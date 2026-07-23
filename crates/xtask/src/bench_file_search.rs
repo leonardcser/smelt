@@ -64,6 +64,7 @@ pub fn run(args: Vec<String>) {
         features: &[],
         env,
         bench_name: "bench-file-search",
+        ignored: true,
     });
 }
 

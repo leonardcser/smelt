@@ -10,49 +10,30 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
     );
     assert!(lua_ok, "smelt.work.busy snippet failed");
     app.tick_signals();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
     let state: String = app
-        .app
-        .lua
-        .lua
-        .load(r#"return smelt.signal.get("work_state")"#)
-        .eval()
+        .eval_lua(r#"return smelt.signal.get("work_state")"#)
         .expect("work_state");
     assert_eq!(state, "busy");
     let label: String = app
-        .app
-        .lua
-        .lua
-        .load(r#"return smelt.signal.get("work_label")"#)
-        .eval()
+        .eval_lua(r#"return smelt.signal.get("work_label")"#)
         .expect("work_label");
     assert_eq!(label, "syncing");
     let (count, first_label): (i64, String) = app
-        .app
-        .lua
-        .lua
-        .load(
+        .eval_lua(
             r#"
                 local s = smelt.signal.get("work_busy")
                 return #s, s[1].label
                 "#,
         )
-        .eval()
         .expect("work_busy");
     assert_eq!(count, 1);
     assert_eq!(first_label, "syncing");
-    drop(_guard);
 
     let ok = app.run_lua("_G._busy_handle:remove(); _G._busy_handle = nil");
     assert!(ok);
     app.tick_signals();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
     let state_after: String = app
-        .app
-        .lua
-        .lua
-        .load(r#"return smelt.signal.get("work_state")"#)
-        .eval()
+        .eval_lua(r#"return smelt.signal.get("work_state")"#)
         .expect("work_state post-release");
     assert_eq!(state_after, "idle");
 }
@@ -60,12 +41,8 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
 #[test]
 fn statusline_can_truncate_items_in_the_middle() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
     let row: String = app
-        .app
-        .lua
-        .lua
-        .load(
+        .eval_lua(
             r#"
             local bar = require("smelt._bar")
             local row = bar.compose_status({
@@ -80,7 +57,6 @@ fn statusline_can_truncate_items_in_the_middle() {
             return row.text
             "#,
         )
-        .eval()
         .expect("compose statusline");
 
     assert_eq!(row, "smelt/…/test  ");
@@ -89,12 +65,8 @@ fn statusline_can_truncate_items_in_the_middle() {
 #[test]
 fn statusline_spacing_respects_text_and_block_items() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
     let row: String = app
-        .app
-        .lua
-        .lua
-        .load(
+        .eval_lua(
             r#"
             local bar = require("smelt._bar")
             local row = bar.compose_status({
@@ -107,7 +79,6 @@ fn statusline_spacing_respects_text_and_block_items() {
             return row.text
             "#,
         )
-        .eval()
         .expect("compose statusline");
 
     assert!(
@@ -119,12 +90,8 @@ fn statusline_spacing_respects_text_and_block_items() {
 #[test]
 fn statusline_separates_first_inline_indicator_after_pills() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
     let row: String = app
-        .app
-        .lua
-        .lua
-        .load(
+        .eval_lua(
             r#"
             local bar = require("smelt._bar")
             local row = bar.compose_status({
@@ -136,7 +103,6 @@ fn statusline_separates_first_inline_indicator_after_pills() {
             return row.text
             "#,
         )
-        .eval()
         .expect("compose statusline");
 
     assert!(
@@ -148,8 +114,8 @@ fn statusline_separates_first_inline_indicator_after_pills() {
 #[test]
 fn tick_event_advances_virtual_clock() {
     let mut app = TestApp::builder().build();
-    let before = app.app.core.clock.instant_now();
+    let before = app.core_probe().clock.instant_now();
     app.feed_one(SourceEvent::Tick(500));
-    let after = app.app.core.clock.instant_now();
+    let after = app.core_probe().clock.instant_now();
     assert_eq!(after - before, Duration::from_millis(500));
 }

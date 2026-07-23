@@ -23,13 +23,16 @@ use mlua::prelude::*;
 
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::signals::ConfirmResolved;
 use smelt_core::transcript_model::{ConfirmChoice, ConfirmRequest};
 
 use super::buf::LuaBuf;
 
 /// Register `smelt.confirm.*` primitives.
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    shared: &std::sync::Arc<crate::lua::LuaShared>,
+) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -39,14 +42,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // smelt.confirm.__back_tab(handle_id) → bool. Cycles app mode and returns true if the
-    // new mode resolves the request. The with_app borrow must be released before calling
-    // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: validate
-    // the handle, run cycle, then re-enter with_app to inspect and resolve.
+    // new mode resolves the request. The host borrow must be released before calling
+    // back into Lua because `smelt.mode.cycle` enters a fresh host scope, so the body is
+    // split into validation, Lua reentry, and resolution.
     m.private_fn(
         "__back_tab",
         &["handle_id"],
         |lua, handle_id: u64| -> LuaResult<bool> {
-            let exists = crate::lua::with_app(|app| app.core.confirms.get(handle_id).is_some());
+            let exists = crate::lua::with_agent_host(|host| host.confirm_exists(handle_id));
             if !exists {
                 return Ok(false);
             }
@@ -56,8 +59,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let cycle: mlua::Function = mode_tbl.get("cycle")?;
             cycle.call::<()>(())?;
 
-            Ok(crate::lua::with_app(|app| {
-                app.resolve_open_confirm_for_current_mode(handle_id)
+            Ok(crate::lua::with_agent_host(|host| {
+                host.resolve_open_confirm_for_current_mode(handle_id)
             }))
         },
     )?;
@@ -66,23 +69,60 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     // any buffer leaves from `app.ui`, then renders the layout into the dialog's
     // preview buffer at `term_width` cells. Returns false if the tool registered no
     // preview or the callback returned nil / an invalid value.
+    let preview_shared = std::sync::Arc::clone(shared);
     m.private_fn(
         "__render_preview",
         &["buf", "handle_id"],
-        |_, (buf, handle_id): (LuaBuf, u64)| -> LuaResult<bool> {
-            let req = match crate::lua::with_app(|app| {
-                app.core
-                    .confirms
-                    .get(handle_id)
-                    .map(|e| (e.req.tool_name.clone(), e.req.args.clone()))
-            }) {
-                Some(r) => r,
-                None => return Ok(false),
+        move |lua, (buf, handle_id): (LuaBuf, u64)| -> LuaResult<bool> {
+            let request =
+                match crate::lua::with_agent_host(|host| host.confirm_preview_request(handle_id)) {
+                    Some(request) => request,
+                    None => return Ok(false),
+                };
+            let layout = match smelt_core::lua::LuaRuntime::call_tool_preview(
+                lua,
+                &preview_shared.core,
+                &request.0,
+                &request.1,
+            ) {
+                Ok(Some(layout)) => layout,
+                Ok(None) => return Ok(false),
+                Err(error) => {
+                    smelt_core::lua::LuaRuntime::record_error_with(
+                        lua,
+                        &preview_shared.core,
+                        error,
+                    );
+                    return Ok(false);
+                }
             };
-            Ok(
-                crate::lua::try_with_app(|app| render_preview_into(app, buf.id, &req.0, &req.1))
-                    .unwrap_or(false),
-            )
+            let preview = match crate::content::display_layout::compile_layout_ir(&layout) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    smelt_core::lua::LuaRuntime::record_error_with(
+                        lua,
+                        &preview_shared.core,
+                        format!("tool preview `{}`: {error}", request.0),
+                    );
+                    return Ok(false);
+                }
+            };
+            let width = crate::content::term_width() as u16;
+            Ok(crate::lua::try_with_ui_host(|host| {
+                host.with_ui(|ui| {
+                    let theme = ui.theme().clone();
+                    let Some(buffer) = ui.buf_mut(buf.id) else {
+                        return false;
+                    };
+                    crate::content::to_buffer::render_into_buffer(buffer, width, &theme, |sink| {
+                        crate::content::display_renderers::render_layout_ir_into(
+                            sink, &preview, width,
+                        );
+                    });
+                    true
+                })
+            })
+            .unwrap_or(false))
         },
     )?;
 
@@ -92,23 +132,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "__resolve",
         &["handle_id", "decision", "message"],
         |_, (handle_id, decision, message): (u64, String, Option<String>)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let entry = match app.core.confirms.take(handle_id) {
-                    Some(e) => e,
-                    None => return,
-                };
-                let choice = parse_decision(&decision, &entry.req);
-                app.core.signals.emit_dyn(
-                    "confirm_resolved",
-                    std::rc::Rc::new(ConfirmResolved {
-                        handle_id,
-                        decision: decision_label(&choice),
-                    }),
-                );
-                let request_id = entry.req.request_id;
-                let call_id = entry.req.call_id.clone();
-                let tool_name = entry.req.tool_name.clone();
-                app.handle_confirm_resolve(choice, message, request_id, &call_id, &tool_name);
+            crate::lua::with_agent_host(|host| {
+                host.resolve_confirm(handle_id, &decision, message);
             });
             Ok(())
         },
@@ -118,7 +143,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 }
 
 /// Stable string label for the `confirm_resolved` cell payload and `__resolve` input.
-fn decision_label(choice: &ConfirmChoice) -> String {
+pub(crate) fn decision_label(choice: &ConfirmChoice) -> String {
     match choice {
         ConfirmChoice::Yes => "yes".into(),
         ConfirmChoice::No => "no".into(),
@@ -127,7 +152,7 @@ fn decision_label(choice: &ConfirmChoice) -> String {
 }
 
 /// Parse a decision label back into `ConfirmChoice`. Unknown labels become `No`.
-fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
+pub(crate) fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
     match decision {
         "yes" => ConfirmChoice::Yes,
         "no" => ConfirmChoice::No,
@@ -139,34 +164,4 @@ fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
             .map(ConfirmChoice::Grant)
             .unwrap_or(ConfirmChoice::No),
     }
-}
-
-/// Call the tool's `preview` hook, compile the returned declarative layout, then
-/// render it directly into the dialog's preview buffer at `term_width` cells.
-fn render_preview_into(
-    app: &mut crate::app::TuiApp,
-    buf_id: crate::smelt_edit::BufId,
-    tool_name: &str,
-    args: &std::collections::HashMap<String, serde_json::Value>,
-) -> bool {
-    let Some(layout) = app.lua.render_tool_preview(tool_name, args) else {
-        return false;
-    };
-    let preview = match crate::content::display_layout::compile_layout_ir(&layout) {
-        Ok(preview) => preview,
-        Err(err) => {
-            app.lua
-                .record_error(format!("tool preview `{tool_name}`: {err}"));
-            return false;
-        }
-    };
-    let theme = app.ui.theme().clone();
-    let width = crate::content::term_width() as u16;
-    let Some(buf) = app.ui.buf_mut(buf_id) else {
-        return false;
-    };
-    crate::content::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
-        crate::content::display_renderers::render_layout_ir_into(sink, &preview, width);
-    });
-    true
 }

@@ -5,19 +5,22 @@
 //! field instead of five.
 
 use engine::SkillLoader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Sources + cached rendered values for everything the agent reads off
 /// disk at startup. Live on `TuiApp`; refreshed in place on `/reload`.
-#[derive(Default)]
 pub struct PromptInputs {
+    runtime_home: PathBuf,
+    config_dir: PathBuf,
+    data_dir: PathBuf,
+    cwd: PathBuf,
     /// Extra skill search roots from `cfg.skills.paths`. Constant for
     /// the session - there is no Lua API to mutate this yet.
-    pub skill_extra_paths: Vec<PathBuf>,
+    skill_extra_paths: Vec<PathBuf>,
     /// Source file behind `--system-prompt=<path>`. `None` for an
     /// inline string or when the flag was omitted.
-    pub system_prompt_path: Option<PathBuf>,
+    system_prompt_path: Option<PathBuf>,
 
     /// Joined `AGENTS.md` content. Re-read on `/reload` and injected
     /// into the system prompt.
@@ -40,33 +43,57 @@ pub struct RefreshOutcome {
 }
 
 impl PromptInputs {
+    pub fn for_runtime(env: &engine::env::RuntimeEnv) -> Self {
+        Self {
+            runtime_home: env.home().clone(),
+            config_dir: env.xdg_config().join("smelt"),
+            data_dir: env.xdg_data().join("smelt"),
+            cwd: env.cwd(),
+            skill_extra_paths: Vec::new(),
+            system_prompt_path: None,
+            instructions: None,
+            skill_section: None,
+            system_prompt_override: None,
+        }
+    }
+
     /// Load every input from scratch. Called once at startup; the same
     /// work runs again inside [`Self::refresh`] on `/reload`.
     pub fn load(
+        env: &engine::env::RuntimeEnv,
         skill_extra_paths: Vec<PathBuf>,
         system_prompt_path: Option<PathBuf>,
         instructions: Option<String>,
         system_prompt_override: Option<String>,
     ) -> (Self, Arc<SkillLoader>) {
-        let loader = Arc::new(SkillLoader::load(&skill_extra_paths));
-        let skill_section = loader.prompt_section().map(String::from);
-        let inputs = Self {
-            skill_extra_paths,
-            system_prompt_path,
-            instructions,
-            skill_section,
-            system_prompt_override,
-        };
+        let mut inputs = Self::for_runtime(env);
+        inputs.skill_extra_paths = skill_extra_paths;
+        inputs.system_prompt_path = system_prompt_path;
+        inputs.instructions = instructions;
+        inputs.system_prompt_override = system_prompt_override;
+        let loader = inputs.skill_loader_for_cwd(&inputs.cwd);
+        inputs.skill_section = loader.prompt_section().map(String::from);
         (inputs, loader)
+    }
+
+    pub fn skill_loader_for_cwd(&self, cwd: &Path) -> Arc<SkillLoader> {
+        Arc::new(SkillLoader::load_for_runtime(
+            &self.skill_extra_paths,
+            &self.runtime_home,
+            &self.config_dir,
+            &self.data_dir,
+            cwd,
+        ))
     }
 
     /// Re-read every on-disk source and rebuild the [`SkillLoader`].
     /// Returns the new loader plus any read error so the caller can
     /// surface it via the notifier.
-    pub fn refresh(&mut self) -> RefreshOutcome {
-        self.instructions = crate::instructions::load();
+    pub fn refresh(&mut self, cwd: &Path) -> RefreshOutcome {
+        self.cwd = cwd.to_path_buf();
+        self.instructions = crate::instructions::load(&self.config_dir, &self.cwd);
 
-        let loader = Arc::new(SkillLoader::load(&self.skill_extra_paths));
+        let loader = self.skill_loader_for_cwd(&self.cwd);
         self.skill_section = loader.prompt_section().map(String::from);
 
         let mut err = None;

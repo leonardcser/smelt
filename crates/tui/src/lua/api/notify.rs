@@ -80,18 +80,15 @@ fn record_from_lua(
             .unwrap_or_else(|error| error.into_inner())
             .push((kind, source, msg));
     } else {
-        crate::lua::try_with_app(|app| app.record_notice(kind, source, msg));
+        crate::lua::try_with_runtime_host(|host| host.record_notice(kind, source, msg));
     }
 }
 
-pub(crate) fn commit_staged_notices(shared: &Arc<LuaShared>) {
-    let notices = std::mem::take(
+pub(crate) fn take_staged_notices(shared: &Arc<LuaShared>) -> Vec<(MessageKind, String, String)> {
+    std::mem::take(
         &mut *shared
             .staged_notices
             .lock()
             .unwrap_or_else(|error| error.into_inner()),
-    );
-    for (kind, source, message) in notices {
-        crate::lua::try_with_app(|app| app.record_notice(kind, source, message));
-    }
+    )
 }

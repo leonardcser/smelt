@@ -1,4 +1,4 @@
-use super::{find_root, LspConfig, LspManager};
+use super::{find_root, LspConfig, LspManager, LspRuntimePaths};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(unix)]
@@ -17,6 +17,7 @@ const SPAWN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Debug, Deserialize, Serialize)]
 struct DaemonRequest {
     config: LspConfig,
+    runtime: LspRuntimePaths,
     operation: String,
     args: Value,
 }
@@ -29,15 +30,26 @@ struct DaemonResponse {
     err: Option<String>,
 }
 
-pub async fn call(config: LspConfig, operation: &str, args: Value) -> Result<Value, String> {
-    call_impl(config, operation, args).await
+pub async fn call(
+    config: LspConfig,
+    runtime: LspRuntimePaths,
+    operation: &str,
+    args: Value,
+) -> Result<Value, String> {
+    call_impl(config, runtime, operation, args).await
 }
 
 #[cfg(unix)]
-async fn call_impl(config: LspConfig, operation: &str, args: Value) -> Result<Value, String> {
-    let (socket, root) = socket_path(&config)?;
+async fn call_impl(
+    config: LspConfig,
+    runtime: LspRuntimePaths,
+    operation: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let socket = socket_path(&config, &runtime)?;
     let request = DaemonRequest {
         config,
+        runtime: runtime.clone(),
         operation: operation.to_string(),
         args,
     };
@@ -46,7 +58,7 @@ async fn call_impl(config: LspConfig, operation: &str, args: Value) -> Result<Va
         return response.into_result();
     }
 
-    ensure_daemon(&socket, &root).await?;
+    ensure_daemon(&socket, &runtime.cwd).await?;
     let deadline = tokio::time::Instant::now() + STARTUP_WAIT;
     loop {
         match send_request(&socket, &request).await {
@@ -61,12 +73,17 @@ async fn call_impl(config: LspConfig, operation: &str, args: Value) -> Result<Va
 }
 
 #[cfg(not(unix))]
-async fn call_impl(config: LspConfig, operation: &str, args: Value) -> Result<Value, String> {
+async fn call_impl(
+    config: LspConfig,
+    runtime: LspRuntimePaths,
+    operation: &str,
+    args: Value,
+) -> Result<Value, String> {
     static MANAGER: OnceLock<Arc<LspManager>> = OnceLock::new();
     let manager = MANAGER
-        .get_or_init(|| Arc::new(LspManager::default()))
+        .get_or_init(|| Arc::new(LspManager::new(runtime.cwd.clone(), runtime.home.clone())))
         .clone();
-    manager.configure(config).await;
+    manager.configure(config, &runtime.cwd, &runtime.home).await;
     manager.dispatch_local(operation, args).await
 }
 
@@ -120,7 +137,9 @@ async fn handle_connection(
         .map_err(|err| err.to_string())?;
     let mut stream = reader.into_inner();
     let request: DaemonRequest = serde_json::from_str(&line).map_err(|err| err.to_string())?;
-    manager.configure(request.config).await;
+    manager
+        .configure(request.config, &request.runtime.cwd, &request.runtime.home)
+        .await;
     let response = match manager
         .dispatch_local(&request.operation, request.args)
         .await
@@ -307,21 +326,24 @@ fn daemon_executable_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(unix)]
-fn socket_path(config: &LspConfig) -> Result<(PathBuf, PathBuf), String> {
-    let cwd = std::env::current_dir().map_err(|err| format!("read current directory: {err}"))?;
+fn socket_path(config: &LspConfig, runtime: &LspRuntimePaths) -> Result<PathBuf, String> {
     let root_markers = config
         .servers
         .values()
         .flat_map(|server| server.root_markers.iter().cloned())
         .collect::<Vec<_>>();
-    let root = canonicalize_lossy(find_root(&cwd, &root_markers));
-    let key = daemon_key(&root, config)?;
+    let root = canonicalize_lossy(find_root(&runtime.cwd, &root_markers, &runtime.cwd));
+    let key = daemon_key(&root, config, runtime)?;
     let dir = socket_dir()?;
-    Ok((dir.join(format!("{key}.sock")), root))
+    Ok(dir.join(format!("{key}.sock")))
 }
 
 #[cfg(unix)]
-fn daemon_key(root: &Path, config: &LspConfig) -> Result<String, String> {
+fn daemon_key(
+    root: &Path,
+    config: &LspConfig,
+    runtime: &LspRuntimePaths,
+) -> Result<String, String> {
     let root = root.to_string_lossy();
     let mut servers = config.servers.iter().collect::<Vec<_>>();
     servers.sort_by(|a, b| a.0.cmp(b.0));
@@ -336,6 +358,8 @@ fn daemon_key(root: &Path, config: &LspConfig) -> Result<String, String> {
     let stable = serde_json::json!({
         "executable": daemon_executable_identity()?,
         "root": root,
+        "cwd": &runtime.cwd,
+        "home": &runtime.home,
         "servers": servers,
     });
     let bytes = serde_json::to_vec(&stable).map_err(|err| err.to_string())?;
@@ -472,9 +496,13 @@ mod tests {
             ]),
         };
 
+        let runtime = LspRuntimePaths {
+            cwd: PathBuf::from("/tmp/project"),
+            home: PathBuf::from("/home/test"),
+        };
         assert_eq!(
-            daemon_key(Path::new("/tmp/project"), &config_a).unwrap(),
-            daemon_key(Path::new("/tmp/project"), &config_b).unwrap()
+            daemon_key(Path::new("/tmp/project"), &config_a, &runtime).unwrap(),
+            daemon_key(Path::new("/tmp/project"), &config_b, &runtime).unwrap()
         );
     }
 

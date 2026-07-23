@@ -12,13 +12,17 @@ pub(crate) mod parse;
 mod tasks;
 pub(crate) mod ui_ops;
 
-pub use app_ref::try_with_app;
-pub(crate) use app_ref::{install_app_ptr, try_with_core, with_app, with_app_ptr};
+pub(crate) use app_ref::{
+    scope_app, try_with_agent_host, try_with_conversation_host, try_with_platform_host,
+    try_with_runtime_host, try_with_session_host, try_with_ui_host, with_agent_host,
+    with_conversation_host, with_platform_host, with_runtime_host, with_session_host, with_ui_host,
+};
 
 pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
 
 use mlua::prelude::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
@@ -288,7 +292,7 @@ pub(crate) fn drop_displaced_lua_handle(
 }
 
 /// Callback invocation queued while `&mut Ui` is held.
-/// Drained by TuiApp after the ui call returns, with the TLS app pointer installed.
+/// Drained by `TuiApp` after the UI call returns, with the frontend host in scope.
 pub(crate) struct PendingInvocation {
     pub(crate) handle: crate::smelt_edit::LuaHandle,
     pub(crate) win: crate::smelt_edit::WinId,
@@ -351,11 +355,13 @@ impl TranscriptViewWatchers {
     }
 }
 
-/// TUI-specific extension of [`smelt_core::lua::LuaShared`] adding the
-/// `pending_invocations` queue. `Deref`s to the core shared state.
+/// TUI-specific state shared by Lua callbacks and the app loop.
 pub(crate) struct LuaShared {
     pub(crate) core: Arc<smelt_core::lua::LuaShared>,
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
+    pending_commands: Mutex<std::collections::VecDeque<String>>,
+    layout_refresh_pending: AtomicBool,
+    pending_focus: Mutex<Option<crate::smelt_edit::WinId>>,
     pub(crate) transcript_view_watchers: Arc<TranscriptViewWatchers>,
     /// Last terminal title declaration made while this generation was a
     /// candidate. `Some(None)` means clear the title at commit.
@@ -376,15 +382,63 @@ impl std::ops::Deref for LuaShared {
     }
 }
 
+pub(crate) const MAX_PENDING_LUA_COMMANDS: usize = 256;
+
 impl LuaShared {
     fn with_core(core: Arc<smelt_core::lua::LuaShared>) -> Self {
         Self {
             core,
             pending_invocations: Mutex::new(Vec::new()),
+            pending_commands: Mutex::new(std::collections::VecDeque::new()),
+            layout_refresh_pending: AtomicBool::new(false),
+            pending_focus: Mutex::new(None),
             transcript_view_watchers: Arc::new(TranscriptViewWatchers::default()),
             staged_terminal_title: Mutex::new(None),
             staged_notices: Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn queue_command(&self, line: String) -> Result<(), String> {
+        let mut commands = self
+            .pending_commands
+            .lock()
+            .map_err(|_| "deferred Lua command queue is unavailable".to_string())?;
+        if commands.len() >= MAX_PENDING_LUA_COMMANDS {
+            return Err(format!(
+                "deferred Lua command queue is full ({MAX_PENDING_LUA_COMMANDS})"
+            ));
+        }
+        commands.push_back(line);
+        Ok(())
+    }
+
+    pub(crate) fn drain_commands(&self) -> Vec<String> {
+        self.pending_commands
+            .lock()
+            .map(|mut commands| commands.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn request_layout_refresh(&self) {
+        self.layout_refresh_pending.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_layout_refresh(&self) -> bool {
+        self.layout_refresh_pending.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn layout_refresh_pending(&self) -> bool {
+        self.layout_refresh_pending.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_focus_after_layout(&self, win: crate::smelt_edit::WinId) {
+        if let Ok(mut pending) = self.pending_focus.lock() {
+            *pending = Some(win);
+        }
+    }
+
+    pub(crate) fn take_focus_after_layout(&self) -> Option<crate::smelt_edit::WinId> {
+        self.pending_focus.lock().ok()?.take()
     }
 
     /// Clone the inner `Arc<smelt_core::lua::LuaShared>` for core API modules.
@@ -420,6 +474,54 @@ pub struct LuaDesiredState {
     pub default_shell: Option<smelt_core::lua::DefaultShell>,
 }
 
+/// VM-facing TUI runtime handle used while the owning app is mutably lent to Lua.
+pub struct LuaExecution {
+    core: smelt_core::lua::runtime::LuaExecution,
+    shared: Arc<LuaShared>,
+}
+
+impl std::ops::Deref for LuaExecution {
+    type Target = smelt_core::lua::runtime::LuaExecution;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl LuaExecution {
+    pub(super) fn shared(&self) -> &LuaShared {
+        &self.shared
+    }
+
+    pub(crate) fn snapshot_desired_state(&self) -> Result<LuaDesiredState, String> {
+        if let Some(error) = self.core.load_error() {
+            return Err(error.to_string());
+        }
+        Ok(collect_desired_state(&self.core))
+    }
+
+    pub(crate) fn fire_ask_callback(
+        &self,
+        id: u64,
+        message: Option<&protocol::Message>,
+        error: Option<protocol::EngineAskError>,
+    ) {
+        invoke_ask_callback(&self.core, &self.shared, id, message, error);
+    }
+
+    pub(crate) fn fire_ask_delta_callback(&self, id: u64, delta: &str) {
+        invoke_ask_delta_callback(&self.core, &self.shared, id, delta);
+    }
+
+    pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
+        invoke_confirm_open(&self.core, handle_id);
+    }
+
+    pub(crate) fn mode_note(&self, name: &str) -> String {
+        mode_note(&self.core, name)
+    }
+}
+
 /// TUI-specific Lua runtime. Wraps [`smelt_core::lua::LuaRuntime`] and adds
 /// the callback queue and statusline rendering.
 pub struct LuaRuntime {
@@ -448,6 +550,23 @@ impl LuaRuntime {
         Self::with_shared(Arc::new(LuaShared::default()))
     }
 
+    pub fn new_for_runtime(
+        env: &engine::env::RuntimeEnv,
+        config_dir: Option<std::path::PathBuf>,
+        runtime_override: Option<std::path::PathBuf>,
+        project_cwd: Option<std::path::PathBuf>,
+    ) -> Self {
+        let shared = Arc::new(LuaShared::default());
+        let core = smelt_core::lua::LuaRuntime::with_shared_for_runtime(
+            shared.core_arc(),
+            env,
+            config_dir,
+            runtime_override,
+            project_cwd,
+        );
+        Self::with_core(core, shared, true)
+    }
+
     fn with_shared(shared: Arc<LuaShared>) -> Self {
         let core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
         Self::with_core(core, shared, true)
@@ -459,7 +578,9 @@ impl LuaRuntime {
         load_bootstrap: bool,
     ) -> Self {
         if core.load_error.is_none() {
-            if let Err(error) = Self::register_api(&core.lua, &shared) {
+            if let Err(error) =
+                Self::register_api(&core.lua, &shared, core.state_root(), core.cache_root())
+            {
                 core.load_error = Some(error.to_string());
             }
         }
@@ -487,17 +608,6 @@ impl LuaRuntime {
         candidate
     }
 
-    #[cfg(any(test, feature = "harness"))]
-    pub fn set_load_paths_for_harness(
-        &mut self,
-        config_dir: std::path::PathBuf,
-        runtime_override: Option<std::path::PathBuf>,
-        target_cwd: Option<std::path::PathBuf>,
-    ) {
-        self.core
-            .set_load_paths_for_harness(config_dir, runtime_override, target_cwd);
-    }
-
     /// Validate and clone all Lua-owned declarations in one coherent snapshot.
     pub fn snapshot_desired_state(&self) -> Result<LuaDesiredState, String> {
         if let Some(error) = self.load_error() {
@@ -507,18 +617,7 @@ impl LuaRuntime {
     }
 
     fn collect_desired_state(&self) -> LuaDesiredState {
-        LuaDesiredState {
-            config: self.to_config(),
-            modes: ModeDeclarations {
-                cycle: self.mode_names(),
-                behaviors: self.mode_behaviors(),
-            },
-            permissions: PermissionDeclarations {
-                rules: self.permission_rules_snapshot().unwrap_or_default(),
-                tool_defaults: self.tool_defaults(),
-            },
-            default_shell: self.default_shell_snapshot(),
-        }
+        collect_desired_state(&self.core)
     }
 
     /// Register the full API surface (host + UiHost) and bundled bootstrap
@@ -527,9 +626,18 @@ impl LuaRuntime {
     pub fn register_for_docs() -> mlua::Result<()> {
         let shared = Arc::new(LuaShared::default());
         let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
-        Self::register_api(&core.lua, &shared)?;
+        Self::register_api(&core.lua, &shared, core.state_root(), core.cache_root())?;
         core.load_full_bootstrap();
         Ok(())
+    }
+
+    /// Clone the VM-facing state needed to invoke Lua while the app owns the
+    /// runtime controller but is mutably lent to host callbacks.
+    pub fn execution(&self) -> LuaExecution {
+        LuaExecution {
+            core: self.core.execution(),
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Borrow the shared state (e.g. to clone the `Arc` into tokio tasks).
@@ -558,28 +666,6 @@ impl LuaRuntime {
         self.core.load_bundled_early();
     }
 
-    /// Drain `smelt.lifecycle.on(event, fn)` callbacks for `event`. Returns
-    /// per-hook errors so the caller can surface them as notifications;
-    /// invocation failures are isolated so one hook can't suppress the rest.
-    /// `build_ctx` constructs the per-event ctx table fresh inside the Lua
-    /// runtime borrow.
-    pub fn drain_lifecycle_hooks<F>(&mut self, event: &str, build_ctx: F) -> Vec<String>
-    where
-        F: Fn(&mlua::Lua) -> mlua::Result<mlua::Value>,
-    {
-        self.core.drain_lifecycle_hooks(event, build_ctx)
-    }
-
-    /// Forward to [`smelt_core::lua::LuaRuntime::drain_shutdown_hooks`].
-    pub fn drain_shutdown_hooks(&mut self, ctx: &crate::app::ShutdownContext) -> Vec<String> {
-        self.core
-            .drain_shutdown_hooks(smelt_core::lua::ShutdownHookContext {
-                session_id: &ctx.session_id,
-                has_messages: ctx.has_messages,
-                ephemeral: ctx.ephemeral,
-            })
-    }
-
     /// Evaluate `~/.config/smelt/early.lua` (if present). Call BEFORE
     /// [`Self::load_autoload`] so user opt-outs take effect.
     pub fn load_early_init(&mut self) {
@@ -592,218 +678,146 @@ impl LuaRuntime {
         self.core.load_project_early_init(cwd);
     }
 
-    /// Fire the `smelt.engine.ask` callback registered under `id` with
-    /// `(response_or_nil, err_or_nil)`. The success payload mirrors the
-    /// provider-shaped assistant `protocol::Message` row; the error table mirrors the
-    /// `smelt.engine.AskError` shape - `{ kind, message }` strings -
-    /// so plugins can branch on the failure mode without parsing text.
-    pub(crate) fn fire_ask_callback(
-        &self,
-        id: u64,
-        message: Option<&protocol::Message>,
-        error: Option<protocol::EngineAskError>,
-    ) {
-        let callbacks = {
-            let Ok(mut cbs) = self.shared.ask_callbacks.lock() else {
-                return;
-            };
-            cbs.remove(&id)
-        };
-        let Some(callbacks) = callbacks else {
-            return;
-        };
-        let Some(handle) = callbacks.response else {
-            return;
-        };
-        let Ok(func) = self.core.lua.registry_value::<mlua::Function>(&handle.key) else {
-            return;
-        };
-        let response_value: mlua::Value = match message {
-            Some(msg) => {
-                smelt_core::lua::serde_to_lua(&self.core.lua, msg).unwrap_or(mlua::Value::Nil)
-            }
-            None => mlua::Value::Nil,
-        };
-        let err_value: mlua::Value = match error {
-            None => mlua::Value::Nil,
-            Some(e) => match self.core.lua.create_table() {
-                Ok(t) => {
-                    let _ = t.set("kind", e.kind.as_str());
-                    let _ = t.set("message", e.message);
-                    mlua::Value::Table(t)
-                }
-                Err(_) => mlua::Value::Nil,
-            },
-        };
-        let _perf = smelt_perf::perf::begin("lua:ask_cb");
-        if let Err(e) = func.call::<()>((response_value, err_value)) {
-            self.record_error(format!("ask callback: {e}"));
-        }
-    }
-
-    pub(crate) fn fire_ask_delta_callback(&self, id: u64, delta: &str) {
-        let func = {
-            let Ok(cbs) = self.shared.ask_callbacks.lock() else {
-                return;
-            };
-            let Some(callbacks) = cbs.get(&id) else {
-                return;
-            };
-            let Some(handle) = callbacks.delta.as_ref() else {
-                return;
-            };
-            let Ok(func) = self.core.lua.registry_value::<mlua::Function>(&handle.key) else {
-                return;
-            };
-            func
-        };
-        let _perf = smelt_perf::perf::begin("lua:ask_delta_cb");
-        if let Err(e) = func.call::<()>(delta.to_string()) {
-            self.record_error(format!("ask delta callback: {e}"));
-        }
-    }
-
-    pub(crate) fn mode_note(&self, name: &str) -> String {
-        let result: mlua::Result<String> = (|| {
-            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            let note: mlua::Function = mode.get("note")?;
-            note.call(name.to_string())
-        })();
-        result.unwrap_or_else(|_| format!("now in {name} mode"))
-    }
-
-    pub(crate) fn mode_block(
-        &self,
-        name: Option<&str>,
-        note: &str,
-    ) -> smelt_core::transcript_model::Block {
-        let result: mlua::Result<(String, String, String)> = (|| {
-            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            if let Some(name) = name {
-                let get: mlua::Function = mode.get("get")?;
-                let info: Option<mlua::Table> = get.call(name.to_string())?;
-                if let Some(info) = info {
-                    let icon = info.get::<Option<String>>("icon")?.unwrap_or_default();
-                    let hl_group = info
-                        .get::<Option<String>>("hl_group")?
-                        .unwrap_or_else(|| "SmeltModeDefault".to_string());
-                    return Ok((icon, hl_group, format!("now in {name} mode")));
-                }
-                return Ok((
-                    String::new(),
-                    "SmeltModeDefault".to_string(),
-                    format!("now in {name} mode"),
-                ));
-            }
-            let list: mlua::Function = mode.get("list")?;
-            let rows: mlua::Table = list.call(())?;
-            for row in rows.sequence_values::<mlua::Table>() {
-                let row = row?;
-                if row.get::<Option<String>>("note")?.as_deref() == Some(note) {
-                    let name = row.get::<String>("name")?;
-                    let icon = row.get::<Option<String>>("icon")?.unwrap_or_default();
-                    let hl_group = row
-                        .get::<Option<String>>("hl_group")?
-                        .unwrap_or_else(|| "SmeltModeDefault".to_string());
-                    return Ok((icon, hl_group, format!("now in {name} mode")));
-                }
-            }
-            Ok((
-                String::new(),
-                "SmeltModeDefault".to_string(),
-                note.to_string(),
-            ))
-        })();
-        let (icon, hl_group, text) = result.unwrap_or_else(|_| {
-            (
-                String::new(),
-                "SmeltModeDefault".to_string(),
-                note.to_string(),
-            )
-        });
-        smelt_core::transcript_model::Block::Mode {
-            text,
-            icon,
-            hl_group,
-        }
-    }
-
     pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
-        let result: mlua::Result<Vec<String>> = (|| {
-            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            let list: mlua::Function = mode.get("list")?;
-            let rows: mlua::Table = list.call(())?;
-            let mut names = Vec::new();
-            for row in rows.sequence_values::<mlua::Table>() {
-                let row = row?;
-                names.push(row.get::<String>("name")?);
-            }
-            Ok(names)
-        })();
-        result
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|name| protocol::AgentMode::parse(&name))
-            .collect()
+        mode_names(&self.core)
     }
 
     pub fn mode_behaviors(
         &self,
     ) -> std::collections::HashMap<String, smelt_core::permissions::ModeBehavior> {
-        let result: mlua::Result<
-            std::collections::HashMap<String, smelt_core::permissions::ModeBehavior>,
-        > = (|| {
-            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            let behaviors: mlua::Function = mode.get("permission_behaviors")?;
-            let table: mlua::Table = behaviors.call(())?;
-            let mut out = std::collections::HashMap::new();
-            for pair in table.pairs::<String, mlua::Table>() {
-                let (name, spec) = pair?;
-                let default_decision =
-                    match spec.get::<Option<String>>("default_decision")?.as_deref() {
-                        Some("allow") => protocol::Decision::Allow,
-                        Some("deny") => protocol::Decision::Deny,
-                        _ => protocol::Decision::Ask,
-                    };
-                out.insert(
-                    name,
-                    smelt_core::permissions::ModeBehavior {
-                        default_decision,
-                        allow_subcommands_by_default: spec
-                            .get("allow_subcommands_by_default")
-                            .unwrap_or(false),
-                        ask_on_output_redirection: spec
-                            .get("ask_on_output_redirection")
-                            .unwrap_or(true),
-                    },
-                );
-            }
-            Ok(out)
-        })();
-        result.unwrap_or_default()
+        mode_behaviors(&self.core)
     }
+}
 
-    /// Fire `smelt.confirm.open(handle_id)` to hand a pending confirm request to the Lua dialog.
-    pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
-        let result: mlua::Result<()> = (|| {
-            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
-            let confirm: mlua::Table = smelt.get("confirm")?;
-            let open: mlua::Function = confirm.get("open")?;
-            open.call::<()>(handle_id)
-        })();
-        if let Err(e) = result {
-            self.record_error(format!("smelt.confirm.open: {e}"));
-        }
+fn collect_desired_state(core: &smelt_core::lua::LuaRuntime) -> LuaDesiredState {
+    LuaDesiredState {
+        config: core.to_config(),
+        modes: ModeDeclarations {
+            cycle: mode_names(core),
+            behaviors: mode_behaviors(core),
+        },
+        permissions: PermissionDeclarations {
+            rules: core.permission_rules_snapshot().unwrap_or_default(),
+            tool_defaults: core.tool_defaults(),
+        },
+        default_shell: core.default_shell_snapshot(),
     }
+}
+
+fn mode_names(core: &smelt_core::lua::LuaRuntime) -> Vec<protocol::AgentMode> {
+    let result: mlua::Result<Vec<String>> = (|| {
+        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
+        let mode: mlua::Table = smelt.get("mode")?;
+        let list: mlua::Function = mode.get("list")?;
+        let rows: mlua::Table = list.call(())?;
+        let mut names = Vec::new();
+        for row in rows.sequence_values::<mlua::Table>() {
+            let row = row?;
+            names.push(row.get::<String>("name")?);
+        }
+        Ok(names)
+    })();
+    result
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|name| protocol::AgentMode::parse(&name))
+        .collect()
+}
+
+fn mode_behaviors(
+    core: &smelt_core::lua::LuaRuntime,
+) -> std::collections::HashMap<String, smelt_core::permissions::ModeBehavior> {
+    let result: mlua::Result<
+        std::collections::HashMap<String, smelt_core::permissions::ModeBehavior>,
+    > = (|| {
+        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
+        let mode: mlua::Table = smelt.get("mode")?;
+        let behaviors: mlua::Function = mode.get("permission_behaviors")?;
+        let table: mlua::Table = behaviors.call(())?;
+        let mut out = std::collections::HashMap::new();
+        for pair in table.pairs::<String, mlua::Table>() {
+            let (name, spec) = pair?;
+            let default_decision = match spec.get::<Option<String>>("default_decision")?.as_deref()
+            {
+                Some("allow") => protocol::Decision::Allow,
+                Some("deny") => protocol::Decision::Deny,
+                _ => protocol::Decision::Ask,
+            };
+            out.insert(
+                name,
+                smelt_core::permissions::ModeBehavior {
+                    default_decision,
+                    allow_subcommands_by_default: spec
+                        .get("allow_subcommands_by_default")
+                        .unwrap_or(false),
+                    ask_on_output_redirection: spec
+                        .get("ask_on_output_redirection")
+                        .unwrap_or(true),
+                },
+            );
+        }
+        Ok(out)
+    })();
+    result.unwrap_or_default()
 }
 
 pub struct FailedLuaCandidate {
     pub message: String,
     pub location: smelt_core::lua::LuaLoadFailureLocation,
+}
+
+/// Detached Lua generation that has not executed user configuration yet.
+///
+/// Preparation snapshots the committed generation without borrowing the TUI
+/// host. The caller then executes [`Self::load`] inside one scoped frontend
+/// entry, so candidate scripts can use UiHost APIs without aliasing `TuiApp`'s
+/// committed [`LuaGeneration`].
+pub struct LuaCandidate {
+    id: u64,
+    runtime: LuaRuntime,
+    state: serde_json::Value,
+    target_cwd: Option<std::path::PathBuf>,
+}
+
+impl LuaCandidate {
+    pub fn load(mut self) -> Result<LuaGeneration, FailedLuaCandidate> {
+        let target_cwd = self.target_cwd.as_deref();
+        if let Some(message) = self
+            .runtime
+            .reload_with_state(target_cwd, Some(&self.state))
+        {
+            let location = self.runtime.load_failure_location().cloned().unwrap_or(
+                smelt_core::lua::LuaLoadFailureLocation {
+                    phase: "load",
+                    path: None,
+                },
+            );
+            return Err(FailedLuaCandidate { message, location });
+        }
+        let desired =
+            self.runtime
+                .snapshot_desired_state()
+                .map_err(|message| FailedLuaCandidate {
+                    message,
+                    location: smelt_core::lua::LuaLoadFailureLocation {
+                        phase: "runtime_resolution",
+                        path: None,
+                    },
+                })?;
+        let manifest = LuaLoadManifest::discover(&self.runtime, target_cwd);
+        let warnings = self.runtime.take_load_warnings();
+        let project_trust = target_cwd.map_or(smelt_core::trust::TrustState::NoContent, |cwd| {
+            self.runtime.project_trust_state(cwd)
+        });
+        Ok(LuaGeneration {
+            id: self.id,
+            runtime: self.runtime,
+            desired,
+            manifest,
+            project_trust,
+            warnings,
+        })
+    }
 }
 
 pub struct LuaGeneration {
@@ -834,79 +848,35 @@ impl LuaGeneration {
         }
     }
 
-    #[cfg(any(test, feature = "harness"))]
-    pub fn load_initial_for_harness(
-        &mut self,
-        target_cwd: Option<&std::path::Path>,
-    ) -> Option<String> {
-        let error = self.runtime.reload(target_cwd);
-        if error.is_none() {
-            self.desired = self.runtime.collect_desired_state();
-            self.manifest = LuaLoadManifest::discover(&self.runtime, target_cwd);
-            self.project_trust = target_cwd.map_or(
-                smelt_core::trust::TrustState::NoContent,
-                smelt_core::trust::project_trust_state,
-            );
-            self.runtime.mark_running();
-        }
-        error
-    }
-
-    pub fn load_candidate(
+    pub fn prepare_candidate(
         &self,
         id: u64,
         target_cwd: Option<&std::path::Path>,
         candidate_skills: std::sync::Arc<engine::SkillLoader>,
         wakeup: tokio::sync::mpsc::UnboundedSender<()>,
-    ) -> Result<Self, FailedLuaCandidate> {
+    ) -> LuaCandidate {
         let state = self.runtime.state_snapshot();
-        let mut runtime = self.runtime.fresh_candidate(target_cwd);
+        let runtime = self.runtime.fresh_candidate(target_cwd);
         runtime.core_shared().set_candidate_skills(candidate_skills);
         runtime.shared().set_generation_id(id);
         runtime.set_wakeup_sender(wakeup);
-        if let Some(message) = runtime.reload_with_state(target_cwd, Some(&state)) {
-            let location = runtime.load_failure_location().cloned().unwrap_or(
-                smelt_core::lua::LuaLoadFailureLocation {
-                    phase: "load",
-                    path: None,
-                },
-            );
-            return Err(FailedLuaCandidate { message, location });
-        }
-        let desired = runtime
-            .snapshot_desired_state()
-            .map_err(|message| FailedLuaCandidate {
-                message,
-                location: smelt_core::lua::LuaLoadFailureLocation {
-                    phase: "runtime_resolution",
-                    path: None,
-                },
-            })?;
-        let manifest = LuaLoadManifest::discover(&runtime, target_cwd);
-        let warnings = runtime.take_load_warnings();
-        let project_trust = target_cwd.map_or(smelt_core::trust::TrustState::NoContent, |cwd| {
-            smelt_core::trust::project_trust_state(cwd)
-        });
-        Ok(Self {
+        LuaCandidate {
             id,
             runtime,
-            desired,
-            manifest,
-            project_trust,
-            warnings,
-        })
+            state,
+            target_cwd: target_cwd.map(std::path::Path::to_path_buf),
+        }
     }
 
     pub fn desired(&self) -> &LuaDesiredState {
         &self.desired
     }
 
-    /// Refresh declarations after a live Lua desired-state write. Candidate
-    /// loads set this snapshot once before commit; runtime writes use the same
-    /// snapshot path before asking the app to reconcile effects.
-    pub fn refresh_desired_state(&mut self) -> Result<(), String> {
-        self.desired = self.runtime.snapshot_desired_state()?;
-        Ok(())
+    /// Install declarations reconstructed from the committed VM after a live
+    /// desired-state write. The caller evaluates the VM through a detached
+    /// execution handle while the frontend host is scoped.
+    pub fn install_desired_state(&mut self, desired: LuaDesiredState) {
+        self.desired = desired;
     }
 
     pub fn warnings(&self) -> &[String] {
@@ -955,6 +925,157 @@ impl LuaLoadManifest {
             files: runtime.loaded_config_files(),
             target_cwd: target_cwd.map(std::path::Path::to_path_buf),
         }
+    }
+}
+
+fn invoke_confirm_open(core: &smelt_core::lua::LuaRuntime, handle_id: u64) {
+    let result: mlua::Result<()> = (|| {
+        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
+        let confirm: mlua::Table = smelt.get("confirm")?;
+        let open: mlua::Function = confirm.get("open")?;
+        open.call::<()>(handle_id)
+    })();
+    if let Err(error) = result {
+        core.record_error(format!("smelt.confirm.open: {error}"));
+    }
+}
+
+fn mode_note(core: &smelt_core::lua::LuaRuntime, name: &str) -> String {
+    let result: mlua::Result<String> = (|| {
+        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
+        let mode: mlua::Table = smelt.get("mode")?;
+        let note: mlua::Function = mode.get("note")?;
+        note.call(name.to_string())
+    })();
+    result.unwrap_or_else(|_| format!("now in {name} mode"))
+}
+
+pub(crate) fn mode_block(
+    core: &smelt_core::lua::LuaRuntime,
+    name: Option<&str>,
+    note: &str,
+) -> smelt_core::transcript_model::Block {
+    let result: mlua::Result<(String, String, String)> = (|| {
+        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
+        let mode: mlua::Table = smelt.get("mode")?;
+        if let Some(name) = name {
+            let get: mlua::Function = mode.get("get")?;
+            let info: Option<mlua::Table> = get.call(name.to_string())?;
+            if let Some(info) = info {
+                let icon = info.get::<Option<String>>("icon")?.unwrap_or_default();
+                let hl_group = info
+                    .get::<Option<String>>("hl_group")?
+                    .unwrap_or_else(|| "SmeltModeDefault".to_string());
+                return Ok((icon, hl_group, format!("now in {name} mode")));
+            }
+            return Ok((
+                String::new(),
+                "SmeltModeDefault".to_string(),
+                format!("now in {name} mode"),
+            ));
+        }
+        let list: mlua::Function = mode.get("list")?;
+        let rows: mlua::Table = list.call(())?;
+        for row in rows.sequence_values::<mlua::Table>() {
+            let row = row?;
+            if row.get::<Option<String>>("note")?.as_deref() == Some(note) {
+                let name = row.get::<String>("name")?;
+                let icon = row.get::<Option<String>>("icon")?.unwrap_or_default();
+                let hl_group = row
+                    .get::<Option<String>>("hl_group")?
+                    .unwrap_or_else(|| "SmeltModeDefault".to_string());
+                return Ok((icon, hl_group, format!("now in {name} mode")));
+            }
+        }
+        Ok((
+            String::new(),
+            "SmeltModeDefault".to_string(),
+            note.to_string(),
+        ))
+    })();
+    let (icon, hl_group, text) = result.unwrap_or_else(|_| {
+        (
+            String::new(),
+            "SmeltModeDefault".to_string(),
+            note.to_string(),
+        )
+    });
+    smelt_core::transcript_model::Block::Mode {
+        text,
+        icon,
+        hl_group,
+    }
+}
+
+fn invoke_ask_callback(
+    core: &smelt_core::lua::LuaRuntime,
+    shared: &LuaShared,
+    id: u64,
+    message: Option<&protocol::Message>,
+    error: Option<protocol::EngineAskError>,
+) {
+    let callbacks = {
+        let Ok(mut callbacks) = shared.ask_callbacks.lock() else {
+            return;
+        };
+        callbacks.remove(&id)
+    };
+    let Some(callbacks) = callbacks else {
+        return;
+    };
+    let Some(handle) = callbacks.response else {
+        return;
+    };
+    let Ok(func) = core.lua.registry_value::<mlua::Function>(&handle.key) else {
+        return;
+    };
+    let response_value = match message {
+        Some(message) => {
+            smelt_core::lua::serde_to_lua(&core.lua, message).unwrap_or(mlua::Value::Nil)
+        }
+        None => mlua::Value::Nil,
+    };
+    let error_value = match error {
+        None => mlua::Value::Nil,
+        Some(error) => match core.lua.create_table() {
+            Ok(table) => {
+                let _ = table.set("kind", error.kind.as_str());
+                let _ = table.set("message", error.message);
+                mlua::Value::Table(table)
+            }
+            Err(_) => mlua::Value::Nil,
+        },
+    };
+    let _perf = smelt_perf::perf::begin("lua:ask_cb");
+    if let Err(error) = func.call::<()>((response_value, error_value)) {
+        core.record_error(format!("ask callback: {error}"));
+    }
+}
+
+fn invoke_ask_delta_callback(
+    core: &smelt_core::lua::LuaRuntime,
+    shared: &LuaShared,
+    id: u64,
+    delta: &str,
+) {
+    let func = {
+        let Ok(callbacks) = shared.ask_callbacks.lock() else {
+            return;
+        };
+        let Some(callbacks) = callbacks.get(&id) else {
+            return;
+        };
+        let Some(handle) = callbacks.delta.as_ref() else {
+            return;
+        };
+        let Ok(func) = core.lua.registry_value::<mlua::Function>(&handle.key) else {
+            return;
+        };
+        func
+    };
+    let _perf = smelt_perf::perf::begin("lua:ask_delta_cb");
+    if let Err(error) = func.call::<()>(delta.to_string()) {
+        core.record_error(format!("ask delta callback: {error}"));
     }
 }
 
@@ -1158,7 +1279,7 @@ mod tests {
         // handler - verify the ask path stays in its own lane.
         let msg =
             protocol::Message::assistant(Some(protocol::Content::text("synthetic")), None, None);
-        rt.fire_ask_callback(id, Some(&msg), None);
+        rt.execution().fire_ask_callback(id, Some(&msg), None);
 
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0, "non-ask handle must not fire on ask response");
@@ -1181,13 +1302,14 @@ mod tests {
             },
         );
 
-        rt.fire_ask_delta_callback(7, "hel");
-        rt.fire_ask_delta_callback(7, "lo");
+        let execution = rt.execution();
+        execution.fire_ask_delta_callback(7, "hel");
+        execution.fire_ask_delta_callback(7, "lo");
         let delta: String = rt.lua.load("return _G.delta").eval().unwrap();
         assert_eq!(delta, "hello");
 
         let msg = protocol::Message::assistant(Some(protocol::Content::text("hello")), None, None);
-        rt.fire_ask_callback(7, Some(&msg), None);
+        execution.fire_ask_callback(7, Some(&msg), None);
         assert!(rt.shared.ask_callbacks.lock().unwrap().is_empty());
     }
 
@@ -1590,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn session_context_note_noops_before_app_ptr() {
+    fn session_context_note_noops_without_frontend_host() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
@@ -2112,6 +2234,72 @@ mod tests {
             vec!["autoupgrade: network is unreachable\nretrying later".to_string()]
         );
         assert!(drain_errors(&rt).is_empty());
+    }
+
+    #[test]
+    fn upgrade_check_rejects_overlap_and_releases_its_in_flight_guard() {
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    smelt.settings = {
+                      autoupgrade = "notify",
+                      autoupgrade_channel = "stable",
+                      autoupgrade_interval = 3600,
+                    }
+
+                    smelt.banner = smelt.banner or {}
+                    smelt.banner.source = function() end
+                    smelt.tick.every = function() return { remove = function() end } end
+
+                    _G.pending_upgrade_spawns = {}
+                    smelt.spawn = function(fn)
+                      table.insert(_G.pending_upgrade_spawns, fn)
+                      return { remove = function() end }
+                    end
+                    smelt.process.run = function()
+                      return { exit_code = 1, stdout = "", stderr = "" }
+                    end
+                    smelt.http.get = function()
+                      return nil, "network is unreachable"
+                    end
+                    smelt.state.__save = function() end
+
+                    require("smelt.plugins.upgrade")
+                "#,
+            )
+            .exec()
+            .expect("load upgrade plugin");
+
+        assert!(rt.run_command("upgrade", Some("check".to_string())));
+        assert!(rt.run_command("upgrade", Some("check".to_string())));
+        assert_eq!(
+            drain_notifications(&rt),
+            vec![
+                "checking for upgrades…".to_string(),
+                "checking for upgrades…".to_string(),
+                "a check is already running".to_string(),
+            ]
+        );
+        rt.lua
+            .load("assert(#_G.pending_upgrade_spawns == 1); table.remove(_G.pending_upgrade_spawns, 1)()")
+            .exec()
+            .expect("finish first upgrade check");
+        assert_eq!(
+            drain_warnings(&rt),
+            vec!["autoupgrade: network is unreachable\nretrying later".to_string()]
+        );
+
+        assert!(rt.run_command("upgrade", Some("check".to_string())));
+        rt.lua
+            .load("assert(#_G.pending_upgrade_spawns == 1)")
+            .exec()
+            .expect("in-flight guard released after completion");
+        assert_eq!(
+            drain_notifications(&rt),
+            vec!["checking for upgrades…".to_string()]
+        );
     }
 
     #[test]

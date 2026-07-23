@@ -49,13 +49,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let write_context = Arc::clone(shared);
     fs.fn_(
         "write",
         "Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p", "contents"],
-        |_, (p, contents): (String, mlua::LuaString)| match crate::fs::write(&p, contents.as_bytes()) {
-            Ok(()) => Ok((true, None)),
-            Err(err) => Ok((false, Some(err.to_string()))),
+        move |_, (p, contents): (String, mlua::LuaString)| {
+            match crate::fs::write(write_context.resolve_project_path(p), contents.as_bytes()) {
+                Ok(()) => Ok((true, None)),
+                Err(err) => Ok((false, Some(err.to_string()))),
+            }
         },
     )?;
 
@@ -117,73 +120,90 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let mkdir_context = Arc::clone(shared);
     fs.fn_(
         "mkdir",
         "Create directory `p` (parents must exist). Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::mkdir(&p) {
+        move |_, p: String| match crate::fs::mkdir(mkdir_context.resolve_project_path(p)) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         },
     )?;
 
+    let mkdir_all_context = Arc::clone(shared);
     fs.fn_(
         "mkdir_all",
         "Create directory `p` along with any missing parent directories. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::mkdir_all(&p) {
+        move |_, p: String| match crate::fs::mkdir_all(mkdir_all_context.resolve_project_path(p)) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         },
     )?;
 
+    let remove_file_context = Arc::clone(shared);
     fs.fn_(
         "remove_file",
         "Delete the file at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::remove_file(&p) {
+        move |_, p: String| match crate::fs::remove_file(remove_file_context.resolve_project_path(p)) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         },
     )?;
 
+    let remove_dir_context = Arc::clone(shared);
     fs.fn_(
         "remove_dir",
         "Delete the empty directory at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::remove_dir(&p) {
+        move |_, p: String| match crate::fs::remove_dir(remove_dir_context.resolve_project_path(p)) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         },
     )?;
 
+    let remove_dir_all_context = Arc::clone(shared);
     fs.fn_(
         "remove_dir_all",
         "Recursively delete the directory tree rooted at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::remove_dir_all(&p) {
+        move |_, p: String| match crate::fs::remove_dir_all(remove_dir_all_context.resolve_project_path(p)) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         },
     )?;
 
+    let rename_context = Arc::clone(shared);
     fs.fn_(
         "rename",
         "Rename or move `from` to `to`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["from", "to"],
-        |_, (from, to): (String, String)| match crate::fs::rename(&from, &to) {
-            Ok(()) => Ok((true, None)),
-            Err(err) => Ok((false, Some(err.to_string()))),
+        move |_, (from, to): (String, String)| {
+            match crate::fs::rename(
+                rename_context.resolve_project_path(from),
+                rename_context.resolve_project_path(to),
+            ) {
+                Ok(()) => Ok((true, None)),
+                Err(err) => Ok((false, Some(err.to_string()))),
+            }
         },
     )?;
 
+    let copy_context = Arc::clone(shared);
     fs.fn_(
         "copy",
         "Copy file `from` to `to`. Returns `(bytes_copied, nil)` on success or `(nil, err_string)` on failure.",
         &["from", "to"],
-        |_, (from, to): (String, String)| match crate::fs::copy(&from, &to) {
-            Ok(n) => Ok((Some(n), None)),
-            Err(err) => Ok((None, Some(err.to_string()))),
+        move |_, (from, to): (String, String)| {
+            match crate::fs::copy(
+                copy_context.resolve_project_path(from),
+                copy_context.resolve_project_path(to),
+            ) {
+                Ok(n) => Ok((Some(n), None)),
+                Err(err) => Ok((None, Some(err.to_string()))),
+            }
         },
     )?;
 
@@ -227,19 +247,29 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Cached file-state tracker used by tools to detect external modifications between reads and writes.",
     )?;
 
+    let file_state_has_context = Arc::clone(shared);
     file_state.fn_(
         "has",
         "Return `true` if the file-state cache has a recorded entry for `p`.",
         &["p"],
-        |_, p: String| Ok(crate::host::try_with_core(|core| core.files.has(&p)).unwrap_or(false)),
+        move |_, p: String| {
+            let p = file_state_has_context.resolve_project_path(p);
+            Ok(
+                crate::host::try_with_core(|core| core.files.has(&p.to_string_lossy()))
+                    .unwrap_or(false),
+            )
+        },
     )?;
 
+    let file_state_get_context = Arc::clone(shared);
     file_state.fn_(
         "get",
         "Look up the cached file-state entry for `p`. Returns `{ content, mtime_ms, read_range }` or `nil` when no entry exists.",
         &["p"],
-        |lua, p: String| -> LuaResult<mlua::Value> {
-            let Some(state) = crate::host::try_with_core(|core| core.files.get(&p)).flatten()
+        move |lua, p: String| -> LuaResult<mlua::Value> {
+            let p = file_state_get_context.resolve_project_path(p);
+            let Some(state) =
+                crate::host::try_with_core(|core| core.files.get(&p.to_string_lossy())).flatten()
             else {
                 return Ok(LuaNil);
             };
@@ -259,27 +289,34 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let record_read_context = Arc::clone(shared);
     file_state.fn_(
         "record_read",
         "Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.",
         &["p", "content", "offset", "limit"],
-        |_, (p, content, offset, limit): (String, String, u64, u64)| {
+        move |_, (p, content, offset, limit): (String, String, u64, u64)| {
+            let p = record_read_context.resolve_project_path(p);
             crate::host::try_with_core(|core| {
-                core.files
-                    .record_read(&p, content, (offset as usize, limit as usize));
+                core.files.record_read(
+                    &p.to_string_lossy(),
+                    content,
+                    (offset as usize, limit as usize),
+                );
             });
             Ok(())
         },
     )?;
 
+    let record_read_with_mtime_context = Arc::clone(shared);
     file_state.fn_(
         "record_read_with_mtime",
         "Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.",
         &["p", "content", "offset", "limit", "mtime_ms"],
-        |_, (p, content, offset, limit, mtime_ms): (String, String, u64, u64, u64)| {
+        move |_, (p, content, offset, limit, mtime_ms): (String, String, u64, u64, u64)| {
+            let p = record_read_with_mtime_context.resolve_project_path(p);
             crate::host::try_with_core(|core| {
                 core.files.record_read_with_mtime(
-                    &p,
+                    &p.to_string_lossy(),
                     content,
                     (offset as usize, limit as usize),
                     mtime_ms,
@@ -289,26 +326,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let record_write_context = Arc::clone(shared);
     file_state.fn_(
         "record_write",
         "Record that `p` was written with `content` so subsequent staleness checks see the latest state.",
         &["p", "content"],
-        |_, (p, content): (String, String)| -> LuaResult<()> {
+        move |_, (p, content): (String, String)| -> LuaResult<()> {
+            let p = record_write_context.resolve_project_path(p);
             crate::host::try_with_core(|core| {
-                core.files.record_write(&p, content);
+                core.files.record_write(&p.to_string_lossy(), content);
             });
             Ok(())
         },
     )?;
 
+    let staleness_context = Arc::clone(shared);
     file_state.fn_(
         "staleness_error",
         "Return an error message describing why the cached state of `p` is stale relative to disk, or `nil` if it is up to date. `noun` (default `\"file\"`) labels the entity in the message.",
         &["p", "noun"],
-        |_, (p, noun): (String, Option<String>)| -> LuaResult<Option<String>> {
+        move |_, (p, noun): (String, Option<String>)| -> LuaResult<Option<String>> {
             let noun = noun.unwrap_or_else(|| "file".into());
+            let p = staleness_context.resolve_project_path(p);
             Ok(crate::host::try_with_core(|core| {
-                crate::fs::staleness_error(&core.files, &p, &noun)
+                crate::fs::staleness_error(&core.files, &p.to_string_lossy(), &noun)
             })
             .flatten())
         },
@@ -327,11 +368,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let flock_context = Arc::clone(shared);
     fs.tbl.set(
         "try_flock",
-        lua.create_function(|_, p: String| match crate::fs::try_flock(&p) {
-            Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
-            Err(err) => Ok((None, Some(err))),
+        lua.create_function(move |_, p: String| {
+            let path = flock_context.resolve_project_path(p);
+            match crate::fs::try_flock(&path.to_string_lossy()) {
+                Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
+                Err(err) => Ok((None, Some(err))),
+            }
         })?,
     )?;
 
@@ -407,11 +452,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_write",
             &["task_id", "path", "contents"],
             move |_, (task_id, path, contents): (u64, String, mlua::LuaString)| -> LuaResult<()> {
+                let path = s.resolve_project_path(path);
                 let bytes = contents.as_bytes().to_vec();
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::write(&path, &bytes) {
                         Ok(()) => {
-                            let mtime_ms = crate::fs::file_mtime_ms(&path).unwrap_or(0);
+                            let mtime_ms =
+                                crate::fs::file_mtime_ms(&path.to_string_lossy()).unwrap_or(0);
                             serde_json::json!({ "ok": true, "mtime_ms": mtime_ms })
                         }
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
@@ -436,8 +483,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     );
                     return Ok(());
                 };
+                let path = s.resolve_project_path(path);
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
-                    match crate::fs::checked_write_file(&path, &contents, &files) {
+                    match crate::fs::checked_write_file(&path.to_string_lossy(), &contents, &files)
+                    {
                         Ok(bytes) => serde_json::json!({ "bytes": bytes }),
                         Err(err) => serde_json::json!({ "err": err }),
                     }
@@ -469,9 +518,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     );
                     return Ok(());
                 };
+                let path = s.resolve_project_path(path);
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match crate::fs::checked_edit_file(
-                        &path,
+                        &path.to_string_lossy(),
                         &old_string,
                         &new_string,
                         replace_all,
@@ -495,6 +545,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_mkdir_all",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                let path = s.resolve_project_path(path);
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::create_dir_all(&path) {
                         Ok(()) => serde_json::json!({ "ok": true }),

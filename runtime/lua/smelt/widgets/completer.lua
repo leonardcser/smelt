@@ -425,10 +425,10 @@ end
 
 -- This file is in `BOOTSTRAP_FILES` so user init.lua can call
 -- `smelt.prompt.completer(...)`. Bootstrap runs at `LuaRuntime::new`,
--- before any app exists; `smelt.prompt.win():on(...)` is headless-safe
--- (no-ops when no app is installed), and production re-registers the
+-- before any frontend host exists; `smelt.prompt.win():on(...)` is headless-safe
+-- (no-ops when no frontend host is in scope), and production re-registers the
 -- subscription on every `bring_up_lua` because `BOOTSTRAP_FILES` are
--- re-executed inside the `install_app_ptr` scope.
+-- re-executed with the frontend host in scope.
 smelt.prompt.win():on("text_changed", function() M._recompute() end)
 
 --- Completer specification handed to `smelt.prompt.completer` for full candidate

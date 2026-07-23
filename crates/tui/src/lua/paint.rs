@@ -1,17 +1,15 @@
 //! Lua paint registry - maps `PaintId`s to Lua callbacks invoked by the renderer.
 //!
-//! The slice borrow is live only while the dispatcher's paint closure is on the stack.
-//! [`SliceGuard`] installs the pointer in TLS before the Lua call and clears it on drop
-//! (panic-safe). Methods called outside a paint callback return a clean Lua error instead
-//! of touching a dangling pointer.
+//! The slice borrow is lent through scoped TLS only while the paint callback is on the
+//! stack. Methods called outside a paint callback return a clean Lua error.
 
 use crate::smelt_edit::layout::PaintId;
 use crate::smelt_edit::{DrawContext, GridSlice};
 use mlua::prelude::*;
+use scoped_tls_hkt::scoped_thread_local;
 use smelt_core::lua::doc::record_class;
 use smelt_core::lua::lua_type::LuaClassDecl;
 use smelt_edit::NamedSlots;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -156,46 +154,60 @@ impl PaintRegistry {
     }
 }
 
-thread_local! {
-    /// Active `GridSlice` pointer for the in-flight paint callback; null otherwise.
-    /// Set by [`SliceGuard::new`], cleared on drop (including panic unwind).
-    static CURRENT_SLICE: Cell<*mut GridSlice<'static>> =
-        const { Cell::new(std::ptr::null_mut()) };
+trait PaintSurface {
+    fn width(&self) -> u16;
+    fn height(&self) -> u16;
+    fn set(&mut self, col: u16, row: u16, symbol: char, style: crate::smelt_edit::Style);
+    fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style);
+    fn fill(
+        &mut self,
+        rect: crate::smelt_edit::layout::Rect,
+        symbol: char,
+        style: crate::smelt_edit::Style,
+    );
 }
 
-/// RAII guard that stashes the slice pointer in TLS for one paint callback, clearing on drop.
-struct SliceGuard;
+impl PaintSurface for GridSlice<'_> {
+    fn width(&self) -> u16 {
+        GridSlice::width(self)
+    }
 
-impl SliceGuard {
-    fn new(slice: &mut GridSlice<'_>) -> Self {
-        // SAFETY: lifetime-erased to `'static` for TLS storage. The Drop impl clears TLS
-        // before `invoke_paint` returns to its caller, who still holds the real borrow.
-        // The pointer is valid for the entire window in which `with_slice` can read it.
-        #[allow(clippy::unnecessary_cast)]
-        let ptr: *mut GridSlice<'static> = slice as *mut GridSlice<'_> as *mut GridSlice<'static>;
-        CURRENT_SLICE.with(|cell| cell.set(ptr));
-        Self
+    fn height(&self) -> u16 {
+        GridSlice::height(self)
+    }
+
+    fn set(&mut self, col: u16, row: u16, symbol: char, style: crate::smelt_edit::Style) {
+        GridSlice::set(self, col, row, symbol, style);
+    }
+
+    fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style) {
+        GridSlice::put_str(self, col, row, text, style);
+    }
+
+    fn fill(
+        &mut self,
+        rect: crate::smelt_edit::layout::Rect,
+        symbol: char,
+        style: crate::smelt_edit::Style,
+    ) {
+        GridSlice::fill(self, rect, symbol, style);
     }
 }
 
-impl Drop for SliceGuard {
-    fn drop(&mut self) {
-        CURRENT_SLICE.with(|cell| cell.set(std::ptr::null_mut()));
-    }
+scoped_thread_local!(static mut CURRENT_SLICE: for<'a> &'a mut dyn PaintSurface);
+
+fn scope_slice<R>(slice: &mut GridSlice<'_>, body: impl FnOnce() -> R) -> R {
+    CURRENT_SLICE.set(slice, body)
 }
 
 /// Run `f` against the active paint slice, or return a Lua error if not in a paint callback.
-pub(crate) fn with_slice<R>(f: impl FnOnce(&mut GridSlice<'_>) -> R) -> LuaResult<R> {
-    let ptr = CURRENT_SLICE.with(|cell| cell.get());
-    if ptr.is_null() {
+fn with_slice<R>(f: impl FnOnce(&mut dyn PaintSurface) -> R) -> LuaResult<R> {
+    if !CURRENT_SLICE.is_set() {
         return Err(LuaError::RuntimeError(
             "smelt.paint: slice not in scope (call from a paint callback)".into(),
         ));
     }
-    // SAFETY: pointer set by the live `SliceGuard`; guard hasn't dropped
-    // (we're inside a Lua callback). Lifetime-restoration is sound for the same reason.
-    let slice: &mut GridSlice<'_> = unsafe { &mut *ptr };
-    Ok(f(slice))
+    Ok(CURRENT_SLICE.with(f))
 }
 
 /// Marker userdata enabling idiomatic `slice:set(...)` call syntax.
@@ -279,13 +291,12 @@ fn build_ctx_table(lua: &Lua, ctx: &DrawContext) -> LuaResult<mlua::Table> {
 /// Fire the Lua paint callback for `handle_id`. Errors are recorded rather than
 /// propagated - a broken painter skips the leaf for the frame without crashing the renderer.
 pub(crate) fn invoke_paint(
-    runtime: &super::LuaRuntime,
+    runtime: &super::LuaExecution,
     handle_id: u64,
     slice: &mut GridSlice<'_>,
     ctx: &DrawContext,
 ) {
-    let _guard = SliceGuard::new(slice);
-    let lua = runtime.lua();
+    let lua = &runtime.lua;
     let func: mlua::Function = {
         let Ok(cbs) = runtime.shared().callbacks.lock() else {
             return;
@@ -313,9 +324,11 @@ pub(crate) fn invoke_paint(
         }
     };
     let _perf = smelt_perf::perf::begin("lua:paint");
-    if let Err(e) = func.call::<()>((ud, ctx_tbl)) {
-        runtime.record_error(format!("smelt.paint: {e}"));
-    }
+    scope_slice(slice, || {
+        if let Err(e) = func.call::<()>((ud, ctx_tbl)) {
+            runtime.record_error(format!("smelt.paint: {e}"));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -360,6 +373,30 @@ mod tests {
     fn with_slice_errors_outside_paint() {
         let r: LuaResult<()> = with_slice(|_| ());
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn scoped_slice_rejects_aliases_and_restores_nested_scope() {
+        let mut outer_grid = crate::smelt_edit::Grid::new(3, 1);
+        let mut outer = outer_grid.slice_mut(crate::smelt_edit::Rect::new(0, 0, 3, 1));
+        let mut inner_grid = crate::smelt_edit::Grid::new(2, 1);
+        let mut inner = inner_grid.slice_mut(crate::smelt_edit::Rect::new(0, 0, 2, 1));
+
+        scope_slice(&mut outer, || {
+            assert_eq!(with_slice(|slice| slice.width()).unwrap(), 3);
+            with_slice(|slice| {
+                assert!(with_slice(|_| ()).is_err());
+                slice.set(0, 0, 'a', crate::smelt_edit::Style::new());
+            })
+            .unwrap();
+
+            scope_slice(&mut inner, || {
+                assert_eq!(with_slice(|slice| slice.width()).unwrap(), 2);
+            });
+            assert_eq!(with_slice(|slice| slice.width()).unwrap(), 3);
+        });
+
+        assert!(with_slice(|_| ()).is_err());
     }
 
     #[test]

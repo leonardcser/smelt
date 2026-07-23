@@ -232,7 +232,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::{staleness_error, FileStateCache};
-use crate::tools::{display_path, str_arg};
+use crate::tools::str_arg;
 
 #[derive(Debug, Clone)]
 struct NotebookCellSnapshot {
@@ -689,7 +689,18 @@ pub fn apply_edit(
     args: &HashMap<String, Value>,
     files: &FileStateCache,
 ) -> Result<NotebookEditOutcome, String> {
-    let r = run_edit(args, files);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = engine::paths::home_dir();
+    apply_edit_with_roots(args, files, &cwd, &home)
+}
+
+pub fn apply_edit_with_roots(
+    args: &HashMap<String, Value>,
+    files: &FileStateCache,
+    cwd: &Path,
+    home: &Path,
+) -> Result<NotebookEditOutcome, String> {
+    let r = run_edit(args, files, cwd, home);
     if r.is_error {
         Err(r.content)
     } else {
@@ -700,7 +711,12 @@ pub fn apply_edit(
     }
 }
 
-fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
+fn run_edit(
+    args: &HashMap<String, Value>,
+    files: &FileStateCache,
+    cwd: &Path,
+    home: &Path,
+) -> NbResult {
     let path = str_arg(args, "notebook_path");
 
     if path.is_empty() {
@@ -708,7 +724,10 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
     }
 
     if !Path::new(&path).exists() {
-        return NbResult::err(format!("file not found: {}", display_path(&path)));
+        return NbResult::err(format!(
+            "file not found: {}",
+            crate::path_display::display_path_from(&path, cwd, home)
+        ));
     }
 
     let edit_mode = {
@@ -808,6 +827,8 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
                 &nb,
                 &format!("replaced cell {idx}"),
                 files,
+                cwd,
+                home,
                 Some(render),
             )
         }
@@ -845,6 +866,8 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
                 &nb,
                 &format!("inserted {cell_type} cell at position {insert_at}"),
                 files,
+                cwd,
+                home,
                 Some(render),
             )
         }
@@ -871,6 +894,8 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
                 &nb,
                 &format!("deleted cell {idx}"),
                 files,
+                cwd,
+                home,
                 Some(render),
             )
         }
@@ -1648,6 +1673,8 @@ fn write_notebook(
     nb: &Value,
     action: &str,
     files: &FileStateCache,
+    cwd: &Path,
+    home: &Path,
     render: Option<NotebookRenderData>,
 ) -> NbResult {
     // 1-space indent matches Jupyter/JupyterLab convention
@@ -1669,11 +1696,12 @@ fn write_notebook(
     match std::fs::write(path, &json) {
         Ok(_) => {
             files.record_write(path, json);
+            let display = crate::path_display::display_path_from(path, cwd, home);
             if let Some(render) = render {
-                NbResult::ok(format!("{action} in {}", display_path(path)))
+                NbResult::ok(format!("{action} in {display}"))
                     .with_metadata(render_data_metadata(&render))
             } else {
-                NbResult::ok(format!("{action} in {}", display_path(path)))
+                NbResult::ok(format!("{action} in {display}"))
             }
         }
         Err(e) => NbResult::err(e.to_string()),

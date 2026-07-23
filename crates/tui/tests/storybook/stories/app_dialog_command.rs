@@ -244,7 +244,7 @@ app_story!(ask_user_question_custom_input_wraps, |ctx| {
 app_story!(resume_dialog, |ctx| {
     ctx.set_viewport(72, 18);
     // /resume drives `smelt.session.list()`. Seed real `SessionMeta`
-    // fixtures under the harness `XDG_STATE_HOME` so the production
+    // fixtures through the app-owned session storage so the production
     // list path returns them, then run the real command. Going
     // through the typed struct (rather than hand-rolled JSON) means
     // a `SessionMeta` field rename breaks compilation, not silently
@@ -323,11 +323,7 @@ app_story!(resume_dialog, |ctx| {
         };
         ctx.write_session_meta(&meta);
     }
-    let state_home = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .expect("storybook state home");
-    std::fs::create_dir_all(state_home.join("smelt").join("sessions").join(unavailable))
-        .expect("create unavailable session fixture");
+    ctx.write_unavailable_session(unavailable);
     ctx.wait_for_session_catalog();
     ctx.run_command("resume");
     ctx.assert_snapshot();

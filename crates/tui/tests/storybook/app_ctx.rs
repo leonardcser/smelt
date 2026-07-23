@@ -36,9 +36,6 @@ pub struct AppStoryCtx {
 impl AppStoryCtx {
     pub fn new(name: &str) -> Self {
         let app = TestApp::builder().without_model().build();
-        let cwd = std::path::Path::new(app.cwd_str());
-        let _ = std::fs::create_dir_all(cwd);
-        let _ = std::env::set_current_dir(cwd);
         Self {
             app,
             name: name.to_string(),
@@ -52,23 +49,24 @@ impl AppStoryCtx {
         self.app.set_terminal_size(w, h);
     }
 
+    pub fn write_workspace_file(&self, path: &str, content: &str) {
+        let path = std::path::Path::new(self.app.cwd_str()).join(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create story workspace directory");
+        }
+        std::fs::write(path, content).expect("write story workspace file");
+    }
+
     pub fn restrict_permissions_to_cwd(&mut self) {
         assert_eq!(
             self.turn_id, 0,
             "configure permissions before starting a turn"
         );
-        let mut permissions = self.app.app.core.permissions.snapshot().as_ref().clone();
-        permissions.set_workspace(std::path::PathBuf::from(self.app.cwd_str()));
-        permissions.set_restrict_to_workspace(true);
-        self.app.app.core.permissions.replace(permissions);
+        self.app.restrict_permissions_to_cwd();
     }
 
     pub fn approve_tool_for_session(&mut self, tool: &str) {
-        let approvals = self.app.app.core.permissions.approvals();
-        approvals
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .add_session_tool(tool, Vec::new());
+        self.app.approve_tool_for_session(tool);
     }
 
     /// Expand the active root-docked dialog while retaining a small transcript
@@ -101,12 +99,7 @@ impl AppStoryCtx {
                 ..Default::default()
             },
         };
-        self.app.app.core.config.available_models = vec![model.clone()];
-        self.app.app.core.config.model_selection = smelt_core::ModelSelectionState {
-            requested_key: Some(model.key.clone()),
-            requested_by: smelt_core::ModelSelectionSource::FirstAvailable,
-            active: Some(smelt_core::ActiveModel::from_resolved(&model)),
-        };
+        self.app.use_model(model);
     }
 
     /// Begin an agent turn. Required before `engine(...)` events route
@@ -123,8 +116,7 @@ impl AppStoryCtx {
     /// to remember.
     pub fn engine(&mut self, ev: EngineEvent) {
         self.start_turn();
-        self.app
-            .feed_one(tui::app::test_harness::SourceEvent::engine(ev));
+        self.app.engine_event(ev);
     }
 
     /// Push a `Block::Compacted` summary block - the same committed marker
@@ -172,13 +164,9 @@ impl AppStoryCtx {
     pub fn exec_with_output(&mut self, command: &str, output: &str, exit_code: Option<i32>) {
         self.app.start_exec(command);
         for line in output.lines() {
-            self.app
-                .feed_one(tui::app::test_harness::SourceEvent::ExecOutput(
-                    line.to_string(),
-                ));
+            self.app.append_exec_output(line);
         }
-        self.app
-            .feed_one(tui::app::test_harness::SourceEvent::ExecDone(exit_code));
+        self.app.finish_exec(exit_code);
     }
 
     /// Drive a tool call lifecycle: `ToolStarted(args)` immediately
@@ -230,14 +218,14 @@ impl AppStoryCtx {
     /// result arrives.
     pub fn tool_started(&mut self, tool_name: &str, args: &[(&str, serde_json::Value)]) {
         let call_id = self.next_call_id(tool_name);
-        self.engine(EngineEvent::ToolStarted {
+        self.start_turn();
+        self.app.tool_started(
             call_id,
-            tool_name: tool_name.into(),
-            args: args
-                .iter()
+            tool_name,
+            args.iter()
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
-        });
+        );
     }
 
     /// Emit a display-only streaming tool-call draft. The final tool
@@ -295,23 +283,23 @@ impl AppStoryCtx {
         elapsed_ms: Option<u64>,
     ) {
         let call_id = self.next_call_id(tool_name);
-        self.engine(EngineEvent::ToolStarted {
-            call_id: call_id.clone(),
-            tool_name: tool_name.into(),
-            args: args
-                .iter()
+        self.start_turn();
+        self.app.tool_started(
+            call_id.clone(),
+            tool_name,
+            args.iter()
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
-        });
-        self.engine(EngineEvent::ToolFinished {
+        );
+        self.app.tool_finished(
             call_id,
-            result: ToolOutcome {
+            ToolOutcome {
                 content: content.into(),
                 is_error,
                 metadata,
             },
             elapsed_ms,
-        });
+        );
     }
 
     pub fn tool_rejected(
@@ -324,21 +312,21 @@ impl AppStoryCtx {
         elapsed_ms: Option<u64>,
     ) {
         let call_id = self.next_call_id(tool_name);
-        self.engine(EngineEvent::ToolRejected {
+        self.start_turn();
+        self.app.tool_rejected(
             call_id,
-            tool_name: tool_name.into(),
-            args: args
-                .iter()
+            tool_name,
+            args.iter()
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
             summary,
-            result: ToolOutcome {
+            ToolOutcome {
                 content: content.into(),
                 is_error,
                 metadata: None,
             },
             elapsed_ms,
-        });
+        );
     }
 
     fn next_call_id(&mut self, tool_name: &str) -> String {
@@ -358,15 +346,10 @@ impl AppStoryCtx {
         args: std::collections::HashMap<String, serde_json::Value>,
         approval_patterns: Vec<String>,
     ) {
-        let summary = self.app.app.lua.tool_summary(tool_name, &args);
-        self.engine(EngineEvent::RequestPermission {
-            request_id: 1,
-            call_id: "call-1".into(),
-            tool_name: tool_name.into(),
-            args,
-            approval_patterns,
-            summary,
-        });
+        let summary = self.app.tool_summary(tool_name, &args);
+        self.start_turn();
+        self.app
+            .request_permission(1, "call-1", tool_name, args, approval_patterns, summary);
     }
 
     /// Write `contents` to `<cwd>/<rel_path>` and return the relative
@@ -397,100 +380,19 @@ impl AppStoryCtx {
 
     /// Write a canonical database-backed session fixture and publish its catalog overlay.
     pub fn write_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
-        let state_home = std::env::var_os("XDG_STATE_HOME")
-            .map(std::path::PathBuf::from)
-            .expect("XDG_STATE_HOME set by test harness");
-        let dir = state_home.join("smelt").join("sessions").join(&meta.id);
-        std::fs::create_dir_all(&dir).expect("create session fixture dir");
-        let mut db = smelt_store::SessionDb::open(dir.join("session.db"))
-            .expect("create session fixture database");
-        let history = if let Some(text_bytes) = meta.text_bytes.filter(|bytes| *bytes > 0) {
-            let mut remaining = usize::try_from(text_bytes).expect("fixture text size fits usize");
-            let mut history = Vec::new();
-            while remaining > 0 {
-                let chunk = remaining.min(60_000);
-                history.push(protocol::HistoryItem::user(protocol::Content::text(
-                    "x".repeat(chunk),
-                )));
-                remaining -= chunk;
-            }
-            history
-        } else {
-            (0..meta.history_len.unwrap_or_default())
-                .map(|index| {
-                    protocol::HistoryItem::user(protocol::Content::text(format!(
-                        "storybook session fixture row {index}"
-                    )))
-                })
-                .collect::<Vec<_>>()
-        };
-        let history_len = history.len();
-        let command = smelt_store::SessionCommit {
-            session_id: meta.id.clone(),
-            expected: smelt_store::StoreHead::default(),
-            identity: smelt_store::SessionIdentity {
-                id: meta.id.clone(),
-                created_at: i64::try_from(meta.created_at_ms).expect("fixture created_at fits i64"),
-                parent_id: meta.parent_id.clone(),
-            },
-            metadata: smelt_store::SessionMetadata {
-                title: meta.title.clone(),
-                slug: meta.slug.clone(),
-                first_user_message: meta.first_user_message.clone(),
-                cwd: meta.cwd.clone(),
-                mode: meta.mode.clone(),
-                reasoning_effort: meta
-                    .reasoning_effort
-                    .map(|effort| effort.label().to_string()),
-                model: meta.model.clone(),
-                fast_mode: meta.fast_mode,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: meta.context_tokens.map(u64::from),
-                context_tokens_history_len: None,
-                display_context_tokens: meta.context_tokens.map(u64::from),
-                session_cost_usd: smelt_store::SessionCostUsd::new(0.0)
-                    .expect("valid fixture cost"),
-                updated_at: i64::try_from(meta.updated_at_ms).expect("fixture updated_at fits i64"),
-            },
-            history: smelt_store::HistorySuffix {
-                start: smelt_store::HistoryIndex::ZERO,
-                final_len: smelt_store::HistoryLen::new(
-                    u64::try_from(history_len).expect("fixture history length fits u64"),
-                ),
-                items: history,
-            },
-            side_tables: smelt_store::SideTableSuffixes::default(),
-            descriptors: None,
-        };
-        let receipt = db
-            .apply_session_commit(&command)
-            .expect("write canonical session fixture");
-        smelt_core::session::publish_session_catalog_commit(&command, &receipt, true);
+        self.app.seed_session_meta(meta);
+    }
+
+    /// Create a session directory with no readable canonical database.
+    pub fn write_unavailable_session(&self, id: &str) {
+        self.app.seed_unavailable_session(id);
     }
 
     /// Reconcile canonical session fixtures before a story opens the resume list.
     pub fn wait_for_session_catalog(&self) {
-        smelt_core::session::request_session_catalog_reconciliation();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let page = smelt_core::session::list_session_page_result(
-                smelt_core::session::SessionListQuery {
-                    limit: 1_000,
-                    ..smelt_core::session::SessionListQuery::default()
-                },
-            )
-            .expect("read storybook session catalog");
-            if page.catalog.state == smelt_core::session::SessionCatalogState::Ready {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "storybook session catalog did not reconcile: {:?}",
-                page.catalog.last_error
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        self.app
+            .reconcile_session_catalog()
+            .expect("reconcile storybook session catalog");
     }
 
     /// Commit a fresh Lua generation through the production reload pipeline.
@@ -516,19 +418,13 @@ impl AppStoryCtx {
     /// coroutine can open their follow-up UI before the next snapshot.
     pub fn press_enter(&mut self) {
         self.app.press(crossterm::event::KeyCode::Enter);
-        for _ in 0..4 {
-            self.app
-                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
-        }
+        self.app.settle_lua();
     }
 
     /// Press a plain character key.
     pub fn press_char(&mut self, ch: char) {
         self.app.press(crossterm::event::KeyCode::Char(ch));
-        for _ in 0..4 {
-            self.app
-                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
-        }
+        self.app.settle_lua();
     }
 
     /// Press Tab and pump Lua callbacks so focus-changing dialog keymaps settle
@@ -562,40 +458,40 @@ impl AppStoryCtx {
     /// Seed model picker entries in the live config. Each tuple is
     /// `(provider, model_name, provider_type)`.
     pub fn seed_models(&mut self, models: &[(&str, &str, &str)]) {
-        self.app.app.core.config.available_models = models
-            .iter()
-            .map(
-                |(provider, model, provider_type)| smelt_core::config::ResolvedModel {
-                    key: format!("{provider}/{model}"),
-                    provider_name: (*provider).to_string(),
-                    model_name: (*model).to_string(),
-                    display_name: None,
-                    api_base: format!("https://{provider}.example/v1"),
-                    api_key_env: format!("{}_API_KEY", provider.to_ascii_uppercase()),
-                    provider_type: (*provider_type).to_string(),
-                    config: smelt_core::config::ModelConfig {
-                        name: Some((*model).to_string()),
-                        ..Default::default()
+        self.app.set_available_models(
+            models
+                .iter()
+                .map(
+                    |(provider, model, provider_type)| smelt_core::config::ResolvedModel {
+                        key: format!("{provider}/{model}"),
+                        provider_name: (*provider).to_string(),
+                        model_name: (*model).to_string(),
+                        display_name: None,
+                        api_base: format!("https://{provider}.example/v1"),
+                        api_key_env: format!("{}_API_KEY", provider.to_ascii_uppercase()),
+                        provider_type: (*provider_type).to_string(),
+                        config: smelt_core::config::ModelConfig {
+                            name: Some((*model).to_string()),
+                            ..Default::default()
+                        },
                     },
-                },
-            )
-            .collect();
+                )
+                .collect(),
+        );
     }
 
     /// Execute a Lua snippet against the embedded runtime. Used by
     /// dialog stories that need to seed state or invoke a primitive
     /// directly.
     pub fn run_lua(&mut self, snippet: &str) {
-        let ok = self.app.run_lua(snippet);
-        assert!(ok, "story Lua snippet failed");
+        self.app
+            .run_lua_result(snippet)
+            .expect("story Lua snippet failed");
     }
 
     /// Pump spawned Lua coroutines to their next yield point.
     pub fn pump_lua(&mut self) {
-        for _ in 0..4 {
-            self.app
-                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
-        }
+        self.app.settle_lua();
     }
 
     /// Seed the latest provider-reported context token count through the
@@ -644,10 +540,7 @@ impl AppStoryCtx {
         let source = source.unwrap_or("story");
         let snippet = format!("smelt.notify.info({body:?}, {source:?})");
         self.run_lua(&snippet);
-        for _ in 0..2 {
-            self.app
-                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
-        }
+        self.app.settle_lua();
     }
 
     /// Run a slash command as if the user typed it in the cmdline.
@@ -666,10 +559,7 @@ impl AppStoryCtx {
         // The handler ran synchronously and called `smelt.spawn`, which
         // enqueued a coroutine on the task runtime. Pump the runtime to
         // run it until it yields at `smelt.dialog.open`.
-        for _ in 0..4 {
-            self.app
-                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
-        }
+        self.app.settle_lua();
     }
 
     fn frame(&mut self) -> SnapshotFrame {

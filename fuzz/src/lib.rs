@@ -1144,40 +1144,6 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
         .collect()
 }
 
-fn prompt_selection_range(app: &TestApp) -> Option<(usize, usize)> {
-    let buf = app.app.ui.buf(tui::app::PROMPT_EDIT_BUF)?;
-    let win = app.app.ui.win(tui::app::PROMPT_WIN)?;
-    let endpoint = win.effective_endpoint();
-    if win.vim_enabled() {
-        if let Some(range) = tui::smelt_edit::vim::visual_range(
-            win.vim_state(),
-            buf.source(),
-            endpoint,
-            win.vim_mode(),
-        ) {
-            return Some(range);
-        }
-    }
-    win.selection_range_at(endpoint, buf.source())
-}
-
-fn prompt_paste_target_ready(app: &TestApp, selection_range: Option<(usize, usize)>) -> bool {
-    if app.prompt_text_input_ready() {
-        return true;
-    }
-    if selection_range.is_none() || app.app.ui.any_drag_active() {
-        return false;
-    }
-    let state = app.state();
-    matches!(state.app_focus, tui::app::AppFocus::Prompt)
-        && !state.agent_running
-        && !state.cmdline_open
-        && state.focused_overlay.is_none()
-        && state.active_modal.is_none()
-        && state.picker_count == 0
-        && state.term_focused
-}
-
 /// Cheap snapshot of state needed by event-specific post-checks. Captured
 /// before dispatch so a `PostCheck` can compare pre/post without re-deriving
 /// what it cares about from scratch.
@@ -1211,7 +1177,7 @@ struct Snapshot {
 
 impl Snapshot {
     fn capture(app: &TestApp) -> Self {
-        let prompt_selection_range = prompt_selection_range(app);
+        let prompt_selection_range = app.prompt_selection_range();
         Self {
             agent_running: app.agent_running(),
             pending: app.pending_tool_call_ids(),
@@ -1234,7 +1200,7 @@ impl Snapshot {
             prompt_vim_mode: app.state().vim_mode,
             prompt_selection_range,
             prompt_text_input_ready: app.prompt_text_input_ready(),
-            prompt_paste_target_ready: prompt_paste_target_ready(app, prompt_selection_range),
+            prompt_paste_target_ready: app.prompt_paste_target_ready(prompt_selection_range),
             action_count: app.actions().len(),
         }
     }

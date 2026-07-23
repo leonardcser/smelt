@@ -38,15 +38,13 @@ fn slash_completion_tab_accepts_command_name() {
 #[test]
 fn fast_slash_command_updates_session_state_for_supported_model() {
     let mut app = TestApp::builder().build();
-    let model = app.app.core.config.active_model_mut().unwrap();
-    model.provider_type = "codex".into();
-    model.config.supports_fast_mode = Some(true);
+    app.configure_active_model_fast_mode("codex", true);
 
     app.type_text("/fast on");
     app.press(KeyCode::Enter);
 
-    assert_eq!(app.app.core.session.fast_mode, Some(true));
-    assert!(!app.app.core.config.settings.fast_mode);
+    assert_eq!(app.session_snapshot().fast_mode, Some(true));
+    assert!(!app.core_probe().config.settings.fast_mode);
     assert!(app.actions().iter().any(|action| matches!(
         action,
         Action::EngineSend(cmd)
@@ -55,23 +53,21 @@ fn fast_slash_command_updates_session_state_for_supported_model() {
 
     app.type_text("/fast off");
     app.press(KeyCode::Enter);
-    assert_eq!(app.app.core.session.fast_mode, Some(false));
+    assert_eq!(app.session_snapshot().fast_mode, Some(false));
 
     app.type_text("/fast toggle");
     app.press(KeyCode::Enter);
-    assert_eq!(app.app.core.session.fast_mode, Some(true));
+    assert_eq!(app.session_snapshot().fast_mode, Some(true));
 
     app.type_text("/fast");
     app.press(KeyCode::Enter);
-    assert_eq!(app.app.core.session.fast_mode, Some(false));
+    assert_eq!(app.session_snapshot().fast_mode, Some(false));
 }
 
 #[test]
 fn fast_slash_command_enables_the_next_turn_payload() {
     let mut app = TestApp::builder().build();
-    let model = app.app.core.config.active_model_mut().unwrap();
-    model.provider_type = "codex".into();
-    model.config.supports_fast_mode = Some(true);
+    app.configure_active_model_fast_mode("codex", true);
 
     app.type_text("/fast on");
     app.press(KeyCode::Enter);
@@ -95,14 +91,12 @@ fn fast_slash_command_enables_the_next_turn_payload() {
 #[test]
 fn fast_slash_command_rejects_unsupported_model() {
     let mut app = TestApp::builder().build();
-    let model = app.app.core.config.active_model_mut().unwrap();
-    model.provider_type = "codex".into();
-    model.config.supports_fast_mode = Some(false);
+    app.configure_active_model_fast_mode("codex", false);
 
     app.type_text("/fast");
     app.press(KeyCode::Enter);
 
-    assert_eq!(app.app.core.session.fast_mode, Some(false));
+    assert_eq!(app.session_snapshot().fast_mode, Some(false));
     assert!(app.state().notification.is_some());
     assert!(!app.actions().iter().any(|action| matches!(
         action,
@@ -114,14 +108,12 @@ fn fast_slash_command_rejects_unsupported_model() {
 #[test]
 fn fast_slash_command_rejects_non_codex_provider() {
     let mut app = TestApp::builder().build();
-    let model = app.app.core.config.active_model_mut().unwrap();
-    model.provider_type = "openai".into();
-    model.config.supports_fast_mode = Some(true);
+    app.configure_active_model_fast_mode("openai", true);
 
     app.type_text("/fast on");
     app.press(KeyCode::Enter);
 
-    assert_eq!(app.app.core.session.fast_mode, Some(false));
+    assert_eq!(app.session_snapshot().fast_mode, Some(false));
     assert!(app.state().notification.is_some());
     assert!(!app.actions().iter().any(|action| matches!(
         action,
@@ -133,19 +125,13 @@ fn fast_slash_command_rejects_non_codex_provider() {
 #[test]
 fn fast_mode_is_restored_per_loaded_session() {
     let mut app = TestApp::builder().build();
-    app.app
-        .core
-        .config
-        .active_model_mut()
-        .unwrap()
-        .config
-        .supports_fast_mode = Some(true);
+    app.set_active_model_fast_mode_support(true);
 
     let mut enabled =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     enabled.id = "fast-enabled".into();
     enabled.fast_mode = Some(true);
-    app.app.load_store_backed_session(
+    app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             enabled,
             crate::app::transcript::LoadedTranscript::full(
@@ -155,13 +141,13 @@ fn fast_mode_is_restored_per_loaded_session() {
             smelt_store::StoreHead::default(),
         ),
     );
-    assert!(app.app.fast_mode());
+    assert!(app.fast_mode());
 
     let mut disabled =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     disabled.id = "fast-disabled".into();
     disabled.fast_mode = Some(false);
-    app.app.load_store_backed_session(
+    app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             disabled,
             crate::app::transcript::LoadedTranscript::full(
@@ -171,14 +157,14 @@ fn fast_mode_is_restored_per_loaded_session() {
             smelt_store::StoreHead::default(),
         ),
     );
-    assert!(!app.app.fast_mode());
-    assert!(!app.app.core.config.settings.fast_mode);
+    assert!(!app.fast_mode());
+    assert!(!app.core_probe().config.settings.fast_mode);
 }
 
 #[test]
 fn path_completion_tab_still_opens_for_path_tokens() {
     let mut app = TestApp::builder().build();
-    let src = std::path::Path::new(&app.app.cwd).join("src");
+    let src = app.workspace_probe().cwd_path().join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(src.join("lib.rs"), "pub fn lib() {}\n").unwrap();
@@ -259,18 +245,17 @@ fn queued_turn_preserves_work_elapsed() {
     app.feed_one(SourceEvent::Tick(3_000));
     app.push_queued_message("follow up".to_string());
 
-    let before = app.app.working.elapsed().expect("live turn elapsed");
+    let before = app.working_probe().elapsed().expect("live turn elapsed");
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         history: None,
         meta: None,
     }));
-    let after = app.app.working.elapsed().expect("queued turn elapsed");
+    let after = app.working_probe().elapsed().expect("queued turn elapsed");
 
     let saved_elapsed_ms = app
-        .app
-        .core
-        .session
+        .conversation_probe()
+        .session()
         .turn_metas
         .last()
         .map(|(_, meta)| meta.elapsed_ms)
@@ -292,8 +277,7 @@ fn queued_turn_preserves_work_elapsed() {
 #[test]
 fn engine_history_replacement_preserves_work_elapsed() {
     let mut app = TestApp::builder().build();
-    app.app
-        .session_append_history(protocol::HistoryItem::user(protocol::Content::text("old")));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("old")));
     app.start_turn(1);
     app.feed_one(SourceEvent::Tick(750));
 
@@ -305,7 +289,10 @@ fn engine_history_replacement_preserves_work_elapsed() {
         ),
     }));
 
-    assert_eq!(app.app.working.elapsed(), Some(Duration::from_millis(750)));
+    assert_eq!(
+        app.working_probe().elapsed(),
+        Some(Duration::from_millis(750))
+    );
 }
 
 #[test]
@@ -336,13 +323,9 @@ fn request_queue_bindings_steer_running_turn() {
 #[test]
 fn stale_prompt_prediction_response_after_submit_is_ignored() {
     let mut app = TestApp::builder().build();
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text(
-            "How should I debug this failing test?",
-        )));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "How should I debug this failing test?",
+    )));
 
     publish_turn_end(&mut app);
     let ask_ids = engine_ask_ids(app.drain_engine_sends());
@@ -356,8 +339,8 @@ fn stale_prompt_prediction_response_after_submit_is_ignored() {
     publish_input_submit(&mut app, "Run the focused test first");
     respond_ask_with_text(&mut app, prediction_id, "Run cargo test");
 
-    let prompt = app.app.well_known.prompt;
-    assert_eq!(app.app.placeholder_text(prompt), None);
+    let prompt = app.well_known_probe().prompt;
+    assert_eq!(app.placeholder_text(prompt), None);
 }
 
 #[test]
@@ -369,11 +352,10 @@ fn queued_messages_collapse_to_keep_transcript_visible() {
     for i in 0..12 {
         app.push_queued_message(format!("follow-up {i}"));
     }
-    app.app.render_normal();
+    app.render();
 
     let transcript_rect = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(crate::app::TRANSCRIPT_WIN)
         .expect("transcript has a rect");
     assert!(
@@ -383,11 +365,13 @@ fn queued_messages_collapse_to_keep_transcript_visible() {
     );
 
     let top_win = app
-        .app
-        .ui
+        .ui_probe()
         .named_win("smelt.prompt_bar.top")
         .expect("top bar exists");
-    let top_rect = app.app.ui.split_rect(top_win).expect("top bar has a rect");
+    let top_rect = app
+        .ui_probe()
+        .split_rect(top_win)
+        .expect("top bar has a rect");
     assert!(
         top_rect.height <= 5,
         "top bar should be capped on a short terminal, got {}",
@@ -398,13 +382,9 @@ fn queued_messages_collapse_to_keep_transcript_visible() {
 #[test]
 fn stale_prompt_prediction_response_after_custom_command_is_ignored() {
     let mut app = TestApp::builder().build();
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text(
-            "How should I debug this failing test?",
-        )));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "How should I debug this failing test?",
+    )));
 
     publish_turn_end(&mut app);
     let ask_ids = engine_ask_ids(app.drain_engine_sends());
@@ -421,16 +401,15 @@ fn stale_prompt_prediction_response_after_custom_command_is_ignored() {
         body: "Run the focused test first".to_string(),
         overrides: smelt_core::custom_commands::CommandOverrides::default(),
     };
-    let turn = app
-        .app
-        .begin_custom_command_turn(cmd)
-        .expect("test app has a usable model");
-    app.app.agent = Some(turn);
+    assert!(
+        app.start_custom_command_turn(cmd),
+        "test app has a usable model"
+    );
 
     respond_ask_with_text(&mut app, prediction_id, "Run cargo test");
 
-    let prompt = app.app.well_known.prompt;
-    assert_eq!(app.app.placeholder_text(prompt), None);
+    let prompt = app.well_known_probe().prompt;
+    assert_eq!(app.placeholder_text(prompt), None);
 }
 
 #[test]
@@ -443,17 +422,10 @@ fn lua_prompt_text_strips_attachment_markers() {
     let mut app = TestApp::builder().build();
     app.insert_attachment("screenshot.png".into());
     assert!(app
-        .app
-        .prompt_buf()
-        .source()
+        .prompt_source()
         .contains(smelt_buffer::ATTACHMENT_MARKER));
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
     let s: String = app
-        .app
-        .lua
-        .lua
-        .load("return smelt.prompt.text()")
-        .eval()
+        .eval_lua("return smelt.prompt.text()")
         .expect("smelt.prompt.text");
     assert!(
         !s.contains(smelt_buffer::ATTACHMENT_MARKER),
@@ -588,24 +560,24 @@ fn prompt_docked_picker_does_not_get_tail_clobbered_on_first_render() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     app.type_text("/pick");
-    app.app.render_normal();
+    app.render();
 
     app.press(KeyCode::Enter);
     app.feed_one(SourceEvent::LuaWakeup);
-    app.app.render_normal();
+    app.render();
 
     // Locate the prompt-docked picker overlay (the slash completer's
     // own picker is closed on Enter).
     let leaf = (1u32..50)
         .map(crate::smelt_edit::OverlayId)
-        .filter_map(|id| app.app.ui.overlay(id))
+        .filter_map(|id| app.ui_probe().overlay(id))
         .filter_map(|ov| ov.layout.leaves_in_order().into_iter().next())
         .map(|p| WinId(p.0))
-        .find(|&w| app.app.picker_state.contains_key(&w))
+        .find(|&win| app.overlays_probe().has_picker(win))
         .expect("a prompt-docked picker overlay should be open after /pick");
 
-    let win = app.app.ui.win(leaf).expect("picker leaf alive");
-    let buf = app.app.ui.buf(win.buf).expect("picker buf alive");
+    let win = app.ui_probe().win(leaf).expect("picker leaf alive");
+    let buf = app.ui_probe().buf(win.buf).expect("picker buf alive");
     let viewport_rows = win
         .viewport
         .map(|v| v.rect.height)
@@ -644,21 +616,18 @@ fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = TestApp::builder().build();
-    app.app.push_block(smelt_core::Block::Text {
+    app.push_transcript_block(smelt_core::Block::Text {
         content: "transcript".into(),
     });
     app.render_silent();
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    app.focus_transcript();
 
     let top_bar = app
-        .app
-        .ui
+        .ui_probe()
         .named_win("smelt.prompt_bar.top")
         .expect("prompt top bar window");
     let vp = app
-        .app
-        .ui
+        .ui_probe()
         .win(top_bar)
         .and_then(|w| w.viewport)
         .expect("prompt top bar viewport");
@@ -671,8 +640,8 @@ fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
     })));
 
     assert_eq!(app.state().app_focus, AppFocus::Prompt);
-    assert_eq!(app.app.ui.focus(), Some(crate::app::PROMPT_WIN));
-    assert!(!app.app.ui.any_drag_active());
+    assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+    assert!(!app.ui_probe().any_drag_active());
 }
 
 #[test]
@@ -700,7 +669,10 @@ fn prompt_triple_click_event_pipeline_yanks_clicked_source_line() {
         })));
     }
 
-    assert_eq!(app.app.core.clipboard.kill_ring.current(), "second line");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "second line"
+    );
 }
 
 #[test]
@@ -717,17 +689,16 @@ fn keyboard_input_cancels_stale_prompt_mouse_endpoint() {
         modifiers: KeyModifiers::empty(),
     })));
     assert!(
-        app.app.ui.any_drag_active(),
+        app.ui_probe().any_drag_active(),
         "mouse down staged a drag endpoint"
     );
 
     app.type_text("Hello");
 
-    let prompt = app.app.prompt_win();
     assert_eq!(app.state().prompt_text, "Hello");
-    assert_eq!(prompt.effective_endpoint(), 5);
-    assert_eq!(app.app.ui.capture(), None);
-    assert!(!app.app.ui.any_drag_active());
+    assert_eq!(app.prompt_endpoint(), 5);
+    assert_eq!(app.ui_probe().capture(), None);
+    assert!(!app.ui_probe().any_drag_active());
 }
 
 #[test]
@@ -743,14 +714,14 @@ fn typing_after_turn_complete_keeps_prompt_cursor_coherent() {
 
     for (idx, ch) in "Hello".chars().enumerate() {
         app.type_char(ch);
-        assert_eq!(app.app.prompt_win().cpos(), idx + 1);
+        assert_eq!(app.prompt_cpos(), idx + 1);
     }
 
     app.press(KeyCode::Left);
     app.type_char('!');
 
     assert_eq!(app.state().prompt_text, "Hell!o");
-    assert_eq!(app.app.prompt_win().cpos(), 5);
+    assert_eq!(app.prompt_cpos(), 5);
 }
 
 #[test]
@@ -767,7 +738,7 @@ fn text_changed_callbacks_do_not_repark_prompt_cursor() {
     app.type_text("Hello");
 
     assert_eq!(app.state().prompt_text, "Hello");
-    assert_eq!(app.app.prompt_win().cpos(), 5);
+    assert_eq!(app.prompt_cpos(), 5);
 }
 
 #[test]
@@ -784,16 +755,15 @@ fn typing_after_unfinished_prompt_click_uses_clicked_caret() {
         column: column + 1,
         modifiers: KeyModifiers::empty(),
     })));
-    assert_eq!(app.app.prompt_win().effective_endpoint(), 1);
+    assert_eq!(app.prompt_endpoint(), 1);
 
     app.type_text("X");
 
-    let prompt = app.app.prompt_win();
     assert_eq!(app.state().prompt_text, "aXbcd");
-    assert_eq!(prompt.cpos(), 2);
-    assert_eq!(prompt.effective_endpoint(), 2);
-    assert_eq!(app.app.ui.capture(), None);
-    assert!(!app.app.ui.any_drag_active());
+    assert_eq!(app.prompt_cpos(), 2);
+    assert_eq!(app.prompt_endpoint(), 2);
+    assert_eq!(app.ui_probe().capture(), None);
+    assert!(!app.ui_probe().any_drag_active());
 }
 
 #[test]
@@ -810,15 +780,15 @@ fn focus_lost_cancels_stale_prompt_mouse_endpoint() {
         modifiers: KeyModifiers::empty(),
     })));
     assert!(
-        app.app.ui.any_drag_active(),
+        app.ui_probe().any_drag_active(),
         "mouse down staged a drag endpoint"
     );
 
     app.feed_one(SourceEvent::Term(Event::FocusLost));
 
-    assert_eq!(app.app.ui.capture(), None);
-    assert!(!app.app.ui.any_drag_active());
-    assert_eq!(app.app.prompt_win().effective_endpoint(), 0);
+    assert_eq!(app.ui_probe().capture(), None);
+    assert!(!app.ui_probe().any_drag_active());
+    assert_eq!(app.prompt_endpoint(), 0);
 }
 
 #[test]
@@ -899,7 +869,7 @@ fn pasted_missing_image_path_stays_text() {
     app.render_silent();
 
     assert_eq!(app.state().prompt_text, text);
-    let prompt = app.app.ui.buf(crate::app::PROMPT_EDIT_BUF).unwrap();
+    let prompt = app.ui_probe().buf(crate::app::PROMPT_EDIT_BUF).unwrap();
     assert!(prompt.attachment_ids.is_empty());
 }
 
@@ -914,7 +884,7 @@ fn pasted_http_image_url_stays_text() {
     app.render_silent();
 
     assert_eq!(app.state().prompt_text, url);
-    let prompt = app.app.ui.buf(crate::app::PROMPT_EDIT_BUF).unwrap();
+    let prompt = app.ui_probe().buf(crate::app::PROMPT_EDIT_BUF).unwrap();
     assert!(prompt.attachment_ids.is_empty());
 }
 

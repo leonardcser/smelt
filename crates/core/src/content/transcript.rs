@@ -1,8 +1,6 @@
 //! `Transcript` owns the block history. Streaming parsing lives in `StreamParser`; display projection in `tui`.
 
-use crate::transcript_model::{
-    Block, BlockHistory, BlockId, BlockOrigin, ToolState, TranscriptBlockDescriptor,
-};
+use crate::transcript_model::{Block, BlockHistory, BlockId, BlockOrigin, ToolState};
 
 pub struct Transcript {
     pub history: BlockHistory,
@@ -25,19 +23,19 @@ impl Transcript {
         Self { history }
     }
 
-    pub fn from_descriptor_records(
+    pub fn from_block_records(
         records: Vec<crate::transcript_model::TranscriptBlockRecord>,
     ) -> Self {
         Self {
-            history: BlockHistory::from_descriptor_records(records),
+            history: BlockHistory::from_block_records(records),
         }
     }
 
-    pub fn from_descriptor_records_with_ids(
+    pub fn from_block_records_with_ids(
         records: Vec<crate::transcript_model::TranscriptBlockRecordWithId>,
     ) -> Self {
         Self {
-            history: BlockHistory::from_descriptor_records_with_ids(records),
+            history: BlockHistory::from_block_records_with_ids(records),
         }
     }
 
@@ -144,16 +142,11 @@ impl Transcript {
         self.history.push_with_origin(block, origin);
     }
 
-    pub fn push_descriptor_with_origin(
-        &mut self,
-        descriptor: TranscriptBlockDescriptor,
-        origin: BlockOrigin,
-    ) {
-        let Some(block) = Self::normalize_block(descriptor.to_block()) else {
+    pub fn push_hydrated_block_with_origin(&mut self, block: Block, origin: BlockOrigin) {
+        let Some(block) = Self::normalize_block(block) else {
             return;
         };
-        self.history
-            .push_descriptor_with_origin(TranscriptBlockDescriptor::from_block(block), origin);
+        self.history.push_hydrated_block_with_origin(block, origin);
     }
 
     pub fn insert_checkpoint_marker(&mut self, history_index: usize, block: Block) {
@@ -198,21 +191,20 @@ impl Transcript {
             .push_with_state_and_origin(block, call_id, state, origin);
     }
 
-    pub fn push_tool_descriptor_with_origin(
+    pub fn push_hydrated_tool_block_with_origin(
         &mut self,
-        descriptor: TranscriptBlockDescriptor,
+        block: Block,
         state: ToolState,
         origin: BlockOrigin,
     ) {
-        let Some(block) = Self::normalize_block(descriptor.to_block()) else {
+        let Some(block) = Self::normalize_block(block) else {
             return;
         };
-        let descriptor = TranscriptBlockDescriptor::from_block(block);
-        let Some(call_id) = descriptor.tool_call_id().map(str::to_string) else {
+        let Some(call_id) = block.tool_call_id().map(str::to_string) else {
             return;
         };
         self.history
-            .push_descriptor_with_state_and_origin(descriptor, call_id, state, origin);
+            .push_hydrated_block_with_state_and_origin(block, call_id, state, origin);
     }
 
     pub fn truncate_to(&mut self, block_idx: usize) {
@@ -459,9 +451,9 @@ mod tests {
     #[test]
     fn user_turn_navigation_uses_compact_stored_metadata() {
         let mut t = Transcript::new();
-        t.history = BlockHistory::from_descriptor_records(vec![
+        t.history = BlockHistory::from_block_records(vec![
             TranscriptBlockRecord {
-                descriptor: TranscriptBlockDescriptor::User {
+                block: Block::User {
                     text: "first line\nfull stored prompt".into(),
                     image_labels: vec![],
                     command: false,
@@ -471,7 +463,7 @@ mod tests {
                 tool_state: None,
             },
             TranscriptBlockRecord {
-                descriptor: TranscriptBlockDescriptor::Text {
+                block: Block::Text {
                     content: "assistant".into(),
                 },
                 content_hash: 0,

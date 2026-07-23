@@ -28,9 +28,8 @@ which case engine state wins). Multiple plugins can hold tokens \
 concurrently; the most recently pushed label wins for display.",
         &["label"],
         |_, label: String| -> LuaResult<LuaReg> {
-            let id = crate::lua::with_app(|app| app.busy_stack.push(label));
-            Ok(LuaReg::new(move || {
-                crate::lua::try_with_app(|app| app.busy_stack.release(id)).unwrap_or(false)
+            Ok(crate::lua::with_agent_host(|host| {
+                host.busy_registration(label)
             }))
         },
     )?;
@@ -39,10 +38,8 @@ concurrently; the most recently pushed label wins for display.",
         "Return an opaque snapshot of the current work lifecycle. Pass it to guarded APIs or `work.guard_current` so late async callbacks can avoid committing after cancellation or turn replacement.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let (turn_id, cancel_generation) = crate::lua::try_with_app(|app| {
-                (app.active_agent_turn_id(), app.cancel_generation)
-            })
-            .unwrap_or((None, 0));
+            let (turn_id, cancel_generation) = crate::lua::try_with_agent_host(|host| host.work_guard())
+                .unwrap_or((None, 0));
             let table = lua.create_table()?;
             table.set("turn_id", turn_id)?;
             table.set("cancel_generation", cancel_generation)?;
@@ -56,9 +53,8 @@ concurrently; the most recently pushed label wins for display.",
         |_, guard: mlua::Table| -> LuaResult<bool> {
             let turn_id = guard.get::<Option<u64>>("turn_id")?;
             let cancel_generation = guard.get::<u64>("cancel_generation")?;
-            Ok(crate::lua::try_with_app(|app| {
-                app.cancel_generation == cancel_generation
-                    && app.active_agent_turn_id() == turn_id
+            Ok(crate::lua::try_with_agent_host(|host| {
+                host.work_guard_is_current(turn_id, cancel_generation)
             })
             .unwrap_or(false))
         },
@@ -70,7 +66,7 @@ live. Plugins that need richer state (top label, full stack, retry \
 countdown, archived outcome) subscribe to the reactive `work_*` signals \
 instead.",
         &[],
-        |_, ()| Ok(crate::lua::try_with_app(|app| app.busy_stack.is_busy()).unwrap_or(false)),
+        |_, ()| Ok(crate::lua::try_with_agent_host(|host| host.is_busy()).unwrap_or(false)),
     )?;
     Ok(())
 }

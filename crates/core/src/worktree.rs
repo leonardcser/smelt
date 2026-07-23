@@ -663,7 +663,8 @@ mod tests {
 
     #[test]
     fn worktree_root_expands_env_vars() {
-        std::env::set_var("SMELT_WORKTREE_ROOT_TEST", "/tmp/smelt-worktrees");
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.set_var("SMELT_WORKTREE_ROOT_TEST", "/tmp/smelt-worktrees");
         let root =
             resolve_worktree_root(Some(Path::new("$SMELT_WORKTREE_ROOT_TEST/nested"))).unwrap();
         assert!(
@@ -673,7 +674,8 @@ mod tests {
 
     #[test]
     fn worktree_root_errors_for_missing_env_vars() {
-        std::env::remove_var("SMELT_WORKTREE_ROOT_TEST_MISSING");
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.remove_var("SMELT_WORKTREE_ROOT_TEST_MISSING");
         let err = resolve_worktree_root(Some(Path::new("$SMELT_WORKTREE_ROOT_TEST_MISSING")))
             .unwrap_err();
         assert!(err.contains("SMELT_WORKTREE_ROOT_TEST_MISSING"));

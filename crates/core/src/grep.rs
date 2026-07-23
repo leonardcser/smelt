@@ -49,14 +49,8 @@ pub(crate) enum RunOutcome {
 }
 
 fn append_hard_excludes(args: &mut Vec<String>, path: &Path) {
-    let search_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
-
     for dir in [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"] {
-        if !path_contains_component(&search_path, dir) {
+        if !path_contains_component(path, dir) {
             args.push(format!("--glob=!**/{dir}/**"));
         }
     }
@@ -79,15 +73,18 @@ fn is_noop_glob(glob: &str) -> bool {
 pub(crate) async fn run_async(
     pattern: &str,
     path: impl AsRef<Path>,
+    cwd: &Path,
     opts: &Options,
     cancel: CancellationToken,
 ) -> io::Result<RunOutcome> {
     let path: PathBuf = {
-        let p = path.as_ref();
-        if p.as_os_str().is_empty() {
-            PathBuf::from(".")
+        let path = path.as_ref();
+        if path.as_os_str().is_empty() {
+            cwd.to_path_buf()
+        } else if path.is_absolute() {
+            path.to_path_buf()
         } else {
-            p.to_path_buf()
+            cwd.join(path)
         }
     };
 
@@ -140,6 +137,7 @@ pub(crate) async fn run_async(
 
     let mut child = tokio::process::Command::new("rg")
         .args(&args)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -217,7 +215,7 @@ mod tests {
     }
 
     async fn run(pattern: &str, path: &Path, opts: &Options) -> Output {
-        match run_async(pattern, path, opts, CancellationToken::new())
+        match run_async(pattern, path, path, opts, CancellationToken::new())
             .await
             .unwrap()
         {
@@ -367,6 +365,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relative_search_path_uses_explicit_runtime_cwd() {
+        if !rg_available() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("runtime.txt"), "cwd needle\n").unwrap();
+
+        let outcome = run_async(
+            "cwd needle",
+            ".",
+            tmp.path(),
+            &Options::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let RunOutcome::Done(output) = outcome else {
+            panic!("unexpected cancellation");
+        };
+        assert!(output.stdout.contains("runtime.txt"), "{}", output.stdout);
+    }
+
+    #[tokio::test]
     async fn run_async_returns_cancelled_when_token_fired() {
         if !rg_available() {
             return;
@@ -375,7 +396,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "alpha\n").unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let outcome = run_async("alpha", tmp.path(), &Options::default(), cancel)
+        let outcome = run_async("alpha", tmp.path(), tmp.path(), &Options::default(), cancel)
             .await
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Cancelled));

@@ -28,13 +28,13 @@ pub use compression::{
 #[cfg(any(test, feature = "test-util"))]
 pub use db::SessionDb;
 pub use db::{
-    session_commit_fingerprint, submit_turn_fingerprint, CompatibilityExportSnapshot, DoctorReport,
-    FullSession, SessionResumeSnapshot, StorageStats, StoredSession,
+    session_commit_fingerprint, submit_turn_fingerprint, DoctorReport, FullSession,
+    SessionResumeSnapshot, StorageStats, StoredSession,
 };
 pub use error::{Result, StoreError};
 pub use history::{
-    TranscriptBlockMetadataRecord, TranscriptDescriptorHydration, TranscriptDescriptorIndex,
-    TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
+    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptRecordHydration,
+    TranscriptRecordOffset, TranscriptRecordRange, TranscriptRecordSlice,
     TranscriptSearchCandidate, TranscriptSearchDirection,
 };
 pub use meta::{SessionCostUsd, SessionIdentity, SessionMeta, SessionMetadata, WriterOwner};
@@ -45,8 +45,8 @@ pub use request_audit::{
 };
 pub use schema::SCHEMA_VERSION;
 pub use session_commit::{
-    DescriptorIndex, DescriptorLen, HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix,
-    NewTurn, Revision, SaveReceipt, SessionCommit, SessionCommitFailure, SideTableSuffixes,
-    StartupRecoveryReceipt, StoreHead, StoredTurn, SubmitTurn, SubmitTurnReceipt,
-    TranscriptDescriptorSuffix, TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
+    HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix, NewTurn, Revision, SaveReceipt,
+    SessionCommit, SessionCommitFailure, SideTableSuffixes, StartupRecoveryReceipt, StoreHead,
+    StoredTurn, SubmitTurn, SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex,
+    TranscriptRecordSuffix, TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
 };

@@ -224,10 +224,9 @@ mod tests {
             dir.path().join("creds.json"),
             "SMELT_TEST_AUTH_ENV_PRIORITY_A",
         );
-        // SAFETY: env-var mutation in tests; unique name avoids cross-test races.
-        unsafe { std::env::set_var(store.env_var.unwrap(), "from-env") };
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.set_var(store.env_var.unwrap(), "from-env");
         let loaded = store.load();
-        unsafe { std::env::remove_var(store.env_var.unwrap()) };
         assert_eq!(loaded.as_deref(), Some("from-env"));
     }
 
@@ -237,9 +236,9 @@ mod tests {
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "from-file").unwrap();
         let store = unique_store(path, "SMELT_TEST_AUTH_ENV_PRIORITY_B");
-        unsafe { std::env::set_var(store.env_var.unwrap(), "from-env") };
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.set_var(store.env_var.unwrap(), "from-env");
         let loaded = store.load();
-        unsafe { std::env::remove_var(store.env_var.unwrap()) };
         assert_eq!(loaded.as_deref(), Some("from-env"));
     }
 
@@ -247,7 +246,8 @@ mod tests {
     fn load_returns_none_when_env_unset_and_no_file() {
         let dir = tempdir().unwrap();
         let store = unique_store(dir.path().join("creds.json"), "SMELT_TEST_AUTH_ENV_UNSET_C");
-        unsafe { std::env::remove_var(store.env_var.unwrap()) };
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.remove_var(store.env_var.unwrap());
         assert!(store.load().is_none());
     }
 

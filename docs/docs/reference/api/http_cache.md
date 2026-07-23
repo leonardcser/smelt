@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.
+Runtime-owned HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.
 
 ## `smelt.http.cache.read`
 

@@ -23,8 +23,8 @@ os.exe_path = nil
 ---@type fun(name: string): string?
 os.getenv = nil
 
---- Return the user's home directory, or `nil` if it cannot be determined.
----@type fun(): string?
+--- Return the runtime home directory.
+---@type fun(): string
 os.home = nil
 
 --- Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.
@@ -35,17 +35,13 @@ os.open_url = nil
 ---@type fun(url: string): table
 os.open_url_if_available = nil
 
---- Return the OS process id of the running smelt instance.
+--- Return the runtime process id.
 ---@type fun(): integer
 os.pid = nil
 
 --- Return the target operating system as reported by `std::env::consts::OS` (e.g. `"macos"`, `"linux"`).
 ---@type fun(): string
 os.platform = nil
-
---- Change the process working directory to `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
----@type fun(p: string): boolean, string?
-os.set_cwd = nil
 
 --- Set the process environment variable `name` to `value`. Mutates the live process env; visible to subsequent `getenv` calls and child processes.
 ---@type fun(name: string, value: string): nil

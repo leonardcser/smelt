@@ -24,7 +24,7 @@ use rules::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,7 +241,7 @@ impl PermissionGrant {
         }
     }
 
-    pub fn display_subject(&self) -> String {
+    pub fn display_subject(&self, home: &Path) -> String {
         match self {
             PermissionGrant::Tool { tool } => tool.clone(),
             PermissionGrant::Command { pattern, .. } => {
@@ -251,18 +251,18 @@ impl PermissionGrant {
                     .map(|(_, rest)| rest.to_string())
                     .unwrap_or_else(|| display.to_string())
             }
-            PermissionGrant::PathPrefix { dir } => engine::paths::collapse_tilde(dir)
+            PermissionGrant::PathPrefix { dir } => engine::paths::collapse_tilde_from(dir, home)
                 .to_string_lossy()
                 .into_owned(),
         }
     }
 
-    pub fn display_subjects(grants: &[PermissionGrant]) -> String {
+    pub fn display_subjects(grants: &[PermissionGrant], home: &Path) -> String {
         let mut command_head = None;
         grants
             .iter()
             .map(|grant| {
-                let subject = grant.display_subject();
+                let subject = grant.display_subject(home);
                 match grant {
                     PermissionGrant::Command { .. } => {
                         if let Some(head) = &command_head {
@@ -307,6 +307,7 @@ pub struct Permissions {
     mode_behaviors: HashMap<String, ModeBehavior>,
     restrict_to_workspace: bool,
     active_root: PathBuf,
+    home: PathBuf,
     allowed_roots: Vec<PathBuf>,
     paths_fn: Option<Arc<PathsFn>>,
     tool_decisions: HashMap<String, ToolPermDefaults>,
@@ -373,6 +374,12 @@ impl PermissionsHandle {
         self.snapshot().paths_fn.clone()
     }
 
+    pub(crate) fn install_home(&self, home: PathBuf) {
+        let mut permissions = self.snapshot().as_ref().clone();
+        permissions.set_home(home);
+        self.replace(permissions);
+    }
+
     pub fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
         self.snapshot().check_tool(mode, tool_name)
     }
@@ -391,6 +398,18 @@ impl PermissionsHandle {
         self.snapshot().evaluate_tool(mode, origin, tool_name, args)
     }
 
+    pub fn evaluate_tool_with_paths(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        paths: &[ToolPath],
+    ) -> PermissionOutcome {
+        self.snapshot()
+            .evaluate_tool_with_paths(mode, origin, tool_name, args, paths)
+    }
+
     pub fn evaluate_tool_with_approvals(
         &self,
         mode: AgentMode,
@@ -400,6 +419,18 @@ impl PermissionsHandle {
     ) -> PermissionOutcome {
         self.snapshot()
             .evaluate_tool_with_approvals(mode, origin, tool_name, args)
+    }
+
+    pub fn evaluate_tool_with_paths_and_approvals(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        paths: &[ToolPath],
+    ) -> PermissionOutcome {
+        self.snapshot()
+            .evaluate_tool_with_paths_and_approvals(mode, origin, tool_name, args, paths)
     }
 
     pub fn from_resolution(resolution: PermissionResolution) -> Self {
@@ -440,6 +471,13 @@ pub struct PermissionResolution {
     workspace_dirs: Vec<PathBuf>,
 }
 
+/// Runtime-owned paths used while resolving permission policy.
+#[derive(Clone, Copy)]
+pub struct PermissionRuntimePaths<'a> {
+    pub cwd: &'a std::path::Path,
+    pub home: &'a std::path::Path,
+}
+
 /// Resolve permission declarations, setting-controlled workspace policy, cwd
 /// roots, and persisted workspace grants through one path.
 pub fn resolve_permissions(
@@ -447,19 +485,22 @@ pub fn resolve_permissions(
     tool_defaults: &ToolDefaults,
     mode_behaviors: HashMap<String, ModeBehavior>,
     settings: &crate::config::ResolvedSettings,
-    cwd: &std::path::Path,
+    runtime_paths: PermissionRuntimePaths<'_>,
+    workspace_store: &store::WorkspacePermissionStore,
     paths_fn: Option<Arc<PathsFn>>,
 ) -> PermissionResolution {
+    let PermissionRuntimePaths { cwd, home } = runtime_paths;
     let context =
         crate::worktree::project_context(cwd, Some(std::path::Path::new(&settings.worktree_root)));
     let roots = context.allowed_roots.clone();
     let mut policy = Permissions::from_raw_with_mode_behaviors(raw, tool_defaults, mode_behaviors);
     policy.set_allowed_roots(context.active_root, context.allowed_roots);
+    policy.set_home(home.to_path_buf());
     policy.set_restrict_to_workspace(settings.restrict_to_workspace);
     if let Some(paths_fn) = paths_fn {
         policy.set_paths_fn(paths_fn);
     }
-    let rules = store::load_for_roots(&cwd.to_string_lossy(), &roots);
+    let rules = workspace_store.load_for_roots(&cwd.to_string_lossy(), &roots);
     let (workspace_tools, workspace_dirs) = store::into_approvals(&rules);
     PermissionResolution {
         policy,
@@ -478,6 +519,7 @@ impl std::fmt::Debug for Permissions {
             )
             .field("restrict_to_workspace", &self.restrict_to_workspace)
             .field("active_root", &self.active_root)
+            .field("home", &self.home)
             .field("allowed_roots", &self.allowed_roots)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
             .field("tool_decisions", &self.tool_decisions)
@@ -523,6 +565,7 @@ impl Permissions {
             mode_behaviors,
             restrict_to_workspace: true,
             active_root: PathBuf::new(),
+            home: engine::paths::home_dir(),
             allowed_roots: Vec::new(),
             paths_fn: None,
             tool_decisions: tool_defaults.tool_decisions.clone(),
@@ -577,6 +620,10 @@ impl Permissions {
         self.allowed_roots = vec![path];
     }
 
+    fn set_home(&mut self, home: PathBuf) {
+        self.home = home;
+    }
+
     pub fn set_allowed_roots(&mut self, active: PathBuf, roots: Vec<PathBuf>) {
         self.active_root = active.clone();
         self.allowed_roots.clear();
@@ -621,10 +668,15 @@ impl Permissions {
         &self,
         tool_name: &str,
         args: &HashMap<String, Value>,
+        paths: Option<&[ToolPath]>,
     ) -> Vec<ToolEffect> {
         match self.tool_effect_kind(tool_name) {
-            ToolEffectKind::Read => self.path_effects_for_tool(tool_name, args, PathAccess::Read),
-            ToolEffectKind::Write => self.path_effects_for_tool(tool_name, args, PathAccess::Write),
+            ToolEffectKind::Read => {
+                self.path_effects_for_tool(tool_name, args, paths, PathAccess::Read)
+            }
+            ToolEffectKind::Write => {
+                self.path_effects_for_tool(tool_name, args, paths, PathAccess::Write)
+            }
             ToolEffectKind::Network => vec![ToolEffect::Network],
             ToolEffectKind::User => vec![ToolEffect::UserInteraction],
             ToolEffectKind::Process => vec![ToolEffect::ProcessControl],
@@ -637,14 +689,17 @@ impl Permissions {
         &self,
         tool_name: &str,
         args: &HashMap<String, Value>,
+        paths: Option<&[ToolPath]>,
         access: PathAccess,
     ) -> Vec<ToolEffect> {
-        let effects: Vec<_> = self
-            .paths_for_tool(tool_name, args)
+        let paths = paths
+            .map(|paths| paths.to_vec())
+            .unwrap_or_else(|| self.paths_for_tool(tool_name, args));
+        let effects: Vec<_> = paths
             .into_iter()
-            .map(|p| {
+            .map(|path| {
                 ToolEffect::Fs(PathEffect::from_tool_path(
-                    p,
+                    path,
                     &self.active_root,
                     access.clone(),
                 ))
@@ -663,6 +718,26 @@ impl Permissions {
         tool_name: &str,
         args: &HashMap<String, Value>,
     ) -> Vec<ToolEffect> {
+        self.effects_for_tool_with_optional_paths(origin, tool_name, args, None)
+    }
+
+    pub fn effects_for_tool_with_paths(
+        &self,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        paths: &[ToolPath],
+    ) -> Vec<ToolEffect> {
+        self.effects_for_tool_with_optional_paths(origin, tool_name, args, Some(paths))
+    }
+
+    fn effects_for_tool_with_optional_paths(
+        &self,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        paths: Option<&[ToolPath]>,
+    ) -> Vec<ToolEffect> {
         if origin == ToolOrigin::Mcp {
             return vec![ToolEffect::Mcp {
                 tool: tool_name.to_string(),
@@ -676,7 +751,8 @@ impl Permissions {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let analysis = bash::analyze_shell_command(&command, &self.active_root);
+                let analysis =
+                    bash::analyze_shell_command_in(&command, &self.active_root, &self.home);
                 let mut effects = vec![ToolEffect::Shell {
                     command,
                     risk: analysis.risk,
@@ -692,7 +768,7 @@ impl Permissions {
                 }
                 effects
             }
-            _ => self.declared_effects_for_tool(tool_name, args),
+            _ => self.declared_effects_for_tool(tool_name, args, paths),
         }
     }
 
@@ -877,6 +953,29 @@ impl Permissions {
         args: &HashMap<String, Value>,
     ) -> PermissionOutcome {
         let effects = self.effects_for_tool(origin.clone(), tool_name, args);
+        self.evaluate_tool_effects(mode, origin, tool_name, args, effects)
+    }
+
+    pub fn evaluate_tool_with_paths(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        paths: &[ToolPath],
+    ) -> PermissionOutcome {
+        let effects = self.effects_for_tool_with_paths(origin.clone(), tool_name, args, paths);
+        self.evaluate_tool_effects(mode, origin, tool_name, args, effects)
+    }
+
+    fn evaluate_tool_effects(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        effects: Vec<ToolEffect>,
+    ) -> PermissionOutcome {
         self.evaluate_request(PermissionRequest {
             mode,
             tool_name,
@@ -894,6 +993,29 @@ impl Permissions {
         args: &HashMap<String, Value>,
     ) -> PermissionOutcome {
         let effects = self.effects_for_tool(origin.clone(), tool_name, args);
+        self.evaluate_tool_effects_with_approvals(mode, origin, tool_name, args, effects)
+    }
+
+    pub fn evaluate_tool_with_paths_and_approvals(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        paths: &[ToolPath],
+    ) -> PermissionOutcome {
+        let effects = self.effects_for_tool_with_paths(origin.clone(), tool_name, args, paths);
+        self.evaluate_tool_effects_with_approvals(mode, origin, tool_name, args, effects)
+    }
+
+    fn evaluate_tool_effects_with_approvals(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        effects: Vec<ToolEffect>,
+    ) -> PermissionOutcome {
         let mut outcome = self.evaluate_request(PermissionRequest {
             mode: mode.clone(),
             tool_name,

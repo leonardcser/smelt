@@ -7,27 +7,87 @@ impl TestApp {
     /// resources keep stable ids while anonymous resources from the retired
     /// generation are reaped.
     pub fn reload_lua(&mut self) {
-        let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.reload_lua();
     }
 
     pub fn schedule_lua_reload(&mut self) -> bool {
-        let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.schedule_lua_reload()
     }
 
     pub fn drain_idle_work(&mut self) -> bool {
-        let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.drain_idle_work()
     }
 
-    pub fn pending_lua_reload(&self) -> bool {
-        self.app.pending_lua_reload
+    /// Pump a bounded batch of Lua wakeups so spawned callbacks reach their next wait point.
+    pub fn settle_lua(&mut self) {
+        for _ in 0..4 {
+            self.feed_one(SourceEvent::LuaWakeup);
+        }
     }
 
-    /// Run an arbitrary Lua snippet against the embedded runtime with the host
-    /// pointer installed. Callers that intentionally probe invalid arguments can
-    /// use this boolean form after wrapping those calls in Lua `pcall`.
+    pub fn pending_lua_reload(&self) -> bool {
+        self.app.lua_reload_pending()
+    }
+
+    pub(crate) fn reload_lua_config(&mut self) {
+        self.app.reload_lua_config();
+    }
+
+    pub(crate) fn apply_lua_command(&mut self, command: &str) {
+        self.app.apply_lua_command(command);
+    }
+
+    pub(crate) fn drive_lua_tasks(&mut self) {
+        self.app.drive_lua_tasks();
+    }
+
+    pub(crate) fn drive_lua_tasks_once(&mut self) -> usize {
+        let now = self.app.core.clock.instant_now();
+        let lua = self.app.lua.execution();
+        crate::lua::scope_app(&mut self.app, || lua.drive_tasks(now)).len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_receive_lua_wakeup(&mut self) -> bool {
+        self.app.try_receive_lua_wakeup()
+    }
+
+    pub(crate) fn shutdown_lua(&mut self) -> (Vec<String>, Option<String>) {
+        self.app.shutdown_lua()
+    }
+
+    pub(crate) fn bring_up_lua(
+        &mut self,
+        kind: &'static str,
+        refresh_agent_inputs: bool,
+    ) -> Option<crate::app::LuaBringUpError> {
+        self.app.bring_up_lua(kind, refresh_agent_inputs)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lua_runtime_reconcile_pending(&self) -> bool {
+        self.app.lua_runtime_reconcile_pending()
+    }
+
+    pub(crate) fn reconcile_committed_lua_runtime(&mut self) -> Result<(), String> {
+        self.app.reconcile_committed_lua_runtime()
+    }
+
+    pub(crate) fn complete_lua_tool(
+        &mut self,
+        invocation: smelt_core::lua::ToolInvocationContext,
+        call_id: String,
+        content: String,
+        is_error: bool,
+        metadata: Option<serde_json::Value>,
+    ) {
+        self.app
+            .complete_lua_tool(invocation, call_id, content, is_error, metadata);
+    }
+
+    /// Run an arbitrary Lua snippet while lending it the frontend host. Callers
+    /// that intentionally probe invalid arguments can use this boolean form after
+    /// wrapping those calls in Lua `pcall`.
     pub fn run_lua(&mut self, snippet: &str) -> bool {
         self.run_lua_result(snippet).is_ok()
     }
@@ -35,22 +95,90 @@ impl TestApp {
     /// Run a Lua snippet and preserve the Lua error for focused harnesses that
     /// require a valid call path to succeed.
     pub fn run_lua_result(&mut self, snippet: &str) -> Result<(), String> {
-        let result = {
-            let _guard = crate::lua::install_app_ptr(&mut self.app);
-            self.app
-                .lua
-                .lua
-                .load(snippet)
-                .exec()
-                .map_err(|error| error.to_string())
-        };
-        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        let result = self.exec_lua_entry(snippet);
+        self.app.pump_lua();
         self.app.try_perform_scheduled_runtime_reconcile();
+        self.app.drain_deferred_layout();
         result
+    }
+
+    /// Execute one Lua entry without pumping deferred callbacks or reconciliation.
+    pub fn exec_lua_entry(&mut self, snippet: &str) -> Result<(), String> {
+        let lua = self.app.lua.lua().clone();
+        crate::lua::scope_app(&mut self.app, || {
+            lua.load(snippet).exec().map_err(|error| error.to_string())
+        })
+    }
+
+    /// Evaluate a Lua expression while lending it the frontend host.
+    pub fn eval_lua<T: mlua::FromLuaMulti>(&mut self, snippet: &str) -> Result<T, String> {
+        let lua = self.app.lua.lua().clone();
+        crate::lua::scope_app(&mut self.app, || {
+            lua.load(snippet).eval().map_err(|error| error.to_string())
+        })
     }
 
     pub fn lua_int_global(&self, name: &str) -> Option<i64> {
         self.app.lua.lua.globals().get(name).ok()
+    }
+
+    pub(crate) fn set_lua_string_global(
+        &mut self,
+        name: &str,
+        value: impl Into<String>,
+    ) -> Result<(), mlua::Error> {
+        self.app.lua.lua.globals().set(name, value.into())
+    }
+
+    pub(crate) fn clear_lua_messages(&mut self) {
+        self.app
+            .lua
+            .core_shared()
+            .messages
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lua_message_count(&self, body: &str) -> usize {
+        self.app
+            .lua
+            .core_shared()
+            .messages
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entries()
+            .iter()
+            .filter(|entry| entry.full == body)
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lua_messages_contain(&self, text: &str) -> bool {
+        self.app
+            .lua
+            .core_shared()
+            .messages
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entries()
+            .iter()
+            .any(|entry| entry.full.contains(text))
+    }
+
+    pub fn tool_summary(
+        &mut self,
+        tool_name: &str,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> protocol::StyledLines {
+        let lua = self.app.lua.execution();
+        crate::lua::scope_app(&mut self.app, || lua.tool_summary(tool_name, args))
+    }
+
+    pub fn mode_note(&mut self, mode: &str) -> String {
+        let lua = self.app.lua.execution();
+        crate::lua::scope_app(&mut self.app, || lua.mode_note(mode))
     }
 
     /// Re-publish the signal diff + fire queued subscribers. Production
@@ -59,9 +187,28 @@ impl TestApp {
     /// the reactive `work_*` / `vim_mode` / `now` signals without driving
     /// a synthetic event.
     pub fn tick_signals(&mut self) {
-        let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.publish_diff_signals();
         self.app.drain_signals_pending();
+    }
+
+    pub(crate) fn drain_signals_pending(&mut self) {
+        self.app.drain_signals_pending();
+    }
+
+    pub(crate) fn pump_lua(&mut self) {
+        self.app.pump_lua();
+    }
+
+    pub(crate) fn tick_timers(&mut self) {
+        self.app.tick_timers();
+    }
+
+    pub(crate) fn clear_timers(&mut self) {
+        self.app.core.timers.clear();
+    }
+
+    pub(crate) fn dispatch_ui_window_events(&mut self, include_tick: bool) {
+        self.app.dispatch_ui_window_events(include_tick);
     }
 
     /// Counts of bound names across the four reload-managed registries:

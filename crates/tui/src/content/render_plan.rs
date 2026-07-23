@@ -398,7 +398,7 @@ struct RenderPlanPrefix {
 pub(crate) struct RenderPlan {
     pub(crate) history_generation: u64,
     pub(crate) history_order_generation: u64,
-    history_descriptor_generation: u64,
+    history_record_generation: u64,
     history_order_len: usize,
     pub(crate) group_generation: u64,
     pub(crate) group_cache_key: Option<u64>,
@@ -414,7 +414,7 @@ impl RenderPlan {
         Self {
             history_generation: 0,
             history_order_generation: 0,
-            history_descriptor_generation: 0,
+            history_record_generation: 0,
             history_order_len: 0,
             group_generation: 0,
             group_cache_key: None,
@@ -489,7 +489,7 @@ impl RenderPlan {
         Self {
             history_generation: history.generation(),
             history_order_generation: history.order_generation(),
-            history_descriptor_generation: history.descriptor_dirty_generation(),
+            history_record_generation: history.record_dirty_generation(),
             history_order_len: history.order.len(),
             group_generation,
             group_cache_key,
@@ -521,7 +521,7 @@ impl RenderPlan {
                 return None;
             }
             self.history_generation = history.generation();
-            self.history_descriptor_generation = history.descriptor_dirty_generation();
+            self.history_record_generation = history.record_dirty_generation();
             self.group_generation = group_generation;
             self.group_cache_key = group_cache_key;
             self.append_prefix = None;
@@ -536,8 +536,7 @@ impl RenderPlan {
         }
         let old_order_len = self.history_order_len;
         if old_order_len > history.order.len()
-            || history.descriptor_changed_from_since(self.history_descriptor_generation)?
-                < old_order_len
+            || history.record_changed_from_since(self.history_record_generation)? < old_order_len
         {
             return None;
         }
@@ -565,7 +564,7 @@ impl RenderPlan {
         }
         self.history_generation = history.generation();
         self.history_order_generation = history.order_generation();
-        self.history_descriptor_generation = history.descriptor_dirty_generation();
+        self.history_record_generation = history.record_dirty_generation();
         self.history_order_len = history.order.len();
         self.group_generation = group_generation;
         self.group_cache_key = group_cache_key;
@@ -778,7 +777,7 @@ fn render_plan_fingerprint(
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     history.order_generation().hash(&mut hasher);
-    history.descriptor_dirty_generation().hash(&mut hasher);
+    history.record_dirty_generation().hash(&mut hasher);
     group_generation.hash(&mut hasher);
     group_cache_key.hash(&mut hasher);
     nodes.len().hash(&mut hasher);
@@ -1298,7 +1297,7 @@ mod tests {
         transcript.push(Block::Text {
             content: "second".into(),
         });
-        transcript.history.clear_descriptor_dirty();
+        transcript.history.clear_record_dirty();
         let mut plan = RenderPlan::for_history_with_groups(&transcript.history, &[], 0, None);
         let initial_order_generation = plan.history_order_generation;
 
@@ -1306,7 +1305,7 @@ mod tests {
             content: "third".into(),
         });
         let appended = *transcript.history.order.last().unwrap();
-        transcript.history.clear_descriptor_dirty();
+        transcript.history.clear_record_dirty();
         let prune_required =
             plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
 

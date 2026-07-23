@@ -162,7 +162,7 @@
 ---@field min_height? any Forwarded to `smelt.dialog.open`.
 ---@field blocks_agent? boolean Forwarded to `smelt.dialog.open`.
 
---- Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaRuntime::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
+--- Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaExecution::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
 ---@class smelt.engine.AskError
 ---@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cyber_policy" | "cancelled" | "other"`.
 ---@field message string Human-readable single-line description (newlines collapsed to spaces).
@@ -735,7 +735,7 @@
 ---@class smelt.transcript.StreamOpts
 ---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
---- Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse descriptor coordinates are intentionally hidden.
+--- Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.
 ---@class smelt.transcript.Target
 ---@field block_id integer Stable transcript block identity.
 ---@field role smelt.transcript.Role Semantic block role.

@@ -40,39 +40,21 @@ fn osc9_notification_sequence(message: &str, dcs_passthrough: bool) -> String {
 }
 
 fn write_terminal_control(bytes: &[u8]) -> LuaResult<bool> {
-    crate::lua::try_with_app(|app| -> std::io::Result<bool> {
-        let Some(terminal) = app.terminal.as_mut() else {
-            return Ok(false);
-        };
-        terminal.write_control_sequence(bytes)?;
-        Ok(true)
-    })
-    .unwrap_or(Ok(false))
-    .map_err(mlua::Error::external)
+    crate::lua::try_with_platform_host(|host| host.write_terminal_control(bytes))
+        .unwrap_or(Ok(false))
+        .map_err(mlua::Error::external)
 }
 
 fn set_terminal_title(bytes: &[u8]) -> LuaResult<bool> {
-    crate::lua::try_with_app(|app| -> std::io::Result<bool> {
-        let Some(terminal) = app.terminal.as_mut() else {
-            return Ok(false);
-        };
-        terminal.set_title_sequence(bytes)?;
-        Ok(true)
-    })
-    .unwrap_or(Ok(false))
-    .map_err(mlua::Error::external)
+    crate::lua::try_with_platform_host(|host| host.set_terminal_title(bytes))
+        .unwrap_or(Ok(false))
+        .map_err(mlua::Error::external)
 }
 
 fn clear_terminal_title(bytes: &[u8]) -> LuaResult<bool> {
-    crate::lua::try_with_app(|app| -> std::io::Result<bool> {
-        let Some(terminal) = app.terminal.as_mut() else {
-            return Ok(false);
-        };
-        terminal.clear_title_sequence(bytes)?;
-        Ok(true)
-    })
-    .unwrap_or(Ok(false))
-    .map_err(mlua::Error::external)
+    crate::lua::try_with_platform_host(|host| host.clear_terminal_title(bytes))
+        .unwrap_or(Ok(false))
+        .map_err(mlua::Error::external)
 }
 
 fn env_var(name: &str) -> Option<String> {
@@ -171,14 +153,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return the current terminal size as `{ width, height }` in cells.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let (width, height) = crate::lua::try_with_app(|app| {
-                app.terminal
-                    .as_ref()
-                    .map(|terminal| terminal.size())
-                    .unwrap_or_else(crossterm::terminal::size)
-            })
-            .unwrap_or_else(crossterm::terminal::size)
-            .map_err(mlua::Error::external)?;
+            let (width, height) = crate::lua::try_with_platform_host(|host| host.terminal_size())
+                .unwrap_or_else(crossterm::terminal::size)
+                .map_err(mlua::Error::external)?;
             let out = lua.create_table()?;
             out.set("width", width)?;
             out.set("height", height)?;
@@ -190,7 +167,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "is_focused",
         "Return true when the smelt terminal window currently has OS focus.",
         &[],
-        |_, ()| -> LuaResult<bool> { Ok(crate::lua::with_app(|app| app.term_focused)) },
+        |_, ()| -> LuaResult<bool> {
+            Ok(crate::lua::with_platform_host(|host| {
+                host.terminal_is_focused()
+            }))
+        },
     )?;
 
     m.fn_(

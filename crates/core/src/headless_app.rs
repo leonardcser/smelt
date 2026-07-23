@@ -11,6 +11,7 @@ use super::runtime::Core;
 
 pub struct HeadlessApp {
     pub core: Core,
+    pub session: crate::session::Session,
     pub(crate) sink: HeadlessSink,
     pub(crate) next_turn_id: u64,
     system_prompt: String,
@@ -34,8 +35,11 @@ impl HeadlessApp {
         } else {
             (None, None)
         };
+        let mut session = crate::session::Session::new(core.env.pid(), core.env.cwd());
+        session.fast_mode = Some(core.config.settings.fast_mode);
         Self {
             core,
+            session,
             sink,
             next_turn_id: 1,
             system_prompt,
@@ -56,18 +60,24 @@ impl HeadlessApp {
     }
 
     fn approves_permission(
-        &self,
+        &mut self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
     ) -> bool {
+        let tool_paths = self.lua.as_ref().map_or_else(Vec::new, |lua| {
+            crate::host::scope_core(&mut self.core, || {
+                lua.tool_paths_for_workspace(tool_name, args)
+            })
+        });
         let mode = self.core.config.mode.clone();
         let permissions = self.core.permissions.snapshot();
         permissions
-            .evaluate_tool(
+            .evaluate_tool_with_paths(
                 mode.clone(),
                 crate::permissions::ToolOrigin::Lua,
                 tool_name,
                 args,
+                &tool_paths,
             )
             .decision
             == Decision::Allow
@@ -118,18 +128,24 @@ impl HeadlessApp {
             });
             return;
         }
-        let metadata = lua.evaluate_tool_metadata(&tool_name, &args);
+        let metadata = crate::host::scope_core(&mut self.core, || {
+            lua.evaluate_tool_metadata(&tool_name, &args)
+        });
         let decision = if let Some(err) = metadata.preflight_error.clone() {
             protocol::Decision::Error(err)
         } else {
+            let tool_paths = crate::host::scope_core(&mut self.core, || {
+                lua.tool_paths_for_workspace(&tool_name, &args)
+            });
             self.core
                 .permissions
                 .snapshot()
-                .evaluate_tool_with_approvals(
+                .evaluate_tool_with_paths_and_approvals(
                     self.core.config.mode.clone(),
                     crate::permissions::ToolOrigin::Lua,
                     &tool_name,
                     &args,
+                    &tool_paths,
                 )
                 .decision
         };
@@ -167,20 +183,24 @@ impl HeadlessApp {
             return;
         }
         let mode = self.core.config.mode.clone();
-        let session_id = self.core.session.id.clone();
-        let session_dir = crate::session::dir_for(&self.core.session);
-        match lua.execute_tool(
-            &tool_name,
-            &args,
-            request_id,
-            &call_id,
-            crate::lua::ToolEnv {
-                mode,
-                session_id: &session_id,
-                session_dir: &session_dir,
-            },
-            self.core.clock.instant_now(),
-        ) {
+        let session_id = self.session.id.clone();
+        let session_dir = self.core.sessions.dir_for(&self.session);
+        let now = self.core.clock.instant_now();
+        let result = crate::host::scope_core(&mut self.core, || {
+            lua.execute_tool(
+                &tool_name,
+                &args,
+                request_id,
+                &call_id,
+                crate::lua::ToolEnv {
+                    mode,
+                    session_id: &session_id,
+                    session_dir: &session_dir,
+                },
+                now,
+            )
+        });
+        match result {
             crate::lua::ToolExecResult::Immediate {
                 content,
                 is_error,
@@ -202,8 +222,12 @@ impl HeadlessApp {
         let Some(lua) = self.lua.as_ref() else {
             return;
         };
-        lua.pump_task_events();
-        for out in lua.drive_tasks(self.core.clock.instant_now()) {
+        let now = self.core.clock.instant_now();
+        let outputs = crate::host::scope_core(&mut self.core, || {
+            lua.pump_task_events();
+            lua.drive_tasks(now)
+        });
+        for out in outputs {
             if let crate::lua::TaskDriveOutput::ToolComplete {
                 invocation,
                 call_id,
@@ -275,12 +299,14 @@ impl HeadlessApp {
                 metadata,
             } => {
                 if let Some(lua) = self.lua.as_ref() {
-                    lua.resolve_core_tool_call(
-                        *request_id,
-                        content.clone(),
-                        *is_error,
-                        metadata.clone(),
-                    );
+                    crate::host::scope_core(&mut self.core, || {
+                        lua.resolve_core_tool_call(
+                            *request_id,
+                            content.clone(),
+                            *is_error,
+                            metadata.clone(),
+                        );
+                    });
                 }
                 true
             }
@@ -319,7 +345,11 @@ impl HeadlessApp {
         if let Some(cmd) = trimmed.strip_prefix('!') {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
-                let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .current_dir(self.core.env.cwd())
+                    .output();
                 match output {
                     Ok(o) => {
                         let _ = io::stdout().write_all(&o.stdout);
@@ -342,7 +372,7 @@ impl HeadlessApp {
         let cwd_path = self.core.env.cwd();
         let cwd = cwd_path.to_string_lossy().into_owned();
         let content = crate::file_ref::expand_at_file_refs(&message, &cwd, &self.core.files);
-        let mut history = self.core.session.history.clone();
+        let mut history = self.session.history.clone();
         history.push(protocol::HistoryItem::note(protocol::HistoryNote::context(
             crate::context_notes::cwd_note(
                 &cwd_path,
@@ -358,7 +388,6 @@ impl HeadlessApp {
         let fast_mode = model_target.provider_type == "codex"
             && model_target.config.supports_fast_mode == Some(true)
             && self
-                .core
                 .session
                 .fast_mode
                 .unwrap_or(self.core.config.settings.fast_mode);
@@ -374,8 +403,8 @@ impl HeadlessApp {
                 reasoning_effort: self.core.config.reasoning_effort,
                 fast_mode,
                 history: protocol::ModelHistorySource::items(history),
-                session_id: self.core.session.id.clone(),
-                session_dir: crate::session::dir_for(&self.core.session),
+                session_id: self.session.id.clone(),
+                session_dir: self.core.sessions.dir_for(&self.session),
                 persistence: protocol::PersistenceScope::default(),
                 permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),

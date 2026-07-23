@@ -1,16 +1,18 @@
 pub mod dispatcher;
 
 use engine::log;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper};
 use rmcp::model::{CallToolRequestParams, ServerInfo};
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub const STARTUP_DISCOVERY_WAIT: Duration = Duration::from_secs(3);
@@ -138,6 +140,184 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Result-bearing completion for rmcp's asynchronous child cleanup.
+#[derive(Clone, Debug)]
+struct ProcessCleanup {
+    state: watch::Sender<ProcessCleanupState>,
+}
+
+#[derive(Clone, Debug)]
+enum ProcessCleanupState {
+    Pending,
+    Finished(Result<(), ProcessCleanupFailure>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProcessCleanupFailure {
+    kind: std::io::ErrorKind,
+    message: String,
+}
+
+impl std::fmt::Display for ProcessCleanupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl ProcessCleanup {
+    fn new() -> Self {
+        let (state, _) = watch::channel(ProcessCleanupState::Pending);
+        Self { state }
+    }
+
+    fn finish<T>(&self, result: &std::io::Result<T>) {
+        let result = result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| ProcessCleanupFailure {
+                kind: error.kind(),
+                message: error.to_string(),
+            });
+        self.state.send_if_modified(|state| {
+            if matches!(state, ProcessCleanupState::Pending) {
+                *state = ProcessCleanupState::Finished(result);
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn fail(&self, error: std::io::Error) {
+        self.finish::<()>(&Err(error));
+    }
+
+    async fn wait(&self) -> Result<(), ProcessCleanupFailure> {
+        let mut state = self.state.subscribe();
+        loop {
+            if let ProcessCleanupState::Finished(result) = state.borrow_and_update().clone() {
+                return result;
+            }
+            if state.changed().await.is_err() {
+                return Err(ProcessCleanupFailure {
+                    kind: std::io::ErrorKind::BrokenPipe,
+                    message: "MCP process cleanup completion channel closed".into(),
+                });
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_finished(&self) -> bool {
+        matches!(*self.state.borrow(), ProcessCleanupState::Finished(_))
+    }
+}
+
+#[derive(Debug)]
+struct TrackProcessCleanup(ProcessCleanup);
+
+impl CommandWrapper for TrackProcessCleanup {
+    fn wrap_child(
+        &mut self,
+        child: Box<dyn ChildWrapper>,
+        _command: &CommandWrap,
+    ) -> std::io::Result<Box<dyn ChildWrapper>> {
+        Ok(Box::new(TrackedProcess {
+            child,
+            cleanup: self.0.clone(),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct TrackedProcess {
+    child: Box<dyn ChildWrapper>,
+    cleanup: ProcessCleanup,
+}
+
+impl ChildWrapper for TrackedProcess {
+    fn inner(&self) -> &dyn ChildWrapper {
+        self.child.inner()
+    }
+
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self.child.inner_mut()
+    }
+
+    fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+        let Self { child, cleanup } = *self;
+        cleanup.fail(std::io::Error::other(
+            "MCP child ownership escaped before cleanup completed",
+        ));
+        child.into_inner()
+    }
+
+    fn kill(&mut self) -> Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + '_> {
+        let kill_result = self.child.start_kill();
+        let wait = self.child.wait();
+        let cleanup = self.cleanup.clone();
+        Box::new(async move {
+            let result = match (wait.await, kill_result) {
+                (Ok(_), _) => Ok(()),
+                (Err(wait_error), Ok(())) => Err(wait_error),
+                (Err(wait_error), Err(kill_error)) => Err(std::io::Error::new(
+                    wait_error.kind(),
+                    format!(
+                        "failed to kill MCP child ({kill_error}) and wait for it ({wait_error})"
+                    ),
+                )),
+            };
+            cleanup.finish(&result);
+            result
+        })
+    }
+
+    fn start_kill(&mut self) -> std::io::Result<()> {
+        self.child.start_kill()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let result = self.child.try_wait();
+        if matches!(result, Ok(Some(_))) {
+            self.cleanup.finish(&result);
+        }
+        result
+    }
+
+    fn wait(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_,
+        >,
+    > {
+        let cleanup = self.cleanup.clone();
+        let wait = self.child.wait();
+        Box::pin(async move {
+            let result = wait.await;
+            cleanup.finish(&result);
+            result
+        })
+    }
+
+    #[cfg(unix)]
+    fn signal(&self, signal: i32) -> std::io::Result<()> {
+        self.child.signal(signal)
+    }
+}
+
+fn spawn_local_process(command: Command) -> std::io::Result<(TokioChildProcess, ProcessCleanup)> {
+    let cleanup = ProcessCleanup::new();
+    let mut command: CommandWrap = command.into();
+    #[cfg(unix)]
+    command.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    command.wrap(process_wrap::tokio::JobObject);
+    command.wrap(TrackProcessCleanup(cleanup.clone()));
+    let transport = TokioChildProcess::new(command)?;
+    Ok((transport, cleanup))
+}
+
 /// Per-server state. Splits sync-readable status and tool metadata from
 /// the async-only client handle (`tokio::RwLock`). Lua bindings never need
 /// to enter the tokio runtime; `call_tool` uses the async lock once per
@@ -145,15 +325,17 @@ fn now_ms() -> u64 {
 pub struct McpServer {
     pub name: String,
     pub config: McpServerConfig,
+    cwd: PathBuf,
     status: watch::Sender<McpStatus>,
     info: StdRwLock<Option<McpServerInfo>>,
     tools: StdRwLock<Vec<McpToolDef>>,
     client: RwLock<Option<RunningService<rmcp::RoleClient, ()>>>,
+    process_cleanup: Mutex<Option<ProcessCleanup>>,
     cancel: CancellationToken,
 }
 
 impl McpServer {
-    fn new(name: String, config: McpServerConfig) -> Self {
+    fn new(name: String, config: McpServerConfig, cwd: PathBuf) -> Self {
         let initial = if config.enabled {
             McpStatus::Connecting
         } else {
@@ -163,10 +345,12 @@ impl McpServer {
         Self {
             name,
             config,
+            cwd,
             status,
             info: StdRwLock::new(None),
             tools: StdRwLock::new(Vec::new()),
             client: RwLock::new(None),
+            process_cleanup: Mutex::new(None),
             cancel: CancellationToken::new(),
         }
     }
@@ -244,14 +428,22 @@ impl McpServer {
         );
 
         let mut cmd = Command::new(&command[0]);
-        cmd.args(&command[1..]);
+        cmd.args(&command[1..]).current_dir(&self.cwd);
         for (k, v) in env {
             cmd.env(k, v);
         }
 
-        let transport = match TokioChildProcess::new(cmd) {
-            Ok(t) => t,
-            Err(e) => return self.record_failure(format!("failed to spawn: {e}")).await,
+        let transport = {
+            let mut process_cleanup = self.process_cleanup.lock().await;
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            let (transport, cleanup) = match spawn_local_process(cmd) {
+                Ok(process) => process,
+                Err(e) => return self.record_failure(format!("failed to spawn: {e}")).await,
+            };
+            *process_cleanup = Some(cleanup);
+            transport
         };
 
         let client = tokio::select! {
@@ -322,9 +514,32 @@ impl McpServer {
         }
     }
 
-    async fn disconnect(&self) {
+    async fn disconnect(&self) -> Result<(), String> {
         self.cancel.cancel();
-        self.client.write().await.take();
+        let mut failures = Vec::new();
+        if let Some(client) = self.client.write().await.take() {
+            if let Err(error) = client.cancel().await {
+                failures.push(format!("service cancellation failed: {error}"));
+            }
+        }
+        let cleanup = self.process_cleanup.lock().await.take();
+        if let Some(cleanup) = cleanup {
+            if let Err(error) = cleanup.wait().await {
+                failures.push(format!(
+                    "process cleanup failed ({:?}): {error}",
+                    error.kind
+                ));
+            }
+        }
+        if failures.is_empty() {
+            self.set_status(McpStatus::Disabled);
+            Ok(())
+        } else {
+            let message = failures.join("; ");
+            self.record_failure(format!("disconnect failed: {message}"))
+                .await;
+            Err(message)
+        }
     }
 
     async fn call_tool(
@@ -376,17 +591,20 @@ pub struct McpManager {
 #[derive(Default)]
 struct McpControllerState {
     desired: HashMap<String, McpServerConfig>,
+    cwd: PathBuf,
     desired_revision: u64,
+    last_error: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpControllerStatus {
     pub desired_revision: u64,
     pub observed_revision: u64,
+    pub error: Option<String>,
 }
 
 impl McpControllerStatus {
-    pub fn is_ready(self) -> bool {
+    pub fn is_ready(&self) -> bool {
         self.observed_revision == self.desired_revision
     }
 }
@@ -401,6 +619,7 @@ pub struct McpReconcile {
     manager: Arc<McpManager>,
     revision: u64,
     desired: HashMap<String, McpServerConfig>,
+    cwd: PathBuf,
     removed_servers: Vec<Arc<McpServer>>,
 }
 
@@ -425,16 +644,16 @@ impl McpManager {
     /// Connect to every configured server concurrently. Returns once
     /// every connector future has resolved (success or failure); status
     /// is queryable via [`McpServer::status`] afterwards.
-    pub async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
+    pub async fn start(configs: &HashMap<String, McpServerConfig>, cwd: &Path) -> Arc<Self> {
         let manager = Arc::new(Self::new());
-        manager.reconcile(configs.clone()).await;
+        manager.reconcile(configs.clone(), cwd.to_path_buf()).await;
         manager
     }
 
     /// Start connecting to configured servers without waiting for discovery.
-    pub fn start_detached(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
+    pub fn start_detached(configs: &HashMap<String, McpServerConfig>, cwd: &Path) -> Arc<Self> {
         let manager = Arc::new(Self::new());
-        manager.reconcile_detached(configs.clone());
+        manager.reconcile_detached(configs.clone(), cwd.to_path_buf());
         manager
     }
 
@@ -480,16 +699,19 @@ impl McpManager {
     pub fn prepare_reconcile(
         self: &Arc<Self>,
         desired: HashMap<String, McpServerConfig>,
+        cwd: PathBuf,
     ) -> Option<McpReconcile> {
         let mut controller = self
             .controller
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if controller.desired == desired {
+        if controller.desired == desired && controller.cwd == cwd {
             return None;
         }
         controller.desired_revision = controller.desired_revision.wrapping_add(1);
+        controller.last_error = None;
         controller.desired = desired.clone();
+        controller.cwd = cwd.clone();
         let revision = controller.desired_revision;
         let mut removed_servers = Vec::new();
         self.servers
@@ -498,7 +720,8 @@ impl McpManager {
             .retain(|name, server| {
                 let keep = desired
                     .get(name)
-                    .is_some_and(|config| config == &server.config);
+                    .is_some_and(|config| config == &server.config)
+                    && server.cwd == cwd;
                 if !keep {
                     server.cancel.cancel();
                     removed_servers.push(Arc::clone(server));
@@ -510,23 +733,32 @@ impl McpManager {
             manager: Arc::clone(self),
             revision,
             desired,
+            cwd,
             removed_servers,
         })
     }
 
     /// Diff the live server map against the latest desired set and wait until
     /// every connection attempt and disconnection has resolved.
-    pub async fn reconcile(self: &Arc<Self>, desired: HashMap<String, McpServerConfig>) {
-        if let Some(reconcile) = self.prepare_reconcile(desired) {
+    pub async fn reconcile(
+        self: &Arc<Self>,
+        desired: HashMap<String, McpServerConfig>,
+        cwd: PathBuf,
+    ) {
+        if let Some(reconcile) = self.prepare_reconcile(desired, cwd) {
             reconcile.apply().await;
         }
     }
 
     /// Publish the desired server set synchronously, then finish lifecycle work
     /// without waiting for process launch, handshake, or tool discovery.
-    pub fn reconcile_detached(self: &Arc<Self>, desired: HashMap<String, McpServerConfig>) {
+    pub fn reconcile_detached(
+        self: &Arc<Self>,
+        desired: HashMap<String, McpServerConfig>,
+        cwd: PathBuf,
+    ) {
         let Some(connections) = self
-            .prepare_reconcile(desired)
+            .prepare_reconcile(desired, cwd)
             .and_then(McpReconcile::install)
         else {
             return;
@@ -546,6 +778,7 @@ impl McpManager {
         McpControllerStatus {
             desired_revision: controller.desired_revision,
             observed_revision: *self.observed.borrow(),
+            error: controller.last_error.clone(),
         }
     }
 
@@ -577,12 +810,13 @@ impl McpManager {
         }
     }
 
-    fn observe_revision(&self, revision: u64) {
-        let controller = self
+    fn observe_revision(&self, revision: u64, error: Option<String>) {
+        let mut controller = self
             .controller
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if controller.desired_revision == revision {
+            controller.last_error = error;
             self.observed.send_replace(revision);
         }
     }
@@ -642,7 +876,7 @@ impl McpReconcile {
                 }
                 continue;
             }
-            let server = Arc::new(McpServer::new(name.clone(), config));
+            let server = Arc::new(McpServer::new(name.clone(), config, self.cwd.clone()));
             servers.insert(name, Arc::clone(&server));
             if server.config.enabled {
                 new_servers.push(server);
@@ -674,25 +908,38 @@ impl McpConnections {
     }
 
     fn observe(self) {
-        self.manager.observe_revision(self.revision);
+        self.manager.observe_revision(self.revision, None);
     }
 
     async fn finish(self) {
         let mut handles = Vec::new();
+        let mut failures = Vec::new();
         for server in self.new_servers {
             handles.push(tokio::spawn(async move { server.connect().await }));
         }
         for server in self.removed_servers {
-            server.disconnect().await;
+            if let Err(error) = server.disconnect().await {
+                failures.push(format!("{}: {error}", server.name));
+            }
             server.wait_until_settled().await;
         }
         for server in self.retained_servers {
             server.wait_until_settled().await;
         }
         for handle in handles {
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                failures.push(format!("connector task failed: {error}"));
+            }
         }
-        self.manager.observe_revision(self.revision);
+        let error = (!failures.is_empty()).then(|| failures.join("; "));
+        if let Some(error) = error.as_ref() {
+            log::entry(
+                log::Level::Warn,
+                "mcp_reconcile_error",
+                &serde_json::json!({"revision": self.revision, "error": error}),
+            );
+        }
+        self.manager.observe_revision(self.revision, error);
     }
 }
 
@@ -760,6 +1007,23 @@ mod tests {
     use super::*;
     use rmcp::model::{ContentBlock, Resource, ResourceContents};
     use serde_json::json;
+
+    fn test_cwd() -> PathBuf {
+        std::env::current_dir().expect("test cwd")
+    }
+
+    #[tokio::test]
+    async fn process_cleanup_preserves_failure_result() {
+        let cleanup = ProcessCleanup::new();
+        cleanup.fail(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cannot reap child",
+        ));
+
+        let error = cleanup.wait().await.expect_err("cleanup failure");
+        assert_eq!(error.kind, std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.message, "cannot reap child");
+    }
 
     // ── sanitize_name ────────────────────────────────────────────────
 
@@ -996,7 +1260,7 @@ mod tests {
         )]);
 
         let started = std::time::Instant::now();
-        let manager = McpManager::start_detached(&desired);
+        let manager = McpManager::start_detached(&desired, &test_cwd());
         assert!(started.elapsed() < Duration::from_secs(1));
 
         let server = manager
@@ -1012,14 +1276,129 @@ mod tests {
             }
         );
 
-        manager.reconcile(HashMap::new()).await;
+        manager.reconcile(HashMap::new(), test_cwd()).await;
         assert!(manager.server("stalled").is_none());
         assert!(manager.controller_status().is_ready());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_server_process_starts_in_explicit_runtime_cwd() {
+        let runtime = tempfile::tempdir().unwrap();
+        let cwd = runtime.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let marker = runtime.path().join("mcp-cwd");
+        let desired = HashMap::from([(
+            "cwd-probe".into(),
+            McpServerConfig {
+                description: String::new(),
+                enabled: true,
+                transport: McpTransportConfig::Local {
+                    command: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "pwd > \"$MCP_CWD_MARKER\"; sleep 30".into(),
+                    ],
+                    env: HashMap::from([(
+                        "MCP_CWD_MARKER".into(),
+                        marker.to_string_lossy().into_owned(),
+                    )]),
+                    timeout: 30_000,
+                },
+            },
+        )]);
+
+        let manager = McpManager::start_detached(&desired, &cwd);
+        let server = manager.server("cwd-probe").expect("installed MCP server");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("MCP child writes cwd marker");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().trim(),
+            cwd.to_string_lossy()
+        );
+        let cleanup = server
+            .process_cleanup
+            .lock()
+            .await
+            .clone()
+            .expect("spawned process cleanup");
+
+        manager.reconcile(HashMap::new(), cwd).await;
+
+        assert!(cleanup.is_finished());
+        assert!(server.process_cleanup.lock().await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_local_server_reconciles_without_waiting_forever() {
+        let desired = HashMap::from([(
+            "exits".into(),
+            McpServerConfig {
+                description: String::new(),
+                enabled: true,
+                transport: McpTransportConfig::Local {
+                    command: vec!["sh".into(), "-c".into(), "exit 0".into()],
+                    env: HashMap::new(),
+                    timeout: 30_000,
+                },
+            },
+        )]);
+        let cwd = test_cwd();
+        let manager = McpManager::start_detached(&desired, &cwd);
+        let server = manager.server("exits").expect("installed MCP server");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while matches!(server.status(), McpStatus::Connecting) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("exited MCP child reaches an error state");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.reconcile(HashMap::new(), cwd),
+        )
+        .await
+        .expect("exited MCP child cleanup completes");
+
+        assert!(server.process_cleanup.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cwd_change_restarts_retained_server_configuration() {
+        let first_cwd = PathBuf::from("/first");
+        let second_cwd = PathBuf::from("/second");
+        let desired = HashMap::from([(
+            "disabled".into(),
+            McpServerConfig {
+                description: String::new(),
+                enabled: false,
+                transport: McpTransportConfig::Local {
+                    command: vec!["unused".into()],
+                    env: HashMap::new(),
+                    timeout: 30_000,
+                },
+            },
+        )]);
+        let manager = McpManager::start(&desired, &first_cwd).await;
+        let first = manager.server("disabled").unwrap();
+
+        manager.reconcile(desired, second_cwd.clone()).await;
+
+        let second = manager.server("disabled").unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.cwd, second_cwd);
+    }
+
     #[tokio::test]
     async fn older_reconcile_cannot_replace_newer_mcp_desired_state() {
-        let manager = McpManager::start(&HashMap::new()).await;
+        let manager = McpManager::start(&HashMap::new(), &test_cwd()).await;
         let old_desired = HashMap::from([(
             "old".into(),
             McpServerConfig {
@@ -1033,7 +1412,7 @@ mod tests {
             },
         )]);
         let old_reconcile = manager
-            .prepare_reconcile(old_desired)
+            .prepare_reconcile(old_desired, test_cwd())
             .expect("old desired revision");
         let (control, completion) = crate::test_util::controlled_completion(());
         let old_task = tokio::spawn(async move {
@@ -1042,7 +1421,7 @@ mod tests {
         });
 
         let release = control.wait_started().await;
-        manager.reconcile(HashMap::new()).await;
+        manager.reconcile(HashMap::new(), test_cwd()).await;
         release.send(()).unwrap();
         old_task.await.unwrap();
 
@@ -1051,13 +1430,15 @@ mod tests {
             "an older reconcile completion must not reinstall a removed server"
         );
         let status = manager.controller_status();
-        assert!(manager.prepare_reconcile(HashMap::new()).is_none());
+        assert!(manager
+            .prepare_reconcile(HashMap::new(), test_cwd())
+            .is_none());
         assert_eq!(manager.controller_status(), status);
     }
 
     #[tokio::test]
     async fn newer_revision_waits_for_retained_server_discovery() {
-        let manager = McpManager::start(&HashMap::new()).await;
+        let manager = McpManager::start(&HashMap::new(), &test_cwd()).await;
         let retained_config = McpServerConfig {
             description: String::new(),
             enabled: true,
@@ -1068,30 +1449,33 @@ mod tests {
             },
         };
         let first = manager
-            .prepare_reconcile(HashMap::from([(
-                "retained".into(),
-                retained_config.clone(),
-            )]))
+            .prepare_reconcile(
+                HashMap::from([("retained".into(), retained_config.clone())]),
+                test_cwd(),
+            )
             .unwrap()
             .install()
             .unwrap();
         let retained = manager.server("retained").unwrap();
         let second = manager
-            .prepare_reconcile(HashMap::from([
-                ("retained".into(), retained_config),
-                (
-                    "disabled".into(),
-                    McpServerConfig {
-                        description: String::new(),
-                        enabled: false,
-                        transport: McpTransportConfig::Local {
-                            command: vec!["unused".into()],
-                            env: HashMap::new(),
-                            timeout: 30_000,
+            .prepare_reconcile(
+                HashMap::from([
+                    ("retained".into(), retained_config),
+                    (
+                        "disabled".into(),
+                        McpServerConfig {
+                            description: String::new(),
+                            enabled: false,
+                            transport: McpTransportConfig::Local {
+                                command: vec!["unused".into()],
+                                env: HashMap::new(),
+                                timeout: 30_000,
+                            },
                         },
-                    },
-                ),
-            ]))
+                    ),
+                ]),
+                test_cwd(),
+            )
             .unwrap()
             .install()
             .unwrap();
@@ -1110,7 +1494,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_connection_completion_cannot_publish_after_server_removal() {
-        let manager = McpManager::start(&HashMap::new()).await;
+        let manager = McpManager::start(&HashMap::new(), &test_cwd()).await;
         let desired = HashMap::from([(
             "old".into(),
             McpServerConfig {
@@ -1124,7 +1508,7 @@ mod tests {
             },
         )]);
         let connections = manager
-            .prepare_reconcile(desired)
+            .prepare_reconcile(desired, test_cwd())
             .unwrap()
             .install()
             .unwrap();
@@ -1138,7 +1522,7 @@ mod tests {
 
         let release = control.wait_started().await;
         let current_reconcile = manager
-            .prepare_reconcile(HashMap::new())
+            .prepare_reconcile(HashMap::new(), test_cwd())
             .expect("new desired revision");
         assert!(manager.server("old").is_none());
         assert!(old_server.cancel.is_cancelled());

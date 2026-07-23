@@ -324,19 +324,19 @@ impl TestApp {
         // also carry a rendering extmark.
         let placeholder_ns =
             smelt_buffer::buffer::create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
-        for win in self.app.placeholder_opts.keys() {
+        for win in self.app.prompt.placeholder_option_windows() {
             assert!(
-                self.app.ui.win(*win).is_some(),
-                "placeholder_opts points at dead window {win:?}",
+                self.app.ui.win(win).is_some(),
+                "placeholder options point at dead window {win:?}",
             );
             assert!(
-                self.app.placeholders.contains_key(win),
-                "placeholder_opts[{win:?}] has no placeholder text",
+                self.app.prompt.placeholder_text(win).is_some(),
+                "placeholder options for {win:?} have no placeholder text",
             );
-            if *win == crate::app::PROMPT_WIN {
+            if win == crate::app::PROMPT_WIN {
                 continue;
             }
-            let buf_id = self.app.ui.win(*win).map(|w| w.buf);
+            let buf_id = self.app.ui.win(win).map(|w| w.buf);
             let extmark_count = buf_id
                 .and_then(|bid| self.app.ui.buf(bid))
                 .map(|b| b.extmarks(placeholder_ns).len())
@@ -354,7 +354,7 @@ impl TestApp {
         // duplicate means `ToolStarted` was processed twice for the same
         // call without an intervening `ToolFinished`, which corrupts the
         // tool-widget state.
-        if let Some(ag) = self.app.agent.as_ref() {
+        if let Some(ag) = self.app.conversation.active() {
             let mut seen = std::collections::HashSet::with_capacity(ag.pending.len());
             for pt in &ag.pending {
                 assert!(
@@ -371,8 +371,8 @@ impl TestApp {
                 // the tool widget.
                 let state = self
                     .app
-                    .session_document
-                    .transcript
+                    .conversation
+                    .transcript()
                     .history()
                     .tool_state(&pt.call_id);
                 assert!(
@@ -395,7 +395,7 @@ impl TestApp {
         // missing block means `gc_tool_states` failed to drop a state
         // that no longer has a live block, or `set_history` left state
         // behind.
-        let history = self.app.session_document.transcript.history();
+        let history = self.app.conversation.transcript().history();
         for (call_id, _) in history.tool_states() {
             let exists = history
                 .order
@@ -425,7 +425,7 @@ impl TestApp {
         // one way.
         if self.app.working.is_animating() {
             assert!(
-                self.app.agent.is_some(),
+                self.app.conversation.is_active(),
                 "working is animating without an active agent turn",
             );
         }
@@ -434,13 +434,11 @@ impl TestApp {
         // already flushed `text` and `thinking` buffers; the idle event
         // handler never appends to them. `exec` is independent of turns
         // (vim bang-shell) so it's deliberately excluded.
-        if self.app.agent.is_none() {
+        if !self.app.conversation.is_active() {
+            let (text, thinking, _) = self.app.conversation.streaming_state();
+            assert!(!text, "streaming text buffer non-empty with no agent turn");
             assert!(
-                !self.app.parser.has_active_text(),
-                "streaming text buffer non-empty with no agent turn",
-            );
-            assert!(
-                !self.app.parser.has_active_thinking(),
+                !thinking,
                 "streaming thinking buffer non-empty with no agent turn",
             );
         }
@@ -454,15 +452,15 @@ impl TestApp {
         const PENDING_DIALOGS_CAP: usize = 64;
 
         assert!(
-            self.app.queued_inputs.len() <= crate::app::MAX_QUEUED_MESSAGES,
+            self.app.prompt.queued_len() <= crate::app::MAX_QUEUED_MESSAGES,
             "queued_inputs {} > cap {}",
-            self.app.queued_inputs.len(),
+            self.app.prompt.queued_len(),
             crate::app::MAX_QUEUED_MESSAGES,
         );
         assert!(
-            self.app.pending_dialogs.len() <= PENDING_DIALOGS_CAP,
-            "pending_dialogs {} > cap {}",
-            self.app.pending_dialogs.len(),
+            self.app.overlays.deferred_dialog_count() <= PENDING_DIALOGS_CAP,
+            "deferred dialogs {} > cap {}",
+            self.app.overlays.deferred_dialog_count(),
             PENDING_DIALOGS_CAP,
         );
 

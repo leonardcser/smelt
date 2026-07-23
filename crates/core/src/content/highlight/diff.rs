@@ -172,8 +172,47 @@ pub fn build_diff_ir_ext_with_base(
     syntax_ext: Option<&str>,
     file_content: Option<&str>,
 ) -> DiffIr {
+    build_diff_ir_ext_inner(
+        old,
+        new,
+        path,
+        anchor,
+        syntax_ext,
+        file_content,
+        file_content.is_some(),
+    )
+}
+
+pub fn build_diff_ir_ext_with_source(
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    syntax_ext: Option<&str>,
+    file_content: &str,
+) -> DiffIr {
+    build_diff_ir_ext_inner(
+        old,
+        new,
+        path,
+        anchor,
+        syntax_ext,
+        Some(file_content),
+        false,
+    )
+}
+
+fn build_diff_ir_ext_inner(
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    syntax_ext: Option<&str>,
+    file_content: Option<&str>,
+    explicit_full_file: bool,
+) -> DiffIr {
     let _perf = smelt_perf::perf::begin("render:build_diff_ir");
-    let dv = compute_diff_view(old, new, path, anchor, file_content);
+    let dv = compute_diff_view(old, new, path, anchor, file_content, explicit_full_file);
     let file_lines: Vec<&str> = dv.file_content.lines().collect();
     let lookup = if !anchor.is_empty() { anchor } else { old };
     let lookup_indent = lookup
@@ -302,8 +341,8 @@ fn compute_diff_view(
     path: &str,
     anchor: &str,
     file_content: Option<&str>,
+    explicit_full_file: bool,
 ) -> DiffViewData {
-    let explicit_full_file = file_content.is_some();
     let file_content = file_content
         .map(str::to_string)
         .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());

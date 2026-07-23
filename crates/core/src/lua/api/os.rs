@@ -83,11 +83,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |_, ()| Ok(std::env::temp_dir().to_string_lossy().into_owned()),
     )?;
 
+    let home_context = Arc::clone(shared);
     m.fn_(
         "home",
-        "Return the user's home directory, or `nil` if it cannot be determined.",
+        "Return the runtime home directory.",
         &[],
-        |_, ()| Ok(dirs::home_dir().map(|p| p.to_string_lossy().into_owned())),
+        move |_, ()| Ok(home_context.runtime_home().to_string_lossy().into_owned()),
     )?;
 
     let cwd_context = Arc::clone(shared);
@@ -104,16 +105,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     m.fn_(
-        "set_cwd",
-        "Change the process working directory to `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
-        &["p"],
-        |_, p: String| match std::env::set_current_dir(&p) {
-            Ok(()) => Ok((true, None)),
-            Err(err) => Ok((false, Some(err.to_string()))),
-        },
-    )?;
-
-    m.fn_(
         "exe_path",
         "Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure. Useful for plugins that re-exec the binary or report install location.",
         &[],
@@ -123,30 +114,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    m.fn_(
-        "pid",
-        "Return the OS process id of the running smelt instance.",
-        &[],
-        |_, ()| Ok(std::process::id()),
-    )?;
+    m.fn_("pid", "Return the runtime process id.", &[], |_, ()| {
+        Ok(crate::host::try_with_core(|core| core.env.pid()).unwrap_or_default())
+    })?;
 
+    let open_url_context = Arc::clone(shared);
     m.fn_(
         "open_url",
         "Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.",
         &["url"],
-        |_, url: String| Ok(match engine::opener::open_url(&url) {
-            Ok(()) => (true, None),
-            Err(e) => (false, Some(e)),
-        }),
+        move |_, url: String| {
+            let cwd = open_url_context.evaluation_cwd();
+            Ok(match engine::opener::open_url_in(&url, &cwd) {
+                Ok(()) => (true, None),
+                Err(e) => (false, Some(e)),
+            })
+        },
     )?;
 
+    let available_context = Arc::clone(shared);
     m.fn_(
         "open_url_if_available",
         "Open `url` only when the host environment can auto-open a browser. Returns `{ opened = bool, error = string?, reason = string? }`.",
         &["url"],
-        |lua, url: String| -> LuaResult<mlua::Table> {
+        move |lua, url: String| -> LuaResult<mlua::Table> {
             let result = lua.create_table()?;
-            match engine::opener::open_url_if_available(&url) {
+            let cwd = available_context.evaluation_cwd();
+            match engine::opener::open_url_if_available_in(&url, &cwd) {
                 engine::opener::OpenResult::Opened => {
                     result.set("opened", true)?;
                 }

@@ -4,19 +4,18 @@ Status: Implemented foundation; canonical session extensions implemented
 
 The per-session ownership, convergence actor, canonical transaction, and bounded
 read-path foundation in this document is implemented. The Enter barrier, persisted
-turn state, root catalog, compatibility exports, transactional search, and active
-transcript memory model are extended and superseded by
-`docs/canonical-session-architecture-plan.md`. Where this document still discusses
-sidecar work in the persistence actor, directory-scanned listing, save-plus-flush
-before provider dispatch, or permanent transcript hydration, the canonical plan
-and current implementation are authoritative.
+turn state, root catalog, transactional search, active transcript memory model,
+and removal of compatibility exports are extended and superseded by
+`docs/canonical-session-architecture-plan.md`. Historical derived-file work,
+directory-scanned listing, save-plus-flush before provider dispatch, and permanent
+transcript hydration described below are not part of the current implementation.
 
 The resulting runtime has one stable writer lease and canonical mutation owner per
 writable session. Ordinary saves and the dedicated Enter `SubmitTurn` command
-share one private SQLite update body. Catalog projection and compatibility export
-are separate bounded process workers that reopen canonical SQLite after receipt
-publication. Writable startup changes `ready` and `running` turns to
-`interrupted`, and never automatically resends provider work.
+share one private SQLite update body. A bounded catalog worker reopens canonical
+SQLite after receipt publication; it is the only derived persistent session
+projection. Writable startup changes `ready` and `running` turns to `interrupted`,
+and never automatically resends provider work.
 
 ## Purpose
 
@@ -115,7 +114,7 @@ lifecycle action.
 
 The initial plan had several mismatches that this revision removes.
 
-1. Current `DocumentGeneration` is a pair of session and descriptor generations
+1. Current `DocumentGeneration` is a pair of session and record generations
    with equality only at `crates/core/src/session_save.rs:8-20`. It has no valid
    total ordering, so `desired > durable` and newest-intent coalescing were not
    well-defined. Replace it with one TUI-owned monotonic
@@ -126,9 +125,9 @@ The initial plan had several mismatches that this revision removes.
    authoritative for commits, while the document keeps a read-only projection
    of acknowledged `StoreHead` for suffix planning and live-prefix compaction.
 3. `PreparedSessionSave::RequestHistoryAppend` and
-   `DescriptorAppendSubmission` are optimizations around pending-save state at
+   the specialized transcript-record append submission are optimizations around pending-save state at
    `crates/tui/src/app/session_document.rs:177-223`. A normal cumulative intent
-   can represent the same one-item history and descriptor suffix. Delete the
+   can represent the same one-item history and record suffix. Delete the
    specialized request-append save path.
 4. Full and live saves currently have separate orchestration at
    `crates/tui/src/app/history.rs:1723-1871`, although they produce the same
@@ -142,10 +141,10 @@ The initial plan had several mismatches that this revision removes.
    that lock before rename and reacquires after publication. A stable lease must
    instead live under the sessions root and remain held across database close,
    staging rename, publication reconciliation, and reopen.
-7. Descriptor replacement occurs after revision calculation at
-   `crates/store/src/db.rs:1407-1438`. A descriptor-only canonical change can
+7. Record replacement occurs after revision calculation at
+   `crates/store/src/db.rs:1407-1438`. A record-only canonical change can
    therefore leave revision unchanged. One canonical apply function must decide
-   revision after metadata, history, side tables, and descriptors have all
+   revision after metadata, history, side tables, and records have all
    contributed to the change result.
 8. Save id exists mainly to match core pending state. The canonical fingerprint
    already identifies an exact retry at `crates/store/src/db.rs:1325-1330`.
@@ -186,7 +185,7 @@ The initial plan had several mismatches that this revision removes.
 
 1. One `PersistenceGeneration(u64)` is scoped to one in-memory session document.
 2. Every applied mutation that changes canonical metadata, history, side tables,
-   or transcript descriptors increments it exactly once.
+   or transcript records increments it exactly once.
 3. Generation increment uses checked arithmetic. Overflow is a fatal invariant
    failure, never saturation or wraparound.
 4. The document tracks one last acknowledged durable generation and one
@@ -266,11 +265,11 @@ The initial plan had several mismatches that this revision removes.
 ### Canonical data
 
 1. `session.db` is the only canonical representation.
-2. Immutable identity, mutable metadata, history, side tables, descriptors,
+2. Immutable identity, mutable metadata, history, side tables, records,
    fingerprint, receipt, and revision are handled by one transaction path.
 3. Session ID, creation time, and fork parent are immutable after first insert.
 4. Revision advances once if any canonical section changes, including
-   descriptor-only replacement, and never advances for request audits or derived
+   record-only replacement, and never advances for request audits or derived
    projections.
 5. Revision increment is checked against SQLite integer limits.
 6. Request audits remain separate best-effort transactions.
@@ -290,7 +289,7 @@ The initial plan had several mismatches that this revision removes.
 - One total persistence generation.
 - Generation inequality for metadata-only changes and the earliest dirty history
   index for suffix construction.
-- Transcript descriptor dirty range already owned by the transcript model.
+- Transcript record dirty range already owned by the transcript model.
 - The last acknowledged durable generation and `StoreHead` projection.
 - Construction of one cumulative, store-ready `SessionSaveIntent`.
 - Clearing dirty state only after current-generation durability.
@@ -319,7 +318,7 @@ The actor owns:
 - One latest desired intent and at most one in-flight commit.
 - Exact-fingerprint reconciliation after ambiguous commit failure.
 - Staged publication and publication recovery.
-- Sidecar refresh after canonical commit.
+- Catalog refresh after canonical commit.
 - Best-effort request-audit serialization.
 - Explicit blocked recovery, generation-targeted flush, and close.
 - Typed latest-status publication and coalesced wake notification.
@@ -420,7 +419,7 @@ pub struct SessionCostUsd(f64);
 pub struct StoreHead {
     pub revision: Revision,
     pub history_len: HistoryLen,
-    pub descriptor_len: DescriptorLen,
+    pub transcript_record_count: TranscriptRecordCount,
 }
 ```
 
@@ -455,9 +454,9 @@ struct DocumentChanges {
 Generation inequality alone represents a metadata-only change, so it needs no
 second dirty flag. A mutation to a history-indexed side table lowers
 `history_dirty_from` to that row's history coordinate, using one conservative
-boundary for history and its side tables. Transcript descriptor dirtiness
-remains in the transcript model, which already owns `descriptor_dirty_from`.
-Remove duplicate `descriptors_persisted` state. `acknowledged_head` is a read
+boundary for history and its side tables. Transcript record dirtiness
+remains in the transcript model, which already owns `record_dirty_from`.
+Remove duplicate `records_persisted` state. `acknowledged_head` is a read
 projection for bounded suffix construction, not authority to choose a commit
 base.
 
@@ -470,7 +469,7 @@ struct SessionSaveIntent {
     metadata: SessionMetadata,
     history: HistorySuffix,
     side_tables: SideTableSuffixes,
-    descriptors: Option<TranscriptDescriptorSuffix>,
+    records: Option<TranscriptRecordSuffix>,
 }
 ```
 
@@ -479,7 +478,7 @@ The actor only adds its authoritative expected `StoreHead`.
 
 There are no metadata-only, live, full, or request-append intent variants. A
 metadata-only update is represented by an empty history suffix at the final
-history length and no descriptor suffix. A live or request append is an ordinary
+history length and no record suffix. A live or request append is an ordinary
 cumulative suffix from the conservative dirty boundary.
 
 The latest intent must contain all work not acknowledged by the document. Dirty
@@ -607,7 +606,7 @@ pub struct SessionCommit {
     pub metadata: SessionMetadata,
     pub history: HistorySuffix,
     pub side_tables: SideTableSuffixes,
-    pub descriptors: Option<TranscriptDescriptorSuffix>,
+    pub records: Option<TranscriptRecordSuffix>,
 }
 
 pub struct SaveReceipt {
@@ -629,14 +628,14 @@ Every canonical mutation entry point uses one outer post-mutation hook:
 
 1. Compute `next = current.checked_add(1)` before changing data; reject the
    mutation if no next generation exists.
-2. Capture conservative history/descriptor boundaries before the mutation can
+2. Capture conservative history/record boundaries before the mutation can
    invalidate old coordinates.
 3. Apply the domain mutation once.
 4. If it was a semantic no-op, leave generation and dirty state unchanged.
 5. Otherwise install the expanded dirty boundaries, set `current = next`, leave
    `durable` and `acknowledged_head` unchanged, and mark the document unsaved.
 
-A mutation that changes metadata, history, side tables, and descriptors together
+A mutation that changes metadata, history, side tables, and records together
 still advances exactly once. Never wrap, saturate, or reuse a generation, and do
 not allow direct canonical field mutation outside this hook.
 
@@ -651,10 +650,10 @@ One builder handles both materialized and store-backed sessions. It:
    range to span SQLite-backed and in-memory history.
 3. Builds replacement/truncation suffixes for every history-indexed side table
    from the same conservative boundary through its final sparse rows.
-4. Clamps the transcript model's descriptor dirty boundary to the acknowledged
-   descriptor extent. Installing synthesized descriptors not proven present in
+4. Clamps the transcript model's record dirty boundary to the acknowledged
+   record extent. Installing synthesized records not proven present in
    SQLite marks them dirty from zero and advances the document generation once;
-   ordinary materialization of already stored descriptors does neither.
+   ordinary materialization of already stored records does neither.
 5. Copies immutable identity and current mutable metadata.
 6. Tags the result with `current`.
 
@@ -719,15 +718,15 @@ pending-save state machine.
 
 On a matching durable observation, the document:
 
-1. Validates the receipt's final history and descriptor lengths against the
+1. Validates the receipt's final history and record lengths against the
    current intent shape.
 2. Sets `durable = current`.
 3. Replaces `acknowledged_head` with the receipt head.
 4. Clears all covered dirty state.
 5. Compacts `LiveSession` through the acknowledged history length.
-6. Installs the receipt's descriptor extent as the transcript's acknowledged
+6. Installs the receipt's record extent as the transcript's acknowledged
    total and clears only the matching dirty range. The extent is not inferred
-   from the number of sparse descriptor rows.
+   from the number of sparse record rows.
 
 An older durable observation is valid actor progress but is not applied to the
 live document. In particular, never compact an old saved prefix after a newer
@@ -749,10 +748,10 @@ acknowledgement.
 
 ### 7. Keep publication lazy
 
-A never-published session with no canonical history or transcript descriptors
+A never-published session with no canonical history or transcript records
 needs no actor, lease, directory, or database. Metadata edits may accumulate in
 that in-memory draft, but do not create an otherwise empty session. Start its
-actor when the first content-bearing history or descriptor intent is submitted;
+actor when the first content-bearing history or record intent is submitted;
 that intent includes all accumulated metadata. Once published, truncating
 content back to zero is an ordinary durable canonical update and does not delete
 the session. The unpublished draft is an explicit intentionally nondurable
@@ -768,10 +767,9 @@ unsaved until the user forks or saves to a writable destination.
 After canonical commit succeeds:
 
 - Publish `Durable` and advance document durability before projection work.
-- Schedule catalog and compatibility export requests without waiting for them.
+- Schedule the catalog projection request without waiting for it.
 - Keep derived failure and lag outside `Blocked` canonical status.
-- Repair catalog state by bounded reconciliation and compatibility exports by a
-  later coalesced request or explicit maintenance action.
+- Repair catalog state by bounded reconciliation or explicit maintenance.
 
 Projectors reopen canonical SQLite. They never replay or mutate canonical state to
 repair derived output.
@@ -1053,7 +1051,7 @@ Forking first freezes source-document mutation. For a writable source it flushes
 the captured generation, then reads one SQLite snapshot through `SessionReader`.
 For a read-only, ownership-lost, or deliberately unsaved source, a concrete fork
 builder overlays
-the document's cumulative local metadata/history/side-table/descriptor state on
+the document's cumulative local metadata/history/side-table/record state on
 that reader snapshot so no local edit is lost. It may use
 `LiveSession::history_range(0..len)` for the SQLite prefix plus live suffix; it
 does not need a source writer lease.
@@ -1111,9 +1109,9 @@ Transaction order:
    expected head to match.
 6. Insert identity for a new database, or require session ID, creation time, and
    fork parent to be unchanged.
-7. Compare and apply metadata, history, side tables, and transcript descriptors
+7. Compare and apply metadata, history, side tables, and transcript records
    using section helpers that return whether canonical content changed.
-8. Set final history and descriptor extents from the applied rows.
+8. Set final history and record extents from the applied rows.
 9. If any canonical section changed, increment revision exactly once with checked
    arithmetic. Otherwise leave revision unchanged.
 10. Persist the command fingerprint and full receipt in the same transaction.
@@ -1121,10 +1119,10 @@ Transaction order:
 
 A helper may compare canonical row hashes or exact decoded rows, whichever is
 simplest for that section, but it may not infer change from a manually selected
-metadata field list. Replacing equal history, side-table, or descriptor rows is a
-no-op. Truncation, descriptor-only replacement, and metadata-only mutation each
-count as canonical change. Audit rows, owner metadata, commit receipts, catalog
-rows, and compatibility exports do not.
+metadata field list. Replacing equal history, side-table, or record rows is a
+no-op. Truncation, record-only replacement, and metadata-only mutation each
+count as canonical change. Audit rows, owner metadata, commit receipts, and
+catalog rows do not.
 
 `updated_at` changes when the document changes, not merely because the user
 pressed save. Consequently, resubmitting identical desired state can remain a
@@ -1138,7 +1136,7 @@ The transaction validates final cross-table invariants before commit:
 
 - History suffix item count exactly reaches final history length.
 - Side-table rows refer to history that exists in the resulting state.
-- Descriptor extent and records agree with the resulting history links.
+- Record extent and records agree with the resulting history links.
 - Every object reference resolves and has the expected reference-level role.
 - Final coordinates fit both Rust and SQLite representations.
 
@@ -1261,25 +1259,17 @@ second path.
 Do not unify these callers with a repository trait. They differ only in how they
 obtain concrete data and ownership; the transaction is already shared.
 
-## Derived catalog and compatibility exports
+## Derived catalog
 
 Derived work never appears in a save intent or canonical transaction. After a
-validated receipt, the actor publishes durability first and schedules two
-independent process services with only session ID and source revision:
+validated receipt, the actor publishes durability first and schedules a catalog
+projection using only the session ID and source revision.
 
-- `catalog.db` is the rebuildable source for paged session listing. Its bounded,
-  coalescing projector reopens `session.db`, applies revision-guarded rows, and
-  falls back to full reconciliation after overflow or corruption.
-- `meta.json` and `content.txt` are deprecated
-  `COMPAT(session-derived-sidecar-exports)` outputs. Their bounded, coalescing
-  exporter takes one revision-pinned read snapshot, writes metadata and streamed
-  content to synced temporary files, and atomically renames complete outputs.
-
-A missing, stale, malformed, unwritable, or corrupt derived file never changes a
-canonical receipt, provider dispatch, list/search correctness, resume, or
-shutdown durability. Normal runtime readers never use compatibility exports.
-Explicit maintenance may rebuild them, while `session doctor` reports their
-revision state without treating lag as canonical corruption.
+`catalog.db` is the rebuildable source for paged session listing. Its bounded,
+coalescing projector reopens `session.db`, applies revision-guarded rows, and
+falls back to full reconciliation after overflow or corruption. Missing, stale,
+unwritable, or corrupt catalog state never changes a canonical receipt, provider
+dispatch, search correctness, resume, or shutdown durability.
 
 ## Read path
 
@@ -1309,7 +1299,7 @@ save IDs, and all acknowledgement-by-pending-snapshot code.
 Own document generation, conservative dirty boundaries, acknowledged head
 projection, one materialized/store-backed intent builder, current-generation
 receipt validation, and generation-safe live-prefix compaction. Remove separate
-full/live/metadata/request-append plans and `DescriptorAppendSubmission`.
+full/live/metadata/request-append plans and the specialized transcript-record append submission.
 
 ### `crates/tui/src/persist.rs`
 
@@ -1335,10 +1325,10 @@ receipt, and only then dispatches the provider request.
 
 `crates/tui/src/app/host_dispatch.rs` captures and validates the fixed session
 epoch for request audits. `crates/tui/src/app/transcript.rs` stops maintaining a
-second submitted descriptor extent; only current model dirtiness and matching
+second submitted record extent; only current model dirtiness and matching
 durable acknowledgement remain. `transcript_search.rs` derives SQLite coverage
-from the acknowledged descriptor extent and current dirty boundary instead of a
-separate `descriptors_persisted` boolean.
+from the acknowledged record extent and current dirty boundary instead of a
+separate `records_persisted` boolean.
 
 ### Core session files
 
@@ -1347,7 +1337,7 @@ suffix representation, `history_range`, truncation, and acknowledged-prefix
 compaction. It does not own transaction coordinates.
 
 `crates/core/src/session.rs` keeps readers, conversion helpers, catalog service
-entry points, explicit compatibility export maintenance, and offline operations.
+entry points, and offline operations.
 `save`, `save_result`, staged save, runtime persistence, repair, and fixtures use
 the same concrete canonical commit and reader primitives.
 
@@ -1394,7 +1384,7 @@ Required regressions:
 - Canonical enqueue failure leaves the document visibly unsaved.
 - A `fast_mode`-only mutation changes canonical revision.
 - Runtime CWD fallback does not mutate canonical CWD; an explicit CWD change does.
-- A descriptor-only mutation changes revision exactly once.
+- A record-only mutation changes revision exactly once.
 - An exact no-op changes no revision.
 - Rewind or truncation while an older save is in flight preserves the newer
   state and never compacts it away.
@@ -1438,7 +1428,7 @@ The observed queue depth peaked at 2 and queued serialized payload bytes peaked
 at 1,415. Their SQLite transaction commits took 69-82 us and 78-88 us across
 the three samples.
 
-The descriptor-backed 10 MiB resume fixture contained 2,560 descriptors and
+The record-backed 10 MiB resume fixture contained 2,560 records and
 108,877 estimated rows. Tail load took 7.548 ms, tail render took 2.799 ms, and
 the resume process peaked at 32,760 KiB RSS. The combined layout/hot-path
 process peaked at 97,788 KiB RSS.
@@ -1450,7 +1440,7 @@ process peaked at 97,788 KiB RSS.
 - Validate and normalize floating-point metadata centrally; use structural
   `PartialEq` and canonical fingerprint serialization.
 - Implement one `apply_session_commit` transaction with exact no-op detection,
-  descriptor-aware revision calculation, checked coordinates, immutable
+  record-aware revision calculation, checked coordinates, immutable
   identity validation, fingerprint, and receipt.
 - Route runtime commit through it and remove the five-second transaction retry.
 - Migrate import, repair, synthesis, synchronous save, fork destination, tests,
@@ -1462,7 +1452,7 @@ process peaked at 97,788 KiB RSS.
 
 Exit gate:
 
-- `fast_mode`, metadata-only, descriptor-only, append, replacement, and
+- `fast_mode`, metadata-only, record-only, append, replacement, and
   truncation each produce exactly the intended revision.
 - True no-op commit returns a receipt without advancing revision.
 - Revision overflow and every coordinate conversion fail before partial change.
@@ -1535,7 +1525,7 @@ Implement the final document and actor protocol as one cutover:
 - Acknowledge and compact only a receipt matching the current document
   generation and actor epoch.
 - Make request audits carry epoch and required generation; remove the specialized
-  request-history append and descriptor submission paths.
+  request-history append and record submission paths.
 - Delete `RestoreCwd`; keep restored/fallback process CWD outside canonical
   session mutation, while explicit user CWD changes advance generation.
 - Replace UI retry state and shutdown loops with explicit retry and
@@ -1548,7 +1538,7 @@ Delete in the same phase:
 
 - `crates/core/src/session_save.rs`.
 - `DocumentGeneration`, `SessionPersistState`, `PersistDelta`, all pending-save
-  types and fields, `SaveId`, and descriptor-submission acknowledgement.
+  types and fields, `SaveId`, and record-submission acknowledgement.
 - Global backend session states and all full/live/metadata/request-append command
   variants.
 - `PersistenceRetryState`, retry delays/counters, shutdown retry loops,
@@ -1574,13 +1564,13 @@ Run fault-injected end-to-end scenarios for:
 - First publication before rename, after rename, after root fsync, and before
   verified reopen.
 - Latest-slot replacement before and during an in-flight commit.
-- Append followed by rewind, truncation, or descriptor replacement.
+- Append followed by rewind, truncation, or record replacement.
 - Connection invalidation with another process contending for ownership.
 - Explicit retry after disk-full, permission, and missing-root failures.
 - Ownership token loss with dirty local state followed by fork/save-as.
 - Existing unsupported/read-only session edits.
 - Stale audit, audit queue saturation, and audit failure after canonical save.
-- Sidecar read/rebuild failure after canonical commit.
+- Catalog read/rebuild failure after canonical commit.
 - Session switch, delete, fork, actor exit, and shutdown deadline expiration.
 - Generation and SQLite revision overflow.
 
@@ -1613,17 +1603,16 @@ required terminal state.
 | Before transaction, process crash during transaction, and commit before actor receipt | `environmental_commit_failure_uses_one_structural_repeat`, `process_crash_rolls_back_an_open_canonical_transaction`, `publication_failure_blocks_until_explicit_retry` | Uncommitted state rolls back; an ambiguous committed command is recovered by fingerprint and exact replay. |
 | Publication before rename, after rename, after root fsync, and before verified reopen | `prepared_publication_is_preserved_if_the_rename_never_starts`, `unexpected_publication_destination_preserves_both_paths`, `token_mismatch_after_rename_preserves_the_published_database`, `publication_retries_after_rename_and_reopen_failure` | One staged or final database remains recoverable and unexpected data is never replaced. |
 | Latest replacement before and during commit | `latest_slot_replaces_an_intent_before_consumption`, `truncation_supersedes_an_append_in_flight`, `acknowledgement_does_not_release_a_newer_latest_intent` | The latest cumulative generation becomes durable and an older acknowledgement cannot clear it. |
-| Append followed by rewind, truncation, or descriptor replacement | `in_flight_live_save_then_rewind_flushes_without_bad_prefix`, `rewind_to_start_persists_empty_history_and_descriptor_delete`, `descriptor_append_replacement_and_truncation_each_advance_once` | The final history and descriptor suffix is exact, with one intended revision per mutation. |
+| Append followed by rewind, truncation, or record replacement | `in_flight_live_save_then_rewind_flushes_without_bad_prefix`, `rewind_to_start_persists_empty_history_and_record_delete`, `record_append_replacement_and_truncation_each_advance_once` | The final history and record suffix is exact, with one intended revision per mutation. |
 | Connection invalidation under process contention | `root_lease_remains_exclusive_while_sqlite_is_closed`, `release_reopens_an_invalidated_connection_and_clears_ownership` | The stable lease excludes a second owner while SQLite is closed and reopen verifies the token. |
 | Disk-full, permission, and missing-root retry | `environmental_failures_remain_dirty_until_explicit_retry` | Each failure is visible and dirty after both the initial attempt and single structural repeat; only explicit Lua retry makes it durable. |
-| Ownership loss, dirty local state, then fork/save-as | `ownership_loss_with_dirty_state_can_fork_to_a_writable_session` | The source remains unchanged and read-only; the fork imports the durable prefix, applies the cumulative history/descriptor suffix without full materialization, and becomes durable under a new ID. |
+| Ownership loss, dirty local state, then fork/save-as | `ownership_loss_with_dirty_state_can_fork_to_a_writable_session` | The source remains unchanged and read-only; the fork imports the durable prefix, applies the cumulative history/record suffix without full materialization, and becomes durable under a new ID. |
 | Unsupported or initially read-only edits | `blocked_save_requires_explicit_retry`, `resuming_session_with_active_writer_is_read_only`, `repeated_read_only_resumes_do_not_modify_writer_session` | Unsupported saves stay visibly blocked; initially read-only mutation is rejected without changing SQLite. |
 | Stale, saturated, and failed audits | `stale_request_audit_after_session_switch_is_rejected`, `full_control_lane_cannot_lose_the_latest_intent`, `audit_failure_after_canonical_save_preserves_durability` | Stale and excess audits are rejected within fixed bounds; audit failure is a warning and cannot undo canonical durability. |
-| Compatibility export failure after canonical commit | `failed_content_rebuild_preserves_existing_exports`, `permissions_failure_leaves_canonical_session_usable`, `exporter_shutdown_is_bounded_while_an_export_lock_is_held` | Canonical SQLite remains usable, the previous complete export remains intact, and bounded exporter failure or shutdown cannot undo durability. |
 | Session switch, delete, fork, actor exit, and shutdown deadline | `stale_request_audit_after_session_switch_is_rejected`, `delete_refuses_session_owned_by_another_process`, `sparse_fork_publishes_a_complete_destination`, `actor_panic_stops_submission_without_advancing_durability`, `control_disconnect_stops_submission_without_advancing_durability`, `close_deadline_reports_exact_progress_without_a_delayed_close`, `shutdown_flushes_latest_generation_after_in_flight_save` | Every boundary either closes the exact epoch, refuses under active ownership, reports unsaved progress, or completes durably. An expired close cannot stop the actor later. |
 | Generation and SQLite revision overflow | `persistence_generation_is_checked`, `revision_overflow_fails_without_partial_mutation` | Overflow is rejected before partial mutation. |
 
-The exact Phase 0 benchmark command completed successfully after the descriptor
+The exact Phase 0 benchmark command completed successfully after the record
 fixture was corrected to store its generated canonical session identity. The
 10,000-row hot path compared with the Phase 0 baseline as follows:
 
@@ -1644,7 +1633,7 @@ show one dirty row, one inserted row, no deletion, and one cached writer
 connection. The sub-millisecond change therefore has no scaling or full-history
 write regression.
 
-The valid 10 MiB fixture again contained 2,560 descriptors and 108,877 rows.
+The valid 10 MiB fixture again contained 2,560 records and 108,877 rows.
 Tail load fell from 7.548 ms to 1.544 ms and tail render fell from 2.799 ms to
 1.939 ms. The combined layout/hot-path process peaked at 98,612 KiB versus
 97,788 KiB in Phase 0. The resume-only process peaked at 48,024 KiB versus
@@ -1670,7 +1659,7 @@ Cover:
 
 - Checked generation advance and overflow.
 - Conservative dirty-boundary expansion for append, replacement, rewind,
-  truncation, metadata, and descriptors.
+  truncation, metadata, and records.
 - Cumulative intent construction across SQLite prefix and live suffix.
 - Matching-generation acknowledgement and compaction.
 - Older, future, malformed, and wrong-epoch durable statuses/flush receipts.
@@ -1721,7 +1710,7 @@ Use subprocesses, not two handles in one process, for OS lock claims.
 
 Drive the same app paths a user triggers and inspect rendered status/dialogs:
 
-- Metadata-only empty draft, first history/descriptor content, and lazy first
+- Metadata-only empty draft, first history/record content, and lazy first
   publication.
 - Save during an agent turn and mutation while saving.
 - Rewind/truncate while an append is in flight.
@@ -1730,8 +1719,8 @@ Drive the same app paths a user triggers and inspect rendered status/dialogs:
 - Session switch with late durable status and audit host calls.
 - Read-after-generation-targeted flush.
 - Normal close, blocked close, and shutdown deadline.
-- Compatibility export failure after canonical durability, catalog corruption,
-  and deterministic ready/running interruption without provider redispatch.
+- Catalog corruption and deterministic ready/running interruption without
+  provider redispatch.
 
 Persistence UI must never report saved while the current generation lacks a
 matching receipt.
@@ -1771,8 +1760,8 @@ Record bounded, non-sensitive metrics for:
 - Blocked and ownership-lost transitions by structured cause.
 - Flush target lag and deadline expiration.
 - Audit rejection/failure, SubmitTurn queue/transaction/row counts, turn recovery,
-  catalog projection/reconciliation/query status, compatibility export outcomes,
-  and transcript cache budgets, pins, hydration, eviction, and dematerialization.
+  catalog projection/reconciliation/query status, and transcript cache budgets,
+  pins, hydration, eviction, and dematerialization.
 
 Generation values and session IDs may be included in local debug diagnostics,
 but never log session content, request bodies, object bytes, secrets,
@@ -1790,7 +1779,7 @@ labels.
 - No statement- or transaction-body retry loop.
 - No `SaveId` or replacement operation-ID sequence.
 - No snapshot write protocol.
-- No canonical dependence on sidecars.
+- No derived per-session files or canonical dependence on exported projections.
 - No permanent compatibility layer or dual schema reader.
 
 ## Risks and mitigations
@@ -1897,7 +1886,7 @@ only when the resulting plan and code satisfy all of the following:
   leave current local changes visibly unsaved.
 - One canonical transaction handles runtime, import, repair, synthesis, fork,
   synchronous save, and fixtures.
-- Metadata, history, side tables, and descriptors contribute to one checked
+- Metadata, history, side tables, and records contribute to one checked
   revision decision; true no-ops do not increment it.
 - Session ID, creation time, and fork parent are immutable after first insert.
 - `objects.kind` is absent, all semantics are reference-level, and manifest
@@ -1906,7 +1895,7 @@ only when the resulting plan and code satisfy all of the following:
   and delete; lock files are never moved or unlinked.
 - Request audits are epoch-checked, generation-ordered, best effort, and unable
   to release canonical ownership.
-- Sidecar failure cannot change canonical durability or flush success.
+- Catalog projection failure cannot change canonical durability or flush success.
 - Shutdown reports the exact target and durable generations and joins the actor.
 - `crates/core/src/session_save.rs`, `session_snapshot.rs`, save IDs, persistence
   dispositions, global worker states, specialized save variants, `RestoreCwd`,

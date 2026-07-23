@@ -6,8 +6,7 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
-fn resolved_input_modalities(app: &crate::app::TuiApp) -> Option<Vec<String>> {
-    let active = app.core.config.active_model()?;
+fn resolved_input_modalities(active: &smelt_core::runtime_state::ActiveModel) -> Vec<String> {
     let mut values = active.config.input_modalities.clone().unwrap_or_default();
     if let Some(catalog) = smelt_provider::catalog::input_modalities(
         &active.provider_type,
@@ -21,7 +20,7 @@ fn resolved_input_modalities(app: &crate::app::TuiApp) -> Option<Vec<String>> {
     }
     values.sort();
     values.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    Some(values)
+    values
 }
 
 fn modalities_table(lua: &Lua, values: &[String]) -> LuaResult<mlua::Table> {
@@ -59,20 +58,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                for (i, m) in app.core.config.available_models.iter().enumerate() {
-                    let entry = lua.create_table()?;
-                    entry.set("key", m.key.clone())?;
-                    entry.set("name", m.model_name.clone())?;
-                    entry.set("display_name", m.display_name.clone())?;
-                    entry.set("provider", m.provider_name.clone())?;
-                    entry.set("api_base", m.api_base.clone())?;
-                    entry.set("provider_type", m.provider_type.clone())?;
-                    out.set(i + 1, entry)?;
-                }
-                Ok(())
-            }) {
-                res?;
+            let models =
+                crate::lua::try_with_runtime_host(|host| host.available_models()).unwrap_or_default();
+            for (index, model) in models.into_iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("key", model.key)?;
+                entry.set("name", model.model_name)?;
+                entry.set("display_name", model.display_name)?;
+                entry.set("provider", model.provider_name)?;
+                entry.set("api_base", model.api_base)?;
+                entry.set("provider_type", model.provider_type)?;
+                out.set(index + 1, entry)?;
             }
             Ok(out)
         },
@@ -83,20 +79,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `\"config override\"`, `\"models.dev\"`, or `\"none\"`. Prices are USD per 1M tokens.",
         &[],
         |lua, ()| -> LuaResult<Option<mlua::Table>> {
-            let Some(resolved) = crate::lua::try_with_app(|app| {
-                app.core.config.active_model().map(|model| {
-                    smelt_provider::resolve_pricing(
-                        &model.model_name,
-                        &model.provider_type,
-                        &model.api_base,
-                        &model.config,
-                    )
-                })
-            })
-            .flatten()
+            let Some(active) = crate::lua::try_with_runtime_host(|host| host.active_model()).flatten()
             else {
                 return Ok(None);
             };
+            let resolved = smelt_provider::resolve_pricing(
+                &active.model_name,
+                &active.provider_type,
+                &active.api_base,
+                &active.config,
+            );
             let t = lua.create_table()?;
             t.set("input", resolved.pricing.input)?;
             t.set("output", resolved.pricing.output)?;
@@ -112,17 +104,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Resolved maximum output tokens for the active model. Returns the config override if set, otherwise falls back to the models.dev catalog value, then to the provider default. Returns `nil` when no limit is known.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
-            Ok(crate::lua::try_with_app(|app| {
-                let active = app.core.config.active_model()?;
-                active.config.max_tokens.or_else(|| {
-                    smelt_provider::catalog::output_tokens(
-                        &active.provider_type,
-                        &active.api_base,
-                        &active.model_name,
-                    )
-                })
-            })
-            .flatten())
+            Ok(crate::lua::try_with_runtime_host(|host| host.active_model())
+                .flatten()
+                .and_then(|active| {
+                    active.config.max_tokens.or_else(|| {
+                        smelt_provider::catalog::output_tokens(
+                            &active.provider_type,
+                            &active.api_base,
+                            &active.model_name,
+                        )
+                    })
+                }))
         },
     )?;
 
@@ -131,11 +123,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Resolved input modalities for the active model as an array such as `{ \"text\", \"image\", \"pdf\" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.",
         &[],
         |lua, ()| -> LuaResult<Option<mlua::Table>> {
-            let Some(values) =
-                crate::lua::try_with_app(|app| resolved_input_modalities(app)).flatten()
+            let Some(active) = crate::lua::try_with_runtime_host(|host| host.active_model()).flatten()
             else {
                 return Ok(None);
             };
+            let values = resolved_input_modalities(&active);
             Ok(Some(modalities_table(lua, &values)?))
         },
     )?;
@@ -146,14 +138,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["modality"],
         |_, modality: String| -> LuaResult<Option<bool>> {
             let want = modality.to_ascii_lowercase();
-            Ok(crate::lua::try_with_app(|app| {
-                resolved_input_modalities(app).map(|modalities| {
-                    modalities
-                        .iter()
-                        .any(|value| value.eq_ignore_ascii_case(&want))
-                })
-            })
-            .flatten())
+            Ok(crate::lua::try_with_runtime_host(|host| host.active_model())
+                .flatten()
+                .map(|active| has_modality(&resolved_input_modalities(&active), &want)))
         },
     )?;
 
@@ -162,10 +149,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport. `api_key_env` is the environment variable name, never its value.",
         &[],
         |lua, ()| -> LuaResult<Option<mlua::Table>> {
-            let Some(active) = crate::lua::try_with_app(|app| {
-                app.core.config.active_model().cloned()
-            })
-            .flatten()
+            let Some(active) = crate::lua::try_with_runtime_host(|host| host.active_model()).flatten()
             else {
                 return Ok(None);
             };
@@ -185,45 +169,46 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.",
         &[],
         |lua, ()| -> LuaResult<Option<mlua::Table>> {
-            let Some(data) = crate::lua::try_with_app(|app| {
-                let active = app.core.config.active_model()?;
-                let modalities = resolved_input_modalities(app)?;
-                let catalog = smelt_provider::catalog::lookup(
-                    &active.provider_type,
-                    &active.api_base,
-                    &active.model_name,
-                );
-                let max_tokens = active
-                    .config
-                    .max_tokens
-                    .or_else(|| catalog.as_ref().and_then(|entry| entry.output_tokens));
-                let context_window = active
-                    .config
-                    .context_window
-                    .or(app.core.config.context_window)
-                    .or_else(|| catalog.as_ref().and_then(|entry| entry.context_window));
-                let supports_reasoning = active
-                    .config
-                    .supports_reasoning
-                    .or_else(|| catalog.as_ref().and_then(|entry| entry.supports_reasoning));
-                Some((
-                    modalities,
-                    active.provider_type.clone(),
-                    active.api_base.clone(),
-                    active.api_key_env.clone(),
-                    active.model_name.clone(),
-                    max_tokens,
-                    context_window,
-                    supports_reasoning,
-                    active.config.tool_calling(),
-                    active.config.input_modalities.is_some(),
-                    catalog.and_then(|entry| entry.input_modalities).is_some(),
-                ))
+            let Some((active, runtime_context_window)) = crate::lua::try_with_runtime_host(|host| {
+                host.active_model()
+                    .map(|active| (active, host.context_window()))
             })
             .flatten()
             else {
                 return Ok(None);
             };
+            let modalities = resolved_input_modalities(&active);
+            let catalog = smelt_provider::catalog::lookup(
+                &active.provider_type,
+                &active.api_base,
+                &active.model_name,
+            );
+            let max_tokens = active
+                .config
+                .max_tokens
+                .or_else(|| catalog.as_ref().and_then(|entry| entry.output_tokens));
+            let context_window = active
+                .config
+                .context_window
+                .or(runtime_context_window)
+                .or_else(|| catalog.as_ref().and_then(|entry| entry.context_window));
+            let supports_reasoning = active
+                .config
+                .supports_reasoning
+                .or_else(|| catalog.as_ref().and_then(|entry| entry.supports_reasoning));
+            let data = (
+                modalities,
+                active.provider_type,
+                active.api_base,
+                active.api_key_env,
+                active.model_name,
+                max_tokens,
+                context_window,
+                supports_reasoning,
+                active.config.tool_calling(),
+                active.config.input_modalities.is_some(),
+                catalog.and_then(|entry| entry.input_modalities).is_some(),
+            );
             let (
                 modalities,
                 provider_type,
@@ -314,13 +299,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return the active model key, or `nil` when no active model exists.",
         &[],
         |_, ()| -> LuaResult<Option<String>> {
-            Ok(crate::lua::try_with_app(|app| {
-                app.core
-                    .config
-                    .active_model()
-                    .map(|model| model.key.clone())
-            })
-            .flatten())
+            Ok(
+                crate::lua::try_with_runtime_host(|host| host.active_model())
+                    .flatten()
+                    .map(|model| model.key),
+            )
         },
     )?;
     m.fn_(
@@ -329,7 +312,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some(status) = crate::lua::try_with_app(|app| app.model_status_snapshot()) {
+            if let Some(status) = crate::lua::try_with_runtime_host(|host| host.model_status()) {
                 out.set("current", status.current)?;
                 out.set("requested", status.requested)?;
                 out.set("availability", status.availability)?;
@@ -357,15 +340,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Switch the active model by key. Errors when the name cannot be resolved.",
         &["name"],
         |_, name: String| -> LuaResult<()> {
-            crate::lua::try_with_app(|app| {
-                let key =
-                    smelt_core::config::resolve_model_ref(&app.core.config.available_models, &name)
-                        .map(|model| model.key.clone())
-                        .map_err(LuaError::external)?;
-                app.apply_model(&key, true);
-                Ok(())
-            })
-            .ok_or_else(|| LuaError::external("smelt.model.set: app not initialized"))?
+            crate::lua::try_with_runtime_host(|host| host.apply_model_ref(&name))
+                .ok_or_else(|| LuaError::external("smelt.model.set: app not initialized"))?
+                .map_err(LuaError::external)
         },
     )?;
     Ok(())

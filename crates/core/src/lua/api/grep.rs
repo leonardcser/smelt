@@ -26,20 +26,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                   -> LuaResult<()> {
                 let parsed = parse_options(opts.as_ref())?;
                 let cancel = crate::lua::current_task_cancel().unwrap_or_default();
+                let cwd = s.evaluation_cwd();
                 let sink = s.resume_sink();
                 tokio::spawn(async move {
-                    let payload = match grep::run_async(&pattern, &path, &parsed, cancel).await {
-                        Ok(grep::RunOutcome::Done(out)) => serde_json::json!({
-                            "stdout": out.stdout,
-                            "stderr": out.stderr,
-                            "exit_code": out.exit_code,
-                            "timed_out": out.timed_out,
-                        }),
-                        Ok(grep::RunOutcome::Cancelled) => {
-                            serde_json::json!({ "__cancelled": true })
-                        }
-                        Err(err) => serde_json::json!({ "err": err.to_string() }),
-                    };
+                    let payload =
+                        match grep::run_async(&pattern, &path, &cwd, &parsed, cancel).await {
+                            Ok(grep::RunOutcome::Done(out)) => serde_json::json!({
+                                "stdout": out.stdout,
+                                "stderr": out.stderr,
+                                "exit_code": out.exit_code,
+                                "timed_out": out.timed_out,
+                            }),
+                            Ok(grep::RunOutcome::Cancelled) => {
+                                serde_json::json!({ "__cancelled": true })
+                            }
+                            Err(err) => serde_json::json!({ "err": err.to_string() }),
+                        };
                     sink.resolve_json(task_id, payload);
                 });
                 Ok(())

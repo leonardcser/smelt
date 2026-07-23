@@ -2909,6 +2909,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scoped-tls-hkt"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9603871ffe5df3ac39cb624790c296dbd47a400d202f56bf3e414045099524d"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3231,6 +3237,7 @@ dependencies = [
  "smelt-protocol",
  "smelt-provider",
  "smelt-store",
+ "smelt-test-support",
  "smelt-tui",
  "tempfile",
  "tokio",
@@ -3272,9 +3279,11 @@ dependencies = [
  "mlua",
  "neo_frizbee",
  "notify",
+ "process-wrap",
  "pulldown-cmark",
  "reqwest",
  "rmcp",
+ "scoped-tls-hkt",
  "scraper",
  "seahash",
  "serde",
@@ -3290,6 +3299,7 @@ dependencies = [
  "smelt-protocol",
  "smelt-provider",
  "smelt-store",
+ "smelt-test-support",
  "syntect",
  "tempfile",
  "tokio",
@@ -3327,6 +3337,7 @@ dependencies = [
  "smelt-protocol",
  "smelt-provider",
  "smelt-store",
+ "smelt-test-support",
  "tempfile",
  "thiserror",
  "tokio",
@@ -3413,6 +3424,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-test-support"
+version = "0.1.0"
+
+[[package]]
 name = "smelt-tui"
 version = "0.5.0-alpha.8"
 dependencies = [
@@ -3424,6 +3439,7 @@ dependencies = [
  "libc",
  "mlua",
  "notify",
+ "scoped-tls-hkt",
  "serde",
  "serde_json",
  "smelt-buffer",
@@ -3436,6 +3452,7 @@ dependencies = [
  "smelt-provider",
  "smelt-store",
  "smelt-term",
+ "smelt-test-support",
  "tempfile",
  "tokio",
 ]

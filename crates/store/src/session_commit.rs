@@ -1,7 +1,7 @@
 use protocol::HistoryItem;
 use serde_json::Value;
 
-use crate::history::TranscriptDescriptorRecord;
+use crate::history::StoredTranscriptBlock;
 use crate::meta::{SessionIdentity, SessionMetadata};
 
 macro_rules! typed_u64 {
@@ -62,8 +62,8 @@ macro_rules! typed_u64 {
 typed_u64!(Revision);
 typed_u64!(HistoryIndex);
 typed_u64!(HistoryLen);
-typed_u64!(DescriptorIndex);
-typed_u64!(DescriptorLen);
+typed_u64!(TranscriptRecordIndex);
+typed_u64!(TranscriptRecordCount);
 typed_u64!(TurnId);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -222,7 +222,7 @@ pub struct SessionCommit {
     pub metadata: SessionMetadata,
     pub history: HistorySuffix,
     pub side_tables: SideTableSuffixes,
-    pub descriptors: Option<TranscriptDescriptorSuffix>,
+    pub transcript_records: Option<TranscriptRecordSuffix>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -241,16 +241,16 @@ pub struct SideTableSuffixes {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct TranscriptDescriptorSuffix {
-    pub start: DescriptorIndex,
-    pub records: Vec<TranscriptDescriptorRecord>,
+pub struct TranscriptRecordSuffix {
+    pub start: TranscriptRecordIndex,
+    pub records: Vec<StoredTranscriptBlock>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StoreHead {
     pub revision: Revision,
     pub history_len: HistoryLen,
-    pub descriptor_len: DescriptorLen,
+    pub transcript_record_count: TranscriptRecordCount,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -291,9 +291,9 @@ pub enum SessionCommitFailure {
         final_len: HistoryLen,
         item_count: u64,
     },
-    InvalidDescriptorSuffix {
-        start: DescriptorIndex,
-        current_len: DescriptorLen,
+    InvalidTranscriptRecordSuffix {
+        start: TranscriptRecordIndex,
+        current_len: TranscriptRecordCount,
     },
     InvalidSideTableSuffix {
         start: HistoryIndex,
@@ -360,12 +360,12 @@ mod tests {
             expected: StoreHead {
                 revision: Revision::new(1),
                 history_len: HistoryLen::new(2),
-                descriptor_len: DescriptorLen::new(3),
+                transcript_record_count: TranscriptRecordCount::new(3),
             },
             current: StoreHead {
                 revision: Revision::new(4),
                 history_len: HistoryLen::new(5),
-                descriptor_len: DescriptorLen::new(6),
+                transcript_record_count: TranscriptRecordCount::new(6),
             },
         };
         let sqlite = SessionCommitFailure::Sqlite {
@@ -381,9 +381,9 @@ mod tests {
     #[test]
     fn typed_lengths_do_not_compare_across_domains() {
         let history_len = HistoryLen::new(7);
-        let descriptor_len = DescriptorLen::new(7);
+        let record_len = TranscriptRecordCount::new(7);
 
-        assert_eq!(history_len.get(), descriptor_len.get());
+        assert_eq!(history_len.get(), record_len.get());
         assert_eq!(history_len.as_usize(), Some(7));
     }
 
@@ -393,20 +393,23 @@ mod tests {
             expected: StoreHead {
                 revision: Revision::new(301),
                 history_len: HistoryLen::new(302),
-                descriptor_len: DescriptorLen::new(303),
+                transcript_record_count: TranscriptRecordCount::new(303),
             },
             current: StoreHead {
                 revision: Revision::new(109),
                 history_len: HistoryLen::new(110),
-                descriptor_len: DescriptorLen::new(111),
+                transcript_record_count: TranscriptRecordCount::new(111),
             },
         };
 
         let json = serde_json::to_value(&failure).expect("serialize failure");
 
-        assert_eq!(json["StaleBase"]["expected"]["descriptor_len"], 303);
+        assert_eq!(
+            json["StaleBase"]["expected"]["transcript_record_count"],
+            303
+        );
         assert_eq!(json["StaleBase"]["current"]["revision"], 109);
         assert_eq!(json["StaleBase"]["current"]["history_len"], 110);
-        assert_eq!(json["StaleBase"]["current"]["descriptor_len"], 111);
+        assert_eq!(json["StaleBase"]["current"]["transcript_record_count"], 111);
     }
 }

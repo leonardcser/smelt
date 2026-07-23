@@ -5,7 +5,6 @@ use super::{
     signals::Signals, timers::Timers, NullSink, Osc52Sink, StartupOverrides, SystemSink,
 };
 use crate::process::ProcessRegistry;
-use crate::session::Session;
 use engine::{EngineHandle, SkillLoader};
 use std::sync::Arc;
 
@@ -37,7 +36,6 @@ pub struct Core {
     /// Identity of the committed Lua generation. Candidate callbacks compare
     /// against this before performing runtime-only effects.
     pub lua_generation: u64,
-    pub session: Session,
     pub confirms: Confirms,
     pub clipboard: crate::Clipboard,
     pub timers: Timers,
@@ -49,6 +47,7 @@ pub struct Core {
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub processes: ProcessRegistry,
     pub permissions: crate::permissions::PermissionsHandle,
+    pub workspace_permissions: crate::permissions::store::WorkspacePermissionStore,
     /// MCP server registry. Shared `Arc` with the engine's
     /// `McpDispatcher`; `None` when the user declared no MCP servers.
     /// Lua introspection reads through this handle without locking out
@@ -58,6 +57,8 @@ pub struct Core {
     /// engine task; swap in [`engine::clock::VirtualClock`] for tests
     /// that need to drive time deterministically.
     pub clock: Arc<dyn engine::clock::Clock>,
+    /// Canonical session storage and its derived catalog, rooted in the runtime state path.
+    pub sessions: crate::session::SessionStorage,
     /// Process-level env snapshot: pid, home, xdg dirs, working directory,
     /// available parallelism. Callers read here instead of touching
     /// `std::env` / `std::process` directly.
@@ -74,6 +75,7 @@ impl Core {
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
+        permissions.install_home(env.home().clone());
         let cwd = env.cwd().to_str().map(String::from).unwrap_or_default();
         let signals = signals::build_with_builtins(signals::SignalSeeds {
             vim_mode: "Insert".to_string(),
@@ -87,16 +89,16 @@ impl Core {
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
         let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
+        let workspace_permissions =
+            crate::permissions::store::WorkspacePermissionStore::new(env.xdg_state().join("smelt"));
+        let sessions = crate::session::SessionStorage::from_env(&env);
         // Read before the struct literal moves `config` into the field below.
         let clipboard =
             crate::Clipboard::new(clipboard_sink(frontend, config.settings.system_clipboard));
-        let mut session = Session::new(env.pid(), env.cwd());
-        session.fast_mode = Some(config.settings.fast_mode);
         Self {
             config,
             startup_overrides,
             lua_generation: 0,
-            session,
             confirms,
             clipboard,
             timers: Timers::new(Arc::clone(&clock)),
@@ -108,8 +110,10 @@ impl Core {
             workspace_files,
             processes: ProcessRegistry::new(),
             permissions,
+            workspace_permissions,
             mcp: None,
             clock,
+            sessions,
             env,
         }
     }

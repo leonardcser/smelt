@@ -87,6 +87,33 @@ pub fn expand(input: impl AsRef<Path>) -> Result<PathBuf, String> {
     Ok(normalize(Path::new(expanded.as_ref())))
 }
 
+/// Expand config-path syntax using an explicit runtime home. Environment
+/// variables still come from the process environment, except `HOME`, which is
+/// always the supplied runtime home.
+pub fn expand_from(input: impl AsRef<Path>, home: &Path) -> Result<PathBuf, String> {
+    let raw = input.as_ref().to_string_lossy();
+    let home = home.to_string_lossy().into_owned();
+    let expanded = shellexpand::full_with_context(
+        raw.as_ref(),
+        || Some(home.as_str()),
+        |name| -> Result<Option<String>, std::env::VarError> {
+            if name == "HOME" {
+                return Ok(Some(home.clone()));
+            }
+            match std::env::var(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(error) => Err(error),
+            }
+        },
+    )
+    .map_err(|error| {
+        let name = error.var_name.to_string();
+        format!("environment variable {name} is not set")
+    })?;
+    Ok(normalize(Path::new(expanded.as_ref())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +154,7 @@ mod tests {
 
     #[test]
     fn expand_config_path_expands_home() {
+        let _environment = smelt_test_support::ProcessEnvironmentGuard::capture();
         let home = dirs::home_dir().expect("test env has HOME");
         assert_eq!(expand("~").unwrap(), home);
         assert_eq!(expand("~/projects").unwrap(), home.join("projects"));
@@ -134,7 +162,8 @@ mod tests {
 
     #[test]
     fn expand_config_path_expands_home_and_env() {
-        std::env::set_var("SMELT_PATH_TEST_ROOT", "/tmp/smelt-path-test");
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.set_var("SMELT_PATH_TEST_ROOT", "/tmp/smelt-path-test");
         assert_eq!(
             expand("$SMELT_PATH_TEST_ROOT/foo/../bar").unwrap(),
             PathBuf::from("/tmp/smelt-path-test/bar")
@@ -147,7 +176,8 @@ mod tests {
 
     #[test]
     fn expand_config_path_errors_for_missing_env() {
-        std::env::remove_var("SMELT_PATH_TEST_MISSING");
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        environment.remove_var("SMELT_PATH_TEST_MISSING");
         let err = expand("$SMELT_PATH_TEST_MISSING/worktrees").unwrap_err();
         assert!(err.contains("SMELT_PATH_TEST_MISSING"));
     }

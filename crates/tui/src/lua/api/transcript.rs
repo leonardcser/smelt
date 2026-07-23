@@ -74,7 +74,7 @@ fn block_snapshot_table(
     snap: crate::app::transcript::TranscriptBlockSnapshot,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    t.set("descriptor_index", snap.descriptor_index)?;
+    t.set("record_index", snap.record_index)?;
     t.set("block_id", snap.block_id.get())?;
     t.set("role", snap.role)?;
     t.set("first_row", snap.first_row)?;
@@ -86,7 +86,7 @@ fn block_snapshot_table(
 #[derive(Clone, Debug)]
 pub(crate) struct LuaTranscriptTarget {
     session_id: String,
-    descriptor_index: usize,
+    record_index: usize,
     block_id: smelt_core::transcript_model::BlockId,
     role: &'static str,
     first_line: String,
@@ -99,7 +99,7 @@ impl LuaTranscriptTarget {
     ) -> Self {
         Self {
             session_id,
-            descriptor_index: block.descriptor_index,
+            record_index: block.record_index,
             block_id: block.block_id,
             role: block.role,
             first_line: block.first_line,
@@ -147,27 +147,15 @@ impl LuaTranscriptView {
         let anchor = self.view.state.anchor?;
         let session_id = self.view.state.session_id.clone();
         let role = role.map(LuaTranscriptRole::as_str);
-        crate::lua::try_with_app(|app| {
-            if app.core.session.id != session_id
-                || app
-                    .session_document
-                    .transcript
-                    .history()
-                    .navigation_generation()
-                    != self.view.state.navigation_generation
-            {
-                return None;
-            }
-            let block = if previous {
-                app.session_document
-                    .transcript
-                    .previous_navigation_block_from(anchor, role)
-            } else {
-                app.session_document
-                    .transcript
-                    .next_navigation_block_from(anchor, role)
-            }?;
-            Some(LuaTranscriptTarget::from_block(session_id, block))
+        crate::lua::try_with_conversation_host(|host| {
+            host.transcript_navigation_block(
+                &session_id,
+                self.view.state.navigation_generation,
+                anchor,
+                role,
+                previous,
+            )
+            .map(|block| LuaTranscriptTarget::from_block(session_id, block))
         })
         .flatten()
     }
@@ -261,27 +249,14 @@ impl LuaTranscriptStream {
         }
     }
 
-    fn target_width(app: &crate::app::TuiApp, buf_id: crate::smelt_edit::BufId) -> Option<u16> {
-        app.ui
-            .iter_wins()
-            .filter(|(_, win)| win.buf == buf_id)
-            .filter_map(|(win_id, _win)| app.ui.win_content_width(win_id))
-            .max()
-    }
-
     fn render(&mut self) {
-        crate::lua::with_app(|app| {
-            let width = self
-                .width
-                .or_else(|| Self::target_width(app, self.buf.id))
-                .unwrap_or_else(|| crate::content::term_width().saturating_sub(2).max(1) as u16)
-                .max(1);
-            let theme = app.ui.theme().clone();
-            let Some(buf) = app.ui.buf_mut(self.buf.id) else {
-                return;
-            };
-            self.projection
-                .project_all(&app.lua, buf, &mut self.transcript.history, width, &theme);
+        crate::lua::with_conversation_host(|host| {
+            host.render_transcript_stream(
+                self.buf.id,
+                self.width,
+                &mut self.projection,
+                &mut self.transcript.history,
+            );
         });
     }
 }
@@ -449,7 +424,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     });
     record_class(LuaClassDecl {
         name: "smelt.transcript.Target",
-        doc: "Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse descriptor coordinates are intentionally hidden.",
+        doc: "Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.",
         fields: vec![
             LuaClassField { name: "block_id", ty: "integer".into(), optional: false, doc: "Stable transcript block identity." },
             LuaClassField { name: "role", ty: role_type, optional: false, doc: "Semantic block role." },
@@ -539,25 +514,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "_set_compaction_preview",
         &["summary"],
         |_, summary: Option<String>| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                if let Some(summary) = summary {
-                    app.update_compaction_preview(summary);
-                } else {
-                    app.clear_compaction_preview();
-                }
-            });
+            crate::lua::with_conversation_host(|host| host.set_compaction_preview(summary));
             Ok(())
         },
     )?;
     m.fn_(
         "loaded_text_expensive",
-        "Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active descriptor window loaded. Prefer `rows(start, count)` for bounded display reads.",
+        "Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active record window loaded. Prefer `rows(start, count)` for bounded display reads.",
         &[],
         |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| {
-                app.materialize_loaded_transcript_display_rows_expensive().join("\n")
-            })
-            .unwrap_or_default())
+            Ok(crate::lua::try_with_conversation_host(|host| host.loaded_transcript_text())
+                .unwrap_or_default())
         },
     )?;
     m.fn_(
@@ -565,15 +532,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `loaded_blocks_expensive()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).",
         &[],
         |_, ()| -> LuaResult<bool> {
-            Ok(crate::lua::try_with_app(|app| app.session_document.transcript.is_empty()).unwrap_or(true))
+            Ok(crate::lua::try_with_conversation_host(|host| host.transcript_is_empty()).unwrap_or(true))
         },
     )?;
     m.fn_(
         "loaded_blocks_expensive",
-        "Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.",
+        "Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded record window; prefer `visible_blocks()` when possible.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let snaps = crate::lua::try_with_app(|app| app.loaded_transcript_block_snapshots())
+            let snaps = crate::lua::try_with_conversation_host(|host| host.loaded_transcript_blocks())
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(snaps.len(), 0)?;
             for (i, snap) in snaps.into_iter().enumerate() {
@@ -584,10 +551,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "visible_blocks",
-        "Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
+        "Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let snaps = crate::lua::try_with_app(|app| app.visible_transcript_block_snapshots())
+            let snaps = crate::lua::try_with_conversation_host(|host| host.visible_transcript_blocks())
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(snaps.len(), 0)?;
             for (i, snap) in snaps.into_iter().enumerate() {
@@ -601,7 +568,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.",
         &["start", "count"],
         |lua, (start, count): (crate::smelt_edit::RowIndex, crate::smelt_edit::RowIndex)| -> LuaResult<mlua::Table> {
-            let rows = crate::lua::try_with_app(|app| app.transcript_visible_rows(start, count))
+            let rows = crate::lua::try_with_conversation_host(|host| host.transcript_rows(start, count))
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(rows.len(), 0)?;
             for (i, row) in rows.into_iter().enumerate() {
@@ -612,10 +579,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "loaded_block_at_row",
-        "Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ descriptor_index, block_id, role, first_row, rows, first_line }`.",
+        "Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ record_index, block_id, role, first_row, rows, first_line }`.",
         &["row"],
         |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
-            let snap = crate::lua::try_with_app(|app| app.loaded_transcript_block_at_row(row)).flatten();
+            let snap = crate::lua::try_with_conversation_host(|host| {
+                host.loaded_transcript_block_at_row(row)
+            })
+            .flatten();
             snap.map(|snap| block_snapshot_table(lua, snap)).transpose()
         },
     )?;
@@ -624,10 +594,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return the latest committed transcript view, or nil before the first projection. The returned snapshot remains immutable; use `watch_view` to observe later revisions.",
         &[],
         |_, ()| -> LuaResult<Option<LuaTranscriptView>> {
-            Ok(crate::lua::try_with_app(|app| {
-                app.committed_transcript_view
-                    .clone()
-                    .map(LuaTranscriptView::new)
+            Ok(crate::lua::try_with_conversation_host(|host| {
+                host.committed_transcript_view().map(LuaTranscriptView::new)
             })
             .flatten())
         },
@@ -653,12 +621,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let opts = opts.unwrap_or_default();
             let _align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
             let move_cursor = opts.move_cursor.unwrap_or(true);
-            Ok(crate::lua::try_with_app(|app| {
-                if app.core.session.id != target.session_id {
-                    return false;
-                }
-                app.reveal_transcript_target(
-                    target.descriptor_index,
+            Ok(crate::lua::try_with_conversation_host(|host| {
+                host.reveal_transcript_target(
+                    &target.session_id,
+                    target.record_index,
                     target.block_id,
                     move_cursor,
                 )
@@ -671,8 +637,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Jump the transcript to its semantic tail and enable tail-follow mode.",
         &[],
         |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                app.scroll_window(
+            crate::lua::with_ui_host(|host| {
+                host.scroll_window(
                     crate::app::TRANSCRIPT_WIN,
                     crate::app::transcript_scroll::WindowScrollCommand::Tail,
                 );
@@ -685,7 +651,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         r#"Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`."#,
         &["row"],
         |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
-            let snap = crate::lua::try_with_app(|app| app.transcript_node_at_row(row)).flatten();
+            let snap =
+                crate::lua::try_with_conversation_host(|host| host.transcript_node_at_row(row)).flatten();
             snap.map(|node| node_snapshot_table(lua, node)).transpose()
         },
     )?;
@@ -706,8 +673,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             } else {
                 crate::content::transcript_buf::FoldActivation::AnyNodeRow
             };
-            Ok(crate::lua::try_with_app(|app| {
-                app.fold_transcript_node_at_row(row, action, activation)
+            Ok(crate::lua::try_with_conversation_host(|host| {
+                host.fold_transcript_node_at_row(row, action, activation)
             })
             .unwrap_or(false))
         },
@@ -723,7 +690,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let Some(action) = fold_action(action.as_str()) else {
                 return Ok(false);
             };
-            Ok(crate::lua::try_with_app(|app| app.fold_transcript_node(id, action))
+            Ok(crate::lua::try_with_conversation_host(|host| host.fold_transcript_node(id, action))
                 .unwrap_or(false))
         },
     )?;
@@ -737,10 +704,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 "close" => crate::content::transcript_buf::FoldAction::Close,
                 _ => return Ok(false),
             };
-            Ok(
-                crate::lua::try_with_app(|app| app.fold_all_transcript_nodes(action))
-                    .unwrap_or(false),
-            )
+            Ok(crate::lua::try_with_conversation_host(|host| {
+                host.fold_all_transcript_nodes(action)
+            })
+            .unwrap_or(false))
         },
     )?;
     m.fn_(
@@ -751,7 +718,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let Some(action) = fold_action(action.as_str()) else {
                 return Ok(false);
             };
-            Ok(crate::lua::try_with_app(|app| app.fold_transcript_block_kind(&kind, action))
+            Ok(crate::lua::try_with_conversation_host(|host| {
+                host.fold_transcript_block_kind(&kind, action)
+            })
                 .unwrap_or(false))
         },
     )?;

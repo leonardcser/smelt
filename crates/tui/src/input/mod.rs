@@ -82,6 +82,8 @@ pub(crate) struct InputSnapshot {
 pub(crate) struct PromptState {
     pub(crate) store: Arc<Mutex<AttachmentStore>>,
     pub(crate) stash: Option<InputSnapshot>,
+    cwd: std::path::PathBuf,
+    runtime_dir: std::path::PathBuf,
     /// True when content came from a paste; cleared on manual character input.
     pub(super) from_paste: bool,
     /// Chord state: true after Ctrl+X, waiting for second key.
@@ -158,13 +160,27 @@ impl Default for PromptState {
 
 impl PromptState {
     pub(crate) fn new() -> Self {
+        let runtime_dir = std::env::temp_dir();
+        Self::new_for_runtime(runtime_dir.clone(), runtime_dir)
+    }
+
+    pub(crate) fn new_for_runtime(
+        cwd: std::path::PathBuf,
+        runtime_dir: std::path::PathBuf,
+    ) -> Self {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
         Self {
             store,
             stash: None,
+            cwd,
+            runtime_dir,
             from_paste: false,
             pending_ctrl_x: false,
         }
+    }
+
+    pub(crate) fn set_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.cwd = cwd;
     }
 
     /// Active selection range `(start_byte, end_byte)` for vim visual or shift+key selection.
@@ -1019,7 +1035,7 @@ impl PromptState {
             KeyAction::ClipboardImage => {
                 // Bracketed-paste terminals forward Cmd+V as `Event::Paste`, bypassing this arm.
                 // Terminals with bracketed paste off send it as a key - handle both paths.
-                if let Some(url) = clipboard_image_to_data_url() {
+                if let Some(url) = clipboard_image_to_data_url(&self.cwd, &self.runtime_dir) {
                     self.save_undo(ctx);
                     self.replace_selection_for_insert(ctx);
                     self.insert_image(ctx, "clipboard.png".into(), url);
@@ -1152,7 +1168,7 @@ impl PromptState {
                 }
             }
             if data.trim().is_empty() {
-                if let Some(url) = clipboard_image_to_data_url() {
+                if let Some(url) = clipboard_image_to_data_url(&self.cwd, &self.runtime_dir) {
                     self.insert_image(ctx, "clipboard.png".into(), url);
                     return Action::Redraw;
                 }
@@ -1215,11 +1231,18 @@ pub(super) fn current_line(buf: &str, cpos: usize) -> usize {
 
 /// Read an image from the system clipboard and return a data URL.
 /// macOS: uses `osascript`; Linux: tries `xclip` then `wl-paste`.
-fn clipboard_image_to_data_url() -> Option<String> {
+fn clipboard_image_to_data_url(
+    cwd: &std::path::Path,
+    runtime_dir: &std::path::Path,
+) -> Option<String> {
     use base64::Engine;
 
-    let tmp = std::env::temp_dir().join("agent_clipboard.png");
-    let tmp_str = tmp.to_string_lossy();
+    let tmp = tempfile::Builder::new()
+        .prefix("clipboard-")
+        .suffix(".png")
+        .tempfile_in(runtime_dir)
+        .ok()?;
+    let tmp_str = tmp.path().to_string_lossy();
 
     let ok = if cfg!(target_os = "macos") {
         std::process::Command::new("osascript")
@@ -1234,31 +1257,32 @@ fn clipboard_image_to_data_url() -> Option<String> {
                     tmp_str
                 ),
             ])
+            .current_dir(cwd)
             .output()
             .ok()
             .is_some_and(|o| o.status.success())
     } else {
         std::process::Command::new("xclip")
             .args(["-selection", "clipboard", "-t", "image/png", "-o"])
-            .stdout(std::fs::File::create(&tmp).ok()?)
+            .current_dir(cwd)
+            .stdout(tmp.reopen().ok()?)
             .status()
             .ok()
             .is_some_and(|s| s.success())
             || std::process::Command::new("wl-paste")
                 .args(["--type", "image/png"])
-                .stdout(std::fs::File::create(&tmp).ok()?)
+                .current_dir(cwd)
+                .stdout(tmp.reopen().ok()?)
                 .status()
                 .ok()
                 .is_some_and(|s| s.success())
     };
 
     if !ok {
-        let _ = std::fs::remove_file(&tmp);
         return None;
     }
 
-    let bytes = std::fs::read(&tmp).ok()?;
-    let _ = std::fs::remove_file(&tmp);
+    let bytes = std::fs::read(tmp.path()).ok()?;
     if bytes.is_empty() {
         return None;
     }

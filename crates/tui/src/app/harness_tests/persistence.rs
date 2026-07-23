@@ -5,16 +5,17 @@ use protocol::{
 };
 use smelt_core::transcript_model::Block;
 
-fn loaded_session(id: &str) -> smelt_core::session::Session {
+fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
     crate::app::history::materialize_full_session(
+        &app.core_probe().sessions,
         id,
         crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
     )
     .expect("session saved")
 }
 
-fn session_revision(id: &str) -> u64 {
-    smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(id))
+fn session_revision(app: &TestApp, id: &str) -> u64 {
+    smelt_store::SessionReader::open_existing(app.core_probe().sessions.dir_for_id(id))
         .unwrap()
         .store_head()
         .unwrap()
@@ -22,52 +23,21 @@ fn session_revision(id: &str) -> u64 {
         .get()
 }
 
-// COMPAT(session-derived-sidecar-exports): wait only in tests that inspect exports.
-fn wait_for_compatibility_exports(session_dir: &std::path::Path, revision: u64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let metadata_revision = std::fs::read(session_dir.join("meta.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value["source_revision"].as_u64());
-        let content_revision = std::fs::read_to_string(session_dir.join("content.txt"))
-            .ok()
-            .and_then(|content| {
-                content
-                    .lines()
-                    .next()
-                    .and_then(|line| line.strip_prefix("# smelt-revision:"))
-                    .and_then(|value| value.parse::<u64>().ok())
-            });
-        if metadata_revision == Some(revision) && content_revision == Some(revision) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "compatibility exports did not reach revision {revision}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
-    app.app.notification.as_ref().is_some_and(|notification| {
-        notification.lifetime.is_sticky()
-            && matches!(
-                notification.owner.as_ref(),
-                Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
-                    if owner_session_id == session_id
-            )
-    })
+    app.overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            notification.lifetime.is_sticky()
+                && matches!(
+                    notification.owner.as_ref(),
+                    Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
+                        if owner_session_id == session_id
+                )
+        })
 }
 
 fn retry_persistence_via_lua(app: &mut TestApp) -> bool {
-    let _app_guard = crate::lua::install_app_ptr(&mut app.app);
-    app.app
-        .lua
-        .lua
-        .load("return smelt.session.retry_persistence()")
-        .eval::<bool>()
+    app.eval_lua("return smelt.session.retry_persistence()")
         .unwrap()
 }
 
@@ -164,54 +134,47 @@ fn assert_model_history_tool_messages(messages: &[protocol::Message]) {
     assert!(!tool.is_error);
 }
 
-fn saved_one_row_session(guard: &std::sync::MutexGuard<'static, ()>) -> String {
+fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) -> String {
     let mut app = TestApp::builder().build_with_test_home_guard(guard);
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("persisted before resume")));
-    app.app.save_session_and_flush();
-    app.app.core.session.id.clone()
+    app.session_append_history(HistoryItem::user(Content::text("persisted before resume")));
+    app.save_session_and_flush();
+    app.session_snapshot().id.clone()
 }
 
 #[test]
 fn session_save_notification_dismissal_uses_typed_ownership() {
     let mut app = TestApp::builder().build();
-    let session_id = app.app.core.session.id.clone();
+    let session_id = app.session_snapshot().id.clone();
 
-    app.app.notify_error_sticky(format!(
+    app.notify_error_sticky(format!(
         "failed to save session {session_id}: unrelated diagnostic"
     ));
-    app.app
-        .dismiss_session_save_failure_notification(&session_id);
+    app.dismiss_session_save_failure_notification(&session_id);
     assert!(
-        app.app.notification.is_some(),
+        app.overlays_probe().notification().is_some(),
         "matching copy without persistence ownership must remain visible"
     );
 
-    app.app
-        .notify_session_save_failure(&session_id, "database busy");
-    app.app
-        .dismiss_session_save_failure_notification("another-session");
+    app.notify_session_save_failure(&session_id, "database busy");
+    app.dismiss_session_save_failure_notification("another-session");
     assert!(has_sticky_session_save_failure(&app, &session_id));
 
-    app.app
-        .dismiss_session_save_failure_notification(&session_id);
-    assert!(app.app.notification.is_none());
+    app.dismiss_session_save_failure_notification(&session_id);
+    assert!(app.overlays_probe().notification().is_none());
 }
 
 #[test]
 fn metadata_only_title_update_persists_after_clean_history_save() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
+    let session_id = app.session_snapshot().id.clone();
 
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("persisted history")));
-    app.app.save_session_and_flush();
-    app.app
-        .set_session_title("Renamed session".into(), "renamed-session".into(), None);
-    app.app.save_session_and_flush();
+    app.session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.save_session_and_flush();
+    app.set_session_title("Renamed session".into(), "renamed-session".into(), None);
+    app.save_session_and_flush();
 
-    let loaded = loaded_session(&session_id);
+    let loaded = loaded_session(&app, &session_id);
     assert_eq!(loaded.title.as_deref(), Some("Renamed session"));
     assert_eq!(loaded.slug.as_deref(), Some("renamed-session"));
     assert_eq!(loaded.history.len(), 1);
@@ -221,38 +184,36 @@ fn metadata_only_title_update_persists_after_clean_history_save() {
 fn fast_mode_only_save_advances_canonical_revision_once() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("persisted history")));
-    app.app.save_session_and_flush();
-    let before = session_revision(&session_id);
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.save_session_and_flush();
+    let before = session_revision(&app, &session_id);
 
-    app.app.set_fast_mode(true);
-    app.app.save_session_and_flush();
+    app.set_fast_mode(true);
+    app.save_session_and_flush();
 
-    assert_eq!(session_revision(&session_id), before + 1);
-    assert_eq!(loaded_session(&session_id).fast_mode, Some(true));
+    assert_eq!(session_revision(&app, &session_id), before + 1);
+    assert_eq!(loaded_session(&app, &session_id).fast_mode, Some(true));
 }
 
 #[test]
-fn descriptor_only_save_advances_canonical_revision_once() {
+fn record_only_save_advances_canonical_revision_once() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("persisted history")));
-    app.app.save_session_and_flush();
-    let before = session_revision(&session_id);
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.save_session_and_flush();
+    let before = session_revision(&app, &session_id);
 
-    app.app.push_block(Block::Thinking {
+    app.push_transcript_block(Block::Thinking {
         title: None,
         summary_titles: Vec::new(),
         kind: protocol::ReasoningKind::Raw,
-        content: "descriptor-only change".into(),
+        content: "record-only change".into(),
     });
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
-    assert_eq!(session_revision(&session_id), before + 1);
+    assert_eq!(session_revision(&app, &session_id), before + 1);
 }
 
 #[test]
@@ -266,22 +227,18 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
         title: Some("Inspecting the report".into()),
         content: String::new(),
     }));
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
-    while app.app.session_document.transcript.drain_compaction_slice() {}
-    let original_id = app.app.session_document.transcript.history().order[0];
-    assert!(!app
-        .app
-        .session_document
-        .transcript
-        .history()
-        .is_materialized(original_id));
-    app.app.session_document.transcript.set_memory_budget(
-        crate::app::transcript::TranscriptMemoryBudget {
-            hydrated_blocks: 1,
-            ..Default::default()
-        },
-    );
+    app.drain_transcript_compaction_for_harness();
+    let (len, original_id, materialized) = app
+        .transcript_tail_state_for_harness()
+        .expect("compacted reasoning summary");
+    assert_eq!(len, 1);
+    assert!(!materialized);
+    app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 1,
+        ..Default::default()
+    });
 
     app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartFinished {
         id: "summary-2".into(),
@@ -290,30 +247,36 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
         content: "The stored tail remains mergeable.".into(),
     }));
 
-    let history = app.app.session_document.transcript.history();
-    assert_eq!(history.len(), 1);
-    let id = history.last_block_id().expect("merged summary block id");
-    let block = history.block(id).expect("materialized merged summary");
-    assert_eq!(id, original_id);
+    let (len, id, block) = app
+        .with_pinned_transcript_blocks(&[original_id], |history| {
+            (
+                history.len(),
+                history.last_block_id(),
+                history.block(original_id).cloned(),
+            )
+        })
+        .expect("hydrate merged summary");
+    assert_eq!(len, 1);
+    assert_eq!(id, Some(original_id));
     assert!(matches!(
         block,
-        Block::Thinking {
+        Some(Block::Thinking {
             title: Some(title),
             summary_titles,
             content,
             kind: protocol::ReasoningKind::Summary,
-        } if title == "Planning the fix"
-            && summary_titles == &["Inspecting the report", "Planning the fix"]
+        }) if title == "Planning the fix"
+            && summary_titles == ["Inspecting the report", "Planning the fix"]
             && content == "The stored tail remains mergeable."
     ));
 }
 
 #[test]
-fn descriptor_resave_preserves_semantic_history_links() {
+fn record_resave_preserves_semantic_history_links() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app.commit_request_history_item(
+    let session_id = app.session_snapshot().id.clone();
+    app.commit_request_history_item(
         HistoryItem::user(protocol::compaction_summary_content("retained summary")),
         Some(Block::Compacted {
             summary: "retained summary".into(),
@@ -322,23 +285,19 @@ fn descriptor_resave_preserves_semantic_history_links() {
     let note = protocol::HistoryNote::process_status_event(
         protocol::ProcessStatusEvent::background_process_completed("4242", Some(0)),
     );
-    app.app.commit_request_history_item(
+    app.commit_request_history_item(
         HistoryItem::note(note.clone()),
-        crate::app::history::history_note_to_block(&app.app.lua, &note),
+        app.history_note_to_block(&note),
     );
     assert!(!has_sticky_session_save_failure(&app, &session_id));
 
-    app.app
-        .session_document
-        .transcript
-        .history_mut()
-        .require_descriptor_resave_from(0);
-    app.app.save_session_and_flush();
+    app.require_transcript_record_resave_from_for_harness(0);
+    app.save_session_and_flush();
 
     assert!(
         !has_sticky_session_save_failure(&app, &session_id),
-        "descriptor resave must preserve semantic origins: {:?}",
-        app.app.notification
+        "record resave must preserve semantic origins: {:?}",
+        app.overlays_probe().notification()
     );
 }
 
@@ -347,16 +306,16 @@ fn history_only_process_status_session_accepts_persisted_follow_up() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app.handle_process_completed("4242".into(), Some(0));
+        app.handle_process_completed("4242".into(), Some(0));
         let turn_id = app.current_turn_id().expect("process-status turn started");
         app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
             turn_id,
             history: None,
             meta: None,
         }));
-        app.app.save_session_and_flush();
-        assert!(!app.app.session_is_read_only());
-        app.app.core.session.id.clone()
+        app.save_session_and_flush();
+        assert!(!app.session_is_read_only());
+        app.session_snapshot().id.clone()
     };
 
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
@@ -370,40 +329,42 @@ fn history_only_process_status_session_accepts_persisted_follow_up() {
     drop(db);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert!(!resumed.app.session_is_read_only());
+    resumed.load_session_by_id(&session_id);
+    assert!(!resumed.session_is_read_only());
 
     resumed.start_submitted_turn("follow up after the agent finished");
-    resumed.app.save_session_and_flush();
+    resumed.save_session_and_flush();
 
     assert!(
         !has_sticky_session_save_failure(&resumed, &session_id),
         "follow-up save failed: {:?}",
-        resumed.app.notification
+        resumed.overlays_probe().notification()
     );
-    assert!(!resumed.app.session_is_read_only());
-    assert!(loaded_session(&session_id).history.iter().any(|item| {
-        matches!(
-            item,
-            HistoryItem::User { content, .. }
-                if content.text_content() == "follow up after the agent finished"
-        )
-    }));
+    assert!(!resumed.session_is_read_only());
+    assert!(loaded_session(&resumed, &session_id)
+        .history
+        .iter()
+        .any(|item| {
+            matches!(
+                item,
+                HistoryItem::User { content, .. }
+                    if content.text_content() == "follow up after the agent finished"
+            )
+        }));
 }
 
 #[test]
 fn exact_no_op_save_does_not_advance_canonical_revision() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("persisted history")));
-    app.app.save_session_and_flush();
-    let before = session_revision(&session_id);
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.save_session_and_flush();
+    let before = session_revision(&app, &session_id);
 
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
-    assert_eq!(session_revision(&session_id), before);
+    assert_eq!(session_revision(&app, &session_id), before);
 }
 
 #[test]
@@ -411,19 +372,17 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
 
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("first generation")));
-    app.app.save_session();
-    assert!(app.app.session_document_has_unflushed_work());
+    app.session_append_history(HistoryItem::user(Content::text("first generation")));
+    app.save_session();
+    assert!(app.session_document_has_unflushed_work());
 
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("final generation")));
-    app.app.save_session();
-    assert!(app.app.session_document_has_unflushed_work());
+    app.session_append_history(HistoryItem::user(Content::text("final generation")));
+    app.save_session();
+    assert!(app.session_document_has_unflushed_work());
 
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
-    let loaded = loaded_session(&app.app.core.session.id);
+    let loaded = loaded_session(&app, &app.session_snapshot().id);
     assert_eq!(loaded.history.len(), 2);
     assert!(matches!(
         loaded.history.last(),
@@ -435,33 +394,27 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
 fn blocked_save_requires_explicit_retry() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("baseline")));
-    app.app.save_session_and_flush();
-    app.app
-        .persistence
-        .as_ref()
-        .expect("persistence actor")
-        .inject_commit_failure(smelt_store::SessionCommitFailure::UnsupportedSchema {
-            found: i32::MAX,
-            expected: 0,
-        });
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("retry me")));
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.save_session_and_flush();
+    app.inject_commit_failure(smelt_store::SessionCommitFailure::UnsupportedSchema {
+        found: i32::MAX,
+        expected: 0,
+    });
+    app.session_append_history(HistoryItem::user(Content::text("retry me")));
 
-    app.app.save_session_and_flush();
-    assert!(app.app.session_document_has_unflushed_work());
+    app.save_session_and_flush();
+    assert!(app.session_document_has_unflushed_work());
     assert!(has_sticky_session_save_failure(&app, &session_id));
 
     assert!(retry_persistence_via_lua(&mut app));
-    let outcome = app.app.flush_persist();
+    let outcome = app.flush_persist();
     assert!(
-        !app.app.session_document_has_unflushed_work(),
+        !app.session_document_has_unflushed_work(),
         "retry flush left work pending: {outcome:?}; status: {:?}",
-        app.app.persistence.as_ref().map(|actor| actor.status())
+        app.conversation_probe().persistence_status()
     );
-    let loaded = loaded_session(&session_id);
+    let loaded = loaded_session(&app, &session_id);
     assert_eq!(loaded.history.len(), 2);
 }
 
@@ -469,10 +422,9 @@ fn blocked_save_requires_explicit_retry() {
 fn environmental_failures_remain_dirty_until_explicit_retry() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("baseline")));
-    app.app.save_session_and_flush();
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.save_session_and_flush();
 
     for (index, failure) in [
         smelt_store::SessionCommitFailure::Sqlite {
@@ -494,30 +446,24 @@ fn environmental_failures_remain_dirty_until_explicit_retry() {
             _ => unreachable!("environmental fault fixture"),
         };
         for _ in 0..2 {
-            app.app
-                .persistence
-                .as_ref()
-                .expect("persistence actor")
-                .inject_commit_failure(failure.clone());
+            app.inject_commit_failure(failure.clone());
         }
-        app.app
-            .session_append_history(HistoryItem::user(Content::text(message.as_str())));
+        app.session_append_history(HistoryItem::user(Content::text(message.as_str())));
 
-        app.app.save_session_and_flush();
+        app.save_session_and_flush();
 
-        assert!(app.app.session_document_has_unflushed_work());
+        assert!(app.session_document_has_unflushed_work());
         assert!(has_sticky_session_save_failure(&app, &session_id));
         assert!(app
-            .app
-            .notification
-            .as_ref()
+            .overlays_probe()
+            .notification()
             .is_some_and(|notification| notification.summary.contains(message.as_str())));
-        assert_eq!(loaded_session(&session_id).history.len(), index + 1);
+        assert_eq!(loaded_session(&app, &session_id).history.len(), index + 1);
 
         assert!(retry_persistence_via_lua(&mut app));
-        app.app.flush_persist();
-        assert!(!app.app.session_document_has_unflushed_work());
-        assert_eq!(loaded_session(&session_id).history.len(), index + 2);
+        app.flush_persist();
+        assert!(!app.session_document_has_unflushed_work());
+        assert_eq!(loaded_session(&app, &session_id).history.len(), index + 2);
     }
 }
 
@@ -527,24 +473,14 @@ fn lua_delete_returns_actionable_error_for_malicious_id() {
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let target = engine::state_dir().join("must-not-delete");
     std::fs::create_dir_all(&target).unwrap();
-    app.app
-        .lua
-        .lua
-        .globals()
-        .set("DELETE_TARGET", target.to_string_lossy().as_ref())
+    app.set_lua_string_global("DELETE_TARGET", target.to_string_lossy())
         .unwrap();
 
-    let (ok, message) = {
-        let _app_guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load(
-                "local ok, err = pcall(function() smelt.session.delete(DELETE_TARGET) end); return ok, tostring(err)",
-            )
-            .eval::<(bool, String)>()
-            .unwrap()
-    };
+    let (ok, message): (bool, String) = app
+        .eval_lua(
+            "local ok, err = pcall(function() smelt.session.delete(DELETE_TARGET) end); return ok, tostring(err)",
+        )
+        .unwrap();
 
     assert!(!ok);
     assert!(message.contains("invalid session id"), "{message}");
@@ -555,59 +491,24 @@ fn lua_delete_returns_actionable_error_for_malicious_id() {
 fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
+    let session_id = app.session_snapshot().id.clone();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     std::fs::create_dir_all(session_dir.parent().unwrap()).unwrap();
     std::fs::write(&session_dir, "permanently blocks directory creation").unwrap();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("cannot save")));
+    app.session_append_history(HistoryItem::user(Content::text("cannot save")));
 
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
-    assert!(app.app.session_document_has_unflushed_work());
-    assert!(app.app.notification.is_some());
+    assert!(app.session_document_has_unflushed_work());
+    assert!(app.overlays_probe().notification().is_some());
     assert!(!session_dir.join("session.db").exists());
-}
-
-#[test]
-// COMPAT(session-derived-sidecar-exports): export failure cannot affect canonical durability.
-fn compatibility_export_failure_does_not_undo_canonical_commit() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("baseline")));
-    app.app.save_session_and_flush();
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    wait_for_compatibility_exports(&session_dir, session_revision(&session_id));
-    let meta_path = session_dir.join("meta.json");
-    std::fs::remove_file(&meta_path).unwrap();
-    std::fs::create_dir(&meta_path).unwrap();
-
-    app.app
-        .session_append_history(HistoryItem::user(Content::text(
-            "canonical despite sidecar",
-        )));
-    app.app.save_session_and_flush();
-
-    assert!(!app.app.session_document_has_unflushed_work());
-    assert!(!has_sticky_session_save_failure(&app, &session_id));
-    assert_eq!(loaded_session(&session_id).history.len(), 2);
-    assert!(smelt_core::session::list_sessions()
-        .iter()
-        .any(|session| session.id == session_id));
-    assert!(smelt_core::session::load_search_blob(&session_id)
-        .unwrap()
-        .contains("canonical despite sidecar"));
-    assert!(smelt_core::session::rebuild_compatibility_exports(&session_dir).is_err());
-    assert!(meta_path.is_dir());
 }
 
 #[test]
 fn new_empty_session_does_not_create_a_directory() {
     let guard = test_home_guard();
     let app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_dir = smelt_core::session::dir_for_id(&app.app.core.session.id);
+    let session_dir = smelt_core::session::dir_for_id(&app.session_snapshot().id);
 
     assert!(!session_dir.exists());
     drop(app);
@@ -618,10 +519,9 @@ fn new_empty_session_does_not_create_a_directory() {
 fn identical_object_bytes_can_serve_distinct_request_roles() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("same bytes in two roles")));
-    app.app.save_session_and_flush();
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("same bytes in two roles")));
+    app.save_session_and_flush();
     let mut audit = request_audit_entry(43);
     audit.body = serde_json::json!({});
     audit.response = Some(protocol::request_log::RequestResponse {
@@ -631,17 +531,13 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
         raw: None,
     });
 
-    app.app.dispatch_host_call(engine::HostCall::RequestAudit {
+    app.dispatch_host_call(engine::HostCall::RequestAudit {
         session_dir: smelt_core::session::dir_for_id(&session_id),
-        persistence: protocol::PersistenceScope {
-            epoch: app.app.persistence_epoch.get(),
-            required_generation: app.app.session_document.generation().get(),
-            store_revision: app.app.session_document.acknowledged_head().revision.get(),
-        },
+        persistence: app.conversation_probe().persistence_scope(),
         entry: Box::new(audit),
         payload_mode: smelt_store::RequestAuditPayloadMode::Full,
     });
-    app.app.flush_persist();
+    app.flush_persist();
 
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
     let db = smelt_store::SessionDb::open_read_only(db_path).unwrap();
@@ -672,30 +568,24 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
 fn stale_request_audit_after_session_switch_is_rejected() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("old session")));
-    app.app.save_session_and_flush();
-    let old_id = app.app.core.session.id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("old session")));
+    app.save_session_and_flush();
+    let old_id = app.session_snapshot().id.clone();
     let old_dir = smelt_core::session::dir_for_id(&old_id);
-    let old_scope = protocol::PersistenceScope {
-        epoch: app.app.persistence_epoch.get(),
-        required_generation: app.app.session_document.generation().get(),
-        store_revision: app.app.session_document.acknowledged_head().revision.get(),
-    };
+    let old_scope = app.conversation_probe().persistence_scope();
 
-    app.app.reset_session();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("new session")));
-    app.app.save_session_and_flush();
-    let new_id = app.app.core.session.id.clone();
+    app.reset_session();
+    app.session_append_history(HistoryItem::user(Content::text("new session")));
+    app.save_session_and_flush();
+    let new_id = app.session_snapshot().id.clone();
 
-    app.app.dispatch_host_call(engine::HostCall::RequestAudit {
+    app.dispatch_host_call(engine::HostCall::RequestAudit {
         session_dir: old_dir.clone(),
         persistence: old_scope,
         entry: Box::new(request_audit_entry(42)),
         payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
     });
-    app.app.flush_persist();
+    app.flush_persist();
 
     for id in [&old_id, &new_id] {
         let reader =
@@ -708,22 +598,20 @@ fn stale_request_audit_after_session_switch_is_rejected() {
 }
 
 #[test]
-// COMPAT(session-derived-sidecar-exports): fork publication schedules alpha exports.
 fn sparse_fork_publishes_a_complete_destination() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("fork source")));
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.session_append_history(HistoryItem::user(Content::text("fork source")));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
 
-    resumed.app.fork_session();
+    resumed.fork_session();
 
-    let fork_id = resumed.app.core.session.id.clone();
+    let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
     let fork_dir = smelt_core::session::dir_for_id(&fork_id);
     let reader = smelt_store::SessionReader::open_existing(&fork_dir).unwrap();
@@ -734,36 +622,32 @@ fn sparse_fork_publishes_a_complete_destination() {
         Some(session_id.as_str())
     );
     assert_eq!(reader.read_history_items_range(0..1).unwrap().len(), 1);
-    wait_for_compatibility_exports(&fork_dir, stored.head.revision.get());
-    assert!(fork_dir.join("meta.json").is_file());
-    assert!(fork_dir.join("content.txt").is_file());
 }
 
 #[test]
-fn large_sparse_fork_preserves_every_canonical_history_and_descriptor_row() {
+fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for index in 0..700 {
-            app.app
-                .session_append_history(HistoryItem::user(Content::text(format!(
-                    "fork source row {index}\nexact suffix {index}"
-                ))));
+            app.session_append_history(HistoryItem::user(Content::text(format!(
+                "fork source row {index}\nexact suffix {index}"
+            ))));
         }
-        app.app.restore_screen();
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.restore_screen();
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
     let source_dir = smelt_core::session::dir_for_id(&session_id);
     let source = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
     let source_history = source.read_history_items_range(0..700).unwrap();
-    let source_descriptors = source.read_all_transcript_descriptor_records().unwrap();
+    let source_records = source.read_all_transcript_records().unwrap();
     assert_eq!(source_history.len(), 700);
-    assert_eq!(source_descriptors.len(), 700);
+    assert_eq!(source_records.len(), 700);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    resumed.app.session_document.transcript.set_memory_budget(
+    resumed.load_session_by_id(&session_id);
+    resumed.set_transcript_memory_budget_for_harness(
         crate::app::transcript::TranscriptMemoryBudget {
             hydrated_blocks: 1,
             ..Default::default()
@@ -772,17 +656,16 @@ fn large_sparse_fork_preserves_every_canonical_history_and_descriptor_row() {
     resumed.render_silent();
     assert!(
         resumed
-            .app
-            .session_document
-            .transcript
+            .conversation_probe()
+            .transcript()
             .memory_snapshot()
             .hydrated_blocks
-            < source_descriptors.len()
+            < source_records.len()
     );
 
-    resumed.app.fork_session();
+    resumed.fork_session();
 
-    let fork_id = resumed.app.core.session.id.clone();
+    let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
     let fork = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&fork_id))
         .unwrap();
@@ -790,10 +673,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_descriptor_row() {
         fork.read_history_items_range(0..700).unwrap(),
         source_history
     );
-    assert_eq!(
-        fork.read_all_transcript_descriptor_records().unwrap(),
-        source_descriptors
-    );
+    assert_eq!(fork.read_all_transcript_records().unwrap(), source_records);
 }
 
 #[test]
@@ -801,21 +681,20 @@ fn sparse_fork_does_not_copy_unreferenced_legacy_blobs() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("fork source")));
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.session_append_history(HistoryItem::user(Content::text("fork source")));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
     let source_dir = smelt_core::session::dir_for_id(&session_id);
     let blob_dir = source_dir.join("blobs");
     std::fs::create_dir_all(&blob_dir).unwrap();
     std::fs::write(blob_dir.join("unreferenced.png"), "private attachment").unwrap();
 
-    resumed.app.fork_session();
+    resumed.fork_session();
 
-    let fork_id = resumed.app.core.session.id.clone();
+    let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
     assert!(!smelt_core::session::dir_for_id(&fork_id)
         .join("blobs")
@@ -833,10 +712,9 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("fork source")));
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.session_append_history(HistoryItem::user(Content::text("fork source")));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
     let source_dir = smelt_core::session::dir_for_id(&session_id);
     let reader = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
@@ -859,7 +737,7 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
                 ))],
             },
             side_tables: smelt_store::SideTableSuffixes::default(),
-            descriptors: None,
+            transcript_records: None,
         })
         .unwrap();
     writer.release().unwrap();
@@ -869,99 +747,99 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
     let blob_path = blob_dir.join(format!("{HASH}.png"));
     std::fs::write(&blob_path, DATA_URL).unwrap();
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.session_document.live_session.is_some());
+    resumed.load_session_by_id(&session_id);
+    assert!(resumed.conversation_probe().has_live_session());
 
     let external = tempfile::tempdir().unwrap();
     let target = external.path().join("private-image");
     std::fs::write(&target, DATA_URL).unwrap();
     std::fs::remove_file(&blob_path).unwrap();
     symlink(&target, &blob_path).unwrap();
-    resumed.app.fork_session();
+    resumed.fork_session();
 
-    assert_eq!(resumed.app.core.session.id, session_id);
-    assert!(resumed.app.notification.is_some());
-    assert_eq!(smelt_core::session::list_sessions().len(), 1);
+    assert_eq!(resumed.session_snapshot().id, session_id);
+    assert!(resumed.overlays_probe().notification().is_some());
+    let sessions = smelt_core::session::list_sessions();
+    assert_eq!(sessions.len(), 1, "unexpected sessions: {sessions:#?}");
 }
 
 #[test]
-fn shutdown_flushes_descriptor_only_transcript_blocks() {
+fn shutdown_flushes_record_only_transcript_blocks() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
+    let session_id = app.session_snapshot().id.clone();
 
-    app.app.push_block(Block::Thinking {
+    app.push_transcript_block(Block::Thinking {
         title: None,
         summary_titles: Vec::new(),
         kind: protocol::ReasoningKind::Raw,
-        content: "descriptor-only interrupted thinking".into(),
+        content: "record-only interrupted thinking".into(),
     });
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
     let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
     )
     .unwrap();
-    let rows = db.read_all_transcript_descriptor_records().unwrap();
+    let rows = db.read_all_transcript_records().unwrap();
     assert!(
         rows.iter().any(|row| row
             .preview_text
-            .contains("descriptor-only interrupted thinking")),
-        "descriptor-only transcript block should be durable: {rows:#?}"
+            .contains("record-only interrupted thinking")),
+        "record-only transcript block should be durable: {rows:#?}"
     );
 }
 
 #[test]
-fn sparse_descriptor_resume_interrupt_save_compacts_and_appends_again() {
+fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app.commit_request_history_item(
-            HistoryItem::user(Content::text("sparse descriptor prompt")),
+        app.commit_request_history_item(
+            HistoryItem::user(Content::text("sparse record prompt")),
             Some(Block::User {
-                text: "sparse descriptor prompt".into(),
+                text: "sparse record prompt".into(),
                 image_labels: Vec::new(),
                 command: false,
             }),
         );
-        app.app.push_block(Block::Text {
+        app.push_transcript_block(Block::Text {
             content: "persisted before sparse rewrite".into(),
         });
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
     let db = smelt_store::SessionDb::open(&db_path).unwrap();
-    assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
+    assert_eq!(db.transcript_record_count().unwrap(), 2);
     db.connection()
         .execute(
-            "UPDATE transcript_blocks SET descriptor_idx = 302 WHERE descriptor_idx = 1",
+            "UPDATE transcript_blocks SET record_idx = 302 WHERE record_idx = 1",
             [],
         )
         .unwrap();
     drop(db);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
     assert_eq!(
         resumed
-            .app
-            .session_document
-            .transcript
-            .descriptor_total_count(),
+            .conversation_probe()
+            .transcript()
+            .record_total_count(),
         Some(2)
     );
     resumed.start_turn(3030);
     resumed.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
-        delta: "interrupted after sparse descriptor load".into(),
+        delta: "interrupted after sparse record load".into(),
     }));
     resumed.cancel();
-    resumed.app.save_session_and_flush();
+    resumed.save_session_and_flush();
     assert!(
-        resumed.app.notification.is_none(),
-        "sparse descriptor save should not surface an integrity failure: {:?}",
-        resumed.app.notification
+        resumed.overlays_probe().notification().is_none(),
+        "sparse record save should not surface an integrity failure: {:?}",
+        resumed.overlays_probe().notification()
     );
     drop(resumed);
 
@@ -969,8 +847,8 @@ fn sparse_descriptor_resume_interrupt_save_compacts_and_appends_again() {
     let (count, min, max): (i64, Option<i64>, Option<i64>) = db
         .connection()
         .query_row(
-            "SELECT COUNT(*), MIN(descriptor_idx), MAX(descriptor_idx)
-             FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+            "SELECT COUNT(*), MIN(record_idx), MAX(record_idx)
+             FROM transcript_blocks WHERE block_json IS NOT NULL",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -979,18 +857,18 @@ fn sparse_descriptor_resume_interrupt_save_compacts_and_appends_again() {
     drop(db);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    resumed.app.push_block(Block::Thinking {
+    resumed.load_session_by_id(&session_id);
+    resumed.push_transcript_block(Block::Thinking {
         title: None,
         summary_titles: Vec::new(),
         content: "append after dense reconciliation".into(),
         kind: protocol::ReasoningKind::Raw,
     });
-    resumed.app.save_session_and_flush();
-    assert!(resumed.app.notification.is_none());
+    resumed.save_session_and_flush();
+    assert!(resumed.overlays_probe().notification().is_none());
 
     let db = smelt_store::SessionReader::open_database(&db_path).unwrap();
-    let rows = db.read_all_transcript_descriptor_records().unwrap();
+    let rows = db.read_all_transcript_records().unwrap();
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().any(|row| row
         .preview_text
@@ -1002,28 +880,26 @@ fn store_backed_resume_preserves_context_token_identity() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("token identity prompt")));
-        app.app.record_visible_token_usage(TokenUsage {
+        app.session_append_history(HistoryItem::user(Content::text("token identity prompt")));
+        app.record_visible_token_usage(TokenUsage {
             context_tokens: Some(1234),
             ..Default::default()
         });
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    let identity = resumed.app.active_context_token_identity();
+    resumed.load_session_by_id(&session_id);
+    let identity = resumed.active_context_token_identity();
 
     assert_eq!(
-        resumed.app.core.session.display_context_tokens(),
+        resumed.session_snapshot().display_context_tokens(),
         Some(1234)
     );
     assert!(!resumed
-        .app
-        .core
-        .session
+        .conversation_probe()
+        .session()
         .display_context_tokens_stale(&identity));
 }
 
@@ -1032,7 +908,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app.commit_request_history_item(
+        app.commit_request_history_item(
             HistoryItem::user(Content::text("first prompt")),
             Some(Block::User {
                 text: "first prompt".into(),
@@ -1040,7 +916,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
                 command: false,
             }),
         );
-        app.app.commit_request_history_item(
+        app.commit_request_history_item(
             HistoryItem::assistant(AssistantStep::terminal(
                 Some(Content::text("first reply")),
                 None,
@@ -1065,10 +941,10 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
             history: None,
             meta: None,
         }));
-        app.app.save_session_and_flush();
+        app.save_session_and_flush();
 
-        let second_prompt_block_idx = app.app.session_document.transcript.history().len();
-        app.app.commit_request_history_item(
+        let second_prompt_block_idx = app.conversation_probe().transcript().history().len();
+        app.commit_request_history_item(
             HistoryItem::user(Content::text("second prompt")),
             Some(Block::User {
                 text: "second prompt".into(),
@@ -1087,23 +963,25 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
             background: false,
         }));
 
-        app.app
-            .rewind_to_block(Some(second_prompt_block_idx), false);
-        app.app.save_session_and_flush();
-        assert_eq!(app.app.session_history_len(), 2);
-        assert_eq!(app.app.core.session.display_context_tokens(), Some(100));
-        app.app.core.session.id.clone()
+        app.rewind_to_block(Some(second_prompt_block_idx), false);
+        app.save_session_and_flush();
+        assert_eq!(app.session_message_count(), 2);
+        assert_eq!(app.session_snapshot().display_context_tokens(), Some(100));
+        app.session_snapshot().id.clone()
     };
 
-    let loaded = loaded_session(&session_id);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let loaded = loaded_session(&resumed, &session_id);
     assert_eq!(loaded.history.len(), 2);
     assert_eq!(loaded.current_context_tokens(), Some(100));
     assert_eq!(loaded.display_context_tokens(), Some(100));
 
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert_eq!(resumed.app.session_history_len(), 2);
-    assert_eq!(resumed.app.core.session.display_context_tokens(), Some(100));
+    resumed.load_session_by_id(&session_id);
+    assert_eq!(resumed.session_message_count(), 2);
+    assert_eq!(
+        resumed.session_snapshot().display_context_tokens(),
+        Some(100)
+    );
 }
 
 #[test]
@@ -1127,14 +1005,14 @@ fn cancel_or_shutdown_preserves_committed_tool_invocations() {
         match finalizer {
             Finalizer::Cancel => app.cancel(),
             Finalizer::Shutdown => {
-                if app.app.agent.is_some() {
-                    app.app.finish_turn(crate::app::TurnEnd::Cancelled);
+                if app.agent_running() {
+                    app.discard_turn(crate::app::TurnEnd::Cancelled);
                 }
             }
         }
-        app.app.save_session_and_flush();
+        app.save_session_and_flush();
 
-        let loaded = loaded_session(&app.app.core.session.id);
+        let loaded = loaded_session(&app, &app.session_snapshot().id);
         assert_committed_tool_invocation(&loaded.history);
     }
 }
@@ -1145,27 +1023,25 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for item in tool_history() {
-            app.app.session_append_history(item);
+            app.session_append_history(item);
         }
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
 
-    assert_eq!(resumed.app.core.session.id, session_id);
+    assert_eq!(resumed.session_snapshot().id, session_id);
     assert!(
-        resumed.app.core.session.history.is_empty(),
+        resumed.session_snapshot().history.is_empty(),
         "resume should use the production sparse SQLite session path"
     );
-    assert_eq!(resumed.app.session_history_len(), 2);
+    assert_eq!(resumed.session_message_count(), 2);
 
-    let stored_history = resumed
-        .app
-        .session_history_range(0..resumed.app.session_history_len());
+    let stored_history = resumed.session_history_range(0..resumed.session_message_count());
     assert_committed_tool_invocation(&stored_history);
-    assert_model_history_tool_messages(&resumed.app.model_history_messages());
+    assert_model_history_tool_messages(&resumed.model_history_messages());
 }
 
 #[test]
@@ -1173,16 +1049,14 @@ fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("old prompt")));
-        app.app
-            .session_append_history(HistoryItem::assistant(AssistantStep::terminal(
-                Some(Content::text("recent reply")),
-                None,
-                Vec::new(),
-            )));
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.session_append_history(HistoryItem::user(Content::text("old prompt")));
+        app.session_append_history(HistoryItem::assistant(AssistantStep::terminal(
+            Some(Content::text("recent reply")),
+            None,
+            Vec::new(),
+        )));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
@@ -1202,20 +1076,19 @@ fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
     drop(db);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
 
-    assert_eq!(resumed.app.core.session.id, session_id);
-    assert!(resumed.app.core.session.history.is_empty());
+    assert_eq!(resumed.session_snapshot().id, session_id);
+    assert!(resumed.session_snapshot().history.is_empty());
     let checkpoint = resumed
-        .app
-        .core
-        .session
+        .conversation_probe()
+        .session()
         .checkpoint
         .as_ref()
         .expect("checkpoint tolerated on sparse resume");
     assert_eq!(checkpoint.first_live_index, 0);
 
-    let history = resumed.app.model_history();
+    let history = resumed.model_history();
     assert_eq!(history.len(), 3);
     assert!(matches!(
         &history[0],
@@ -1248,20 +1121,18 @@ fn store_backed_resume_then_continue_preserves_prior_tool_invocations() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for item in tool_history() {
-            app.app.session_append_history(item);
+            app.session_append_history(item);
         }
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text("continue after resume")));
-    resumed.app.save_session_and_flush();
+    resumed.load_session_by_id(&session_id);
+    resumed.session_append_history(HistoryItem::user(Content::text("continue after resume")));
+    resumed.save_session_and_flush();
 
-    let loaded = loaded_session(&session_id);
+    let loaded = loaded_session(&resumed, &session_id);
     assert_eq!(loaded.history.len(), 3);
     assert_committed_tool_invocation(&loaded.history);
     assert!(matches!(
@@ -1276,24 +1147,23 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for item in tool_history() {
-            app.app.session_append_history(item);
+            app.session_append_history(item);
         }
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     for cycle in 0..4 {
         let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-        resumed.app.load_session_by_id(&session_id);
-        assert_eq!(resumed.app.core.session.id, session_id);
-        assert!(resumed.app.session_document.live_session.is_some());
-        resumed
-            .app
-            .session_append_history(HistoryItem::user(Content::text(format!("cycle {cycle}"))));
-        resumed.app.save_session_and_flush();
+        resumed.load_session_by_id(&session_id);
+        assert_eq!(resumed.session_snapshot().id, session_id);
+        assert!(resumed.conversation_probe().has_live_session());
+        resumed.session_append_history(HistoryItem::user(Content::text(format!("cycle {cycle}"))));
+        resumed.save_session_and_flush();
     }
 
-    let loaded = loaded_session(&session_id);
+    let reader = TestApp::builder().build_without_test_home_reset(&guard);
+    let loaded = loaded_session(&reader, &session_id);
     assert_eq!(loaded.history.len(), 6);
     assert_committed_tool_invocation(&loaded.history);
     for cycle in 0..4 {
@@ -1308,12 +1178,10 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
 fn resuming_session_with_active_writer_is_read_only() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
-    writer
-        .app
-        .session_append_history(HistoryItem::user(Content::text("owned history")));
-    writer.app.save_session_and_flush();
+    writer.session_append_history(HistoryItem::user(Content::text("owned history")));
+    writer.save_session_and_flush();
 
-    let session_id = writer.app.core.session.id.clone();
+    let session_id = writer.session_snapshot().id.clone();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     let db_path = session_dir.join("session.db");
     let before = smelt_store::SessionReader::open_database(&db_path)
@@ -1322,19 +1190,17 @@ fn resuming_session_with_active_writer_is_read_only() {
         .unwrap()
         .expect("session state before read-only resume");
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
-    reader.app.load_session_by_id(&session_id);
+    reader.load_session_by_id(&session_id);
 
-    assert_eq!(reader.app.core.session.id, session_id);
-    assert!(reader.app.session_is_read_only());
-    assert_eq!(reader.app.session_history_len(), 1);
+    assert_eq!(reader.session_snapshot().id, session_id);
+    assert!(reader.session_is_read_only());
+    assert_eq!(reader.session_message_count(), 1);
 
-    let result = reader
-        .app
-        .apply_history_append_to_history(&HistoryAppend::append(HistoryItem::user(Content::text(
-            "read-only mutation",
-        ))));
+    let result = reader.apply_history_append_to_history(&HistoryAppend::append(HistoryItem::user(
+        Content::text("read-only mutation"),
+    )));
     assert_eq!(result, HistoryAppendResult::Unchanged);
-    reader.app.save_session_and_flush();
+    reader.save_session_and_flush();
 
     let after = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
@@ -1357,24 +1223,17 @@ fn ownership_loss_moves_session_to_read_only_and_keeps_document_dirty() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert!(!resumed.app.session_is_read_only());
-    resumed
-        .app
-        .persistence
-        .as_ref()
-        .expect("persistence actor")
-        .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text(
-            "unsaved after ownership loss",
-        )));
+    resumed.load_session_by_id(&session_id);
+    assert!(!resumed.session_is_read_only());
+    resumed.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    resumed.session_append_history(HistoryItem::user(Content::text(
+        "unsaved after ownership loss",
+    )));
 
-    resumed.app.save_session_and_flush();
+    resumed.save_session_and_flush();
 
-    assert!(resumed.app.session_is_read_only());
-    assert!(resumed.app.session_document_has_unflushed_work());
+    assert!(resumed.session_is_read_only());
+    assert!(resumed.session_document_has_unflushed_work());
     assert!(has_sticky_session_save_failure(&resumed, &session_id));
 }
 
@@ -1383,50 +1242,44 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
     resumed.start_turn(42);
     resumed.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
         delta: "stream finalized by fork cancellation".into(),
     }));
     assert!(resumed.streaming_state().text);
-    resumed
-        .app
-        .persistence
-        .as_ref()
-        .expect("persistence actor")
-        .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text(
-            "preserved in ownership-loss fork",
-        )));
-    resumed.app.push_block(Block::Text {
-        content: "unsaved ownership-loss descriptor".into(),
+    resumed.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    resumed.session_append_history(HistoryItem::user(Content::text(
+        "preserved in ownership-loss fork",
+    )));
+    resumed.push_transcript_block(Block::Text {
+        content: "unsaved ownership-loss record".into(),
     });
-    resumed.app.save_session_and_flush();
-    assert!(resumed.app.session_is_read_only());
-    assert!(resumed.app.session_document_has_unflushed_work());
+    resumed.save_session_and_flush();
+    assert!(resumed.session_is_read_only());
+    assert!(resumed.session_document_has_unflushed_work());
 
-    resumed.app.fork_session();
+    resumed.fork_session();
 
-    let fork_id = resumed.app.core.session.id.clone();
+    let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
-    assert!(!resumed.app.session_is_read_only());
-    assert!(!resumed.app.session_document_has_unflushed_work());
-    assert!(resumed.app.core.session.history.is_empty());
-    assert!(resumed.app.session_document.live_session.is_some());
-    let reader =
-        smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&fork_id))
-            .unwrap();
-    let descriptor_rows = reader.read_all_transcript_descriptor_records().unwrap();
-    assert!(descriptor_rows.iter().any(|row| row
-        .preview_text
-        .contains("unsaved ownership-loss descriptor")));
+    assert!(!resumed.session_is_read_only());
+    assert!(!resumed.session_document_has_unflushed_work());
+    assert!(resumed.session_snapshot().history.is_empty());
+    assert!(resumed.conversation_probe().has_live_session());
+    let reader = smelt_store::SessionReader::open_existing(
+        resumed.core_probe().sessions.dir_for_id(&fork_id),
+    )
+    .unwrap();
+    let record_rows = reader.read_all_transcript_records().unwrap();
+    assert!(record_rows
+        .iter()
+        .any(|row| row.preview_text.contains("unsaved ownership-loss record")));
     let full = reader.load_full_session().unwrap().unwrap();
     assert!(full.turn_metas.iter().any(|(history_len, meta)| {
         *history_len == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
     }));
-    let forked = loaded_session(&fork_id);
+    let forked = loaded_session(&resumed, &fork_id);
     assert_eq!(forked.parent_id.as_deref(), Some(session_id.as_str()));
     assert_eq!(forked.history.len(), 2);
     assert!(matches!(
@@ -1434,7 +1287,7 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
         Some(HistoryItem::User { content, .. })
             if content.text_content() == "preserved in ownership-loss fork"
     ));
-    assert_eq!(loaded_session(&session_id).history.len(), 1);
+    assert_eq!(loaded_session(&resumed, &session_id).history.len(), 1);
 }
 
 #[test]
@@ -1443,35 +1296,28 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
     let session_id = saved_one_row_session(&guard);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    let stored_len = resumed.app.session_history_len();
+    resumed.load_session_by_id(&session_id);
+    let stored_len = resumed.session_message_count();
     assert_eq!(stored_len, 1);
 
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text("kept live row")));
-    assert!(resumed.app.session_document.live_session.is_some());
-    resumed
-        .app
-        .session_document
-        .set_history_resave_from_for_test(stored_len + 1);
+    resumed.session_append_history(HistoryItem::user(Content::text("kept live row")));
+    assert!(resumed.conversation_probe().has_live_session());
+    resumed.set_history_resave_from_for_harness(stored_len + 1);
 
-    resumed.app.save_session();
-    resumed.app.flush_persist();
+    resumed.save_session();
+    resumed.flush_persist();
 
     assert!(
-        resumed.app.notification.is_none(),
+        resumed.overlays_probe().notification().is_none(),
         "save should not surface a prefix-exceeds-stored integrity error"
     );
     let live = resumed
-        .app
-        .session_document
-        .live_session
-        .as_ref()
+        .conversation_probe()
+        .live_session()
         .expect("store-backed session");
     assert_eq!(live.live_suffix_len(), 0);
 
-    let loaded = loaded_session(&session_id);
+    let loaded = loaded_session(&resumed, &session_id);
     assert_eq!(loaded.history.len(), stored_len + 1);
     assert!(matches!(
         loaded.history.last(),
@@ -1484,10 +1330,9 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     for idx in 0..24 {
-        app.app
-            .session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
+        app.session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
     }
-    let compacted_prefix_len = app.app.session_history_len();
+    let compacted_prefix_len = app.session_message_count();
     app.start_turn(1);
     app.feed_one(SourceEvent::engine(EngineEvent::TokenUsage {
         usage: TokenUsage {
@@ -1503,15 +1348,15 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         history: None,
         meta: None,
     }));
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
-    let mut settings = app.app.core.config.settings.clone();
+    let mut settings = app.core_probe().config.settings.clone();
     settings.auto_compact = true;
     settings.compact_threshold = 0.8;
     settings.compact_keep_recent_groups = 1.0;
-    app.app.set_settings_for_harness(settings);
-    app.app.core.config.context_window = Some(100);
-    app.app.commit_request_history_item(
+    app.set_settings_for_harness(settings);
+    app.set_context_window(Some(100));
+    app.commit_request_history_item(
         HistoryItem::user(Content::text("request after compaction")),
         Some(Block::User {
             text: "request after compaction".into(),
@@ -1521,16 +1366,14 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
     );
     app.start_turn(42);
 
-    let messages = protocol::history_to_messages(&app.app.model_history());
+    let messages = protocol::history_to_messages(&app.model_history());
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages: engine::PreparedRequestMessages::model_only(messages),
-                estimated_tokens: 200,
-                reply: tx,
-            });
+        app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            messages: engine::PreparedRequestMessages::model_only(messages),
+            estimated_tokens: 200,
+            reply: tx,
+        });
     }
     let ask_id = app
         .drain_engine_sends()
@@ -1542,18 +1385,16 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         .next_back()
         .expect("pre-request compaction should issue EngineAsk");
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_engine_event(EngineEvent::EngineAskResponse {
-                id: ask_id,
-                message: Some(protocol::Message::assistant(
-                    Some(Content::text("# Goal\nretained summary")),
-                    None,
-                    None,
-                )),
-                error: None,
-            });
-        app.app.drive_lua_tasks();
+        app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+            id: ask_id,
+            message: Some(protocol::Message::assistant(
+                Some(Content::text("# Goal\nretained summary")),
+                None,
+                None,
+            )),
+            error: None,
+        });
+        app.drive_lua_tasks();
     }
 
     let (replacement, coordinates) = match rx
@@ -1586,16 +1427,16 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
             ))],
         },
     }));
-    app.app.save_session_and_flush();
+    app.save_session_and_flush();
 
     assert!(
-        app.app.notification.is_none(),
+        app.overlays_probe().notification().is_none(),
         "compacted append should save without a side-table bounds error: {:?}",
-        app.app.notification
+        app.overlays_probe().notification()
     );
-    assert_eq!(app.app.session_history_len(), compacted_prefix_len + 2);
-    let session_id = app.app.core.session.id.clone();
-    let loaded = loaded_session(&session_id);
+    assert_eq!(app.session_message_count(), compacted_prefix_len + 2);
+    let session_id = app.session_snapshot().id.clone();
+    let loaded = loaded_session(&app, &session_id);
     assert_eq!(loaded.history.len(), compacted_prefix_len + 2);
     assert!(loaded
         .context_snapshots
@@ -1621,11 +1462,9 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
 
     drop(app);
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert_eq!(resumed.app.session_history_len(), compacted_prefix_len + 2);
-    let resumed_history = resumed
-        .app
-        .session_history_range(0..resumed.app.session_history_len());
+    resumed.load_session_by_id(&session_id);
+    assert_eq!(resumed.session_message_count(), compacted_prefix_len + 2);
+    let resumed_history = resumed.session_history_range(0..resumed.session_message_count());
     assert!(matches!(
         resumed_history.first(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "row 0"
@@ -1643,56 +1482,45 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for idx in 0..4 {
-            app.app
-                .session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
+            app.session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
         }
-        app.app
-            .session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
-                kind: "compaction".into(),
-                summary: "retained summary".into(),
-                first_live_index: 3,
-                created_at_ms: 1,
-                tokens_before: None,
-                tokens_after_estimate: None,
-                tokens_after_estimate_history_len: None,
-                pre_checkpoint_context_tokens: None,
-                pre_checkpoint_context_history_len: None,
-            }));
-        app.app.save_session_and_flush();
-        app.app.core.session.id.clone()
+        app.session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
+            kind: "compaction".into(),
+            summary: "retained summary".into(),
+            first_live_index: 3,
+            created_at_ms: 1,
+            tokens_before: None,
+            tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
+            pre_checkpoint_context_tokens: None,
+            pre_checkpoint_context_history_len: None,
+        }));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
+    resumed.load_session_by_id(&session_id);
     assert_eq!(
         resumed
-            .app
-            .core
-            .session
+            .conversation_probe()
+            .session()
             .checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.first_live_index),
         Some(3)
     );
-    let identity = resumed.app.active_context_token_identity();
-    resumed.app.apply_session_document_mutation(
-        crate::app::session_document::SessionMutation::RewindHistoryTo {
-            index: 1,
-            keep_checkpoint_at_boundary: false,
-            identity,
-        },
-    );
-    assert!(resumed.app.core.session.checkpoint.is_none());
+    let identity = resumed.active_context_token_identity();
+    resumed.rewind_history_for_harness(1, false, identity);
+    assert!(resumed.session_snapshot().checkpoint.is_none());
 
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text("new after rewind")));
-    resumed.app.save_session_and_flush();
+    resumed.session_append_history(HistoryItem::user(Content::text("new after rewind")));
+    resumed.save_session_and_flush();
 
     assert!(
-        resumed.app.notification.is_none(),
+        resumed.overlays_probe().notification().is_none(),
         "save after rewind should not surface a checkpoint/history integrity error: {:?}",
-        resumed.app.notification
+        resumed.overlays_probe().notification()
     );
 }
 
@@ -1702,21 +1530,19 @@ fn in_flight_live_save_then_rewind_flushes_without_bad_prefix() {
     let session_id = saved_one_row_session(&guard);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text("save before rewind")));
-    resumed.app.save_session();
-    assert!(resumed.app.session_document_has_unflushed_work());
+    resumed.load_session_by_id(&session_id);
+    resumed.session_append_history(HistoryItem::user(Content::text("save before rewind")));
+    resumed.save_session();
+    assert!(resumed.session_document_has_unflushed_work());
 
-    resumed.app.rewind_to_start();
-    resumed.app.save_session_and_flush();
+    resumed.rewind_to_start();
+    resumed.save_session_and_flush();
 
     assert!(
-        resumed.app.notification.is_none(),
+        resumed.overlays_probe().notification().is_none(),
         "rewind after an in-flight live save should not surface a save error"
     );
-    let loaded = loaded_session(&session_id);
+    let loaded = loaded_session(&resumed, &session_id);
     assert!(loaded.history.is_empty());
 }
 
@@ -1724,12 +1550,10 @@ fn in_flight_live_save_then_rewind_flushes_without_bad_prefix() {
 fn repeated_read_only_resumes_do_not_modify_writer_session() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
-    writer
-        .app
-        .session_append_history(HistoryItem::user(Content::text("writer row")));
-    writer.app.save_session_and_flush();
+    writer.session_append_history(HistoryItem::user(Content::text("writer row")));
+    writer.save_session_and_flush();
 
-    let session_id = writer.app.core.session.id.clone();
+    let session_id = writer.session_snapshot().id.clone();
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
     let before = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
@@ -1738,19 +1562,17 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
         .expect("session state before readonly loops");
     for idx in 0..5 {
         let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
-        reader.app.load_session_by_id(&session_id);
+        reader.load_session_by_id(&session_id);
         assert!(
-            reader.app.session_is_read_only(),
+            reader.session_is_read_only(),
             "reader {idx} should be read-only"
         );
-        assert_eq!(reader.app.session_history_len(), 1);
-        let result = reader
-            .app
-            .apply_history_append_to_history(&HistoryAppend::append(HistoryItem::user(
-                Content::text(format!("ignored reader row {idx}")),
-            )));
+        assert_eq!(reader.session_message_count(), 1);
+        let result = reader.apply_history_append_to_history(&HistoryAppend::append(
+            HistoryItem::user(Content::text(format!("ignored reader row {idx}"))),
+        ));
         assert_eq!(result, HistoryAppendResult::Unchanged);
-        reader.app.save_session_and_flush();
+        reader.save_session_and_flush();
     }
 
     let after = smelt_store::SessionReader::open_database(&db_path)

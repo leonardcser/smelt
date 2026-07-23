@@ -66,7 +66,7 @@ fn apply_setting(
         .unwrap_or_else(|error| error.into_inner())
         .insert(key, parsed);
     if shared.core.external_effects_active() {
-        crate::lua::try_with_app(|app| app.schedule_runtime_reconcile());
+        crate::lua::try_with_runtime_host(|host| host.schedule_runtime_reconcile());
     }
     Ok(())
 }
@@ -136,18 +136,18 @@ pub(super) fn register(
             "__index",
             &["_", "key"],
             move |lua, (_, key): (mlua::Value, String)| -> LuaResult<mlua::Value> {
-                let Some(decl) = setting_decl(&key) else {
+                if setting_decl(&key).is_none() {
                     return Err(unknown_key_err(&key));
-                };
+                }
                 let desired = shared
                     .settings_overrides
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .get(&key)
                     .cloned();
-                if let Some(value) = desired.or_else(|| {
-                    crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings))
-                }) {
+                if let Some(value) = desired
+                    .or_else(|| crate::lua::try_with_runtime_host(|host| host.setting_value(&key))?)
+                {
                     return setting_to_lua(lua, &value);
                 }
                 Err(LuaError::external(format!(
@@ -226,9 +226,9 @@ pub(super) fn register(
                                 .get(key)
                                 .cloned();
                             let value = desired.or_else(|| {
-                                crate::lua::try_with_app(|app| {
-                                    (decl.read)(&app.core.config.settings)
-                                })
+                                crate::lua::try_with_runtime_host(|host| {
+                                    host.setting_value(decl.key)
+                                })?
                             });
                             let value = match value {
                                 Some(ref value) => setting_to_lua(lua, value)?,

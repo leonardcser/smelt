@@ -3,12 +3,11 @@
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use std::sync::Arc;
 
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
-    _shared: &Arc<crate::lua::LuaShared>,
+    shared: &std::sync::Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     let inspect = LuaMod::under(
         lua,
@@ -22,32 +21,8 @@ pub(super) fn register(
         "__start",
         &["task_id"],
         move |_, task_id: u64| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let shared_server = Arc::clone(&app.inspect_server);
-                if let Some(ref server) = *shared_server.lock().unwrap() {
-                    app.lua.shared().resume_sink().resolve_json(
-                        task_id,
-                        serde_json::json!({ "ok": true, "url": server.url() }),
-                    );
-                    return Ok(());
-                }
-
-                let sink = app.lua.shared().resume_sink();
-                tokio::spawn(async move {
-                    let payload = match crate::inspect_server::Server::start().await {
-                        Ok(server) => {
-                            let url = server.url();
-                            *shared_server.lock().unwrap() = Some(server);
-                            serde_json::json!({ "ok": true, "url": url })
-                        }
-                        Err(err) => {
-                            serde_json::json!({ "ok": false, "error": err.to_string() })
-                        }
-                    };
-                    sink.resolve_json(task_id, payload);
-                });
-                Ok(())
-            })
+            crate::lua::with_platform_host(|host| host.start_inspect_server(task_id));
+            Ok(())
         },
     )?;
 
@@ -55,30 +30,19 @@ pub(super) fn register(
         "__stop",
         &["task_id"],
         move |_, task_id: u64| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let shared_server = Arc::clone(&app.inspect_server);
-                let sink = app.lua.shared().resume_sink();
-                tokio::spawn(async move {
-                    let server = shared_server.lock().unwrap().take();
-                    let payload = if let Some(mut server) = server {
-                        server.stop().await;
-                        serde_json::json!({ "ok": true })
-                    } else {
-                        serde_json::json!({ "ok": false, "error": "server not running" })
-                    };
-                    sink.resolve_json(task_id, payload);
-                });
-                Ok(())
-            })
+            crate::lua::with_platform_host(|host| host.stop_inspect_server(task_id));
+            Ok(())
         },
     )?;
 
+    let open_context = std::sync::Arc::clone(&shared.core);
     inspect.private_fn(
         "__open_url",
         &["url"],
         move |lua, url: String| -> LuaResult<mlua::Table> {
             let result = lua.create_table()?;
-            match engine::opener::open_url_if_available(&url) {
+            let cwd = open_context.evaluation_cwd();
+            match engine::opener::open_url_if_available_in(&url, &cwd) {
                 engine::opener::OpenResult::Opened => {
                     result.set("ok", true)?;
                     result.set("opened", true)?;
@@ -103,15 +67,8 @@ pub(super) fn register(
         "Return the URL of the running inspector server, or nil if it is not running.",
         &[],
         move |lua, ()| -> LuaResult<mlua::Value> {
-            crate::lua::try_with_app(|app| {
-                app.inspect_server
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|s| s.url())
-                    .into_lua(lua)
-            })
-            .unwrap_or(Ok(mlua::Value::Nil))
+            crate::lua::try_with_platform_host(|host| host.inspect_server_url().into_lua(lua))
+                .unwrap_or(Ok(mlua::Value::Nil))
         },
     )?;
 

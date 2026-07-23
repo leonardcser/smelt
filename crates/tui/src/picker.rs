@@ -130,7 +130,7 @@ pub(crate) fn open(
     .blocks_agent(blocks_agent);
     let overlay_id = app.ui.overlay_open(overlay);
 
-    app.picker_state.insert(
+    app.overlays.install_picker(
         leaf,
         PickerState {
             overlay: overlay_id,
@@ -156,7 +156,7 @@ pub(crate) fn open(
 
 /// Replace picker items, resizing the overlay. No-op if `leaf` is not a known picker.
 pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
-    let Some(mut state) = app.picker_state.remove(&leaf) else {
+    let Some(mut state) = app.overlays.take_picker(leaf) else {
         return;
     };
     state.max_label = max_label_chars(&items);
@@ -166,7 +166,7 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     let height = picker_height(state.items.len(), state.placement, &app.ui);
     let new_anchor = anchor_for(&app.ui, state.placement, height);
     let overlay = state.overlay;
-    app.picker_state.insert(leaf, state);
+    app.overlays.install_picker(leaf, state);
 
     if let Some(ov) = app.ui.overlay_mut(overlay) {
         ov.layout = layout_for(leaf, height);
@@ -182,7 +182,7 @@ pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
 
 /// Move the picker's logical selection by `delta`, clamped to the item set.
 pub(crate) fn move_selected(app: &mut TuiApp, leaf: WinId, delta: isize) {
-    let Some(state) = app.picker_state.get(&leaf) else {
+    let Some(state) = app.overlays.picker(leaf) else {
         return;
     };
     let total = state.items.len();
@@ -202,9 +202,9 @@ pub(crate) fn move_selected(app: &mut TuiApp, leaf: WinId, delta: isize) {
 
 /// Refresh materialized picker buffers after viewport-led scrolling.
 pub(crate) fn sync_scrolled(app: &mut TuiApp) {
-    let leaves: Vec<WinId> = app.picker_state.keys().copied().collect();
+    let leaves: Vec<WinId> = app.overlays.picker_leaves();
     for leaf in leaves {
-        let Some(state) = app.picker_state.get(&leaf) else {
+        let Some(state) = app.overlays.picker(leaf) else {
             continue;
         };
         let total = state.items.len();
@@ -223,9 +223,9 @@ pub(crate) fn sync_scrolled(app: &mut TuiApp) {
 /// Called from `refresh_main_layout` so pickers shrink or grow as the
 /// available headroom above the prompt changes.
 pub(crate) fn sync_layouts(app: &mut TuiApp) {
-    let leaves: Vec<WinId> = app.picker_state.keys().copied().collect();
+    let leaves: Vec<WinId> = app.overlays.picker_leaves();
     for leaf in leaves {
-        let Some(state) = app.picker_state.get(&leaf) else {
+        let Some(state) = app.overlays.picker(leaf) else {
             continue;
         };
         if !matches!(
@@ -250,12 +250,12 @@ pub(crate) fn sync_layouts(app: &mut TuiApp) {
 /// Remove picker state when its leaf closes. The overlay itself is removed
 /// by `Ui::win_close → overlay_close`.
 pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
-    app.picker_state.remove(&leaf);
+    app.overlays.forget_picker(leaf);
 }
 
 /// Current logical selection index (0-based) for `leaf`.
 pub(crate) fn selected_index(app: &TuiApp, leaf: WinId) -> Option<usize> {
-    let state = app.picker_state.get(&leaf)?;
+    let state = app.overlays.picker(leaf)?;
     (!state.items.is_empty()).then_some(state.selected)
 }
 
@@ -270,7 +270,7 @@ fn sync_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
 }
 
 fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnchor) {
-    let Some(mut state) = app.picker_state.remove(&leaf) else {
+    let Some(mut state) = app.overlays.take_picker(leaf) else {
         return;
     };
     let total = state.items.len();
@@ -322,7 +322,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
         }
     }
     state.materialized = range;
-    app.picker_state.insert(leaf, state);
+    app.overlays.install_picker(leaf, state);
 }
 
 fn clamp_selected(selected: usize, total: usize) -> usize {

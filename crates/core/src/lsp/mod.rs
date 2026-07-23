@@ -71,17 +71,29 @@ enum LspClientState {
     },
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct LspRuntimePaths {
+    cwd: PathBuf,
+    home: PathBuf,
+}
+
 pub struct LspManager {
+    runtime: StdMutex<LspRuntimePaths>,
     servers: StdMutex<HashMap<String, ServerEntry>>,
     controller: StdMutex<LspControllerState>,
 }
 
-#[derive(Default)]
 struct LspControllerState {
     desired: LspConfig,
+    desired_runtime: LspRuntimePaths,
     desired_revision: u64,
     observed_revision: u64,
+}
+
+impl Default for LspManager {
+    fn default() -> Self {
+        Self::new(PathBuf::from("."), PathBuf::from("."))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +106,7 @@ pub struct LspConfigure {
     manager: Arc<LspManager>,
     revision: u64,
     desired: LspConfig,
+    runtime: LspRuntimePaths,
 }
 
 struct LspConfigureCompletion {
@@ -423,14 +436,45 @@ pub async fn run_daemon(socket: PathBuf) -> Result<(), String> {
 }
 
 impl LspManager {
-    fn reconcile_config(&self, config: LspConfig) -> Vec<Arc<LspClientSlot>> {
+    pub fn new(cwd: PathBuf, home: PathBuf) -> Self {
+        let runtime = LspRuntimePaths { cwd, home };
+        Self {
+            runtime: StdMutex::new(runtime.clone()),
+            servers: StdMutex::new(HashMap::new()),
+            controller: StdMutex::new(LspControllerState {
+                desired: LspConfig::default(),
+                desired_runtime: runtime,
+                desired_revision: 0,
+                observed_revision: 0,
+            }),
+        }
+    }
+
+    fn runtime_paths(&self) -> LspRuntimePaths {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn reconcile_config(
+        &self,
+        config: LspConfig,
+        runtime: LspRuntimePaths,
+    ) -> Vec<Arc<LspClientSlot>> {
+        let mut installed_runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime_changed = *installed_runtime != runtime;
         let mut removed_clients = Vec::new();
         let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
         servers.retain(|name, entry| {
-            let keep = config
-                .servers
-                .get(name)
-                .is_some_and(|new_config| new_config == &entry.config);
+            let keep = !runtime_changed
+                && config
+                    .servers
+                    .get(name)
+                    .is_some_and(|new_config| new_config == &entry.config);
             if !keep {
                 for client in entry.clients.values() {
                     client.cancel.cancel();
@@ -445,41 +489,57 @@ impl LspManager {
                 clients: HashMap::new(),
             });
         }
+        *installed_runtime = runtime;
         removed_clients
     }
 
-    fn reserve_configure(&self, desired: &LspConfig) -> Option<u64> {
+    fn reserve_configure(&self, desired: &LspConfig, runtime: &LspRuntimePaths) -> Option<u64> {
         let mut controller = self
             .controller
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if &controller.desired == desired {
+        if &controller.desired == desired && &controller.desired_runtime == runtime {
             return None;
         }
         controller.desired_revision = controller.desired_revision.wrapping_add(1);
         controller.desired = desired.clone();
+        controller.desired_runtime = runtime.clone();
         Some(controller.desired_revision)
     }
 
-    pub fn prepare_configure(self: &Arc<Self>, desired: LspConfig) -> Option<LspConfigure> {
-        self.reserve_configure(&desired)
+    pub fn prepare_configure(
+        self: &Arc<Self>,
+        desired: LspConfig,
+        cwd: &Path,
+        home: &Path,
+    ) -> Option<LspConfigure> {
+        let runtime = LspRuntimePaths {
+            cwd: cwd.to_path_buf(),
+            home: home.to_path_buf(),
+        };
+        self.reserve_configure(&desired, &runtime)
             .map(|revision| LspConfigure {
                 manager: Arc::clone(self),
                 revision,
                 desired,
+                runtime,
             })
     }
 
-    pub async fn configure(&self, desired: LspConfig) {
-        let Some(revision) = self.reserve_configure(&desired) else {
+    pub async fn configure(&self, desired: LspConfig, cwd: &Path, home: &Path) {
+        let runtime = LspRuntimePaths {
+            cwd: cwd.to_path_buf(),
+            home: home.to_path_buf(),
+        };
+        let Some(revision) = self.reserve_configure(&desired, &runtime) else {
             return;
         };
-        self.apply_configure(revision, desired).await;
+        self.apply_configure(revision, desired, runtime).await;
     }
 
-    pub fn configure_detached(self: &Arc<Self>, desired: LspConfig) {
+    pub fn configure_detached(self: &Arc<Self>, desired: LspConfig, cwd: &Path, home: &Path) {
         let Some(completion) = self
-            .prepare_configure(desired)
+            .prepare_configure(desired, cwd, home)
             .and_then(LspConfigure::install)
         else {
             return;
@@ -495,6 +555,7 @@ impl LspManager {
         &self,
         revision: u64,
         desired: LspConfig,
+        runtime: LspRuntimePaths,
     ) -> Option<Vec<Arc<LspClientSlot>>> {
         let controller = self
             .controller
@@ -503,7 +564,7 @@ impl LspManager {
         if controller.desired_revision != revision {
             return None;
         }
-        let removed_clients = self.reconcile_config(desired);
+        let removed_clients = self.reconcile_config(desired, runtime);
         drop(controller);
         Some(removed_clients)
     }
@@ -521,8 +582,8 @@ impl LspManager {
         }
     }
 
-    async fn apply_configure(&self, revision: u64, desired: LspConfig) {
-        if let Some(removed_clients) = self.install_configure(revision, desired) {
+    async fn apply_configure(&self, revision: u64, desired: LspConfig, runtime: LspRuntimePaths) {
+        if let Some(removed_clients) = self.install_configure(revision, desired, runtime) {
             self.finish_configure(revision, removed_clients).await;
         }
     }
@@ -553,7 +614,7 @@ impl LspManager {
         if config.servers.is_empty() {
             return self.dispatch_local(operation, args).await;
         }
-        daemon::call(config, operation, args).await
+        daemon::call(config, self.runtime_paths(), operation, args).await
     }
 
     pub async fn shutdown_all(&self) {
@@ -621,9 +682,11 @@ impl LspManager {
     }
 
     pub async fn document_symbols(&self, file_path: &str) -> Result<Value, String> {
-        let client = self.client_for_file(file_path).await?;
-        client.sync_document(file_path).await?;
-        request_document_symbols(&client, file_path).await
+        let runtime = self.runtime_paths();
+        let file_path = absolute_path_string(file_path, &runtime.cwd);
+        let client = self.client_for_file(&file_path).await?;
+        client.sync_document(&file_path).await?;
+        request_document_symbols(&client, &file_path).await
     }
 
     pub(crate) async fn outline(&self, options: OutlineOptions<'_>) -> Result<Value, String> {
@@ -641,8 +704,13 @@ impl LspManager {
         let limit = bounded_limit(options.max_symbols, 200, 500);
         let (total, compact_symbols) = limited_outline_symbols(&symbols, filter, limit);
         let shown = count_compact_outline_symbols(&compact_symbols);
+        let runtime = self.runtime_paths();
         Ok(json!({
-            "file_path": display_path(&absolute_path_string(options.file_path)),
+            "file_path": display_path(
+                &absolute_path_string(options.file_path, &runtime.cwd),
+                &runtime.cwd,
+                &runtime.home,
+            ),
             "filters": {
                 "symbol": options.symbol,
                 "kind": options.kind,
@@ -666,6 +734,7 @@ impl LspManager {
         limit: usize,
         exact: bool,
     ) -> Result<Value, String> {
+        let runtime = self.runtime_paths();
         let clients = self.workspace_clients(path_glob).await?;
         let mut errors = Vec::new();
         let mut symbols = Vec::new();
@@ -686,9 +755,15 @@ impl LspManager {
                 continue;
             };
             match result {
-                Ok(value) => {
-                    collect_workspace_symbols(&value, &server, kind, path_glob, &mut symbols)
-                }
+                Ok(value) => collect_workspace_symbols(
+                    &value,
+                    &server,
+                    kind,
+                    path_glob,
+                    &runtime.cwd,
+                    &runtime.home,
+                    &mut symbols,
+                ),
                 Err(err) => errors.push(json!({
                     "code": "lsp_workspace_symbol_request_failed",
                     "message": err,
@@ -723,9 +798,11 @@ impl LspManager {
         column: u64,
         depth: u64,
     ) -> Result<Value, String> {
-        let client = self.client_for_file(file_path).await?;
-        let text = client.sync_document(file_path).await?.text;
-        let params = text_position_params(file_path, &text, line, column)?;
+        let runtime = self.runtime_paths();
+        let file_path = absolute_path_string(file_path, &runtime.cwd);
+        let client = self.client_for_file(&file_path).await?;
+        let text = client.sync_document(&file_path).await?.text;
+        let params = text_position_params(&file_path, &text, line, column)?;
         let hover_params = params.clone();
         let definition_params = params.clone();
         let type_definition_params = params.clone();
@@ -740,13 +817,22 @@ impl LspManager {
                 )
             },
             async {
-                optional_lsp_locations(&client, "textDocument/definition", definition_params).await
+                optional_lsp_locations(
+                    &client,
+                    "textDocument/definition",
+                    definition_params,
+                    &runtime.cwd,
+                    &runtime.home,
+                )
+                .await
             },
             async {
                 optional_lsp_locations(
                     &client,
                     "textDocument/typeDefinition",
                     type_definition_params,
+                    &runtime.cwd,
+                    &runtime.home,
                 )
                 .await
             },
@@ -755,11 +841,13 @@ impl LspManager {
                     &client,
                     "textDocument/implementation",
                     implementation_params,
+                    &runtime.cwd,
+                    &runtime.home,
                 )
                 .await
             },
             async {
-                request_document_symbols(&symbols_client, file_path)
+                request_document_symbols(&symbols_client, &file_path)
                     .await
                     .ok()
             },
@@ -768,7 +856,7 @@ impl LspManager {
                     return Value::Null;
                 }
                 let mut reference_params =
-                    match text_position_params(file_path, &references_text, line, column) {
+                    match text_position_params(&file_path, &references_text, line, column) {
                         Ok(params) => params,
                         Err(err) => return json!({ "error": err }),
                     };
@@ -782,11 +870,13 @@ impl LspManager {
                         LocationSummaryOptions {
                             limit: 30,
                             symbol: Some(SymbolPosition {
-                                file_path,
+                                file_path: &file_path,
                                 line,
                                 column,
                             }),
                         },
+                        &runtime.cwd,
+                        &runtime.home,
                     ),
                     Err(err) => json!({ "error": err }),
                 }
@@ -801,7 +891,7 @@ impl LspManager {
 
         Ok(json!({
             "position": {
-                "file_path": display_path(&absolute_path_string(file_path)),
+                "file_path": display_path(&file_path, &runtime.cwd, &runtime.home),
                 "line": line,
                 "column": column,
             },
@@ -821,12 +911,14 @@ impl LspManager {
         line: u64,
         column: u64,
     ) -> Result<Value, String> {
-        let client = self.client_for_file(file_path).await?;
-        let text = client.sync_document(file_path).await?.text;
+        let runtime = self.runtime_paths();
+        let file_path = absolute_path_string(file_path, &runtime.cwd);
+        let client = self.client_for_file(&file_path).await?;
+        let text = client.sync_document(&file_path).await?.text;
         let raw = client
             .request(
                 "textDocument/definition",
-                text_position_params(file_path, &text, line, column)?,
+                text_position_params(&file_path, &text, line, column)?,
             )
             .await?;
         Ok(location_summary(
@@ -834,11 +926,13 @@ impl LspManager {
             LocationSummaryOptions {
                 limit: 50,
                 symbol: Some(SymbolPosition {
-                    file_path,
+                    file_path: &file_path,
                     line,
                     column,
                 }),
             },
+            &runtime.cwd,
+            &runtime.home,
         ))
     }
 
@@ -849,9 +943,11 @@ impl LspManager {
         column: u64,
         options: ReferenceOptions,
     ) -> Result<Value, String> {
-        let client = self.client_for_file(file_path).await?;
-        let text = client.sync_document(file_path).await?.text;
-        let mut params = text_position_params(file_path, &text, line, column)?;
+        let runtime = self.runtime_paths();
+        let file_path = absolute_path_string(file_path, &runtime.cwd);
+        let client = self.client_for_file(&file_path).await?;
+        let text = client.sync_document(&file_path).await?.text;
+        let mut params = text_position_params(&file_path, &text, line, column)?;
         params["context"] = json!({ "includeDeclaration": options.include_declaration });
         let raw_refs = client.request("textDocument/references", params).await?;
         if options.raw {
@@ -862,20 +958,24 @@ impl LspManager {
             LocationSummaryOptions {
                 limit: options.limit,
                 symbol: Some(SymbolPosition {
-                    file_path,
+                    file_path: &file_path,
                     line,
                     column,
                 }),
             },
+            &runtime.cwd,
+            &runtime.home,
         ))
     }
 
     pub async fn diagnostics(&self, file_path: Option<&str>) -> Result<Value, String> {
         if let Some(path) = file_path {
-            let client = self.client_for_file(path).await?;
-            let uri = file_uri(path)?;
+            let runtime = self.runtime_paths();
+            let path = absolute_path_string(path, &runtime.cwd);
+            let client = self.client_for_file(&path).await?;
+            let uri = file_uri(&path)?;
             let generation = client.diagnostics.generation(&uri).await;
-            let synced = client.sync_document(path).await?;
+            let synced = client.sync_document(&path).await?;
             if !synced.changed {
                 return Ok(client
                     .diagnostics
@@ -919,9 +1019,11 @@ impl LspManager {
         new_name: &str,
         apply: bool,
     ) -> Result<Value, String> {
-        let client = self.client_for_file(file_path).await?;
-        let text = client.sync_document(file_path).await?.text;
-        let mut params = text_position_params(file_path, &text, line, column)?;
+        let runtime = self.runtime_paths();
+        let file_path = absolute_path_string(file_path, &runtime.cwd);
+        let client = self.client_for_file(&file_path).await?;
+        let text = client.sync_document(&file_path).await?.text;
+        let mut params = text_position_params(&file_path, &text, line, column)?;
         params["newName"] = json!(new_name);
         let edit = client.request("textDocument/rename", params).await?;
         let summary = workspace_edit_summary(&edit);
@@ -935,6 +1037,7 @@ impl LspManager {
         &self,
         path_glob: Option<&str>,
     ) -> Result<Vec<(String, Arc<LspClient>)>, String> {
+        let runtime = self.runtime_paths();
         let (existing_slots, candidate_names, hinted): (Vec<_>, Vec<String>, bool) = {
             let servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
             if servers.is_empty() {
@@ -979,13 +1082,12 @@ impl LspManager {
 
         let slots: Vec<_> = {
             let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let mut slots = Vec::new();
             for name in candidate_names {
                 let Some(entry) = servers.get_mut(&name) else {
                     continue;
                 };
-                let root = find_root(&cwd, &entry.config.root_markers);
+                let root = find_root(&runtime.cwd, &entry.config.root_markers, &runtime.cwd);
                 let slot = entry
                     .clients
                     .entry(root.clone())
@@ -1022,7 +1124,8 @@ impl LspManager {
     }
 
     async fn initialized_client_for_file(&self, file_path: &str) -> Result<Arc<LspClient>, String> {
-        let file = PathBuf::from(file_path);
+        let runtime = self.runtime_paths();
+        let file = PathBuf::from(absolute_path_string(file_path, &runtime.cwd));
         let (server_name, slot) = {
             let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
             let server_name = pick_server(&servers, &file)
@@ -1030,7 +1133,7 @@ impl LspManager {
             let entry = servers
                 .get_mut(&server_name)
                 .ok_or_else(|| format!("server disappeared: {server_name}"))?;
-            let root = find_root(&file, &entry.config.root_markers);
+            let root = find_root(&file, &entry.config.root_markers, &runtime.cwd);
             let slot = entry
                 .clients
                 .entry(root.clone())
@@ -1049,9 +1152,9 @@ impl LspManager {
 
 impl LspConfigure {
     fn install(self) -> Option<LspConfigureCompletion> {
-        let removed_clients = self
-            .manager
-            .install_configure(self.revision, self.desired)?;
+        let removed_clients =
+            self.manager
+                .install_configure(self.revision, self.desired, self.runtime)?;
         Some(LspConfigureCompletion {
             manager: self.manager,
             revision: self.revision,
@@ -1147,7 +1250,12 @@ fn raw_location_summary(locations: Value, requested_limit: usize) -> Value {
     })
 }
 
-fn location_summary(locations: &Value, options: LocationSummaryOptions<'_>) -> Value {
+fn location_summary(
+    locations: &Value,
+    options: LocationSummaryOptions<'_>,
+    cwd: &Path,
+    home: &Path,
+) -> Value {
     let mut locations = normalize_locations(locations);
     let total = locations.len();
     let limit = bounded_limit(options.limit, 50, 200);
@@ -1155,7 +1263,7 @@ fn location_summary(locations: &Value, options: LocationSummaryOptions<'_>) -> V
     add_location_previews(&mut locations);
     let locations = locations
         .into_iter()
-        .map(|loc| loc.to_json())
+        .map(|loc| loc.to_json(cwd, home))
         .collect::<Vec<_>>();
     let mut out = json!({
         "total": total,
@@ -1167,7 +1275,11 @@ fn location_summary(locations: &Value, options: LocationSummaryOptions<'_>) -> V
     });
     if let Some(symbol) = options.symbol {
         out["symbol"] = json!({
-            "file_path": display_path(&absolute_path_string(symbol.file_path)),
+            "file_path": display_path(
+                &absolute_path_string(symbol.file_path, cwd),
+                cwd,
+                home,
+            ),
             "line": symbol.line,
             "column": symbol.column,
         });
@@ -1782,7 +1894,7 @@ fn pick_server(servers: &HashMap<String, ServerEntry>, file: &Path) -> Option<St
     })
 }
 
-fn find_root(file: &Path, markers: &[String]) -> PathBuf {
+fn find_root(file: &Path, markers: &[String], fallback: &Path) -> PathBuf {
     let start = if file.is_dir() {
         file.to_path_buf()
     } else {
@@ -1808,7 +1920,7 @@ fn find_root(file: &Path, markers: &[String]) -> PathBuf {
     }
     dirs.into_iter()
         .find(|dir| markers.iter().any(|marker| dir.join(marker).exists()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or_else(|| fallback.to_path_buf())
 }
 
 fn text_document(file_path: &str) -> Result<Value, String> {
@@ -1874,14 +1986,10 @@ fn file_uri(path: &str) -> Result<String, String> {
 }
 
 fn path_to_uri(path: &Path) -> Result<String, String> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(path)
-    };
-    let url = url::Url::from_file_path(abs).map_err(|_| "could not convert path to file URI")?;
+    if !path.is_absolute() {
+        return Err(format!("LSP path must be absolute: {}", path.display()));
+    }
+    let url = url::Url::from_file_path(path).map_err(|_| "could not convert path to file URI")?;
     Ok(url.to_string())
 }
 
@@ -2024,6 +2132,11 @@ mod tests {
     use super::*;
     use std::io::{BufRead, Write};
 
+    fn test_runtime_paths() -> (PathBuf, PathBuf) {
+        let cwd = std::env::current_dir().expect("test cwd");
+        (cwd.clone(), cwd)
+    }
+
     fn progress_message(token: &str, kind: &str, title: Option<&str>) -> Value {
         let mut value = json!({ "kind": kind });
         if let Some(title) = title {
@@ -2162,30 +2275,42 @@ mod tests {
     #[tokio::test]
     async fn first_workspace_symbol_query_waits_for_server_readiness() {
         let executable = std::env::current_exe().unwrap();
-        let manager = LspManager::default();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::write(
+            workspace.path().join("src/config.rs"),
+            "// fixture line 1\n// fixture line 2\n    struct ReadySymbol;\n",
+        )
+        .unwrap();
+        let cwd = std::fs::canonicalize(workspace.path()).unwrap();
+        let manager = LspManager::new(cwd.clone(), cwd.clone());
         manager
-            .configure(LspConfig {
-                servers: HashMap::from([(
-                    "fake".to_string(),
-                    LspServerConfig {
-                        cmd: vec![
-                            executable.display().to_string(),
-                            "--exact".into(),
-                            "lsp::tests::fake_workspace_loading_lsp_server_process".into(),
-                            "--nocapture".into(),
-                            "--test-threads=1".into(),
-                        ],
-                        extensions: vec!["rs".into()],
-                        language_id: Some("rust".into()),
-                        root_markers: Vec::new(),
-                        init_timeout_ms: 2_000,
-                        request_timeout_ms: 2_000,
-                        startup_wait_ms: 1_000,
-                        initialization_options: Value::Null,
-                        settings: Value::Null,
-                    },
-                )]),
-            })
+            .configure(
+                LspConfig {
+                    servers: HashMap::from([(
+                        "fake".to_string(),
+                        LspServerConfig {
+                            cmd: vec![
+                                executable.display().to_string(),
+                                "--exact".into(),
+                                "lsp::tests::fake_workspace_loading_lsp_server_process".into(),
+                                "--nocapture".into(),
+                                "--test-threads=1".into(),
+                            ],
+                            extensions: vec!["rs".into()],
+                            language_id: Some("rust".into()),
+                            root_markers: Vec::new(),
+                            init_timeout_ms: 2_000,
+                            request_timeout_ms: 2_000,
+                            startup_wait_ms: 1_000,
+                            initialization_options: Value::Null,
+                            settings: Value::Null,
+                        },
+                    )]),
+                },
+                &cwd,
+                &cwd,
+            )
             .await;
 
         let result = manager
@@ -2520,7 +2645,8 @@ mod tests {
         assert_eq!(
             find_root(
                 &crate_dir.join("lib.rs"),
-                &["Cargo.toml".to_string(), ".git".to_string()]
+                &["Cargo.toml".to_string(), ".git".to_string()],
+                &workspace,
             ),
             workspace
         );
@@ -2540,7 +2666,8 @@ mod tests {
         assert_eq!(
             find_root(
                 &inner.join("lib.rs"),
-                &["Cargo.toml".to_string(), ".git".to_string()]
+                &["Cargo.toml".to_string(), ".git".to_string()],
+                &outer,
             ),
             outer.join("vendor/inner")
         );
@@ -2548,20 +2675,25 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_symbol_query_without_hint_does_not_start_multiple_servers() {
-        let manager = LspManager::default();
+        let (cwd, home) = test_runtime_paths();
+        let manager = LspManager::new(cwd.clone(), home.clone());
         manager
-            .configure(LspConfig {
-                servers: HashMap::from([
-                    (
-                        "rust-analyzer".to_string(),
-                        test_server("rust-analyzer", "rust", &["rs"]).config,
-                    ),
-                    (
-                        "lua-language-server".to_string(),
-                        test_server("lua-language-server", "lua", &["lua"]).config,
-                    ),
-                ]),
-            })
+            .configure(
+                LspConfig {
+                    servers: HashMap::from([
+                        (
+                            "rust-analyzer".to_string(),
+                            test_server("rust-analyzer", "rust", &["rs"]).config,
+                        ),
+                        (
+                            "lua-language-server".to_string(),
+                            test_server("lua-language-server", "lua", &["lua"]).config,
+                        ),
+                    ]),
+                },
+                &cwd,
+                &home,
+            )
             .await;
 
         let err = manager
@@ -2576,7 +2708,8 @@ mod tests {
 
     #[tokio::test]
     async fn older_configure_cannot_replace_newer_lsp_desired_state() {
-        let manager = Arc::new(LspManager::default());
+        let (cwd, home) = test_runtime_paths();
+        let manager = Arc::new(LspManager::new(cwd.clone(), home.clone()));
         let old_config = LspConfig {
             servers: HashMap::from([(
                 "old".into(),
@@ -2584,7 +2717,7 @@ mod tests {
             )]),
         };
         let old_configure = manager
-            .prepare_configure(old_config)
+            .prepare_configure(old_config, &cwd, &home)
             .expect("old desired revision");
         let (control, completion) = crate::test_util::controlled_completion(());
         let old_task = tokio::spawn(async move {
@@ -2594,9 +2727,13 @@ mod tests {
 
         let release = control.wait_started().await;
         manager
-            .configure(LspConfig {
-                servers: HashMap::new(),
-            })
+            .configure(
+                LspConfig {
+                    servers: HashMap::new(),
+                },
+                &cwd,
+                &home,
+            )
             .await;
         release.send(()).unwrap();
         old_task.await.unwrap();
@@ -2606,18 +2743,25 @@ mod tests {
             "an older configure completion must not reinstall a removed server"
         );
         let status = manager.controller_status();
-        assert!(manager.prepare_configure(LspConfig::default()).is_none());
+        assert!(manager
+            .prepare_configure(LspConfig::default(), &cwd, &home)
+            .is_none());
         assert_eq!(manager.controller_status(), status);
     }
 
     #[tokio::test]
     async fn removing_a_starting_client_cancels_initialization() {
-        let manager = Arc::new(LspManager::default());
+        let (cwd, home) = test_runtime_paths();
+        let manager = Arc::new(LspManager::new(cwd.clone(), home.clone()));
         let config = test_server("unused", "text", &["txt"]).config;
         manager
-            .configure(LspConfig {
-                servers: HashMap::from([("old".into(), config.clone())]),
-            })
+            .configure(
+                LspConfig {
+                    servers: HashMap::from([("old".into(), config.clone())]),
+                },
+                &cwd,
+                &home,
+            )
             .await;
         let slot = Arc::new(LspClientSlot {
             name: "old".into(),
@@ -2639,7 +2783,7 @@ mod tests {
             .insert(PathBuf::from("/tmp"), Arc::clone(&slot));
 
         let completion = manager
-            .prepare_configure(LspConfig::default())
+            .prepare_configure(LspConfig::default(), &cwd, &home)
             .unwrap()
             .install()
             .unwrap();
@@ -2654,8 +2798,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cwd_change_restarts_retained_lsp_configuration() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let manager = Arc::new(LspManager::new(
+            first.path().to_path_buf(),
+            home.path().to_path_buf(),
+        ));
+        let config = test_server("unused", "text", &["txt"]).config;
+        let desired = LspConfig {
+            servers: HashMap::from([("server".into(), config.clone())]),
+        };
+        manager
+            .configure(desired.clone(), first.path(), home.path())
+            .await;
+        let slot = Arc::new(LspClientSlot {
+            name: "server".into(),
+            root: first.path().to_path_buf(),
+            config,
+            state: Mutex::new(LspClientState::Starting {
+                started: Instant::now(),
+            }),
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
+            cancel: CancellationToken::new(),
+        });
+        manager
+            .servers
+            .lock()
+            .unwrap()
+            .get_mut("server")
+            .unwrap()
+            .clients
+            .insert(first.path().to_path_buf(), Arc::clone(&slot));
+
+        manager.configure(desired, second.path(), home.path()).await;
+
+        assert!(slot.cancel.is_cancelled());
+        assert!(manager
+            .servers
+            .lock()
+            .unwrap()
+            .get("server")
+            .unwrap()
+            .clients
+            .is_empty());
+        assert_eq!(manager.runtime_paths().cwd, second.path());
+    }
+
+    #[tokio::test]
     async fn stale_configure_completion_cannot_publish_after_server_removal() {
-        let manager = Arc::new(LspManager::default());
+        let (cwd, home) = test_runtime_paths();
+        let manager = Arc::new(LspManager::new(cwd.clone(), home.clone()));
         let old_config = LspConfig {
             servers: HashMap::from([(
                 "old".into(),
@@ -2663,7 +2857,7 @@ mod tests {
             )]),
         };
         let old_completion = manager
-            .prepare_configure(old_config)
+            .prepare_configure(old_config, &cwd, &home)
             .unwrap()
             .install()
             .unwrap();
@@ -2675,7 +2869,7 @@ mod tests {
         });
 
         let release = control.wait_started().await;
-        manager.configure(LspConfig::default()).await;
+        manager.configure(LspConfig::default(), &cwd, &home).await;
         let current_status = manager.controller_status();
         release.send(()).unwrap();
         old_task.await.unwrap();

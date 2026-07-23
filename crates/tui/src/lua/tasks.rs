@@ -34,10 +34,9 @@ impl LuaRuntime {
         }
     }
 
-    /// Build the `mlua::Function` + payload table for a queued invocation without calling Lua.
-    /// Splitting preparation from the call lets the host release all TuiApp borrows before
-    /// the Lua body runs (so it can reach `&mut TuiApp` via [`crate::lua::with_app`]).
-    /// Returns `None` if the handle is dropped or payload construction fails.
+    /// Build the `mlua::Function` and payload table for a queued invocation without calling Lua.
+    /// Splitting preparation from the call releases runtime borrows before the Lua body enters
+    /// its capability scope. Returns `None` if the handle is dropped or payload construction fails.
     pub(crate) fn prepare_invocation(
         &self,
         handle: crate::smelt_edit::LuaHandle,
@@ -67,11 +66,6 @@ impl LuaRuntime {
         Some((func, payload_table))
     }
 
-    /// Record a callback error from the phase-2 invocation path.
-    pub(crate) fn record_callback_error(&self, handle_id: u64, err: impl std::fmt::Display) {
-        self.record_error(format!("callback `{handle_id}`: {err}"));
-    }
-
     /// Queue an invocation from inside `ui.dispatch_event` / `ui.fire_win_event`.
     /// The ui dispatcher holds `&mut Ui`, so Lua cannot be called immediately - it would
     /// collide with the borrow. The host drains the queue after the ui call returns.
@@ -90,7 +84,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Drain all queued invocations. Must be called under an [`crate::lua::install_app_ptr`] scope.
+    /// Drain all queued invocations for preparation before their scoped Lua entries.
     pub(crate) fn drain_invocations(&self) -> Vec<crate::lua::PendingInvocation> {
         match self.shared.pending_invocations.lock() {
             Ok(mut q) => std::mem::take(&mut *q),

@@ -13,20 +13,18 @@ fn open_root_test_dialog(app: &mut TestApp) {
 }
 
 fn assert_safe_dialog_fallback(app: &TestApp) {
-    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_none());
+    assert!(app.ui_probe().split_rect(crate::app::PROMPT_WIN).is_none());
     let statusline = app
-        .app
-        .ui
+        .ui_probe()
         .named_win("smelt.statusline")
         .expect("statusline window");
     let status_rect = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(statusline)
         .expect("fallback keeps statusline mounted");
     assert_eq!(
         status_rect.top + status_rect.height,
-        app.app.ui.terminal_size().1
+        app.ui_probe().terminal_size().1
     );
 }
 
@@ -40,7 +38,7 @@ fn root_dialog_replaces_composer_and_restores_prompt_state() {
     app.render_silent();
 
     assert!(app.state().active_modal.is_some());
-    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_none());
+    assert!(app.ui_probe().split_rect(crate::app::PROMPT_WIN).is_none());
     assert_eq!(app.state().prompt_text, "draft response");
     assert!(!app.render_to_frame().text().contains("draft response"));
 
@@ -48,7 +46,7 @@ fn root_dialog_replaces_composer_and_restores_prompt_state() {
     app.render_silent();
 
     assert!(app.state().active_modal.is_none());
-    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_some());
+    assert!(app.ui_probe().split_rect(crate::app::PROMPT_WIN).is_some());
     assert_eq!(app.state().prompt_text, "draft response");
     assert!(app.render_to_frame().text().contains("draft response"));
 }
@@ -70,7 +68,7 @@ fn failed_root_dialog_open_does_not_pollute_dialog_stack() {
         assert(smelt.dialog.current() == nil, "failed dialog leaked into stack")
         "#
     ));
-    assert!(app.app.active_docked_dialog().is_none());
+    assert!(app.active_docked_dialog().is_none());
 }
 
 #[test]
@@ -86,10 +84,9 @@ fn root_dialog_can_disable_top_edge_resize() {
         "#
     ));
 
-    let dialog = app.app.active_docked_dialog().expect("active dialog");
+    let dialog = app.active_docked_dialog().expect("active dialog");
     assert!(
-        !app.app
-            .ui
+        !app.ui_probe()
             .docked_surface(dialog)
             .expect("docked surface")
             .resize_config()
@@ -112,13 +109,11 @@ fn root_dialog_uses_safe_fallback_when_custom_composer_omits_it() {
     app.render_silent();
 
     assert_safe_dialog_fallback(&app);
-    let dialog = app.app.active_docked_dialog().expect("active dialog");
+    let dialog = app.active_docked_dialog().expect("active dialog");
     let root = app
-        .app
-        .ui
+        .ui_probe()
         .modal_leaves(
-            app.app
-                .ui
+            app.ui_probe()
                 .docked_surface(dialog)
                 .expect("docked surface")
                 .modal(),
@@ -126,7 +121,7 @@ fn root_dialog_uses_safe_fallback_when_custom_composer_omits_it() {
         .and_then(|leaves| leaves.first())
         .copied()
         .expect("dialog root");
-    assert!(app.app.ui.split_rect(root).is_some());
+    assert!(app.ui_probe().split_rect(root).is_some());
 }
 
 #[test]
@@ -218,52 +213,49 @@ fn expanding_root_dialog_preserves_focused_panel() {
         "#
     ));
     app.render_silent();
-    let focused = app.app.ui.focus().expect("second dialog panel focused");
+    let focused = app.ui_probe().focus().expect("second dialog panel focused");
 
     app.press_mod(KeyCode::Char('o'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.app.ui.focus(), Some(focused));
+    assert_eq!(app.ui_probe().focus(), Some(focused));
     assert!(app
-        .app
         .active_docked_dialog()
-        .and_then(|dialog| app.app.ui.docked_surface(dialog))
+        .and_then(|dialog| app.ui_probe().docked_surface(dialog))
         .is_some_and(|dialog| dialog.expanded()));
 }
 
 #[test]
 fn root_dialog_pauses_notification_visibility_and_ttl() {
     let mut app = TestApp::builder().build();
-    app.app.notify_error("deferred notification".into());
-    assert!(app.app.notification_win().is_some());
+    app.notify_error("deferred notification".into());
+    assert!(app.notification_win().is_some());
 
     open_root_test_dialog(&mut app);
 
-    assert!(app.app.notification_win().is_none());
-    assert!(app.app.suspended_notification.is_some());
+    assert!(app.notification_win().is_none());
+    assert!(app.overlays_probe().suspended_notification().is_some());
     app.clock.advance(std::time::Duration::from_millis(
         crate::app::NOTIFICATION_TTL_MS * 2,
     ));
-    assert!(!app.app.dismiss_expired_notification());
+    assert!(!app.dismiss_expired_notification());
 
     assert!(app.run_lua("smelt.dialog.current().close()"));
 
-    assert!(app.app.suspended_notification.is_none());
-    assert!(app.app.notification_win().is_some());
+    assert!(app.overlays_probe().suspended_notification().is_none());
+    assert!(app.notification_win().is_some());
 }
 
 #[test]
 fn root_dialog_preserves_notification_ownership() {
     let mut app = TestApp::builder().build();
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .notify_session_save_failure(&session_id, "database busy");
+    let session_id = app.session_snapshot().id.clone();
+    app.notify_session_save_failure(&session_id, "database busy");
 
     open_root_test_dialog(&mut app);
 
     assert!(app
-        .app
-        .suspended_notification
-        .as_ref()
+        .overlays_probe()
+        .suspended_notification()
         .is_some_and(|notification| {
             matches!(
                 notification.owner.as_ref(),
@@ -274,13 +266,16 @@ fn root_dialog_preserves_notification_ownership() {
 
     assert!(app.run_lua("smelt.dialog.current().close()"));
 
-    assert!(app.app.notification.as_ref().is_some_and(|notification| {
-        matches!(
-            notification.owner.as_ref(),
-            Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
-                if owner_session_id == &session_id
-        )
-    }));
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            matches!(
+                notification.owner.as_ref(),
+                Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
+                    if owner_session_id == &session_id
+            )
+        }));
 }
 
 #[test]
@@ -300,21 +295,21 @@ fn readonly_dialog_arrows_move_without_vim() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 0);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 0);
+    let win_id = app.ui_probe().focus().expect("dialog leaf focused");
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 0);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 0);
 
     app.press(KeyCode::Down);
     app.press(KeyCode::Right);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 1);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 1);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 1);
 
     app.press(KeyCode::Up);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 0);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 0);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 1);
 
     app.press(KeyCode::Left);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 0);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 0);
 }
 
 #[test]
@@ -334,30 +329,30 @@ fn vim_readonly_dialog_arrows_and_vim_motions_move_cursor() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let win_id = app.ui_probe().focus().expect("dialog leaf focused");
 
     app.press(KeyCode::Down);
     app.press(KeyCode::Right);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 1);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 1);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 1);
 
     app.type_char('j');
     app.type_char('l');
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 2);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 2);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 2);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 2);
 
     app.press(KeyCode::Up);
     app.press(KeyCode::Left);
     app.type_char('k');
     app.type_char('h');
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 0);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 0);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 0);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 0);
 
     app.type_char('w');
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 6);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 6);
     app.type_char('j');
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 1);
-    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 6);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_row(), 1);
+    assert_eq!(app.ui_probe().win(win_id).expect("window").cursor_col(), 6);
 }
 
 #[test]
@@ -377,22 +372,22 @@ fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let win_id = app.ui_probe().focus().expect("dialog leaf focused");
 
     app.type_char('v');
     app.type_char('e');
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.ui_probe().win(win_id).expect("window").vim_mode(),
         VimMode::Visual
     );
     app.type_char('y');
-    assert_eq!(app.app.core.clipboard.kill_ring.current(), "alpha");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
     assert_eq!(
-        app.app.core.clipboard.kill_ring.last_clipboard_write(),
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some("alpha")
     );
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.ui_probe().win(win_id).expect("window").vim_mode(),
         VimMode::Normal
     );
 
@@ -400,26 +395,26 @@ fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
     app.type_char('g');
     app.type_char('V');
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.ui_probe().win(win_id).expect("window").vim_mode(),
         VimMode::VisualLine
     );
     app.type_char('G');
     app.type_char('y');
 
     assert_eq!(
-        app.app.core.clipboard.kill_ring.current(),
+        app.core_probe().clipboard.kill_ring.current(),
         "alpha beta\ngamma\ndelta"
     );
     assert_eq!(
-        app.app.core.clipboard.kill_ring.last_clipboard_write(),
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some("alpha beta\ngamma\ndelta")
     );
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.ui_probe().win(win_id).expect("window").vim_mode(),
         VimMode::Normal
     );
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.ui_probe().active_modal().is_some(),
         "copying must keep the dialog open"
     );
 }
@@ -444,20 +439,18 @@ fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let win_id = app.ui_probe().focus().expect("dialog leaf focused");
     app.type_char('v');
     app.type_char('e');
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.ui_probe().win(win_id).expect("window").vim_mode(),
         VimMode::Visual
     );
     assert!(
-        app.app
-            .ui
+        app.ui_probe()
             .win(win_id)
             .and_then(|win| app
-                .app
-                .ui
+                .ui_probe()
                 .buf(win.buf)
                 .and_then(|buf| win.selection_range(buf)))
             .is_some(),
@@ -467,11 +460,11 @@ fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
     app.press(KeyCode::Esc);
 
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.ui_probe().active_modal().is_some(),
         "Esc from Visual should not close the dialog"
     );
     assert_eq!(
-        app.app.ui.win(win_id).expect("window").vim_mode(),
+        app.ui_probe().win(win_id).expect("window").vim_mode(),
         VimMode::Normal
     );
 }
@@ -493,21 +486,20 @@ fn vim_readonly_dialog_visual_selection_is_painted() {
     ));
     app.render_silent();
 
-    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let win_id = app.ui_probe().focus().expect("dialog leaf focused");
     app.type_char('v');
     app.type_char('e');
     assert!(
-        !app.app
-            .ui
+        !app.ui_probe()
             .win(win_id)
             .expect("window")
             .has_materialized_rows(),
         "dialog viewer should stay byte-backed after visual motions"
     );
     let frame = app.render_to_frame();
-    let win = app.app.ui.win(win_id).expect("window");
+    let win = app.ui_probe().win(win_id).expect("window");
     let rect = win.viewport.expect("dialog viewport").rect;
-    let selection_bg = app.app.ui.theme().get("Visual").bg;
+    let selection_bg = app.ui_probe().theme().get("Visual").bg;
     let painted = (rect.top..rect.top + rect.height).any(|row| {
         (rect.left..rect.left + rect.width)
             .any(|col| frame.styles[row as usize][col as usize].bg == selection_bg)
@@ -567,6 +559,7 @@ fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
         call_id: format!("call-{request_id}"),
         tool_name: "test_tool".into(),
         args: std::collections::HashMap::new(),
+        tool_paths: Vec::new(),
         approval_candidates: Vec::new(),
         grant_options: Vec::new(),
         summary: protocol::StyledLines::from_plain("test tool"),
@@ -575,7 +568,7 @@ fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
 }
 
 fn install_confirm_test_permissions(app: &mut TestApp) {
-    app.app.core.permissions.replace(confirm_test_permissions());
+    app.replace_permissions_for_harness(confirm_test_permissions());
 }
 
 fn permission_decisions(cmds: Vec<protocol::UiCommand>) -> Vec<(u64, bool)> {
@@ -596,15 +589,7 @@ fn dispatch_confirm_request(
     req: smelt_core::ConfirmRequest,
     pending: &mut Vec<crate::app::PendingTool>,
 ) -> crate::app::SessionControl {
-    let mut turn = app.app.agent.take().expect("test turn is active");
-    turn.pending = std::mem::take(pending);
-    let ctrl = app.app.dispatch_control(
-        crate::app::SessionControl::NeedsConfirm(Box::new(req)),
-        &mut turn,
-    );
-    *pending = std::mem::take(&mut turn.pending);
-    app.app.agent = Some(turn);
-    ctrl
+    app.dispatch_confirm_request(req, pending)
 }
 
 fn actions_permission_decisions(actions: &[Action]) -> Vec<(u64, bool)> {
@@ -629,7 +614,7 @@ fn request_permission_auto_allows_when_applied_turn_mode_allows() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
-    app.app.applied_agent_mode = protocol::AgentMode::parse("apply").unwrap();
+    app.set_applied_mode(protocol::AgentMode::parse("apply").unwrap());
 
     let mut pending = Vec::new();
     let ctrl = dispatch_confirm_request(&mut app, confirm_req(10), &mut pending);
@@ -647,7 +632,7 @@ fn request_permission_auto_denies_when_applied_turn_mode_denies() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
-    app.app.applied_agent_mode = protocol::AgentMode::parse("deny").unwrap();
+    app.set_applied_mode(protocol::AgentMode::parse("deny").unwrap());
 
     let mut pending = vec![crate::app::PendingTool {
         call_id: "call-11".into(),
@@ -670,7 +655,7 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
-    app.app.core.config.mode = protocol::AgentMode::parse("deny").unwrap();
+    app.set_configured_agent_mode_for_harness(protocol::AgentMode::parse("deny").unwrap());
     let _ = app.drain_engine_sends();
 
     app.feed_one(SourceEvent::engine(
@@ -697,20 +682,109 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
 }
 
 #[test]
+fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
+    let outside = tempfile::TempDir::new().expect("create outside-workspace directory");
+    let outside_file = outside.path().join("secret.txt");
+    std::fs::write(&outside_file, "secret").expect("write outside-workspace file");
+    let outside_path = outside_file.to_string_lossy();
+    let lua_path = serde_json::to_string(outside_path.as_ref()).expect("quote Lua path");
+
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.run_lua_result(&format!(
+        r#"
+        path_callback_count = 0
+        path_callback_session_id = nil
+        smelt.tools.register({{
+            name = "scoped_path_probe",
+            description = "permission path probe",
+            parameters = {{ type = "object", properties = {{}} }},
+            effect = "read",
+            permission_defaults = {{ normal = "allow" }},
+            paths_for_workspace = function()
+                local session_id = smelt.session.id()
+                assert(type(session_id) == "string" and session_id ~= "")
+                path_callback_count = path_callback_count + 1
+                path_callback_session_id = session_id
+                return {{ {{ path = {lua_path}, kind = "file" }} }}
+            end,
+            execute = function() return "ok" end,
+        }})
+        "#
+    ))
+    .expect("register path-aware tool");
+
+    let _ = app.drain_engine_sends();
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::ToolEvaluationRequest {
+            request_id: 91,
+            call_id: "call-91".into(),
+            tool_name: "scoped_path_probe".into(),
+            args: std::collections::HashMap::new(),
+            mode: protocol::AgentMode::normal(),
+        },
+    ));
+
+    let decision = app.actions().iter().rev().find_map(|action| match action {
+        Action::EngineSend(command) => match command.as_ref() {
+            protocol::UiCommand::ToolEvaluationResponse {
+                request_id: 91,
+                evaluation,
+            } => Some(evaluation.decision.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(decision, Some(protocol::Decision::Ask));
+    assert_eq!(app.lua_int_global("path_callback_count"), Some(1));
+    assert_eq!(
+        app.eval_lua::<String>("return path_callback_session_id")
+            .expect("read callback session id"),
+        app.session_snapshot().id
+    );
+
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            request_id: 92,
+            call_id: "call-91".into(),
+            tool_name: "scoped_path_probe".into(),
+            args: std::collections::HashMap::new(),
+            approval_patterns: Vec::new(),
+            summary: protocol::StyledLines::from_plain("path probe"),
+        },
+    ));
+
+    let handle_id = app
+        .first_pending_confirm()
+        .expect("permission dialog opens");
+    let request = &app
+        .core_probe()
+        .confirms
+        .get(handle_id)
+        .expect("pending confirm")
+        .req;
+    assert_eq!(request.tool_paths.len(), 1);
+    assert_eq!(request.tool_paths[0].path, outside_path);
+    assert_eq!(app.lua_int_global("path_callback_count"), Some(2));
+
+    assert!(!app.resolve_open_confirm_for_current_mode(handle_id));
+    assert_eq!(app.lua_int_global("path_callback_count"), Some(2));
+}
+
+#[test]
 fn open_confirm_recheck_keeps_dialog_when_mode_still_asks() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(12), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
     }
 
     let handle_id = app.first_pending_confirm().unwrap();
-    assert!(!app.app.resolve_open_confirm_for_current_mode(handle_id));
+    assert!(!app.resolve_open_confirm_for_current_mode(handle_id));
     assert_eq!(app.pending_confirm_count(), 1);
     assert!(permission_decisions(app.drain_engine_sends()).is_empty());
 }
@@ -722,7 +796,6 @@ fn public_status_open_confirm_needs_attention() {
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(13), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
@@ -731,7 +804,7 @@ fn public_status_open_confirm_needs_attention() {
     assert_eq!(app.pending_confirm_count(), 1);
     assert!(app.state().active_modal.is_some());
 
-    let (state, reason) = app.app.public_status_state_reason();
+    let (state, reason) = app.public_status_state_reason();
     assert_eq!(
         state,
         smelt_core::public_status::PublicState::NeedsAttention
@@ -749,7 +822,6 @@ fn open_confirm_dialog_does_not_show_permission_pending_in_statusline() {
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(130), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
@@ -771,7 +843,6 @@ fn deferred_confirm_dialog_shows_permission_pending_in_statusline() {
     app.type_text("draft response");
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(131), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
@@ -793,15 +864,14 @@ fn confirm_down_moves_selection_without_scrolling_options() {
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(14), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
     }
     app.render_silent();
 
-    let options = app.app.ui.focus().expect("confirm options focused");
-    let before = app.app.ui.win(options).expect("confirm options window");
+    let options = app.ui_probe().focus().expect("confirm options focused");
+    let before = app.ui_probe().win(options).expect("confirm options window");
     assert_eq!(before.cursor_abs_row(), 0);
     assert_eq!(before.scroll_top(), 0);
     assert!(
@@ -816,7 +886,7 @@ fn confirm_down_moves_selection_without_scrolling_options() {
 
     app.press(KeyCode::Down);
 
-    let after = app.app.ui.win(options).expect("confirm options window");
+    let after = app.ui_probe().win(options).expect("confirm options window");
     assert_eq!(after.cursor_abs_row(), 1, "Down should select deny");
     assert_eq!(
         after.scroll_top(),
@@ -834,20 +904,17 @@ fn confirm_top_border_drag_resizes_dialog() {
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(15), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
     }
     app.render_silent();
 
-    let dialog = app.app.active_docked_dialog().expect("confirm dialog");
+    let dialog = app.active_docked_dialog().expect("confirm dialog");
     let first_leaf = app
-        .app
-        .ui
+        .ui_probe()
         .modal_leaves(
-            app.app
-                .ui
+            app.ui_probe()
                 .docked_surface(dialog)
                 .expect("docked surface")
                 .modal(),
@@ -856,8 +923,7 @@ fn confirm_top_border_drag_resizes_dialog() {
         .copied()
         .expect("confirm dialog leaf");
     let before_top = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(first_leaf)
         .expect("confirm dialog leaf rect")
         .top
@@ -883,8 +949,7 @@ fn confirm_top_border_drag_resizes_dialog() {
     app.render_silent();
 
     let after_top = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(first_leaf)
         .expect("resized confirm dialog leaf rect")
         .top
@@ -912,10 +977,9 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
     ));
     app.render_silent();
 
-    let dialog = app.app.active_docked_dialog().expect("active dialog");
+    let dialog = app.active_docked_dialog().expect("active dialog");
     let before = app
-        .app
-        .ui
+        .ui_probe()
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("custom-composed dialog rect");
@@ -940,8 +1004,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
     app.render_silent();
 
     let resized = app
-        .app
-        .ui
+        .ui_probe()
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("resized custom-composed dialog rect");
@@ -951,8 +1014,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
     app.set_terminal_size(80, 3);
     app.render_silent();
     let constrained = app
-        .app
-        .ui
+        .ui_probe()
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("constrained dialog rect");
@@ -962,8 +1024,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
     app.set_terminal_size(80, 24);
     app.render_silent();
     let restored = app
-        .app
-        .ui
+        .ui_probe()
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("restored dialog rect");
@@ -982,7 +1043,6 @@ fn shift_tab_on_open_confirm_waits_for_turn_mode_boundary_before_allowing() {
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(13), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
@@ -993,13 +1053,13 @@ fn shift_tab_on_open_confirm_waits_for_turn_mode_boundary_before_allowing() {
     app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
 
     assert_eq!(app.pending_confirm_count(), 1);
-    assert_eq!(app.app.core.config.mode.as_str(), "apply");
-    assert!(app.app.mode_pending());
+    assert_eq!(app.core_probe().config.mode.as_str(), "apply");
+    assert!(app.mode_pending());
     assert!(actions_permission_decisions(app.actions()).is_empty());
 
-    app.app.sync_agent_mode_applied();
+    app.sync_agent_mode_applied();
     let handle_id = app.first_pending_confirm().unwrap();
-    assert!(app.app.resolve_open_confirm_for_current_mode(handle_id));
+    assert!(app.resolve_open_confirm_for_current_mode(handle_id));
     assert_eq!(app.pending_confirm_count(), 0);
     assert_eq!(
         permission_decisions(app.drain_engine_sends()),
@@ -1014,16 +1074,15 @@ fn open_confirm_recheck_auto_denies_without_stopping_turn() {
     app.start_turn(1);
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut pending = Vec::new();
         let ctrl = dispatch_confirm_request(&mut app, confirm_req(14), &mut pending);
         assert!(matches!(ctrl, crate::app::SessionControl::Continue));
     }
 
     let handle_id = app.first_pending_confirm().unwrap();
-    app.app.applied_agent_mode = protocol::AgentMode::parse("deny").unwrap();
+    app.set_applied_mode(protocol::AgentMode::parse("deny").unwrap());
 
-    assert!(app.app.resolve_open_confirm_for_current_mode(handle_id));
+    assert!(app.resolve_open_confirm_for_current_mode(handle_id));
     assert_eq!(app.pending_confirm_count(), 0);
     assert!(app.agent_running());
     assert_eq!(
@@ -1034,10 +1093,7 @@ fn open_confirm_recheck_auto_denies_without_stopping_turn() {
 
 #[test]
 fn present_plan_save_draft_writes_artifact_and_manifest() {
-    let home_guard = test_home_guard();
-    let mut app = TestApp::builder()
-        .with_vim(false)
-        .build_with_test_home_guard(&home_guard);
+    let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
 
     let mut args = std::collections::HashMap::new();
@@ -1073,7 +1129,7 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
 
     let artifact_dir = std::path::Path::new(plan_path).parent().unwrap();
     let artifact_dir = std::fs::canonicalize(artifact_dir).unwrap();
-    let grants = app.app.session_path_grants();
+    let grants = app.session_path_grants();
     assert!(grants.iter().any(|grant| {
         grant.mode.is_none()
             && grant.tool == "read_file"
@@ -1107,13 +1163,10 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
 
 #[test]
 fn present_plan_existing_path_approves_without_overwriting_plan_body() {
-    let home_guard = test_home_guard();
-    let mut app = TestApp::builder()
-        .with_vim(false)
-        .build_with_test_home_guard(&home_guard);
+    let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
 
-    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let session_dir = app.core_probe().sessions.dir_for(&app.session_snapshot());
     let artifact_dir = session_dir.join("plans/20260101-000000-parser-plan");
     std::fs::create_dir_all(&artifact_dir).unwrap();
     let plan_path = artifact_dir.join("plan.md");
@@ -1168,10 +1221,7 @@ fn present_plan_existing_path_approves_without_overwriting_plan_body() {
 
 #[test]
 fn present_plan_dismiss_does_not_echo_plan_body() {
-    let home_guard = test_home_guard();
-    let mut app = TestApp::builder()
-        .with_vim(false)
-        .build_with_test_home_guard(&home_guard);
+    let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
 
     let mut args = std::collections::HashMap::new();
@@ -1202,10 +1252,7 @@ fn present_plan_dismiss_does_not_echo_plan_body() {
 
 #[test]
 fn present_plan_dialog_tracks_terminal_width_on_resize() {
-    let home_guard = test_home_guard();
-    let mut app = TestApp::builder()
-        .with_vim(false)
-        .build_with_test_home_guard(&home_guard);
+    let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
 
     let mut args = std::collections::HashMap::new();
@@ -1269,7 +1316,7 @@ fn public_status_open_question_needs_attention() {
     }));
     assert!(app.state().active_modal.is_some());
 
-    let (state, reason) = app.app.public_status_state_reason();
+    let (state, reason) = app.public_status_state_reason();
     assert_eq!(
         state,
         smelt_core::public_status::PublicState::NeedsAttention
@@ -1324,7 +1371,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
 
     app.press(KeyCode::Enter);
     assert!(
-        app.app.lua_wakeup_rx.try_recv().is_ok(),
+        app.try_receive_lua_wakeup(),
         "resolving the first dialog should wake the Lua task runtime"
     );
     app.feed_one(SourceEvent::LuaWakeup);
@@ -1337,7 +1384,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
 
     app.press(KeyCode::Char('2'));
     assert!(
-        app.app.lua_wakeup_rx.try_recv().is_ok(),
+        app.try_receive_lua_wakeup(),
         "resolving the final dialog should wake the Lua task runtime"
     );
     app.feed_one(SourceEvent::LuaWakeup);
@@ -1466,30 +1513,21 @@ fn cmdline_typed_payload_does_not_trip_cursor_invariant() {
 fn btw_command_preserves_model_history_prefix_and_appends_question() {
     let mut app = TestApp::builder().build();
     stub_btw_ui(&mut app);
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.push_assistant_text("a1");
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u2")));
 
-    let expected_prefix = protocol::history_to_messages(&app.app.model_history());
+    let expected_prefix = protocol::history_to_messages(&app.model_history());
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.apply_lua_command("btw what changed?");
-        app.app.drive_lua_tasks();
+        app.apply_lua_command("btw what changed?");
+        app.drive_lua_tasks();
     }
 
     let asks = ask_messages(app.drain_engine_sends());
     assert_eq!(asks.len(), 1, "/btw should issue one inherited ask");
     let (system, messages) = &asks[0];
-    assert_eq!(system, &app.app.assemble_system_prompt());
+    assert_eq!(system, &app.assemble_system_prompt());
     assert_eq!(
         &messages[..expected_prefix.len()],
         expected_prefix.as_slice(),
@@ -1504,7 +1542,7 @@ fn btw_command_preserves_model_history_prefix_and_appends_question() {
     assert!(last_text.contains("Question: what changed?"));
 
     respond_pending_ask_with_text(&mut app, "done");
-    app.app.core.timers.clear();
+    app.clear_timers();
 }
 
 #[test]
@@ -1515,9 +1553,8 @@ fn btw_dialog_paints_a_selected_delta_before_a_coalesced_final_response() {
     app.push_assistant_text("Call `buf:source(text)`.");
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app.apply_lua_command("btw show me a tiny example");
-        app.app.drive_lua_tasks();
+        app.apply_lua_command("btw show me a tiny example");
+        app.drive_lua_tasks();
     }
     let ask_id = app.pending_ask_id().expect("/btw registered ask callback");
     app.render_to_frame();
@@ -1539,18 +1576,13 @@ fn btw_dialog_paints_a_selected_delta_before_a_coalesced_final_response() {
     .expect("queue /btw response");
 
     let selected_delta = app
-        .app
-        .core
-        .engine
-        .try_recv_output()
+        .try_receive_engine_output()
         .expect("select loop should receive the first delta");
-    app.app
-        .dispatch_engine_output_in_render_loop_to(selected_delta, &mut std::io::sink(), |_| {});
+    app.dispatch_engine_output_in_render_loop_to(selected_delta, &mut std::io::sink(), |_| {});
     let mut streamed_frame = None;
-    app.app
-        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |app| {
-            streamed_frame = Some(app.ui.snapshot().text())
-        });
+    app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |frame| {
+        streamed_frame = Some(frame.text())
+    });
 
     let streamed_frame = streamed_frame.expect("final response should paint the pending delta");
     assert!(
@@ -1567,7 +1599,7 @@ fn btw_dialog_paints_a_selected_delta_before_a_coalesced_final_response() {
         final_frame.contains("coalesced final answer"),
         "frame: {final_frame}"
     );
-    app.app.core.timers.clear();
+    app.clear_timers();
 }
 
 #[test]
@@ -1578,9 +1610,8 @@ fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
     app.push_assistant_text("Call `buf:source(text)`.");
 
     {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app.apply_lua_command("btw show me a tiny example");
-        app.app.drive_lua_tasks();
+        app.apply_lua_command("btw show me a tiny example");
+        app.drive_lua_tasks();
     }
     let ask_id = app.pending_ask_id().expect("/btw registered ask callback");
     app.render_to_frame();
@@ -1606,8 +1637,7 @@ fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
     })
     .expect("queue /btw response");
 
-    app.app
-        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+    app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
     let frame = app.render_to_frame().text();
     assert!(frame.contains("live dialog marker"), "frame: {frame}");
     assert!(!frame.contains("final answer"), "frame: {frame}");
@@ -1616,8 +1646,7 @@ fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
         if app.pending_ask_id().is_none() {
             break;
         }
-        app.app
-            .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+        app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
     }
     assert!(
         app.pending_ask_id().is_none(),
@@ -1625,25 +1654,20 @@ fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
     );
     let frame = app.render_to_frame().text();
     assert!(frame.contains("final answer"), "frame: {frame}");
-    app.app.core.timers.clear();
+    app.clear_timers();
 }
 
 #[test]
 fn btw_command_denies_tool_calls_then_retries_same_request_shape() {
     let mut app = TestApp::builder().build();
     stub_btw_ui(&mut app);
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.push_assistant_text("a1");
-    let expected_prefix = protocol::history_to_messages(&app.app.model_history());
+    let expected_prefix = protocol::history_to_messages(&app.model_history());
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.apply_lua_command("btw quick summary");
-        app.app.drive_lua_tasks();
+        app.apply_lua_command("btw quick summary");
+        app.drive_lua_tasks();
     }
 
     let first = ask_messages(app.drain_engine_sends());
@@ -1676,5 +1700,5 @@ fn btw_command_denies_tool_calls_then_retries_same_request_shape() {
     assert!(second_messages[first_messages.len() + 1].is_error);
 
     respond_pending_ask_with_text(&mut app, "done");
-    app.app.core.timers.clear();
+    app.clear_timers();
 }

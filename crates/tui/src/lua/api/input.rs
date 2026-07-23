@@ -53,8 +53,10 @@ impl mlua::UserData for LuaInput {
         methods.add_method(
             "buf",
             |_, this, ()| -> LuaResult<Option<super::buf::LuaBuf>> {
-                let bid =
-                    crate::lua::try_with_app(|app| app.ui.win(this.win).map(|w| w.buf)).flatten();
+                let bid = crate::lua::try_with_ui_host(|host| {
+                    host.with_ui(|ui| ui.win(this.win).map(|window| window.buf))
+                })
+                .flatten();
                 Ok(bid.map(|id| super::buf::LuaBuf { id }))
             },
         );
@@ -64,7 +66,7 @@ impl mlua::UserData for LuaInput {
         });
 
         methods.add_method("set_text", |_, this, text: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| set_input_text(app, this.win, &text));
+            crate::lua::with_ui_host(|host| host.set_input_text(this.win, &text));
             Ok(())
         });
 
@@ -81,8 +83,8 @@ impl mlua::UserData for LuaInput {
                 let shared = super::win::current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
                 let event = event.win_event();
-                let installed = crate::lua::try_with_app(|app| {
-                    app.ui.win_on_event(
+                let installed = crate::lua::try_with_ui_host(|host| {
+                    host.register_window_event(
                         this.win,
                         event,
                         crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
@@ -97,13 +99,15 @@ impl mlua::UserData for LuaInput {
                 }
                 let win = this.win;
                 Ok(LuaReg::new(move || {
-                    let mut removed = false;
-                    crate::lua::with_app(|app| {
-                        let prev = app.ui.win_clear_event_by_id(win, event, id);
-                        removed = prev.is_some();
-                        crate::lua::drop_displaced_lua_handle(app, prev);
-                    });
-                    removed
+                    crate::lua::app_ref::defer_registered_lua_operation(
+                        &shared,
+                        id,
+                        crate::lua::app_ref::DeferredLuaOperation::WindowEvent {
+                            window: win,
+                            event,
+                            callback_id: id,
+                        },
+                    )
                 }))
             },
         );
@@ -121,23 +125,23 @@ impl mlua::UserData for LuaInput {
                 };
                 let shared = super::win::current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
-                crate::lua::with_app(|app| {
-                    let prev = app.ui.win_set_keymap(
+                crate::lua::with_ui_host(|host| {
+                    host.set_window_keymap(
                         this.win,
                         key,
                         crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
                     );
-                    crate::lua::drop_displaced_lua_handle(app, prev);
                 });
                 let win = this.win;
                 Ok(LuaReg::new(move || {
-                    let mut removed = false;
-                    crate::lua::with_app(|app| {
-                        let prev = app.ui.win_clear_keymap(win, key);
-                        removed = prev.is_some();
-                        crate::lua::drop_displaced_lua_handle(app, prev);
-                    });
-                    removed
+                    crate::lua::app_ref::defer_registered_lua_operation(
+                        &shared,
+                        id,
+                        crate::lua::app_ref::DeferredLuaOperation::WindowKeymap {
+                            window: win,
+                            key,
+                        },
+                    )
                 }))
             },
         );
@@ -187,14 +191,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             }
             buf_opts.set("editable", true)?;
             let buf = super::buf::create_or_open(&shared, Some(&buf_opts))?;
-            crate::lua::try_with_app(|app| {
-                if let Some(b) = app.ui.buf_mut(buf) {
-                    b.set_lines(
-                        0,
-                        b.line_count(),
-                        vec![crate::line_input::normalize_single_line(&text)],
-                    );
-                }
+            crate::lua::try_with_ui_host(|host| {
+                host.with_ui(|ui| {
+                    if let Some(buffer) = ui.buf_mut(buf) {
+                        buffer.set_lines(
+                            0,
+                            buffer.line_count(),
+                            vec![crate::line_input::normalize_single_line(&text)],
+                        );
+                    }
+                });
             });
             opts.set("surface", opts.get::<Option<String>>("surface")?.unwrap_or_else(|| "editable_text".into()))?;
             opts.set("kind", "input")?;
@@ -217,30 +223,11 @@ fn input_opts(lua: &Lua, opts: Option<mlua::Table>) -> LuaResult<mlua::Table> {
 }
 
 fn input_text(win: crate::smelt_edit::WinId) -> Option<String> {
-    crate::lua::try_with_app(|app| {
-        let buf = app.ui.win(win)?.buf;
-        app.ui.buf(buf)?.get_line(0).map(str::to_string)
+    crate::lua::try_with_ui_host(|host| {
+        host.with_ui(|ui| {
+            let buffer = ui.win(win)?.buf;
+            ui.buf(buffer)?.get_line(0).map(str::to_string)
+        })
     })
     .flatten()
-}
-
-fn set_input_text(app: &mut crate::app::TuiApp, win: crate::smelt_edit::WinId, text: &str) {
-    let normalized = crate::line_input::normalize_single_line(text);
-    let Some(buf_id) = app.ui.win(win).map(|w| w.buf) else {
-        return;
-    };
-    if let Some(buf) = app.ui.buf_mut(buf_id) {
-        buf.set_lines(0, buf.line_count(), vec![normalized.clone()]);
-        if normalized.is_empty() {
-            if let Some(placeholder) = app.placeholders.get(&win).cloned() {
-                crate::content::prompt_buf::set_placeholder_extmark(buf, Some(placeholder));
-            }
-        } else {
-            crate::content::prompt_buf::set_placeholder_extmark(buf, Some(String::new()));
-        }
-    }
-    if let Some(w) = app.ui.win_mut(win) {
-        w.set_cursor_byte_single_line(&normalized, normalized.len());
-        w.clear_selection_anchor();
-    }
 }

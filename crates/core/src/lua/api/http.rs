@@ -15,7 +15,12 @@ use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+pub(super) fn register(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    shared: &Arc<LuaShared>,
+    cache_root: &std::path::Path,
+) -> LuaResult<()> {
     let http = LuaMod::under(
         lua,
         smelt,
@@ -70,20 +75,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     let cache = http.sub(
         "cache",
-        "Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.",
+        "Runtime-owned HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.",
     )?;
+    let read_cache_root = cache_root.to_path_buf();
     cache.fn_(
         "read",
         "Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.",
         &["key"],
-        |_, key: String| Ok(http::cache::get(&key)),
+        move |_, key: String| Ok(http::cache::get(&read_cache_root, &key)),
     )?;
+    let write_cache_root = cache_root.to_path_buf();
     cache.fn_(
         "write",
         "Store `value` in the HTTP response cache under `key`.",
         &["key", "value"],
-        |_, (key, value): (String, String)| -> LuaResult<()> {
-            http::cache::put(&key, &value);
+        move |_, (key, value): (String, String)| -> LuaResult<()> {
+            http::cache::put(&write_cache_root, &key, &value);
             Ok(())
         },
     )?;

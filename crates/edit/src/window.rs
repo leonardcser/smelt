@@ -5072,6 +5072,49 @@ mod tests {
     }
 
     #[test]
+    fn mouse_drag_to_chrome_boundary_copies_selectable_prefix() {
+        let mut w = make_win();
+        w.set_surface(WindowSurface::selectable_text());
+        let mut buf = make_buf(vec!["abc----xyz".into()]);
+        buf.add_highlight_group_with_meta(
+            0,
+            3,
+            7,
+            smelt_buffer::theme::intern("Normal"),
+            smelt_buffer::buffer::SpanMeta::unselectable(),
+        );
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport: viewport_for(buf.lines(), Rect::new(0, 0, 20, 1)),
+            click_count: 1,
+        };
+
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            ctx,
+        );
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 3),
+            ctx,
+        );
+        let (_, range) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 3),
+            ctx,
+        );
+
+        assert_eq!(range, Some((0, 7)));
+        let (start, end) = range.expect("selection range");
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(&buf, start, end),
+            "abc"
+        );
+    }
+
+    #[test]
     fn reverse_mouse_drag_copy_includes_cursor_cell() {
         let mut w = make_win();
         let buf = make_buf(vec!["abc".into()]);

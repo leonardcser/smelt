@@ -104,9 +104,7 @@ impl mlua::UserData for LuaOverlay {
         });
 
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                app.close_overlay(this.id);
-            });
+            crate::lua::with_ui_host(|host| host.close_overlay(this.id));
             Ok(())
         });
 
@@ -138,22 +136,19 @@ pub(crate) fn install_overlay_key(
     };
     let shared = current_shared(lua)?;
     let id = crate::lua::register_callback_handle(&shared, lua, func)?;
-    crate::lua::with_app(|app| {
-        let prev = app.ui.overlay_set_keymap(
+    crate::lua::with_ui_host(|host| {
+        host.set_overlay_keymap(
             overlay,
             key,
             crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
         );
-        crate::lua::drop_displaced_lua_handle(app, prev);
     });
     Ok(LuaReg::new(move || {
-        let mut removed = false;
-        crate::lua::with_app(|app| {
-            let prev = app.ui.overlay_clear_keymap(overlay, key);
-            removed = prev.is_some();
-            crate::lua::drop_displaced_lua_handle(app, prev);
-        });
-        removed
+        crate::lua::app_ref::defer_registered_lua_operation(
+            &shared,
+            id,
+            crate::lua::app_ref::DeferredLuaOperation::OverlayKeymap { overlay, key },
+        )
     }))
 }
 
@@ -259,7 +254,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     opts.set("name", auto)?;
                 }
             }
-            let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
+            let id = crate::lua::with_ui_host(|host| host.open_overlay(opts))
                 .map_err(|e| LuaError::RuntimeError(format!("overlay: {e}")))?;
             let overlay_id = crate::smelt_edit::OverlayId(id as u32);
 
@@ -267,11 +262,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 // Clear any prior overlay-scoped bindings on a named re-open so the
                 // freshly parsed list fully replaces the old one (no stale chords
                 // hanging around when a plugin hot-reloads).
-                crate::lua::with_app(|app| {
-                    for stale in app.ui.overlay_clear_callbacks(overlay_id) {
-                        app.lua.remove_callback(stale);
-                    }
-                });
+                crate::lua::with_ui_host(|host| host.clear_overlay_callbacks(overlay_id));
                 for pair in kms.sequence_values::<mlua::Table>() {
                     let entry = pair?;
                     let chord: String = entry

@@ -81,6 +81,7 @@ mod tests {
             call_id: format!("call-{id}"),
             tool_name: "test".into(),
             args: Default::default(),
+            tool_paths: vec![],
             approval_candidates: vec![],
             grant_options: vec![],
             summary: protocol::StyledLines::from_plain("test"),

@@ -1,17 +1,172 @@
 use crate::app::{AppEvent, TuiApp};
+use std::collections::HashMap;
 
-impl TuiApp {
-    pub(crate) fn poll_managed_auth(&mut self) -> bool {
-        let now = self.core.clock.instant_now();
-        if now < self.next_managed_auth_check || self.managed_auth_check_in_flight {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedModelRefreshNotification {
+    auth_revision: u64,
+    desired_revision: u64,
+    message: String,
+}
+
+pub(super) struct ManagedModelState {
+    catalog: smelt_core::ManagedModels,
+    refresh_notifications: HashMap<engine::auth::AuthProvider, ManagedModelRefreshNotification>,
+    next_auth_check: std::time::Instant,
+    auth_check_in_flight: bool,
+}
+
+impl ManagedModelState {
+    pub(super) fn new(catalog: smelt_core::ManagedModels, now: std::time::Instant) -> Self {
+        Self {
+            catalog,
+            refresh_notifications: HashMap::new(),
+            next_auth_check: now + std::time::Duration::from_secs(2),
+            auth_check_in_flight: false,
+        }
+    }
+
+    pub(super) fn catalog(&self) -> &smelt_core::ManagedModels {
+        &self.catalog
+    }
+
+    pub(super) fn replace_catalog(&mut self, catalog: smelt_core::ManagedModels) {
+        self.catalog = catalog;
+    }
+
+    fn begin_auth_check(&mut self, now: std::time::Instant) -> bool {
+        if now < self.next_auth_check || self.auth_check_in_flight {
             return false;
         }
+        self.next_auth_check = now + std::time::Duration::from_secs(2);
+        self.auth_check_in_flight = true;
+        true
+    }
+
+    fn apply_auth_snapshots(
+        &mut self,
+        snapshots: Vec<(
+            engine::auth::AuthProvider,
+            Option<u64>,
+            Vec<protocol::ModelMetadata>,
+        )>,
+    ) -> bool {
+        self.auth_check_in_flight = false;
+        snapshots
+            .into_iter()
+            .fold(false, |changed, (provider, fingerprint, cached_models)| {
+                self.catalog
+                    .apply_auth_snapshot(provider, fingerprint, cached_models)
+                    || changed
+            })
+    }
+
+    fn mark_credentials_changed(&mut self, now: std::time::Instant) {
+        self.next_auth_check = now;
+    }
+
+    fn begin_refreshes(&mut self) -> Vec<smelt_core::RefreshToken> {
+        self.catalog.begin_refreshes()
+    }
+
+    fn apply_refresh(
+        &mut self,
+        token: smelt_core::RefreshToken,
+        outcome: engine::auth::ManagedModelsRefreshOutcome,
+    ) -> Option<bool> {
+        self.catalog.apply(token, outcome)
+    }
+
+    fn clear_refresh_notification(&mut self, provider: engine::auth::AuthProvider) {
+        self.refresh_notifications.remove(&provider);
+    }
+
+    fn should_notify_refresh(&mut self, token: smelt_core::RefreshToken, message: String) -> bool {
+        let notification = ManagedModelRefreshNotification {
+            auth_revision: token.auth_revision,
+            desired_revision: token.desired_revision,
+            message,
+        };
+        if self.refresh_notifications.get(&token.provider) == Some(&notification) {
+            return false;
+        }
+        self.refresh_notifications
+            .insert(token.provider, notification);
+        true
+    }
+
+    pub(super) fn provider(
+        &self,
+        provider: engine::auth::AuthProvider,
+    ) -> &smelt_core::ManagedProviderModels {
+        self.catalog.provider(provider)
+    }
+
+    fn retry_delay(&self, provider: engine::auth::AuthProvider) -> Option<std::time::Duration> {
+        self.catalog.retry_delay(provider)
+    }
+
+    fn activate_retry(
+        &mut self,
+        provider: engine::auth::AuthProvider,
+        auth_revision: u64,
+        desired_revision: u64,
+    ) -> bool {
+        self.catalog
+            .activate_retry(provider, auth_revision, desired_revision)
+    }
+
+    #[cfg(test)]
+    fn sync_desired_for_harness(
+        &mut self,
+        config: &smelt_core::config::Config,
+        revision: u64,
+    ) -> bool {
+        self.catalog.sync_desired(config, revision)
+    }
+}
+
+impl TuiApp {
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn managed_model_catalog(&self) -> &smelt_core::ManagedModels {
+        self.managed_models.catalog()
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn begin_managed_model_refreshes(&mut self) -> Vec<smelt_core::RefreshToken> {
+        self.managed_models.begin_refreshes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activate_managed_model_retry_for_harness(
+        &mut self,
+        token: smelt_core::RefreshToken,
+    ) -> bool {
+        self.managed_models.activate_retry(
+            token.provider,
+            token.auth_revision,
+            token.desired_revision,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_managed_models_for_harness(
+        &mut self,
+        config: &smelt_core::config::Config,
+        revision: u64,
+    ) -> bool {
+        self.managed_models
+            .sync_desired_for_harness(config, revision)
+    }
+
+    pub(crate) fn poll_managed_auth(&mut self) -> bool {
+        let now = self.core.clock.instant_now();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return false;
         };
-        self.next_managed_auth_check = now + std::time::Duration::from_secs(2);
-        self.managed_auth_check_in_flight = true;
-        let tx = self.app_event_tx.clone();
+        if !self.managed_models.begin_auth_check(now) {
+            return false;
+        }
+        let tx = self.platform.app_event_sender();
         runtime.spawn_blocking(move || {
             let snapshots = smelt_core::ManagedModels::provider_kinds()
                 .into_iter()
@@ -34,15 +189,7 @@ impl TuiApp {
             Vec<protocol::ModelMetadata>,
         )>,
     ) {
-        self.managed_auth_check_in_flight = false;
-        let changed =
-            snapshots
-                .into_iter()
-                .fold(false, |changed, (provider, fingerprint, cached_models)| {
-                    self.managed_models
-                        .apply_auth_snapshot(provider, fingerprint, cached_models)
-                        || changed
-                });
+        let changed = self.managed_models.apply_auth_snapshots(snapshots);
         if !changed {
             return;
         }
@@ -51,18 +198,19 @@ impl TuiApp {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn install_http_client(&mut self, client: engine::HttpClient) {
-        self.http_client = Some(client);
+        self.platform.install_http_client(client);
         self.submit_managed_model_refreshes();
     }
 
     pub(crate) fn submit_managed_model_refreshes(&mut self) {
-        let Some(client) = self.http_client.clone() else {
+        let Some(client) = self.platform.http_client() else {
             return;
         };
         for token in self.managed_models.begin_refreshes() {
             let client = client.clone();
-            let tx = self.app_event_tx.clone();
+            let tx = self.platform.app_event_sender();
             tokio::spawn(async move {
                 let outcome = engine::auth::refresh_model_info_outcome_for(
                     token.provider,
@@ -113,7 +261,7 @@ impl TuiApp {
             }
             | engine::auth::ManagedModelsRefreshOutcome::CredentialsChanged => None,
         };
-        let Some(catalog_changed) = self.managed_models.apply(token, outcome) else {
+        let Some(catalog_changed) = self.managed_models.apply_refresh(token, outcome) else {
             return;
         };
         if credentials_rejected {
@@ -123,7 +271,8 @@ impl TuiApp {
             );
         }
         if credentials_changed {
-            self.next_managed_auth_check = self.core.clock.instant_now();
+            self.managed_models
+                .mark_credentials_changed(self.core.clock.instant_now());
         }
         if catalog_changed {
             if let Err(error) = self.reconcile_runtime_snapshot() {
@@ -137,22 +286,14 @@ impl TuiApp {
             .retry_delay(token.provider)
             .map(|delay| (delay, state.auth_revision, state.desired_revision));
         if refresh_succeeded {
-            self.managed_model_refresh_notifications
-                .remove(&token.provider);
+            self.managed_models
+                .clear_refresh_notification(token.provider);
         }
         if let Some(error) = warning {
-            let notification = crate::app::ManagedModelRefreshNotification {
-                auth_revision: token.auth_revision,
-                desired_revision: token.desired_revision,
-                message: error.clone(),
-            };
             if self
-                .managed_model_refresh_notifications
-                .get(&token.provider)
-                != Some(&notification)
+                .managed_models
+                .should_notify_refresh(token, error.clone())
             {
-                self.managed_model_refresh_notifications
-                    .insert(token.provider, notification);
                 self.notify_warn(format!(
                     "{} model refresh: {error}",
                     managed_provider_label(token.provider)
@@ -160,7 +301,7 @@ impl TuiApp {
             }
         }
         if let Some((delay, auth_revision, desired_revision)) = retry {
-            let tx = self.app_event_tx.clone();
+            let tx = self.platform.app_event_sender();
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
                 let _ = tx.send(AppEvent::ManagedModelsRetry {

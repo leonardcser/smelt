@@ -1,12 +1,342 @@
 use crate::app::{
-    CommandTurnStart, DeferredDialog, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp,
-    TurnState, CONFIRM_DEFER_MS,
+    CommandTurnStart, PendingHistoryAppend, PendingHistoryLifecycle, PendingTool, SessionControl,
+    TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Owns the state machine data that exists only for an agent turn lifecycle.
+///
+/// `TuiApp` still orchestrates persistence, rendering, and engine I/O, while this
+/// subsystem owns turn identity, callback invalidation, continuation, request-scoped
+/// history, and the temporary dispatch state needed when an active turn is lent out.
+pub(crate) struct TurnLifecycle {
+    active: Option<TurnState>,
+    next_turn_id: u64,
+    last_terminal_turn_id: Option<u64>,
+    next_continuation_token: u64,
+    pending_continuation_token: Option<u64>,
+    pending_meta: Option<protocol::TurnMeta>,
+    pending_history_appends: Vec<PendingHistoryAppend>,
+    context_tokens_updated: bool,
+    applied_mode: protocol::AgentMode,
+    applied_reasoning_effort: protocol::ReasoningEffort,
+    cancel_generation: u64,
+    dispatching_turn_id: Option<u64>,
+    dispatching_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+}
+
+pub(crate) struct DispatchingTurn {
+    pub(crate) state: TurnState,
+    previous_turn_id: Option<u64>,
+    previous_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+}
+
+impl TurnLifecycle {
+    pub(crate) fn new(
+        applied_mode: protocol::AgentMode,
+        applied_reasoning_effort: protocol::ReasoningEffort,
+    ) -> Self {
+        Self {
+            active: None,
+            next_turn_id: 1,
+            last_terminal_turn_id: None,
+            next_continuation_token: 1,
+            pending_continuation_token: None,
+            pending_meta: None,
+            pending_history_appends: Vec::new(),
+            context_tokens_updated: false,
+            applied_mode,
+            applied_reasoning_effort,
+            cancel_generation: 0,
+            dispatching_turn_id: None,
+            dispatching_permissions: None,
+        }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub(crate) fn active(&self) -> Option<&TurnState> {
+        self.active.as_ref()
+    }
+
+    pub(crate) fn active_mut(&mut self) -> Option<&mut TurnState> {
+        self.active.as_mut()
+    }
+
+    pub(crate) fn set_active(&mut self, turn: Option<TurnState>) {
+        self.active = turn;
+    }
+
+    pub(crate) fn clear_active(&mut self) -> Option<TurnState> {
+        self.active.take()
+    }
+
+    pub(crate) fn next_turn_id(&self) -> u64 {
+        self.next_turn_id
+    }
+
+    pub(crate) fn last_terminal_turn_id(&self) -> Option<u64> {
+        self.last_terminal_turn_id
+    }
+
+    pub(crate) fn mark_terminal(&mut self, turn_id: u64) {
+        self.last_terminal_turn_id = Some(turn_id);
+    }
+
+    pub(crate) fn set_last_terminal_turn_id(&mut self, turn_id: Option<u64>) {
+        self.last_terminal_turn_id = turn_id;
+    }
+
+    pub(crate) fn applied_mode(&self) -> &protocol::AgentMode {
+        &self.applied_mode
+    }
+
+    pub(crate) fn set_applied_mode(&mut self, mode: protocol::AgentMode) {
+        self.applied_mode = mode;
+    }
+
+    pub(crate) fn applied_reasoning_effort(&self) -> protocol::ReasoningEffort {
+        self.applied_reasoning_effort
+    }
+
+    pub(crate) fn set_applied_reasoning_effort(
+        &mut self,
+        reasoning_effort: protocol::ReasoningEffort,
+    ) {
+        self.applied_reasoning_effort = reasoning_effort;
+    }
+
+    pub(crate) fn set_pending_meta(&mut self, meta: Option<protocol::TurnMeta>) {
+        self.pending_meta = meta;
+    }
+
+    pub(crate) fn take_pending_meta(&mut self) -> Option<protocol::TurnMeta> {
+        self.pending_meta.take()
+    }
+
+    pub(crate) fn mark_context_tokens_updated(&mut self) {
+        self.context_tokens_updated = true;
+    }
+
+    pub(crate) fn clear_context_tokens_updated(&mut self) {
+        self.context_tokens_updated = false;
+    }
+
+    pub(crate) fn take_context_tokens_updated(&mut self, enabled: bool) -> bool {
+        let updated = enabled && self.context_tokens_updated;
+        if updated {
+            self.context_tokens_updated = false;
+        }
+        updated
+    }
+
+    pub(crate) fn pending_history_appends(&self) -> &[PendingHistoryAppend] {
+        &self.pending_history_appends
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn pending_history_append_count(&self) -> usize {
+        self.pending_history_appends.len()
+    }
+
+    pub(crate) fn clear_pending_history_appends(&mut self) {
+        self.pending_history_appends.clear();
+    }
+
+    pub(crate) fn retain_session_history_appends(&mut self) {
+        self.pending_history_appends
+            .retain(|pending| pending.lifecycle() == PendingHistoryLifecycle::SessionScoped);
+    }
+
+    pub(crate) fn take_pending_history_appends(&mut self) -> Vec<PendingHistoryAppend> {
+        std::mem::take(&mut self.pending_history_appends)
+    }
+
+    pub(crate) fn pending_context_note(&self, name: &str) -> Option<Option<&str>> {
+        self.pending_history_appends()
+            .iter()
+            .rev()
+            .find(|pending| pending.replace_context_name.as_deref() == Some(name))
+            .map(|pending| {
+                if pending.remove_context {
+                    None
+                } else {
+                    pending.item.as_note().map(protocol::HistoryNote::text)
+                }
+            })
+    }
+
+    pub(crate) fn queue_history_append(
+        &mut self,
+        append: PendingHistoryAppend,
+        mode_base: Option<&protocol::AgentMode>,
+    ) {
+        if append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
+            let Some(new_mode) = append.mode() else {
+                self.replace_or_push_history_append(append);
+                return;
+            };
+            let existing = self.pending_history_appends.iter().position(|pending| {
+                pending.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+            });
+            if let Some(index) = existing {
+                if mode_base.is_some_and(|base| base.as_str() == new_mode) {
+                    self.pending_history_appends.remove(index);
+                } else {
+                    self.pending_history_appends[index] = append;
+                }
+            } else if mode_base.is_none_or(|base| base.as_str() != new_mode) {
+                self.pending_history_appends.push(append);
+            }
+            return;
+        }
+        self.replace_or_push_history_append(append);
+    }
+
+    pub(crate) fn replace_or_push_history_append(&mut self, append: PendingHistoryAppend) {
+        if append.replacement_note_kind().is_some() {
+            if let Some(existing) = self
+                .pending_history_appends
+                .iter_mut()
+                .find(|pending| pending.same_replacement_target(&append))
+            {
+                *existing = append;
+                return;
+            }
+        }
+        self.pending_history_appends.push(append);
+    }
+
+    pub(crate) fn remove_matching_history_append(&mut self, append: &PendingHistoryAppend) {
+        self.pending_history_appends
+            .retain(|pending| !pending.same_replacement_target(append));
+    }
+
+    pub(crate) fn take_matching_history_append(
+        &mut self,
+        item: &protocol::HistoryItem,
+    ) -> Option<PendingHistoryAppend> {
+        let index = self
+            .pending_history_appends()
+            .iter()
+            .position(|append| append.matches_history_item(item))?;
+        Some(self.pending_history_appends.remove(index))
+    }
+
+    pub(crate) fn active_id(&self) -> Option<u64> {
+        self.active
+            .as_ref()
+            .map(|turn| turn.turn_id)
+            .or(self.dispatching_turn_id)
+    }
+
+    pub(crate) fn active_permissions(
+        &self,
+        fallback: std::sync::Arc<smelt_core::permissions::Permissions>,
+    ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
+        self.active
+            .as_ref()
+            .map(|turn| turn.permissions.clone())
+            .or_else(|| self.dispatching_permissions.clone())
+            .unwrap_or(fallback)
+    }
+
+    pub(crate) fn refresh_active_permissions(
+        &mut self,
+        permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+    ) {
+        if self.dispatching_turn_id.is_some() {
+            self.dispatching_permissions = Some(permissions);
+        } else if let Some(turn) = self.active.as_mut() {
+            turn.permissions = permissions;
+        }
+    }
+
+    pub(crate) fn begin_dispatch(&mut self) -> Option<DispatchingTurn> {
+        let state = self.active.take()?;
+        let previous_turn_id = self.dispatching_turn_id.replace(state.turn_id);
+        let previous_permissions = self
+            .dispatching_permissions
+            .replace(state.permissions.clone());
+        Some(DispatchingTurn {
+            state,
+            previous_turn_id,
+            previous_permissions,
+        })
+    }
+
+    pub(crate) fn finish_dispatch(&mut self, mut dispatch: DispatchingTurn) {
+        if let Some(permissions) = &self.dispatching_permissions {
+            if !std::sync::Arc::ptr_eq(permissions, &dispatch.state.permissions) {
+                dispatch.state.permissions = permissions.clone();
+            }
+        }
+        self.dispatching_turn_id = dispatch.previous_turn_id;
+        self.dispatching_permissions = dispatch.previous_permissions;
+        self.active = Some(dispatch.state);
+    }
+
+    pub(crate) fn begin_prepared_turn(&mut self) {
+        self.pending_continuation_token = None;
+    }
+
+    pub(crate) fn record_started_turn(
+        &mut self,
+        turn_id: u64,
+        mode: protocol::AgentMode,
+        reasoning_effort: protocol::ReasoningEffort,
+    ) {
+        self.next_turn_id = turn_id.checked_add(1).unwrap_or(turn_id);
+        self.applied_mode = mode;
+        self.applied_reasoning_effort = reasoning_effort;
+    }
+
+    pub(crate) fn issue_continuation_token(&mut self) -> u64 {
+        let token = self.next_continuation_token;
+        self.next_continuation_token = self.next_continuation_token.wrapping_add(1).max(1);
+        self.pending_continuation_token = Some(token);
+        token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_continuation_token(&self) -> Option<u64> {
+        self.pending_continuation_token
+    }
+
+    pub(crate) fn clear_continuation(&mut self) {
+        self.pending_continuation_token = None;
+    }
+
+    pub(crate) fn consume_continuation(&mut self, token: u64) -> bool {
+        if self.pending_continuation_token != Some(token) {
+            return false;
+        }
+        self.pending_continuation_token = None;
+        true
+    }
+
+    pub(crate) fn invalidate_turn_callbacks(&mut self) {
+        self.cancel_generation = self.cancel_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn cancel_generation(&self) -> u64 {
+        self.cancel_generation
+    }
+
+    pub(crate) fn reset_session(&mut self) {
+        self.last_terminal_turn_id = None;
+        self.pending_meta = None;
+        self.pending_history_appends.clear();
+        self.context_tokens_updated = false;
+        self.clear_continuation();
+    }
+}
 
 struct StagedTurnRollback {
     history_len: Option<usize>,
@@ -77,20 +407,28 @@ impl TuiApp {
     pub(crate) fn active_permissions(
         &self,
     ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
-        self.agent
-            .as_ref()
-            .map(|turn| turn.permissions.clone())
-            .or_else(|| self.dispatching_turn_permissions.clone())
-            .unwrap_or_else(|| self.core.permissions.snapshot())
+        self.conversation
+            .active_permissions(self.core.permissions.snapshot())
+    }
+
+    pub(crate) fn with_dispatched_turn<R>(
+        &mut self,
+        body: impl FnOnce(&mut Self, &mut TurnState) -> R,
+    ) -> Option<R> {
+        let mut dispatch = self.conversation.begin_dispatch()?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            body(self, &mut dispatch.state)
+        }));
+        self.conversation.finish_dispatch(dispatch);
+        match result {
+            Ok(value) => Some(value),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     fn refresh_active_turn_permissions(&mut self) {
-        let permissions = self.core.permissions.snapshot();
-        if self.dispatching_turn_id.is_some() {
-            self.dispatching_turn_permissions = Some(permissions);
-        } else if let Some(turn) = self.agent.as_mut() {
-            turn.permissions = permissions;
-        }
+        self.conversation
+            .refresh_active_permissions(self.core.permissions.snapshot());
     }
 
     fn agent_project_context(&self) -> protocol::AgentProjectContext {
@@ -127,7 +465,7 @@ impl TuiApp {
     fn prepare_user_visible_turn(&mut self) {
         self.dismiss_notification();
         self.clear_prompt_prediction();
-        self.sleep_inhibit.acquire();
+        self.platform.set_sleep_inhibited(true);
         self.begin_turn();
         self.ensure_current_context_note();
         self.apply_pending_history_appends_for_request();
@@ -141,7 +479,7 @@ impl TuiApp {
     }
 
     fn continuation_target(&mut self) -> Option<smelt_store::TurnId> {
-        match self.last_terminal_turn_id {
+        match self.conversation.last_terminal_turn_id() {
             Some(turn_id) => Some(smelt_store::TurnId::new(turn_id)),
             None => {
                 self.notify_error_sticky(
@@ -158,11 +496,11 @@ impl TuiApp {
             "a canonical turn may already be durable; reopen the session before retrying ({})",
             cause.message
         );
-        self.session_access = crate::app::SessionAccess::ReadOnly { reason };
+        self.conversation.mark_read_only(reason);
     }
 
     fn expand_at_file_refs_in_text(&mut self, text: &str) -> String {
-        smelt_core::file_ref::expand_at_file_refs(text, &self.cwd, &self.core.files)
+        smelt_core::file_ref::expand_at_file_refs(text, self.workspace.cwd(), &self.core.files)
     }
 
     fn expand_at_file_refs(&mut self, content: Content) -> Content {
@@ -222,11 +560,11 @@ impl TuiApp {
         self.prepare_user_visible_turn();
         let rollback = StagedTurnRollback {
             history_len: Some(self.session_history_len()),
-            transcript_len: Some(self.session_document.transcript.history().order.len()),
+            transcript_len: Some(self.conversation.transcript().history().order.len()),
         };
         let first_user_message = self
-            .core
-            .session
+            .conversation
+            .session()
             .first_user_message
             .is_none()
             .then(|| text.clone().into_owned());
@@ -270,7 +608,7 @@ impl TuiApp {
     }
 
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> Option<TurnState> {
-        self.pending_continuation_token = None;
+        self.conversation.begin_prepared_turn();
         self.working.begin(TurnPhase::Working);
 
         self.core.signals.set_dyn(
@@ -280,45 +618,54 @@ impl TuiApp {
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
-        let (turn_id, submitted_revision, required_generation, durable_receipt_at) = if self
-            .ephemeral()
-        {
-            let turn_id = self.next_turn_id;
-            (turn_id, 0, self.session_document.generation().get(), None)
-        } else {
-            let acknowledgement = match self.submit_canonical_turn(smelt_store::NewTurn {
-                kind: turn.kind,
-                submitted_history_idx: turn.submitted_history_idx,
-                continuation_of: turn.continuation_of,
-                created_at_ms: session::now_ms(),
-            }) {
-                Ok(acknowledgement) => acknowledgement,
-                Err(cause) => {
-                    if cause.definitely_not_committed() {
-                        if let Some(rollback) = turn.rollback.as_ref() {
-                            self.rollback_staged_turn(rollback);
+        let (turn_id, submitted_revision, required_generation, durable_receipt_at) =
+            if self.ephemeral() {
+                let turn_id = self.conversation.next_turn_id();
+                (
+                    turn_id,
+                    0,
+                    self.conversation.persistence_generation().get(),
+                    None,
+                )
+            } else {
+                let acknowledgement = match self.submit_canonical_turn(smelt_store::NewTurn {
+                    kind: turn.kind,
+                    submitted_history_idx: turn.submitted_history_idx,
+                    continuation_of: turn.continuation_of,
+                    created_at_ms: session::now_ms(),
+                }) {
+                    Ok(acknowledgement) => acknowledgement,
+                    Err(cause) => {
+                        if cause.definitely_not_committed() {
+                            if let Some(rollback) = turn.rollback.as_ref() {
+                                self.rollback_staged_turn(rollback);
+                            }
+                        } else if cause.requires_reopen() {
+                            self.require_reopen_after_submit_failure(&cause);
                         }
-                    } else if cause.requires_reopen() {
-                        self.require_reopen_after_submit_failure(&cause);
+                        self.platform.set_sleep_inhibited(false);
+                        self.working.finish(TurnOutcome::Errored);
+                        self.notify_session_save_failure(
+                            &self.conversation.session().id.clone(),
+                            &cause.message,
+                        );
+                        return None;
                     }
-                    self.sleep_inhibit.release();
-                    self.working.finish(TurnOutcome::Errored);
-                    self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
-                    return None;
-                }
+                };
+                (
+                    acknowledgement.receipt.turn_id.get(),
+                    acknowledgement.receipt.session.current.revision.get(),
+                    acknowledgement.generation.get(),
+                    Some(std::time::Instant::now()),
+                )
             };
-            (
-                acknowledgement.receipt.turn_id.get(),
-                acknowledgement.receipt.session.current.revision.get(),
-                acknowledgement.generation.get(),
-                Some(std::time::Instant::now()),
-            )
-        };
-        self.next_turn_id = turn_id.checked_add(1).unwrap_or(turn_id);
+        self.conversation.record_started_turn(
+            turn_id,
+            self.core.config.mode.clone(),
+            turn.reasoning_effort,
+        );
 
         let permissions = turn.permissions.clone();
-        self.applied_agent_mode = self.core.config.mode.clone();
-        self.applied_reasoning_effort = turn.reasoning_effort;
         let payload = protocol::StartTurnPayload {
             turn_id,
             input: turn.input,
@@ -328,16 +675,11 @@ impl TuiApp {
             reasoning_effort: turn.reasoning_effort,
             fast_mode: self.fast_mode_active(),
             history: turn.history,
-            session_id: self.core.session.id.clone(),
+            session_id: self.conversation.session().id.clone(),
             session_dir: self.current_session_dir(),
-            persistence: protocol::PersistenceScope {
-                epoch: self
-                    .persistence
-                    .as_ref()
-                    .map_or(0, |actor| actor.epoch().get()),
-                required_generation,
-                store_revision: submitted_revision,
-            },
+            persistence: self
+                .conversation
+                .persistence_scope_at(required_generation, submitted_revision),
             permission_overrides: turn.permission_overrides,
             system_prompt: Some(system_prompt),
             tools,
@@ -355,7 +697,7 @@ impl TuiApp {
                     Some("engine_channel_rejected".into()),
                 );
             }
-            self.sleep_inhibit.release();
+            self.platform.set_sleep_inhibited(false);
             self.working.finish(TurnOutcome::Errored);
             self.notify_error_sticky("engine stopped before accepting the request".into());
             return None;
@@ -382,7 +724,10 @@ impl TuiApp {
                 smelt_store::TurnState::Running,
                 None,
             ) {
-                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+                self.notify_session_save_failure(
+                    &self.conversation.session().id.clone(),
+                    &cause.message,
+                );
             }
         }
 
@@ -406,7 +751,10 @@ impl TuiApp {
         }
         let model_target = self.resolve_model_target()?;
         self.invalidate_prompt_prediction();
-        let block = crate::app::history::history_note_to_block(&self.lua, &history_note);
+        let lua = self.lua.execution();
+        let block = crate::lua::scope_app(self, || {
+            crate::app::history::history_note_to_block(&lua, &history_note)
+        });
         let adds_history = !history_note.text().is_empty();
         let adds_block = block.is_some();
         if !adds_history && self.session_history_len() == 0 {
@@ -416,7 +764,7 @@ impl TuiApp {
         let rollback = StagedTurnRollback {
             history_len: adds_history.then(|| self.session_history_len()),
             transcript_len: adds_block
-                .then(|| self.session_document.transcript.history().order.len()),
+                .then(|| self.conversation.transcript().history().order.len()),
         };
         let history = if adds_history {
             self.stage_request_history_item(HistoryItem::note(history_note.clone()), block)
@@ -543,13 +891,13 @@ impl TuiApp {
         self.prepare_user_visible_turn();
         let rollback = StagedTurnRollback {
             history_len: (!evaluated.is_empty()).then(|| self.session_history_len()),
-            transcript_len: Some(self.session_document.transcript.history().order.len()),
+            transcript_len: Some(self.conversation.transcript().history().order.len()),
         };
 
         let history = if !evaluated.is_empty() {
             let first_user_message = self
-                .core
-                .session
+                .conversation
+                .session()
                 .first_user_message
                 .is_none()
                 .then(|| display.clone());
@@ -669,7 +1017,7 @@ impl TuiApp {
     }
 
     fn record_finished_turn_state(&mut self, ui_meta: protocol::TurnMeta) {
-        let mut meta = match self.pending_turn_meta.take() {
+        let mut meta = match self.conversation.take_pending_meta() {
             Some(engine_meta) => protocol::TurnMeta {
                 elapsed_ms: ui_meta.elapsed_ms,
                 avg_tps: engine_meta.avg_tps.or(ui_meta.avg_tps),
@@ -684,18 +1032,14 @@ impl TuiApp {
         }
         let history_len = self.session_history_len();
         let snapshot_context = !self.session_is_read_only();
-        let update_context_token_history_len =
-            snapshot_context && self.context_tokens_updated_this_turn;
-        if snapshot_context {
-            self.context_tokens_updated_this_turn = false;
-        }
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FinishTurnState {
-                history_len,
-                meta,
-                snapshot_context,
-                update_context_token_history_len,
-            },
+        let update_context_token_history_len = self
+            .conversation
+            .take_context_tokens_updated(snapshot_context);
+        self.conversation.finish_turn_state(
+            history_len,
+            meta,
+            snapshot_context,
+            update_context_token_history_len,
         );
     }
 
@@ -711,7 +1055,7 @@ impl TuiApp {
         reason: Option<String>,
     ) -> bool {
         if self.ephemeral() {
-            self.last_terminal_turn_id = Some(turn_id);
+            self.conversation.mark_terminal(turn_id);
             self.save_session();
             return true;
         }
@@ -721,11 +1065,14 @@ impl TuiApp {
             reason,
         ) {
             Ok(_) => {
-                self.last_terminal_turn_id = Some(turn_id);
+                self.conversation.mark_terminal(turn_id);
                 true
             }
             Err(cause) => {
-                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+                self.notify_session_save_failure(
+                    &self.conversation.session().id.clone(),
+                    &cause.message,
+                );
                 false
             }
         }
@@ -734,13 +1081,13 @@ impl TuiApp {
     /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
     pub(crate) fn cancel_agent(&mut self) {
         let turn = self
-            .agent
-            .as_ref()
+            .conversation
+            .active()
             .map(|turn| (turn.turn_id, turn.canonical));
-        self.sleep_inhibit.release();
+        self.platform.set_sleep_inhibited(false);
         self.core.engine.send(UiCommand::Cancel);
         self.cancel_turn_lua_tasks();
-        self.cancel_generation = self.cancel_generation.wrapping_add(1);
+        self.conversation.invalidate_turn_callbacks();
         self.busy_stack.clear();
         // A turn is ending without going through `finish_turn`. Commit any
         // in-flight streaming buffers so the post-cancel state honors the
@@ -751,7 +1098,7 @@ impl TuiApp {
         self.flush_streaming_text();
         self.clear_tool_drafts();
         self.clear_compaction_preview();
-        self.pending_history_appends.clear();
+        self.conversation.clear_pending_history_appends();
         let meta = self.working.finish(TurnOutcome::Cancelled);
         self.record_finished_turn_state(meta);
         self.sync_agent_mode_applied();
@@ -766,23 +1113,18 @@ impl TuiApp {
             }
             Some((_, false)) | None => self.save_session(),
         }
-        self.queued_inputs.clear();
+        self.prompt.clear_queue();
     }
 
     pub(crate) fn consume_continuation_token(&mut self, token: u64) -> bool {
-        if self.pending_continuation_token == Some(token) {
-            self.pending_continuation_token = None;
-            true
-        } else {
-            false
-        }
+        self.conversation.consume_continuation(token)
     }
 
     pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
-        let was_running = self.agent.is_some();
+        let was_running = self.conversation.is_active();
         if was_running {
             let start_queued = self.finish_turn(end);
-            self.agent = None;
+            self.conversation.clear_active();
             if start_queued {
                 self.start_next_queued_input_if_idle();
             }
@@ -792,7 +1134,7 @@ impl TuiApp {
             // bash executions, etc.). App-scoped background work survives.
             self.core.engine.send(UiCommand::Cancel);
             self.cancel_turn_lua_tasks();
-            self.cancel_generation = self.cancel_generation.wrapping_add(1);
+            self.conversation.invalidate_turn_callbacks();
             self.busy_stack.clear();
             self.clear_compaction_preview();
             // Archive an interrupted outcome so the prompt bar shows
@@ -806,8 +1148,8 @@ impl TuiApp {
         use crate::app::TurnEnd;
 
         let turn = self
-            .agent
-            .as_ref()
+            .conversation
+            .active()
             .map(|turn| (turn.turn_id, turn.canonical));
         let (terminal_state, terminal_reason) = match &end {
             TurnEnd::Complete => (smelt_store::TurnState::Completed, None),
@@ -824,12 +1166,12 @@ impl TuiApp {
             ),
         };
 
-        self.sleep_inhibit.release();
+        self.platform.set_sleep_inhibited(false);
         match end {
             TurnEnd::Cancelled => {
                 self.core.engine.send(UiCommand::Cancel);
                 self.cancel_turn_lua_tasks();
-                self.cancel_generation = self.cancel_generation.wrapping_add(1);
+                self.conversation.invalidate_turn_callbacks();
                 self.busy_stack.clear();
             }
             TurnEnd::Complete | TurnEnd::Errored { .. } => {}
@@ -842,12 +1184,9 @@ impl TuiApp {
         };
         let resumable = interrupted && is_resumable_turn_error(error_kind, retry_at_ms);
         let continuation_token = if !interrupted || resumable {
-            let token = self.next_continuation_token;
-            self.next_continuation_token = self.next_continuation_token.wrapping_add(1).max(1);
-            self.pending_continuation_token = Some(token);
-            Some(token)
+            Some(self.conversation.issue_continuation_token())
         } else {
-            self.pending_continuation_token = None;
+            self.conversation.clear_continuation();
             None
         };
         self.core.signals.set_dyn(
@@ -875,7 +1214,7 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:working_finish");
             match end {
                 TurnEnd::Complete => {
-                    let start_queued = !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
+                    let start_queued = !self.prompt.queue_is_empty() && !self.busy_stack.is_busy();
                     let meta = if start_queued {
                         self.working
                             .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
@@ -886,18 +1225,14 @@ impl TuiApp {
                     (meta, start_queued)
                 }
                 TurnEnd::Cancelled => {
-                    self.pending_history_appends.retain(|pending| {
-                        pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
-                    });
+                    self.conversation.retain_session_history_appends();
                     let meta = self.working.finish(TurnOutcome::Cancelled);
                     self.drain_queued_inputs_into_prompt();
                     self.restore_session_metadata_after_rewind(self.session_history_len());
                     (meta, false)
                 }
                 TurnEnd::Errored { .. } => {
-                    self.pending_history_appends.retain(|pending| {
-                        pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
-                    });
+                    self.conversation.retain_session_history_appends();
                     let meta = self.working.finish(TurnOutcome::Errored);
                     // On error the queue is preserved so the user can resubmit.
                     (meta, false)
@@ -919,7 +1254,7 @@ impl TuiApp {
                 self.commit_terminal_turn(turn_id, terminal_state, terminal_reason)
             }
             Some((turn_id, false)) => {
-                self.last_terminal_turn_id = Some(turn_id);
+                self.conversation.mark_terminal(turn_id);
                 if matches!(end, TurnEnd::Complete) {
                     self.schedule_session_save();
                 } else {
@@ -948,20 +1283,25 @@ impl TuiApp {
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
         let mode = self.core.config.mode.clone();
-        let session_id = self.core.session.id.clone();
+        let session_id = self.conversation.session().id.clone();
         let session_dir = self.current_session_dir();
-        let (invocation, result) = self.lua.execute_tool_with_context(
-            &tool_name,
-            &args,
-            request_id,
-            &call_id,
-            crate::lua::ToolEnv {
-                mode,
-                session_id: &session_id,
-                session_dir: &session_dir,
-            },
-            self.core.clock.instant_now(),
-        );
+        let now = self.core.clock.instant_now();
+        let lua = self.lua.execution();
+        let lua_call_id = call_id.clone();
+        let (invocation, result) = crate::lua::scope_app(self, move || {
+            lua.execute_tool_with_context(
+                &tool_name,
+                &args,
+                request_id,
+                &lua_call_id,
+                crate::lua::ToolEnv {
+                    mode,
+                    session_id: &session_id,
+                    session_dir: &session_dir,
+                },
+                now,
+            )
+        });
         match result {
             crate::lua::ToolExecResult::Immediate {
                 content,
@@ -1063,10 +1403,11 @@ impl TuiApp {
         if self.agent_is_running() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
         } else if self.prompt_input_is_busy() {
-            self.queued_inputs
-                .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
+            self.prompt
+                .try_queue_turn(crate::app::QueuedInput::ProcessStatus(note));
         } else {
-            self.agent = self.begin_process_status_turn(note);
+            let turn = self.begin_process_status_turn(note);
+            self.conversation.set_active(turn);
         }
     }
 
@@ -1133,7 +1474,9 @@ impl TuiApp {
             }
         }
 
-        smelt_core::permissions::store::save(&self.cwd, &workspace_rules);
+        self.core
+            .workspace_permissions
+            .save(self.workspace.cwd(), &workspace_rules);
         {
             let approval_store = self.core.permissions.approvals();
             approval_store.write().unwrap().set_session(
@@ -1191,7 +1534,11 @@ impl TuiApp {
                     }
                     ApprovalScope::Workspace => {
                         for grant in option.grants {
-                            add_workspace_grant(&self.cwd, grant);
+                            add_workspace_grant(
+                                &self.core.workspace_permissions,
+                                self.workspace.cwd(),
+                                grant,
+                            );
                         }
                         self.reload_workspace_permissions();
                     }
@@ -1205,9 +1552,7 @@ impl TuiApp {
                 self.send_permission_decision(request_id, false, message);
                 self.finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
-                    if let Some(ref mut ag) = self.agent {
-                        ag.pending.retain(|p| p.call_id != call_id);
-                    }
+                    self.conversation.remove_pending_tool(call_id);
                     false
                 } else {
                     engine::log::entry(
@@ -1218,9 +1563,7 @@ impl TuiApp {
                             "tool": tool_name,
                         }),
                     );
-                    if let Some(ref mut ag) = self.agent {
-                        ag.pending.clear();
-                    }
+                    self.conversation.clear_pending_tools();
                     true
                 }
             }
@@ -1229,11 +1572,12 @@ impl TuiApp {
 
     fn permission_decision_for_confirm(&self, req: &ConfirmRequest) -> Decision {
         self.active_permissions()
-            .evaluate_tool_with_approvals(
-                self.applied_agent_mode.clone(),
+            .evaluate_tool_with_paths_and_approvals(
+                self.conversation.applied_mode().clone(),
                 smelt_core::permissions::ToolOrigin::Lua,
                 &req.tool_name,
                 &req.args,
+                &req.tool_paths,
             )
             .decision
     }
@@ -1265,8 +1609,8 @@ impl TuiApp {
             self.finish_tool(&req.call_id, ToolStatus::Denied, None, None);
             if let Some(pending) = pending {
                 pending.retain(|p| p.call_id != req.call_id);
-            } else if let Some(ref mut ag) = self.agent {
-                ag.pending.retain(|p| p.call_id != req.call_id);
+            } else {
+                self.conversation.remove_pending_tool(&req.call_id);
             }
         }
     }
@@ -1323,11 +1667,12 @@ impl TuiApp {
                         .unwrap_or_default();
                 }
 
-                let outcome = turn.permissions.evaluate_tool_with_approvals(
-                    self.applied_agent_mode.clone(),
+                let outcome = turn.permissions.evaluate_tool_with_paths_and_approvals(
+                    self.conversation.applied_mode().clone(),
                     smelt_core::permissions::ToolOrigin::Lua,
                     &req.tool_name,
                     &req.args,
+                    &req.tool_paths,
                 );
                 match outcome.decision {
                     Decision::Allow => {
@@ -1349,8 +1694,7 @@ impl TuiApp {
 
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
-                    self.pending_dialog = true;
-                    self.pending_dialogs.push_back(DeferredDialog::Confirm(req));
+                    self.overlays.defer_confirm(req);
                     return SessionControl::Continue;
                 }
 
@@ -1359,7 +1703,11 @@ impl TuiApp {
                     &req.approval_candidates,
                     &outcome,
                 );
-                req.grant_options = confirm_grant_options(options.grant_sets, &self.cwd);
+                req.grant_options = confirm_grant_options(
+                    options.grant_sets,
+                    self.workspace.cwd(),
+                    self.core.env.home(),
+                );
 
                 self.close_focused_non_blocking_overlay();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
@@ -1379,7 +1727,8 @@ impl TuiApp {
                         ..snapshot
                     }),
                 );
-                self.lua.fire_confirm_open(handle_id);
+                let lua = self.lua.execution();
+                crate::lua::scope_app(self, move || lua.fire_confirm_open(handle_id));
                 SessionControl::Continue
             }
         }
@@ -1389,10 +1738,11 @@ impl TuiApp {
 fn confirm_grant_options(
     grant_sets: Vec<Vec<smelt_core::permissions::PermissionGrant>>,
     cwd: &str,
+    home: &std::path::Path,
 ) -> Vec<smelt_core::transcript_model::ConfirmApprovalOption> {
     let mut out = Vec::new();
     for grants in grant_sets {
-        let subject = smelt_core::permissions::PermissionGrant::display_subjects(&grants);
+        let subject = smelt_core::permissions::PermissionGrant::display_subjects(&grants, home);
         let idx = out.len();
         out.push(smelt_core::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_session"),
@@ -1402,7 +1752,7 @@ fn confirm_grant_options(
         });
         out.push(smelt_core::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_workspace"),
-            label: format!("allow {subject} in {}", pretty_cwd(cwd)),
+            label: format!("allow {subject} in {}", pretty_cwd(cwd, home)),
             scope: ApprovalScope::Workspace,
             grants,
         });
@@ -1410,25 +1760,26 @@ fn confirm_grant_options(
     out
 }
 
-fn pretty_cwd(cwd: &str) -> String {
-    engine::paths::collapse_tilde(std::path::Path::new(cwd))
+fn pretty_cwd(cwd: &str, home: &std::path::Path) -> String {
+    engine::paths::collapse_tilde_from(std::path::Path::new(cwd), home)
         .to_string_lossy()
         .into_owned()
 }
 
-fn add_workspace_grant(cwd: &str, grant: smelt_core::permissions::PermissionGrant) {
+fn add_workspace_grant(
+    store: &smelt_core::permissions::store::WorkspacePermissionStore,
+    cwd: &str,
+    grant: smelt_core::permissions::PermissionGrant,
+) {
     match grant {
         smelt_core::permissions::PermissionGrant::Tool { tool } => {
-            smelt_core::permissions::store::add_tool(cwd, &tool, Vec::new());
+            store.add_tool(cwd, &tool, Vec::new());
         }
         smelt_core::permissions::PermissionGrant::Command { tool, pattern } => {
-            smelt_core::permissions::store::add_tool(cwd, &tool, vec![pattern]);
+            store.add_tool(cwd, &tool, vec![pattern]);
         }
         smelt_core::permissions::PermissionGrant::PathPrefix { dir } => {
-            let dir = engine::paths::collapse_tilde(&dir)
-                .to_string_lossy()
-                .into_owned();
-            smelt_core::permissions::store::add_dir(cwd, &dir);
+            store.add_dir(cwd, &dir.to_string_lossy());
         }
     }
 }
@@ -1492,8 +1843,153 @@ pub(crate) fn lookup_api_key(
 mod tests {
     use super::*;
 
+    #[test]
+    fn turn_lifecycle_owns_continuation_and_callback_generations() {
+        let mut lifecycle = TurnLifecycle::new(
+            protocol::AgentMode::parse("normal").unwrap(),
+            protocol::ReasoningEffort::Off,
+        );
+
+        assert_eq!(lifecycle.cancel_generation(), 0);
+        lifecycle.invalidate_turn_callbacks();
+        assert_eq!(lifecycle.cancel_generation(), 1);
+
+        let token = lifecycle.issue_continuation_token();
+        assert_eq!(token, 1);
+        assert!(!lifecycle.consume_continuation(token + 1));
+        assert_eq!(lifecycle.pending_continuation_token(), Some(token));
+        assert!(lifecycle.consume_continuation(token));
+        assert_eq!(lifecycle.pending_continuation_token(), None);
+    }
+
+    #[test]
+    fn turn_lifecycle_replaces_mode_changes_and_removes_base_mode() {
+        let base = protocol::AgentMode::parse("normal").unwrap();
+        let mut lifecycle = TurnLifecycle::new(base.clone(), protocol::ReasoningEffort::Off);
+
+        lifecycle.queue_history_append(
+            PendingHistoryAppend::mode_change("plan".to_string(), "plan mode".to_string()),
+            Some(&base),
+        );
+        lifecycle.queue_history_append(
+            PendingHistoryAppend::mode_change("auto".to_string(), "auto mode".to_string()),
+            Some(&base),
+        );
+
+        assert_eq!(lifecycle.pending_history_append_count(), 1);
+        assert_eq!(lifecycle.pending_history_appends()[0].mode(), Some("auto"));
+
+        lifecycle.queue_history_append(
+            PendingHistoryAppend::mode_change("normal".to_string(), "normal mode".to_string()),
+            Some(&base),
+        );
+        assert_eq!(lifecycle.pending_history_append_count(), 0);
+    }
+
+    #[test]
+    fn turn_lifecycle_replaces_and_removes_named_context() {
+        let mut lifecycle = TurnLifecycle::new(
+            protocol::AgentMode::parse("normal").unwrap(),
+            protocol::ReasoningEffort::Off,
+        );
+
+        lifecycle.replace_or_push_history_append(PendingHistoryAppend::context(
+            "project".to_string(),
+            "first".to_string(),
+        ));
+        lifecycle.replace_or_push_history_append(PendingHistoryAppend::context(
+            "project".to_string(),
+            "second".to_string(),
+        ));
+        assert_eq!(lifecycle.pending_history_append_count(), 1);
+        assert_eq!(
+            lifecycle.pending_context_note("project"),
+            Some(Some("second"))
+        );
+
+        lifecycle.replace_or_push_history_append(PendingHistoryAppend::remove_context(
+            "project".to_string(),
+        ));
+        assert_eq!(lifecycle.pending_history_append_count(), 1);
+        assert_eq!(lifecycle.pending_context_note("project"), Some(None));
+        assert_eq!(lifecycle.pending_context_note("other"), None);
+    }
+
+    #[test]
+    fn turn_lifecycle_extracts_matching_history_append() {
+        let mut lifecycle = TurnLifecycle::new(
+            protocol::AgentMode::parse("normal").unwrap(),
+            protocol::ReasoningEffort::Off,
+        );
+        let append = PendingHistoryAppend::context("project".to_string(), "text".to_string());
+        let item = append.history_item();
+        lifecycle.replace_or_push_history_append(append);
+
+        let extracted = lifecycle
+            .take_matching_history_append(&item)
+            .expect("matching append exists");
+        assert_eq!(extracted.history_item(), item);
+        assert_eq!(lifecycle.pending_history_append_count(), 0);
+    }
+
+    #[test]
+    fn turn_lifecycle_retains_only_session_scoped_history() {
+        let base = protocol::AgentMode::parse("normal").unwrap();
+        let mut lifecycle = TurnLifecycle::new(base.clone(), protocol::ReasoningEffort::Off);
+        lifecycle.queue_history_append(
+            PendingHistoryAppend::mode_change("plan".to_string(), "plan mode".to_string()),
+            Some(&base),
+        );
+        lifecycle.replace_or_push_history_append(PendingHistoryAppend::context(
+            "project".to_string(),
+            "text".to_string(),
+        ));
+
+        lifecycle.retain_session_history_appends();
+
+        assert_eq!(lifecycle.pending_history_append_count(), 1);
+        assert_eq!(lifecycle.pending_history_appends()[0].mode(), Some("plan"));
+    }
+
+    #[test]
+    fn turn_lifecycle_keeps_active_identity_while_state_is_dispatched() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(41);
+
+        let dispatch = app
+            .app
+            .conversation
+            .begin_dispatch()
+            .expect("active turn enters dispatch");
+        assert!(!app.app.conversation.is_active());
+        assert_eq!(app.app.conversation.active_id(), Some(41));
+
+        app.app.conversation.finish_dispatch(dispatch);
+        assert_eq!(
+            app.app.conversation.active().map(|turn| turn.turn_id),
+            Some(41)
+        );
+    }
+
+    #[test]
+    fn dispatched_turn_is_restored_before_panic_resumes() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(42);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.app.with_dispatched_turn::<()>(|_, _| panic!("boom"));
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(app.app.conversation.active_id(), Some(42));
+        assert_eq!(
+            app.app.conversation.active().map(|turn| turn.turn_id),
+            Some(42)
+        );
+    }
+
     fn process_status_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        let history = app.app.session_document.transcript.history();
+        let history = app.app.conversation.transcript().history();
         history
             .order
             .iter()
@@ -1506,7 +2002,7 @@ mod tests {
     }
 
     fn user_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        let history = app.app.session_document.transcript.history();
+        let history = app.app.conversation.transcript().history();
         history
             .order
             .iter()
@@ -1573,8 +2069,8 @@ mod tests {
             "store:session:load_full_snapshot",
             "store:session:full_snapshot_rows_read",
             "store:transcript:search_blob_full",
-            "store:transcript:read_descriptors_full",
-            "store:transcript:descriptors_full_loaded",
+            "store:transcript:read_records_full",
+            "store:transcript:records_full_loaded",
             "session:rebuild_transcript_full_fallback",
             "session:display_only_load_full",
             "transcript:build_from_session:history_items",
@@ -1621,7 +2117,7 @@ mod tests {
             .app
             .begin_agent_turn("try again", Content::text("try again"))
             .expect("test app has a usable model");
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
 
         assert!(app.app.notification_win().is_none());
     }
@@ -1633,7 +2129,7 @@ mod tests {
             .app
             .begin_agent_turn("previous", Content::text("previous"))
             .expect("previous turn starts");
-        app.app.agent = Some(previous);
+        app.app.conversation.set_active(Some(previous));
         app.app.discard_turn(crate::app::TurnEnd::Complete);
         app.app.notify_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
@@ -1647,7 +2143,7 @@ mod tests {
                 crate::app::CommandTurnStart::ContinueFromLast,
             )
             .expect("test app has a usable model");
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
 
         assert!(app.app.notification_win().is_none());
     }
@@ -1660,10 +2156,10 @@ mod tests {
             .app
             .begin_agent_turn("first request", Content::text("first request"))
             .expect("test app has a usable model");
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
 
         assert!(matches!(
-            app.app.core.session.history.last(),
+            app.app.conversation.session().history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"
         ));
         let payload = app
@@ -1677,7 +2173,7 @@ mod tests {
         let protocol::ModelHistorySource::Store { end_index, .. } = &payload.history else {
             panic!("interactive turn should dispatch store-backed model history");
         };
-        assert_eq!(*end_index, app.app.core.session.history.len() - 1);
+        assert_eq!(*end_index, app.app.conversation.session().history.len() - 1);
         assert_eq!(
             payload.input.provider_content().text_content(),
             "first request"
@@ -1685,7 +2181,8 @@ mod tests {
 
         app.app.flush_persist();
         let loaded = crate::app::history::materialize_full_session(
-            &app.app.core.session.id,
+            &app.app.core.sessions,
+            &app.app.conversation.session().id,
             crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
         )
         .expect("session saved");
@@ -1703,7 +2200,7 @@ mod tests {
             .begin_agent_turn("finish me", Content::text("finish me"))
             .expect("turn starts");
         let turn_id = turn.turn_id;
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
         app.app
             .session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
                 Some(Content::text("finished")),
@@ -1713,10 +2210,8 @@ mod tests {
 
         app.app.discard_turn(crate::app::TurnEnd::Complete);
 
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .expect("open completed session");
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir())
+            .expect("open completed session");
         let stored = reader
             .turn(smelt_store::TurnId::new(turn_id))
             .unwrap()
@@ -1743,14 +2238,12 @@ mod tests {
             .begin_agent_turn("first", Content::text("first"))
             .expect("turn starts");
         let turn_id = turn.turn_id;
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
         let _ = app.app.flush_persist();
         app.push_queued_message("must remain queued".into());
         app.clear_actions();
         app.app
-            .persistence
-            .as_ref()
-            .expect("persistence actor")
+            .conversation
             .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
 
         app.app.discard_turn(crate::app::TurnEnd::Complete);
@@ -1763,10 +2256,7 @@ mod tests {
                 if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
         assert!(app.app.session_document_has_unflushed_work());
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .unwrap();
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
         assert_eq!(
             reader
                 .turn(smelt_store::TurnId::new(turn_id))
@@ -1814,7 +2304,7 @@ mod tests {
             "persist:submit_turn:queue_wait_ms",
             "persist:submit_turn:transaction_ms",
             "persist:submit_turn:history_rows",
-            "persist:submit_turn:descriptor_rows",
+            "persist:submit_turn:transcript_record_rows",
             "persist:submit_turn:index_rows",
             "persist:submit_turn:dispatch_after_receipt_ms",
         ] {
@@ -1842,20 +2332,7 @@ mod tests {
             committed_at <= dispatched_at,
             "expected SubmitTurn commit ({committed_at}) before dispatch ({dispatched_at})"
         );
-        for metric in [
-            "persist:projection:compat_export:requested_at_us",
-            "session:compat_export:meta:completed_at_us",
-            "session:compat_export:content:completed_at_us",
-        ] {
-            if let Some(exported_at) = perf_value_last(&snapshot, metric) {
-                assert!(
-                    dispatched_at <= exported_at,
-                    "compatibility export {metric} completed before dispatch"
-                );
-            }
-        }
-
-        let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+        let session_dir = app.session_dir();
         let reader = smelt_store::SessionReader::open_database(session_dir.join("session.db"))
             .expect("open committed session");
         let head = reader.store_head().expect("read committed head");
@@ -1895,13 +2372,11 @@ mod tests {
             )));
         app.app.save_session_and_flush();
         app.type_text("retry this exact input");
-        app.app
-            .persistence
-            .as_ref()
-            .expect("persistence actor")
-            .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+        app.app.conversation.inject_commit_failure(
+            smelt_store::SessionCommitFailure::InvalidCommand {
                 message: "injected pre-commit rejection".into(),
-            });
+            },
+        );
 
         app.press(crossterm::event::KeyCode::Enter);
 
@@ -1914,20 +2389,12 @@ mod tests {
                 if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
 
-        app.app
-            .persistence
-            .as_ref()
-            .unwrap()
-            .retry_blocked()
-            .unwrap();
+        app.app.conversation.retry_blocked_persistence().unwrap();
         app.clear_actions();
         app.press(crossterm::event::KeyCode::Enter);
         assert!(app.agent_running());
         let _ = app.app.flush_persist();
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .unwrap();
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
         let head = reader.store_head().unwrap();
         let history = reader
             .read_history_items_range(0..head.history_len.get() as usize)
@@ -1951,14 +2418,12 @@ mod tests {
             )));
         app.app.save_session_and_flush();
         let baseline_history_len = app.app.session_history_len();
-        let baseline_transcript_len = app.app.session_document.transcript.history().order.len();
-        app.app
-            .persistence
-            .as_ref()
-            .expect("persistence actor")
-            .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+        let baseline_transcript_len = app.app.conversation.transcript().history().order.len();
+        app.app.conversation.inject_commit_failure(
+            smelt_store::SessionCommitFailure::InvalidCommand {
                 message: "injected command rejection".into(),
-            });
+            },
+        );
 
         assert!(app
             .app
@@ -1972,22 +2437,17 @@ mod tests {
 
         assert_eq!(app.app.session_history_len(), baseline_history_len);
         assert_eq!(
-            app.app.session_document.transcript.history().order.len(),
+            app.app.conversation.transcript().history().order.len(),
             baseline_transcript_len
         );
-        assert!(app.app.core.session.first_user_message.is_none());
+        assert!(app.app.conversation.session().first_user_message.is_none());
         assert!(user_blocks(&app).is_empty());
         assert!(app
             .drain_engine_sends()
             .into_iter()
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 
-        app.app
-            .persistence
-            .as_ref()
-            .unwrap()
-            .retry_blocked()
-            .unwrap();
+        app.app.conversation.retry_blocked_persistence().unwrap();
         let turn = app
             .app
             .begin_command_request_turn(
@@ -1997,11 +2457,8 @@ mod tests {
                 crate::app::CommandTurnStart::Fresh,
             )
             .expect("command retry starts");
-        app.app.agent = Some(turn);
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .unwrap();
+        app.app.conversation.set_active(Some(turn));
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
         let head = reader.store_head().unwrap();
         let history = reader
             .read_history_items_range(0..head.history_len.get() as usize)
@@ -2025,21 +2482,19 @@ mod tests {
             )));
         app.app.save_session_and_flush();
         let baseline_history_len = app.app.session_history_len();
-        let baseline_transcript_len = app.app.session_document.transcript.history().order.len();
+        let baseline_transcript_len = app.app.conversation.transcript().history().order.len();
         let note = protocol::HistoryNote::process_status("background process 9 finished");
-        app.app
-            .persistence
-            .as_ref()
-            .expect("persistence actor")
-            .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+        app.app.conversation.inject_commit_failure(
+            smelt_store::SessionCommitFailure::InvalidCommand {
                 message: "injected note rejection".into(),
-            });
+            },
+        );
 
         assert!(app.app.begin_process_status_turn(note.clone()).is_none());
 
         assert_eq!(app.app.session_history_len(), baseline_history_len);
         assert_eq!(
-            app.app.session_document.transcript.history().order.len(),
+            app.app.conversation.transcript().history().order.len(),
             baseline_transcript_len
         );
         assert!(process_status_blocks(&app).is_empty());
@@ -2048,21 +2503,13 @@ mod tests {
             .into_iter()
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 
-        app.app
-            .persistence
-            .as_ref()
-            .unwrap()
-            .retry_blocked()
-            .unwrap();
+        app.app.conversation.retry_blocked_persistence().unwrap();
         let turn = app
             .app
             .begin_process_status_turn(note)
             .expect("note retry starts");
-        app.app.agent = Some(turn);
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .unwrap();
+        app.app.conversation.set_active(Some(turn));
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
         let head = reader.store_head().unwrap();
         let history = reader
             .read_history_items_range(0..head.history_len.get() as usize)
@@ -2089,10 +2536,10 @@ mod tests {
                 Vec::new(),
             )));
         app.app.save_session_and_flush();
-        assert_eq!(app.app.last_terminal_turn_id, None);
+        assert_eq!(app.app.conversation.last_terminal_turn_id(), None);
 
         assert!(app.app.begin_agent_turn("", Content::text("")).is_none());
-        assert!(app.app.notification.as_ref().is_some_and(|notification| {
+        assert!(app.app.overlays.notification().is_some_and(|notification| {
             notification.summary.contains("no durable prior turn")
         }));
         assert!(app
@@ -2108,10 +2555,7 @@ mod tests {
             .drain_engine_sends()
             .into_iter()
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .unwrap();
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
         assert!(reader.turns().unwrap().is_empty());
     }
 
@@ -2126,10 +2570,8 @@ mod tests {
             .is_none());
         let _ = app.app.flush_persist();
 
-        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
-            &app.app.core.session,
-        ))
-        .expect("submitted session was published");
+        let reader = smelt_store::SessionReader::open_existing(app.session_dir())
+            .expect("submitted session was published");
         let turns = reader.turns().expect("read turns");
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].state, smelt_store::TurnState::Failed);
@@ -2141,22 +2583,23 @@ mod tests {
 
     #[test]
     fn committed_ready_turn_is_interrupted_after_receipt_publication_failure() {
+        let runtime = tempfile::tempdir().expect("create shared runtime root");
         let session_id;
+        let session_dir;
         {
-            let mut app = crate::app::test_harness::TestApp::builder().build();
+            let mut app = crate::app::test_harness::TestApp::builder()
+                .with_runtime_home(runtime.path())
+                .build();
             app.app
                 .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
                     "published baseline",
                 )));
             app.app.save_session_and_flush();
-            session_id = app.app.core.session.id.clone();
+            session_id = app.app.conversation.session().id.clone();
+            session_dir = app.app.core.sessions.dir_for_id(&session_id);
             app.type_text("durable before dispatch failure");
             app.clear_actions();
-            app.app
-                .persistence
-                .as_ref()
-                .expect("persistence actor")
-                .inject_publish_failure();
+            app.app.conversation.inject_publish_failure();
 
             app.press(crossterm::event::KeyCode::Enter);
 
@@ -2167,23 +2610,23 @@ mod tests {
                     if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
             )));
             let reader = smelt_store::SessionReader::open_existing(
-                smelt_core::session::dir_for_id(&session_id),
+                app.app.core.sessions.dir_for_id(&session_id),
             )
             .expect("open committed session");
             assert_eq!(
                 reader.turns().unwrap()[0].state,
                 smelt_store::TurnState::Ready
             );
-            assert!(app.app.session_access.is_read_only());
+            assert!(app.app.conversation.is_read_only());
             let staged_history_len = app.app.session_history_len();
-            let staged_transcript_len = app.app.session_document.transcript.history().order.len();
+            let staged_transcript_len = app.app.conversation.transcript().history().order.len();
             app.clear_actions();
 
             app.press(crossterm::event::KeyCode::Enter);
 
             assert_eq!(app.app.session_history_len(), staged_history_len);
             assert_eq!(
-                app.app.session_document.transcript.history().order.len(),
+                app.app.conversation.transcript().history().order.len(),
                 staged_transcript_len
             );
             assert!(app.actions().iter().all(|action| !matches!(
@@ -2194,7 +2637,6 @@ mod tests {
             assert_eq!(reader.turns().unwrap().len(), 1);
         }
 
-        let session_dir = smelt_core::session::dir_for_id(&session_id);
         let root = session_dir.parent().expect("session root");
         let writer = smelt_store::OwnedSessionWriter::open(root, &session_id)
             .expect("writable restart recovers nonterminal turn");
@@ -2219,22 +2661,23 @@ mod tests {
 
     #[test]
     fn session_resume_interrupts_running_turn_without_redispatch() {
-        let home = crate::app::test_harness::test_home_guard();
+        let runtime = tempfile::tempdir().expect("create shared runtime root");
         let session_id;
         let turn_id;
         {
-            let mut app =
-                crate::app::test_harness::TestApp::builder().build_with_test_home_guard(&home);
+            let mut app = crate::app::test_harness::TestApp::builder()
+                .with_runtime_home(runtime.path())
+                .build();
             let turn = app
                 .app
                 .begin_agent_turn("before restart", Content::text("before restart"))
                 .expect("turn starts");
             turn_id = turn.turn_id;
-            app.app.agent = Some(turn);
+            app.app.conversation.set_active(Some(turn));
             let _ = app.app.flush_persist();
-            session_id = app.app.core.session.id.clone();
+            session_id = app.app.conversation.session().id.clone();
             let reader = smelt_store::SessionReader::open_existing(
-                smelt_core::session::dir_for_id(&session_id),
+                app.app.core.sessions.dir_for_id(&session_id),
             )
             .unwrap();
             assert_eq!(
@@ -2247,19 +2690,20 @@ mod tests {
             );
         }
 
-        let mut resumed =
-            crate::app::test_harness::TestApp::builder().build_without_test_home_reset(&home);
+        let mut resumed = crate::app::test_harness::TestApp::builder()
+            .with_runtime_home(runtime.path())
+            .build();
         resumed.clear_actions();
         resumed.app.load_session_by_id(&session_id);
 
         assert_eq!(
-            resumed.app.core.session.id,
+            resumed.app.conversation.session().id,
             session_id,
             "resume failed: {:?}",
             resumed
                 .app
-                .notification
-                .as_ref()
+                .overlays
+                .notification()
                 .map(|notification| notification.summary.as_str())
         );
         assert!(!resumed.agent_running());
@@ -2268,11 +2712,15 @@ mod tests {
             crate::app::test_harness::Action::EngineSend(command)
                 if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
-        assert_eq!(resumed.app.last_terminal_turn_id, Some(turn_id));
-        assert!(!resumed.app.session_access.is_read_only());
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
-                .unwrap();
+        assert_eq!(
+            resumed.app.conversation.last_terminal_turn_id(),
+            Some(turn_id)
+        );
+        assert!(!resumed.app.conversation.is_read_only());
+        let reader = smelt_store::SessionReader::open_existing(
+            resumed.app.core.sessions.dir_for_id(&session_id),
+        )
+        .unwrap();
         assert_eq!(
             reader
                 .turn(smelt_store::TurnId::new(turn_id))
@@ -2282,7 +2730,7 @@ mod tests {
             smelt_store::TurnState::Interrupted
         );
         assert_eq!(
-            resumed.app.session_document.acknowledged_head(),
+            resumed.app.conversation.acknowledged_head(),
             reader.store_head().unwrap()
         );
     }
@@ -2291,7 +2739,7 @@ mod tests {
     fn request_start_dispatches_store_history_without_full_reads() {
         const BASE_HISTORY_LEN: usize = 128;
         let mut app = large_saved_session_app(BASE_HISTORY_LEN);
-        let old_history_len = app.app.core.session.history.len();
+        let old_history_len = app.app.conversation.session().history.len();
         assert!(old_history_len >= BASE_HISTORY_LEN);
 
         smelt_perf::perf::set_enabled(true);
@@ -2302,17 +2750,13 @@ mod tests {
             .expect("test app has a usable model");
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
 
         assert_no_full_request_start_reads(&snapshot);
         assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 1);
         assert_perf_value_at_most(&snapshot, "store:session:history_rows_inserted", 1);
-        assert_perf_value_at_most(
-            &snapshot,
-            "store:transcript:dirty_descriptor_suffix_rows",
-            1,
-        );
-        assert_perf_value_at_most(&snapshot, "store:transcript:descriptor_db_rows_inserted", 1);
+        assert_perf_value_at_most(&snapshot, "store:transcript:dirty_record_suffix_rows", 1);
+        assert_perf_value_at_most(&snapshot, "store:transcript:record_db_rows_inserted", 1);
 
         let payload = app
             .drain_engine_sends()
@@ -2343,7 +2787,10 @@ mod tests {
             payload.input.provider_content().text_content(),
             "new request"
         );
-        assert_eq!(app.app.core.session.history.len(), old_history_len + 1);
+        assert_eq!(
+            app.app.conversation.session().history.len(),
+            old_history_len + 1
+        );
     }
 
     #[test]
@@ -2359,31 +2806,31 @@ mod tests {
                 crate::app::CommandTurnStart::Fresh,
             )
             .expect("test app has a usable model");
-        app.app.agent = Some(turn);
+        app.app.conversation.set_active(Some(turn));
 
         assert_eq!(
-            app.app.core.session.first_user_message.as_deref(),
+            app.app.conversation.session().first_user_message.as_deref(),
             Some("/fix")
         );
         assert_eq!(
             app.app
-                .core
-                .session
+                .conversation
+                .session()
                 .metadata_snapshots
                 .as_slice()
                 .last()
                 .map(|(idx, _)| *idx),
-            Some(app.app.core.session.history.len())
+            Some(app.app.conversation.session().history.len())
         );
         assert!(matches!(
-            app.app.core.session.history.last(),
+            app.app.conversation.session().history.last(),
             Some(HistoryItem::User {
                 display: Some(display),
                 command: true,
                 ..
             }) if display == "/fix"
         ));
-        let transcript = app.app.session_document.transcript.history();
+        let transcript = app.app.conversation.transcript().history();
         assert!(transcript
             .order
             .last()
@@ -2409,8 +2856,9 @@ mod tests {
         let file = tmp.path().join("note.txt");
         std::fs::write(&file, "hello\nworld").unwrap();
 
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.cwd = tmp.path().to_string_lossy().into_owned();
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_cwd(tmp.path())
+            .build();
         let expanded = app.app.expand_at_file_refs_in_text("summarize @note.txt");
 
         let path = file.to_string_lossy();
@@ -2432,8 +2880,9 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.cwd = tmp.path().to_string_lossy().into_owned();
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_cwd(tmp.path())
+            .build();
         let expanded = app.app.expand_at_file_refs_in_text("summarize @nb.ipynb");
 
         let path = file.to_string_lossy();
@@ -2491,7 +2940,8 @@ mod tests {
 
         let before = app
             .app
-            .pending_history_appends
+            .conversation
+            .pending_history_appends()
             .iter()
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
@@ -2504,7 +2954,8 @@ mod tests {
         ));
         let after = app
             .app
-            .pending_history_appends
+            .conversation
+            .pending_history_appends()
             .iter()
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
@@ -2513,7 +2964,8 @@ mod tests {
 
         let process_status_appends: Vec<_> = app
             .app
-            .pending_history_appends
+            .conversation
+            .pending_history_appends()
             .iter()
             .filter(|append| {
                 append.history_item().note_kind() == Some(protocol::HistoryNoteKind::ProcessStatus)
@@ -2585,20 +3037,16 @@ mod tests {
         ));
 
         assert!(matches!(
-            &app.app.core.session.history[1],
+            &app.app.conversation.session().history[1],
             HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event })
                 if text == "background process 751225 exited with code 1"
                     && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")
                     && event.as_ref().and_then(|event| event.exit_code()) == Some(1)
         ));
 
-        let (count, first_content, contains_marker): (i64, String, bool) = {
-            let _guard = crate::lua::install_app_ptr(&mut app.app);
-            app.app
-                .lua
-                .lua
-                .load(
-                    r#"
+        let (count, first_content, contains_marker): (i64, String, bool) = app
+            .eval_lua(
+                r#"
                     local rows = smelt.session.conversation()
                     local contains_marker = false
                     for _, row in ipairs(rows) do
@@ -2608,10 +3056,8 @@ mod tests {
                     end
                     return #rows, rows[1] and rows[1].content or "", contains_marker
                     "#,
-                )
-                .eval()
-                .expect("conversation query succeeds")
-        };
+            )
+            .expect("conversation query succeeds");
 
         assert_eq!(count, 1);
         assert_eq!(first_content, "previous user message");
@@ -2621,7 +3067,7 @@ mod tests {
     #[test]
     fn lua_conversation_limit_returns_recent_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.session.history = vec![
+        app.app.conversation.replace_history_for_harness(vec![
             HistoryItem::user(Content::text("first user")),
             HistoryItem::note(protocol::HistoryNote::named_context("hidden", "note")),
             protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
@@ -2635,22 +3081,16 @@ mod tests {
                 None,
                 Vec::new(),
             )),
-        ];
+        ]);
 
-        let (count, first, second): (i64, String, String) = {
-            let _guard = crate::lua::install_app_ptr(&mut app.app);
-            app.app
-                .lua
-                .lua
-                .load(
-                    r#"
+        let (count, first, second): (i64, String, String) = app
+            .eval_lua(
+                r#"
                     local rows = smelt.session.conversation({ limit = 2 })
                     return #rows, rows[1] and rows[1].content or "", rows[2] and rows[2].content or ""
                     "#,
-                )
-                .eval()
-                .expect("conversation limit query succeeds")
-        };
+            )
+            .expect("conversation limit query succeeds");
 
         assert_eq!(count, 2);
         assert_eq!(first, "second user");
@@ -2664,6 +3104,7 @@ mod tests {
         let child = smelt_core::process::spawn_shell_child(
             "echo alive; sleep 30",
             &smelt_core::process::ShellSpec::default(),
+            &app.app.core.env.cwd(),
         )
         .unwrap();
         let id = registry.child_id(&child);

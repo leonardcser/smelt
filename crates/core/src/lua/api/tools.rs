@@ -465,11 +465,12 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             Ok(())
         },
     )?;
+    let summary_context = Arc::clone(shared);
     m.fn_(
         "default_summary",
         "Best-effort one-liner summary of a tool call's arguments. Picks a sensible field from `args` in priority order: `questions` (returns `\"N question(s)\"`), `pattern` (optionally suffixed with ` in <display path>`), then the first non-empty `command | file_path | notebook_path | path | url | query | name | id`. Returns `\"\"` if nothing matches. Used as the default `summary` field on tools registered via `smelt.tools.register`.",
         &["args"],
-        |_, args: Option<mlua::Table>| -> LuaResult<String> {
+        move |_, args: Option<mlua::Table>| -> LuaResult<String> {
             let Some(args) = args else { return Ok(String::new()) };
             if let Ok(Some(questions)) = args.get::<Option<mlua::Table>>("questions") {
                 let n = questions.raw_len();
@@ -478,11 +479,18 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
                     return Ok(format!("{n} question{suffix}"));
                 }
             }
+            let display_path = |path: &str| {
+                crate::path_display::display_path_from(
+                    path,
+                    &summary_context.evaluation_cwd(),
+                    &summary_context.runtime_home(),
+                )
+            };
             if let Ok(Some(pattern)) = args.get::<Option<String>>("pattern") {
                 if !pattern.is_empty() {
                     if let Ok(Some(path)) = args.get::<Option<String>>("path") {
                         if !path.is_empty() && path != "." {
-                            return Ok(format!("{pattern} in {}", crate::tools::display_path(&path)));
+                            return Ok(format!("{pattern} in {}", display_path(&path)));
                         }
                     }
                     return Ok(pattern);
@@ -494,7 +502,7 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
                         continue;
                     }
                     if matches!(key, "file_path" | "notebook_path" | "path") {
-                        return Ok(crate::tools::display_path(&value));
+                        return Ok(display_path(&value));
                     }
                     return Ok(value);
                 }

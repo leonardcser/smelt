@@ -19,15 +19,14 @@ fn turn_error_preserves_request_queue() {
         "request-stage queued input should be preserved on error"
     );
     assert_eq!(
-        app.app.working.last_outcome(),
+        app.working_probe().last_outcome(),
         Some(smelt_core::working::TurnOutcome::Errored),
         "error should archive an error outcome"
     );
 
     // Plugins observe the turn_end event; it must signal interruption on error.
     assert!(
-        app.app
-            .core
+        app.core_probe()
             .signals
             .get::<smelt_core::signals::TurnEnd>("turn_end")
             .is_some_and(|end| end.cancelled),
@@ -66,7 +65,7 @@ fn turn_error_preserves_turn_queue() {
 
     // The status bar should record an error outcome, not done.
     assert_eq!(
-        app.app.working.last_outcome(),
+        app.working_probe().last_outcome(),
         Some(smelt_core::working::TurnOutcome::Errored)
     );
 }
@@ -74,11 +73,11 @@ fn turn_error_preserves_turn_queue() {
 #[test]
 fn public_status_cancelled_turn_is_idle_interrupted() {
     let mut app = TestApp::builder().build();
-    app.app.term_focused = false;
+    app.set_terminal_focus_for_harness(false);
     app.start_turn(1);
 
-    app.app.discard_turn(crate::app::TurnEnd::Cancelled);
-    let (state, reason) = app.app.public_status_state_reason();
+    app.discard_turn(crate::app::TurnEnd::Cancelled);
+    let (state, reason) = app.public_status_state_reason();
     assert_eq!(state, smelt_core::public_status::PublicState::Idle);
     assert_eq!(
         reason,
@@ -96,7 +95,7 @@ fn public_status_turn_error_needs_attention() {
         kind: None,
         retry_at_ms: None,
     }));
-    let (state, reason) = app.app.public_status_state_reason();
+    let (state, reason) = app.public_status_state_reason();
     assert_eq!(
         state,
         smelt_core::public_status::PublicState::NeedsAttention
@@ -116,8 +115,7 @@ fn resumable_turn_error_publishes_continuation_token() {
     }));
 
     let turn_end = app
-        .app
-        .core
+        .core_probe()
         .signals
         .get::<smelt_core::signals::TurnEnd>("turn_end")
         .expect("turn_end should be published");
@@ -139,8 +137,7 @@ fn non_quota_retry_metadata_does_not_publish_continuation_token() {
     }));
 
     let turn_end = app
-        .app
-        .core
+        .core_probe()
         .signals
         .get::<smelt_core::signals::TurnEnd>("turn_end")
         .expect("turn_end should be published");
@@ -152,7 +149,7 @@ fn non_quota_retry_metadata_does_not_publish_continuation_token() {
 
 fn run_due_timers(app: &mut TestApp, ms: u64) -> Vec<protocol::UiCommand> {
     app.feed_one(SourceEvent::Tick(ms));
-    app.app.tick_timers();
+    app.tick_timers();
     app.drain_engine_sends()
 }
 
@@ -180,15 +177,13 @@ fn create_auto_goal(app: &mut TestApp, objective: &str) {
     )));
 }
 
-fn isolated_app() -> (std::sync::MutexGuard<'static, ()>, TestApp) {
-    let home_guard = crate::app::test_harness::test_home_guard();
-    let app = TestApp::builder().build_with_test_home_guard(&home_guard);
-    (home_guard, app)
+fn isolated_app() -> TestApp {
+    TestApp::builder().build()
 }
 
 #[test]
 fn goal_auto_continues_after_recoverable_quota_error() {
-    let (_home_guard, mut app) = isolated_app();
+    let mut app = isolated_app();
     create_auto_goal(&mut app, "finish quota test");
     start_canonical_turn(&mut app);
 
@@ -203,7 +198,7 @@ fn goal_auto_continues_after_recoverable_quota_error() {
 
 #[test]
 fn auto_continue_off_disables_quota_retry() {
-    let (_home_guard, mut app) = isolated_app();
+    let mut app = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
     create_auto_goal(&mut app, "finish quota test");
     start_canonical_turn(&mut app);
@@ -219,7 +214,7 @@ fn auto_continue_off_disables_quota_retry() {
 
 #[test]
 fn auto_continue_always_continues_without_goal() {
-    let (_home_guard, mut app) = isolated_app();
+    let mut app = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
     clear_goal(&mut app);
     let turn_id = start_canonical_turn(&mut app);
@@ -235,7 +230,7 @@ fn auto_continue_always_continues_without_goal() {
 
 #[test]
 fn auto_continue_goal_mode_ignores_sessions_without_goal() {
-    let (_home_guard, mut app) = isolated_app();
+    let mut app = isolated_app();
     clear_goal(&mut app);
     let turn_id = start_canonical_turn(&mut app);
 
@@ -250,7 +245,7 @@ fn auto_continue_goal_mode_ignores_sessions_without_goal() {
 
 #[test]
 fn goal_auto_continue_ignores_non_quota_errors() {
-    let (_home_guard, mut app) = isolated_app();
+    let mut app = isolated_app();
     create_auto_goal(&mut app, "finish quota test");
     start_canonical_turn(&mut app);
 

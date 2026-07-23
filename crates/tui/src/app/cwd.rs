@@ -12,40 +12,131 @@ pub(crate) enum SessionCwdRestore {
     },
 }
 
-pub(crate) struct PendingCwdChange {
+struct PendingCwdChange {
     path: std::path::PathBuf,
     mark_session_dirty: bool,
     tool_invocation: Option<smelt_core::lua::ToolInvocationContext>,
 }
 
-pub(crate) struct StagedProcessCwd {
-    previous_cwd: std::path::PathBuf,
-    previous_pwd: Option<std::ffi::OsString>,
-    cwd: std::path::PathBuf,
-    committed: bool,
+pub(crate) struct WorkspaceState {
+    cwd: String,
+    home: std::path::PathBuf,
+    context: smelt_core::worktree::ProjectContext,
+    worktree_path: String,
+    pending_change: Option<PendingCwdChange>,
 }
 
-impl StagedProcessCwd {
-    pub(crate) fn cwd(&self) -> &std::path::Path {
+impl WorkspaceState {
+    pub(crate) fn new(
+        cwd: String,
+        home: std::path::PathBuf,
+        worktree_root: &std::path::Path,
+    ) -> Self {
+        let context =
+            smelt_core::worktree::project_context(std::path::Path::new(&cwd), Some(worktree_root));
+        let worktree_path = worktree_display_path(&context, &home);
+        Self {
+            cwd,
+            home,
+            context,
+            worktree_path,
+            pending_change: None,
+        }
+    }
+
+    pub(crate) fn cwd(&self) -> &str {
         &self.cwd
     }
 
-    pub(crate) fn commit(mut self) {
-        self.committed = true;
+    pub(crate) fn cwd_path(&self) -> &std::path::Path {
+        std::path::Path::new(&self.cwd)
+    }
+
+    pub(crate) fn project(&self) -> &str {
+        &self.context.project_name
+    }
+
+    pub(crate) fn branch(&self) -> &str {
+        &self.context.branch
+    }
+
+    pub(crate) fn worktree(&self) -> &str {
+        self.context.worktree_name.as_deref().unwrap_or_default()
+    }
+
+    pub(crate) fn worktree_path(&self) -> &str {
+        &self.worktree_path
+    }
+
+    pub(crate) fn is_managed_worktree(&self) -> bool {
+        self.context.managed_worktree
+    }
+
+    pub(crate) fn install_cwd(&mut self, cwd: std::path::PathBuf, worktree_root: &std::path::Path) {
+        self.cwd = cwd.to_string_lossy().into_owned();
+        self.refresh(worktree_root);
+    }
+
+    pub(crate) fn refresh(&mut self, worktree_root: &std::path::Path) {
+        let context = smelt_core::worktree::project_context(self.cwd_path(), Some(worktree_root));
+        self.install_context(context);
+    }
+
+    pub(crate) fn context_note(&self, worktree_root: &std::path::Path) -> String {
+        smelt_core::context_notes::cwd_note(self.cwd_path(), worktree_root)
+    }
+
+    fn install_context(&mut self, context: smelt_core::worktree::ProjectContext) {
+        self.worktree_path = worktree_display_path(&context, &self.home);
+        self.context = context;
+    }
+
+    fn schedule(
+        &mut self,
+        path: std::path::PathBuf,
+        mark_session_dirty: bool,
+        tool_invocation: Option<smelt_core::lua::ToolInvocationContext>,
+    ) {
+        self.pending_change = Some(PendingCwdChange {
+            path,
+            mark_session_dirty,
+            tool_invocation,
+        });
+    }
+
+    fn pending(&self) -> Option<&PendingCwdChange> {
+        self.pending_change.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_change(&self) -> bool {
+        self.pending_change.is_some()
+    }
+
+    fn take_pending(&mut self) -> Option<PendingCwdChange> {
+        self.pending_change.take()
+    }
+
+    fn discard_pending(&mut self) {
+        self.pending_change = None;
     }
 }
 
-impl Drop for StagedProcessCwd {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        let _ = std::env::set_current_dir(&self.previous_cwd);
-        match &self.previous_pwd {
-            Some(pwd) => std::env::set_var("PWD", pwd),
-            None => std::env::remove_var("PWD"),
+fn worktree_display_path(
+    context: &smelt_core::worktree::ProjectContext,
+    home: &std::path::Path,
+) -> String {
+    if !context.managed_worktree {
+        return String::new();
+    }
+    if let Some(base_path) = context.base_path.as_deref() {
+        if let Ok(suffix) = context.active_root.strip_prefix(base_path) {
+            return suffix.display().to_string();
         }
     }
+    engine::paths::collapse_tilde_from(&context.active_root, home)
+        .display()
+        .to_string()
 }
 
 impl TuiApp {
@@ -56,17 +147,19 @@ impl TuiApp {
         &mut self,
         path: std::path::PathBuf,
     ) -> Result<(String, bool), String> {
-        let path = Self::resolve_cwd_target(path)?;
+        let path = self.resolve_cwd_target(path)?;
         let target = path.to_string_lossy().into_owned();
-        self.pending_cwd_change = Some(PendingCwdChange {
-            path,
-            mark_session_dirty: true,
-            tool_invocation: smelt_core::lua::current_tool_invocation(),
-        });
+        self.workspace
+            .schedule(path, true, smelt_core::lua::current_tool_invocation());
         Ok((target, true))
     }
 
-    fn resolve_cwd_target(path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
+    fn resolve_cwd_target(&self, path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.core.env.cwd().join(path)
+        };
         let path = std::fs::canonicalize(&path)
             .map_err(|error| format!("resolve cwd {}: {error}", path.display()))?;
         if !path.is_dir() {
@@ -76,10 +169,10 @@ impl TuiApp {
     }
 
     pub(crate) fn try_perform_scheduled_cwd_change(&mut self) -> bool {
-        if self.pending_cwd_change.is_none()
+        if self.workspace.pending().is_none()
             || self
-                .pending_cwd_change
-                .as_ref()
+                .workspace
+                .pending()
                 .is_some_and(|pending| pending.tool_invocation.is_some())
             || self.prompt_input_is_busy()
             || self.ui.active_modal().is_some()
@@ -98,19 +191,19 @@ impl TuiApp {
         tool_succeeded: bool,
     ) -> Result<bool, String> {
         if self
-            .pending_cwd_change
-            .as_ref()
+            .workspace
+            .pending()
             .and_then(|pending| pending.tool_invocation)
             != Some(invocation)
         {
             return Ok(false);
         }
         if !tool_succeeded {
-            self.pending_cwd_change = None;
+            self.workspace.discard_pending();
             return Ok(false);
         }
         if invocation.execution_mode != protocol::ToolExecutionMode::Sequential {
-            self.pending_cwd_change = None;
+            self.workspace.discard_pending();
             return Err("cwd-changing model tools must use sequential execution".into());
         }
         self.commit_pending_cwd_change()
@@ -118,18 +211,18 @@ impl TuiApp {
 
     pub(crate) fn discard_model_tool_cwd_change(&mut self) {
         if self
-            .pending_cwd_change
-            .as_ref()
+            .workspace
+            .pending()
             .is_some_and(|pending| pending.tool_invocation.is_some())
         {
-            self.pending_cwd_change = None;
+            self.workspace.discard_pending();
         }
     }
 
     /// Commit the pending transaction without applying the idle gate. Callers
     /// must own a safe boundary, such as a completed model tool callback.
     fn commit_pending_cwd_change(&mut self) -> Result<bool, String> {
-        let Some(pending) = self.pending_cwd_change.take() else {
+        let Some(pending) = self.workspace.take_pending() else {
             return Ok(false);
         };
         let requested = pending.path.to_string_lossy().into_owned();
@@ -139,13 +232,13 @@ impl TuiApp {
             } else {
                 format!(
                     "session cwd unavailable: {requested}: {error}; using {}",
-                    self.cwd
+                    self.workspace.cwd()
                 )
             };
             self.notify_error_sticky(message.clone());
             return Err(message);
         }
-        if self.notification.as_ref().is_some_and(|notification| {
+        if self.overlays.notification().is_some_and(|notification| {
             notification.summary.starts_with("cwd change:")
                 || notification.summary.starts_with("session cwd unavailable:")
         }) {
@@ -162,21 +255,17 @@ impl TuiApp {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
             return SessionCwdRestore::Missing;
         };
-        if cwd == self.cwd {
+        if cwd == self.workspace.cwd() {
             return SessionCwdRestore::Current;
         }
 
-        match Self::resolve_cwd_target(std::path::PathBuf::from(cwd)) {
+        match self.resolve_cwd_target(std::path::PathBuf::from(cwd)) {
             Ok(path) => {
-                self.pending_cwd_change = Some(PendingCwdChange {
-                    path,
-                    mark_session_dirty: false,
-                    tool_invocation: None,
-                });
+                self.workspace.schedule(path, false, None);
                 SessionCwdRestore::Restored
             }
             Err(error) => {
-                let fallback = self.cwd.clone();
+                let fallback = self.workspace.cwd().to_owned();
                 SessionCwdRestore::Fallback {
                     requested: cwd.to_string(),
                     fallback,
@@ -186,55 +275,40 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn stage_process_cwd(path: std::path::PathBuf) -> Result<StagedProcessCwd, String> {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
-        let previous_cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-        let previous_pwd = std::env::var_os("PWD");
-        std::env::set_current_dir(&path)
-            .map_err(|error| format!("set cwd {}: {error}", path.display()))?;
-        let cwd = std::env::current_dir().unwrap_or(path);
-        std::env::set_var("PWD", &cwd);
-        Ok(StagedProcessCwd {
-            previous_cwd,
-            previous_pwd,
-            cwd,
-            committed: false,
-        })
-    }
-
     pub(crate) fn install_runtime_cwd(
         &mut self,
         cwd: std::path::PathBuf,
         mark_session_dirty: bool,
     ) {
-        self.cwd = cwd.to_string_lossy().into_owned();
         self.core.env.set_cwd(cwd.clone());
+        self.platform.install_cwd(cwd.clone());
+        self.prompt.set_cwd(cwd.clone());
+        self.workspace.install_cwd(
+            cwd.clone(),
+            std::path::Path::new(&self.core.config.settings.worktree_root),
+        );
         if mark_session_dirty && !self.session_is_read_only() {
-            self.apply_session_document_mutation(
-                crate::app::session_document::SessionMutation::SetCwd {
-                    cwd: self.cwd.clone(),
-                },
-            );
+            self.conversation.set_cwd(self.workspace.cwd().to_owned());
         }
-        self.refresh_cwd_status();
         self.core
             .signals
-            .publish_if_changed("cwd", self.cwd.clone());
+            .publish_if_changed("cwd", self.workspace.cwd().to_owned());
         self.core
             .signals
-            .publish_if_changed("cwd_project", self.cwd_project.clone());
+            .publish_if_changed("cwd_project", self.workspace.project().to_owned());
         self.core
             .signals
-            .publish_if_changed("cwd_branch", self.cwd_branch.clone());
+            .publish_if_changed("cwd_branch", self.workspace.branch().to_owned());
         self.core
             .signals
-            .publish_if_changed("cwd_worktree", self.cwd_worktree.clone());
+            .publish_if_changed("cwd_worktree", self.workspace.worktree().to_owned());
+        self.core.signals.publish_if_changed(
+            "cwd_worktree_path",
+            self.workspace.worktree_path().to_owned(),
+        );
         self.core
             .signals
-            .publish_if_changed("cwd_worktree_path", self.cwd_worktree_path.clone());
-        self.core
-            .signals
-            .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
+            .publish_if_changed("cwd_managed_worktree", self.workspace.is_managed_worktree());
         let branch = engine::paths::git_branch(&cwd).unwrap_or_default();
         self.core.signals.publish_if_changed("branch", branch);
     }
@@ -245,5 +319,28 @@ impl TuiApp {
             self.ensure_current_context_note();
             self.save_session();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worktree_display_path;
+
+    #[test]
+    fn worktree_display_path_is_relative_to_project_root() {
+        let context = smelt_core::worktree::ProjectContext {
+            project_name: "smelt".into(),
+            active_root: std::path::PathBuf::from("/home/dev/dev/smelt/.worktrees/test"),
+            branch: "test".into(),
+            managed_worktree: true,
+            worktree_name: Some("test".into()),
+            base_path: Some(std::path::PathBuf::from("/home/dev/dev/smelt")),
+            allowed_roots: Vec::new(),
+        };
+
+        assert_eq!(
+            worktree_display_path(&context, std::path::Path::new("/home/dev")),
+            ".worktrees/test"
+        );
     }
 }

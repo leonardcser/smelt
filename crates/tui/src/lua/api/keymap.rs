@@ -44,8 +44,8 @@ fn canonicalize_prefix_chord(
 }
 
 fn current_query_mode() -> String {
-    crate::lua::try_with_app(|app| {
-        app.focused_vim_mode_label()
+    crate::lua::try_with_agent_host(|host| {
+        host.focused_vim_mode_label()
             .and_then(|mode| crate::lua::normalize_mode(&mode))
     })
     .flatten()
@@ -120,8 +120,7 @@ pub(super) fn register(
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let vim_enabled =
-                crate::lua::try_with_app(|app| app.input.vim_enabled(app.prompt_win()))
-                    .unwrap_or(false);
+                crate::lua::try_with_agent_host(|host| host.prompt_vim_enabled()).unwrap_or(false);
             let sections = crate::keymap::hints::help_sections(vim_enabled);
             let out = lua.create_table()?;
             for (i, (title, entries)) in sections.into_iter().enumerate() {

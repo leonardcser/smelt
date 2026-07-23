@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
-use smelt_core::config;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MetricsEntry {
@@ -19,13 +18,13 @@ pub(crate) struct MetricsEntry {
     pub(crate) reasoning_tokens: Option<u32>,
 }
 
-fn metrics_path() -> PathBuf {
-    config::state_dir().join("metrics.jsonl")
+fn metrics_path(state_root: &Path) -> PathBuf {
+    state_root.join("metrics.jsonl")
 }
 
 /// Append one entry to the metrics JSONL file.
-pub(crate) fn append(entry: &MetricsEntry) {
-    let path = metrics_path();
+pub(crate) fn append(state_root: &Path, entry: &MetricsEntry) {
+    let path = metrics_path(state_root);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -42,8 +41,8 @@ pub(crate) fn append(entry: &MetricsEntry) {
 }
 
 /// Load all entries from the metrics file.
-pub(crate) fn load() -> Vec<MetricsEntry> {
-    let path = metrics_path();
+pub(crate) fn load(state_root: &Path) -> Vec<MetricsEntry> {
+    let path = metrics_path(state_root);
     let Ok(f) = std::fs::File::open(&path) else {
         return Vec::new();
     };

@@ -1,36 +1,33 @@
-use smelt_core::config;
 use std::path::{Path, PathBuf};
 
 const FILENAME: &str = "AGENTS.md";
 
-fn paths() -> Vec<PathBuf> {
+fn paths(config_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    let root = config::config_dir().join(FILENAME);
+    let root = config_dir.join(FILENAME);
     if root.exists() {
         paths.push(root);
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir: Option<&Path> = Some(cwd.as_path());
-        while let Some(d) = dir {
-            let candidate = d.join(FILENAME);
-            if candidate.exists() {
-                if paths.first().is_none_or(|r| *r != candidate) {
-                    paths.push(candidate);
-                }
-                break;
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let candidate = d.join(FILENAME);
+        if candidate.exists() {
+            if paths.first().is_none_or(|r| *r != candidate) {
+                paths.push(candidate);
             }
-            dir = d.parent();
+            break;
         }
+        dir = d.parent();
     }
 
     paths
 }
 
 /// Returns all AGENTS.md files joined for the system prompt, or `None` if none found.
-pub fn load() -> Option<String> {
-    let files = paths();
+pub fn load(config_dir: &Path, cwd: &Path) -> Option<String> {
+    let files = paths(config_dir, cwd);
     let pairs: Vec<(PathBuf, String)> = files
         .into_iter()
         .filter_map(|p| std::fs::read_to_string(&p).ok().map(|c| (p, c)))

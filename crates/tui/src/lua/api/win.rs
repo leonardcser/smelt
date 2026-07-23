@@ -144,7 +144,7 @@ impl mlua::UserData for LuaDecoration {
             Ok(format!("Decoration#{}", this.id.0))
         });
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.close_decoration(this.id));
+            crate::lua::with_ui_host(|host| host.close_decoration(this.id));
             Ok(())
         });
     }
@@ -161,23 +161,12 @@ impl mlua::UserData for LuaWin {
             if is_builtin_win(this.id) {
                 return Ok(());
             }
-            crate::lua::with_app(|app| {
-                app.close_overlay_leaf(this.id);
-            });
+            crate::lua::with_ui_host(|host| host.close_overlay_leaf(this.id));
             Ok(())
         });
 
         methods.add_method("focus", |_, this, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                app.ui.set_focus(this.id);
-                // Keep app-level pane focus in sync when a well-known pane
-                // window is focused (prompt bars call this from press handlers).
-                match this.id {
-                    crate::app::PROMPT_WIN => app.app_focus = crate::app::AppFocus::Prompt,
-                    crate::app::TRANSCRIPT_WIN => app.app_focus = crate::app::AppFocus::Content,
-                    _ => {}
-                }
-            });
+            crate::lua::with_ui_host(|host| host.focus_window(this.id));
             Ok(())
         });
 
@@ -185,8 +174,10 @@ impl mlua::UserData for LuaWin {
         methods.add_method(
             "buf",
             |_, this, ()| -> LuaResult<Option<super::buf::LuaBuf>> {
-                let bid =
-                    crate::lua::try_with_app(|app| app.ui.win(this.id).map(|w| w.buf)).flatten();
+                let bid = crate::lua::try_with_ui_host(|host| {
+                    host.with_ui(|ui| ui.win(this.id).map(|window| window.buf))
+                })
+                .flatten();
                 Ok(bid.map(|id| super::buf::LuaBuf { id }))
             },
         );
@@ -196,11 +187,12 @@ impl mlua::UserData for LuaWin {
         // resize handlers don't observe the previous painted viewport for one
         // frame after a layout change.
         methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
-            let rect = crate::lua::try_with_app(|app| {
-                let win = app.ui.win(this.id)?;
-                app.ui
-                    .split_rect(this.id)
-                    .or_else(|| win.viewport.map(|vp| vp.rect))
+            let rect = crate::lua::try_with_ui_host(|host| {
+                host.with_ui(|ui| {
+                    let window = ui.win(this.id)?;
+                    ui.split_rect(this.id)
+                        .or_else(|| window.viewport.map(|viewport| viewport.rect))
+                })
             })
             .flatten();
             match rect {
@@ -221,7 +213,10 @@ impl mlua::UserData for LuaWin {
         // the current terminal size during the first frame of a resize, before
         // the window viewport has been refreshed by painting.
         methods.add_method("content_width", |_, this, ()| -> LuaResult<mlua::Value> {
-            let w = crate::lua::try_with_app(|app| app.ui.win_content_width(this.id)).flatten();
+            let w = crate::lua::try_with_ui_host(|host| {
+                host.with_ui(|ui| ui.win_content_width(this.id))
+            })
+            .flatten();
             Ok(match w {
                 Some(n) => mlua::Value::Integer(n as i64),
                 None => mlua::Value::Nil,
@@ -232,10 +227,8 @@ impl mlua::UserData for LuaWin {
         methods.add_method(
             "decorate",
             |_, this, opts: mlua::Table| -> LuaResult<LuaDecoration> {
-                let id = crate::lua::with_app(|app| {
-                    crate::lua::ui_ops::open_decoration(app, this.id, opts)
-                })
-                .map_err(|e| LuaError::RuntimeError(format!("win:decorate: {e}")))?;
+                let id = crate::lua::with_ui_host(|host| host.open_decoration(this.id, opts))
+                    .map_err(|e| LuaError::RuntimeError(format!("win:decorate: {e}")))?;
                 Ok(LuaDecoration { id })
             },
         );
@@ -247,19 +240,14 @@ impl mlua::UserData for LuaWin {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 match row {
                     Some(r) => {
-                        crate::lua::with_app(|app| {
-                            if this.id == crate::app::PROMPT_WIN {
-                                return;
-                            }
-                            crate::lua::ui_ops::set_cursor_row(app, this.id, r);
-                        });
+                        if this.id != crate::app::PROMPT_WIN {
+                            crate::lua::with_ui_host(|host| host.set_cursor_row(this.id, r));
+                        }
                         Ok(mlua::Value::UserData(this_ud))
                     }
                     None => {
-                        let row = crate::lua::try_with_app(|app| {
-                            crate::lua::ui_ops::cursor_row(app, this.id)
-                        })
-                        .flatten();
+                        let row =
+                            crate::lua::try_with_ui_host(|host| host.cursor_row(this.id)).flatten();
                         Ok(match row {
                             Some(r) => mlua::Value::Integer(r as i64),
                             None => mlua::Value::Nil,
@@ -274,12 +262,9 @@ impl mlua::UserData for LuaWin {
             "move_cursor",
             |_, (this_ud, delta): (mlua::AnyUserData, i64)| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
-                crate::lua::with_app(|app| {
-                    if this.id == crate::app::PROMPT_WIN {
-                        return;
-                    }
-                    crate::lua::ui_ops::move_cursor(app, this.id, delta as isize);
-                });
+                if this.id != crate::app::PROMPT_WIN {
+                    crate::lua::with_ui_host(|host| host.move_cursor(this.id, delta as isize));
+                }
                 Ok(this_ud)
             },
         );
@@ -303,23 +288,11 @@ impl mlua::UserData for LuaWin {
                     .as_ref()
                     .and_then(|t| t.get::<Option<bool>>("cursor").ok().flatten())
                     .unwrap_or(true);
-                crate::lua::with_app(|app| {
-                    if this.id == crate::app::PROMPT_WIN {
-                        return;
-                    }
-                    let transcript_scroll_intent = (this.id == crate::app::TRANSCRIPT_WIN)
-                        .then_some(crate::app::reveal::RevealScrollIntent::Position);
-                    app.reveal_position(
-                        this.id,
-                        crate::smelt_edit::DocPosition { row, byte_col: 0 },
-                        crate::app::reveal::RevealOptions {
-                            top_padding,
-                            bottom_padding,
-                            cursor,
-                            transcript_scroll_intent,
-                        },
-                    );
-                });
+                if this.id != crate::app::PROMPT_WIN {
+                    crate::lua::with_ui_host(|host| {
+                        host.reveal_position(this.id, row, top_padding, bottom_padding, cursor)
+                    });
+                }
                 Ok(this_ud)
             },
         );
@@ -338,23 +311,23 @@ impl mlua::UserData for LuaWin {
                 };
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
-                crate::lua::with_app(|app| {
-                    let prev = app.ui.win_set_keymap(
+                crate::lua::with_ui_host(|host| {
+                    host.set_window_keymap(
                         this.id,
                         key,
                         crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
                     );
-                    crate::lua::drop_displaced_lua_handle(app, prev);
                 });
                 let win = this.id;
                 Ok(LuaReg::new(move || {
-                    let mut removed = false;
-                    crate::lua::with_app(|app| {
-                        let prev = app.ui.win_clear_keymap(win, key);
-                        removed = prev.is_some();
-                        crate::lua::drop_displaced_lua_handle(app, prev);
-                    });
-                    removed
+                    crate::lua::app_ref::defer_registered_lua_operation(
+                        &shared,
+                        id,
+                        crate::lua::app_ref::DeferredLuaOperation::WindowKeymap {
+                            window: win,
+                            key,
+                        },
+                    )
                 }))
             },
         );
@@ -376,33 +349,29 @@ impl mlua::UserData for LuaWin {
                 let accept_keys = parse_chord_list(opts.as_ref(), "accept_keys")?;
                 let dismiss_keys =
                     parse_chord_list_with_default(opts.as_ref(), "dismiss_keys", &["esc", "c-c"])?;
-                crate::lua::with_app(|app| {
-                    if text.is_empty() {
-                        app.clear_placeholder(this.id);
-                    } else {
-                        app.set_placeholder(this.id, text);
-                        app.placeholder_opts.insert(
-                            this.id,
-                            crate::app::PlaceholderOpts {
-                                accept_keys,
-                                dismiss_keys,
-                            },
-                        );
-                    }
+                crate::lua::with_ui_host(|host| {
+                    host.set_placeholder(
+                        this.id,
+                        text,
+                        crate::app::PlaceholderOpts {
+                            accept_keys,
+                            dismiss_keys,
+                        },
+                    );
                 });
                 Ok(this_ud)
             },
         );
 
         methods.add_method("clear_placeholder", |_, this, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.clear_placeholder(this.id));
+            crate::lua::with_ui_host(|host| host.clear_placeholder(this.id));
             Ok(())
         });
 
         methods.add_method(
             "placeholder_text",
             |_, this, ()| -> LuaResult<Option<String>> {
-                Ok(crate::lua::try_with_app(|app| app.placeholder_text(this.id)).flatten())
+                Ok(crate::lua::try_with_ui_host(|host| host.placeholder_text(this.id)).flatten())
             },
         );
 
@@ -414,10 +383,12 @@ impl mlua::UserData for LuaWin {
              -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 let highlights = parse_row_highlights(specs.as_ref())?;
-                crate::lua::with_app(|app| {
-                    if let Some(w) = app.ui.win_mut(this.id) {
-                        w.set_row_highlights(highlights);
-                    }
+                crate::lua::with_ui_host(|host| {
+                    host.with_ui(|ui| {
+                        if let Some(window) = ui.win_mut(this.id) {
+                            window.set_row_highlights(highlights);
+                        }
+                    });
                 });
                 Ok(this_ud)
             },
@@ -425,7 +396,7 @@ impl mlua::UserData for LuaWin {
 
         // ── on(event, fn) → Reg ────────────────────────────────────
         //
-        // Headless-safe: when no app pointer is installed (e.g. autoload
+        // Headless-safe: when no frontend host is in scope (e.g. autoload
         // running before `bring_up_lua`, or a unit test driving the Lua
         // runtime directly), there is no `Ui` to register against and no
         // event source to ever fire. The call silently no-ops and the
@@ -444,8 +415,8 @@ impl mlua::UserData for LuaWin {
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
                 let event: crate::smelt_edit::WinEvent = event.into();
-                let installed = crate::lua::try_with_app(|app| {
-                    app.ui.win_on_event(
+                let installed = crate::lua::try_with_ui_host(|host| {
+                    host.register_window_event(
                         this.id,
                         event,
                         crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
@@ -461,13 +432,15 @@ impl mlua::UserData for LuaWin {
                 }
                 let win = this.id;
                 Ok(LuaReg::new(move || {
-                    let mut removed = false;
-                    crate::lua::with_app(|app| {
-                        let prev = app.ui.win_clear_event_by_id(win, event, id);
-                        removed = prev.is_some();
-                        crate::lua::drop_displaced_lua_handle(app, prev);
-                    });
-                    removed
+                    crate::lua::app_ref::defer_registered_lua_operation(
+                        &shared,
+                        id,
+                        crate::lua::app_ref::DeferredLuaOperation::WindowEvent {
+                            window: win,
+                            event,
+                            callback_id: id,
+                        },
+                    )
                 }))
             },
         );
@@ -485,68 +458,30 @@ impl mlua::UserData for LuaWin {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 match arg {
                     mlua::Value::Nil => {
-                        let info = crate::lua::try_with_app(|app| {
-                            let win = app.ui.win(this.id)?;
-                            let total = app
-                                .ui
-                                .buf(win.buf)
-                                .map(|buf| win.scroll_row_total(buf))
-                                .unwrap_or(0);
-                            let viewport = win.viewport.map(|v| v.rect.height).unwrap_or(0);
-                            let max = total.saturating_sub(viewport as u64);
-                            let top = win.scroll_top().min(max);
-                            let overflow = total > viewport as u64;
-                            let numeric_at_bottom = top >= max;
-                            let semantic_needs_tail_repin = if this.id == crate::app::TRANSCRIPT_WIN
-                            {
-                                app.session_document.transcript.needs_tail_repin()
-                            } else {
-                                false
-                            };
-                            let needs_tail_repin =
-                                overflow && (semantic_needs_tail_repin || !numeric_at_bottom);
-                            let at_bottom = numeric_at_bottom && !semantic_needs_tail_repin;
-                            Some((
-                                top,
-                                win.is_following_tail(),
-                                total,
-                                viewport,
-                                max,
-                                overflow,
-                                at_bottom,
-                                needs_tail_repin,
-                            ))
+                        let info = crate::lua::try_with_ui_host(|host| {
+                            host.window_scroll_snapshot(this.id)
                         })
                         .flatten();
                         match info {
-                            Some((
-                                top,
-                                follow,
-                                total,
-                                viewport,
-                                max,
-                                overflow,
-                                at_bottom,
-                                needs_tail_repin,
-                            )) => {
+                            Some(info) => {
                                 let t = lua.create_table()?;
-                                t.set("top", top)?;
-                                t.set("follow", follow)?;
-                                t.set("total", total)?;
-                                t.set("viewport", viewport)?;
-                                t.set("max", max)?;
-                                t.set("overflow", overflow)?;
-                                t.set("at_top", top == 0)?;
-                                t.set("at_bottom", at_bottom)?;
-                                t.set("needs_tail_repin", needs_tail_repin)?;
+                                t.set("top", info.top)?;
+                                t.set("follow", info.follow)?;
+                                t.set("total", info.total)?;
+                                t.set("viewport", info.viewport)?;
+                                t.set("max", info.max)?;
+                                t.set("overflow", info.overflow)?;
+                                t.set("at_top", info.top == 0)?;
+                                t.set("at_bottom", info.at_bottom)?;
+                                t.set("needs_tail_repin", info.needs_tail_repin)?;
                                 Ok(mlua::Value::Table(t))
                             }
                             None => Ok(mlua::Value::Nil),
                         }
                     }
                     mlua::Value::Integer(n) => {
-                        crate::lua::with_app(|app| {
-                            app.scroll_window(
+                        crate::lua::with_ui_host(|host| {
+                            host.scroll_window(
                                 this.id,
                                 crate::app::transcript_scroll::WindowScrollCommand::Pin(
                                     n.max(0) as u64
@@ -556,8 +491,8 @@ impl mlua::UserData for LuaWin {
                         Ok(mlua::Value::UserData(this_ud))
                     }
                     mlua::Value::String(s) if s.to_str()?.as_ref() == "tail" => {
-                        crate::lua::with_app(|app| {
-                            app.scroll_window(
+                        crate::lua::with_ui_host(|host| {
+                            host.scroll_window(
                                 this.id,
                                 crate::app::transcript_scroll::WindowScrollCommand::Tail,
                             );
@@ -583,9 +518,7 @@ impl mlua::UserData for LuaWin {
                 for w in others {
                     ids.push(w.id);
                 }
-                crate::lua::with_app(|app| {
-                    app.ui.link_scroll(&ids);
-                });
+                crate::lua::with_ui_host(|host| host.with_ui(|ui| ui.link_scroll(&ids)));
                 Ok(this_ud)
             },
         );
@@ -922,85 +855,85 @@ pub(super) fn open_or_refresh(
     buf_id: crate::smelt_edit::BufId,
     opts: Option<&mlua::Table>,
 ) -> LuaResult<Option<crate::smelt_edit::WinId>> {
-    // `try_with_app` (rather than `with_app`) lets bootstrap chunks call
-    // `smelt.win.new` before an app pointer is installed (the initial
-    // autoload pass). The window is opened for real on the second pass,
-    // when `bring_up_lua("launch")` reloads with the app available.
-    let Some(win) = crate::lua::try_with_app(|app| -> Option<crate::smelt_edit::WinId> {
+    // Optional access lets bootstrap chunks call `smelt.win.new` before the
+    // frontend host is in scope. The window is opened on the launch reload.
+    let Some(win) = crate::lua::try_with_ui_host(|host| -> Option<crate::smelt_edit::WinId> {
         let name: Option<String> = opts
-            .and_then(|t| t.get::<Option<String>>("name").ok())
+            .and_then(|table| table.get::<Option<String>>("name").ok())
             .flatten();
-        // Named window already exists - refresh and return.
-        if let Some(ref n) = name {
-            if let Some(existing) = app.ui.touch_named_win(n) {
-                if let Some(t) = opts {
-                    apply_window_opts(app, existing, t);
+        if let Some(ref name) = name {
+            let existing = host.with_ui(|ui| ui.touch_named_win(name));
+            if let Some(existing) = existing {
+                if let Some(options) = opts {
+                    host.with_ui(|ui| apply_window_opts(ui, existing, options));
                 }
                 return Some(existing);
             }
         }
         let region = opts
-            .and_then(|t| t.get::<String>("region").ok())
+            .and_then(|table| table.get::<String>("region").ok())
             .unwrap_or_else(|| "lua_overlay".to_string());
         let pad_left = opts
-            .and_then(|t| t.get::<u64>("pad_left").ok())
+            .and_then(|table| table.get::<u64>("pad_left").ok())
             .unwrap_or(0) as u16;
         let pad_right = opts
-            .and_then(|t| t.get::<u64>("pad_right").ok())
+            .and_then(|table| table.get::<u64>("pad_right").ok())
             .unwrap_or(0) as u16;
         let scrollbar = opts
-            .and_then(|t| t.get::<Option<bool>>("scrollbar").ok().flatten())
+            .and_then(|table| table.get::<Option<bool>>("scrollbar").ok().flatten())
             .unwrap_or_else(|| crate::smelt_edit::layout::Gutters::default().scrollbar);
-        let win = app.ui.win_open_split(
-            buf_id,
-            crate::smelt_edit::SplitConfig {
-                region,
-                gutters: crate::smelt_edit::layout::Gutters {
-                    pad_left,
-                    pad_right,
-                    scrollbar,
+        let window = host.with_ui(|ui| {
+            let window = ui.win_open_split(
+                buf_id,
+                crate::smelt_edit::SplitConfig {
+                    region,
+                    gutters: crate::smelt_edit::layout::Gutters {
+                        pad_left,
+                        pad_right,
+                        scrollbar,
+                    },
                 },
-            },
-        );
-        if let Some(win_id) = win {
-            if let Some(w) = app.ui.win_mut(win_id) {
-                // Default gutter is `LineNumberGutter` (strict): buffers
-                // without `SourceLine` stamps get a zero-width column.
-                w.gutter = Some(std::sync::Arc::new(
-                    crate::smelt_edit::gutter::LineNumberGutter::new(),
-                ));
-                w.wrap = true;
-            }
-            if let Some(t) = opts {
-                apply_window_opts(app, win_id, t);
-                // Apply input/list kind if requested.
-                if let Ok(Some(kind)) = t.get::<Option<String>>("kind") {
-                    match kind.as_str() {
-                        "input" => {
-                            let placeholder = t
-                                .get::<Option<String>>("placeholder")
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default();
-                            crate::lua::ui_ops::configure_input_leaf(app, win_id, placeholder);
-                        }
-                        "list" => {
-                            let initial = t.get::<Option<u64>>("initial_cursor").ok().flatten();
-                            crate::lua::ui_ops::configure_list_leaf(
-                                app,
-                                win_id,
-                                initial.unwrap_or(0),
-                            );
-                        }
-                        _ => {}
-                    }
+            );
+            if let Some(window_id) = window {
+                if let Some(window) = ui.win_mut(window_id) {
+                    window.gutter = Some(std::sync::Arc::new(
+                        crate::smelt_edit::gutter::LineNumberGutter::new(),
+                    ));
+                    window.wrap = true;
+                }
+                if let Some(options) = opts {
+                    apply_window_opts(ui, window_id, options);
+                }
+                if let Some(ref name) = name {
+                    ui.name_win(name.clone(), window_id);
                 }
             }
-            if let Some(ref n) = name {
-                app.ui.name_win(n.clone(), win_id);
+            window
+        });
+        if let (Some(window_id), Some(options)) = (window, opts) {
+            if let Ok(Some(kind)) = options.get::<Option<String>>("kind") {
+                match kind.as_str() {
+                    "input" => {
+                        let placeholder = options
+                            .get::<Option<String>>("placeholder")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        host.configure_input_leaf(window_id, placeholder);
+                    }
+                    "list" => {
+                        let initial = options
+                            .get::<Option<u64>>("initial_cursor")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        host.configure_list_leaf(window_id, initial);
+                    }
+                    _ => {}
+                }
             }
         }
-        win
+        window
     }) else {
         return Ok(None);
     };
@@ -1010,11 +943,11 @@ pub(super) fn open_or_refresh(
 /// Apply the mutable subset of window opts to an existing window. Used
 /// by `smelt.win.new()` on both the create and named-refresh paths.
 fn apply_window_opts(
-    app: &mut crate::app::TuiApp,
+    ui: &mut crate::smelt_edit::Ui,
     win_id: crate::smelt_edit::WinId,
     opts: &mlua::Table,
 ) {
-    let Some(w) = app.ui.win_mut(win_id) else {
+    let Some(w) = ui.win_mut(win_id) else {
         return;
     };
     if let Ok(wrap) = opts.get::<bool>("wrap") {

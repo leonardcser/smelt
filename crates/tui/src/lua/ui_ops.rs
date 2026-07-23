@@ -12,10 +12,106 @@
 use crate::app::TuiApp;
 use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
 use crate::smelt_edit::{
-    BodyDrag, Callback, CallbackResult, Decoration, DragConfig, KeyBind, Overlay, Payload,
-    ResizeConfig, RowIndex, WinEvent, WinId,
+    BodyDrag, Callback, CallbackResult, Constraint, Decoration, DragConfig, KeyBind, LayoutTree,
+    Overlay, Payload, ResizeConfig, RowIndex, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Resolve a Lua-built layout description against host-owned windows, paints,
+/// and dialog stages. Window leaves are returned for first-frame pre-rendering.
+pub(crate) fn build_layout_tree(
+    app: &mut TuiApp,
+    node: &crate::lua::api::overlay_layout::LayoutNode,
+    window_leaves: &mut Vec<WinId>,
+) -> Result<(Constraint, LayoutTree), String> {
+    use crate::lua::api::overlay_layout::{ContainerKind, LayoutNode};
+
+    match node {
+        LayoutNode::DialogStage { id } => {
+            let modal = app
+                .ui
+                .docked_surface(*id)
+                .map(crate::smelt_edit::DockedSurface::modal)
+                .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?;
+            let tree = app
+                .docked_dialog_stage_layout(*id)
+                .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?;
+            if let Some(leaves) = app.ui.modal_leaves(modal) {
+                window_leaves.extend_from_slice(leaves);
+            }
+            Ok((Constraint::Fill, tree))
+        }
+        LayoutNode::Leaf {
+            raw_id,
+            chrome,
+            collapse_when_empty,
+            natural,
+        } => {
+            let leaf = app.resolve_leaf_id(*raw_id).ok_or_else(|| {
+                format!("layout leaf references missing window/paint id {raw_id}")
+            })?;
+            let mut tree = match leaf {
+                crate::lua::paint::LeafKind::Window(window) => {
+                    window_leaves.push(window);
+                    LayoutTree::leaf(window)
+                }
+                crate::lua::paint::LeafKind::Paint(paint) => LayoutTree::leaf(paint),
+            };
+            if let Some(natural) = natural.clone() {
+                tree = tree.with_natural(natural);
+            }
+            if let Some(border) = chrome.border {
+                tree = tree.with_border(border);
+            }
+            if let Some(title) = chrome.title.clone() {
+                tree = tree.with_title(title);
+            }
+            if chrome.padding > 0 {
+                tree = tree.with_padding(chrome.padding);
+            }
+            let constraint = if let crate::lua::paint::LeafKind::Window(window) = leaf {
+                if *collapse_when_empty && window_buffer_empty_pub(app, window) {
+                    Constraint::Length(0)
+                } else {
+                    Constraint::Fill
+                }
+            } else {
+                Constraint::Fill
+            };
+            Ok((constraint, tree))
+        }
+        LayoutNode::Container {
+            kind,
+            items,
+            chrome,
+            gap,
+        } => {
+            let mut tree_items = Vec::with_capacity(items.len());
+            for item in items {
+                let (_, child_tree) = build_layout_tree(app, &item.node, window_leaves)?;
+                tree_items.push((item.constraint, child_tree));
+            }
+            let mut tree = match kind {
+                ContainerKind::Vbox => LayoutTree::vbox(tree_items),
+                ContainerKind::Hbox => LayoutTree::hbox(tree_items),
+            };
+            if let Some(border) = chrome.border {
+                tree = tree.with_border(border);
+            }
+            if let Some(title) = chrome.title.clone() {
+                tree = tree.with_title(title);
+            }
+            if *gap > 0 {
+                tree = tree.with_gap(*gap);
+            }
+            tree = tree.with_justify(chrome.justify);
+            if chrome.padding > 0 {
+                tree = tree.with_padding(chrome.padding);
+            }
+            Ok((Constraint::Fill, tree))
+        }
+    }
+}
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
     // Parse the full opts up front so a named re-open refreshes the whole
@@ -60,8 +156,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let min_height = parse_overlay_constraint_opt(&opts, "min_height", "overlay.min_height")?;
 
     let mut window_leaves: Vec<WinId> = Vec::new();
-    let (_root_constraint, inner) =
-        crate::lua::api::overlay_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
+    let (_root_constraint, inner) = build_layout_tree(app, &layout_node, &mut window_leaves)?;
     let mut layout = inner;
     if let Some(b) = border {
         layout = layout.with_border(b);
@@ -151,8 +246,7 @@ pub(crate) fn open_decoration(
     let min_height = parse_overlay_constraint_opt(&opts, "min_height", "decoration.min_height")?;
 
     let mut window_leaves = Vec::new();
-    let (_root_constraint, layout) =
-        crate::lua::api::overlay_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
+    let (_root_constraint, layout) = build_layout_tree(app, &layout_node, &mut window_leaves)?;
     let (term_w, _) = app.ui.terminal_size();
     for &win_id in &window_leaves {
         let content_w = app.ui.win_content_width(win_id).unwrap_or(term_w);

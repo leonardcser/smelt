@@ -5,26 +5,26 @@
 //! - Windows: calls `SetThreadExecutionState`
 
 pub(crate) struct SleepInhibitor {
+    cwd: std::path::PathBuf,
     #[cfg(not(target_os = "windows"))]
     child: Option<std::process::Child>,
     #[cfg(target_os = "windows")]
     active: bool,
 }
 
-impl Default for SleepInhibitor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SleepInhibitor {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(cwd: std::path::PathBuf) -> Self {
         Self {
+            cwd,
             #[cfg(not(target_os = "windows"))]
             child: None,
             #[cfg(target_os = "windows")]
             active: false,
         }
+    }
+
+    pub(crate) fn set_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.cwd = cwd;
     }
 
     /// Prevent the system from idle-sleeping. Idempotent.
@@ -34,7 +34,7 @@ impl SleepInhibitor {
             if self.child.is_some() {
                 return;
             }
-            self.child = spawn_inhibitor();
+            self.child = spawn_inhibitor(&self.cwd);
         }
         #[cfg(target_os = "windows")]
         {
@@ -74,10 +74,11 @@ impl Drop for SleepInhibitor {
 // ── Platform: macOS ──────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-fn spawn_inhibitor() -> Option<std::process::Child> {
+fn spawn_inhibitor(cwd: &std::path::Path) -> Option<std::process::Child> {
     let pid = std::process::id().to_string();
     std::process::Command::new("caffeinate")
         .args(["-i", "-w", &pid])
+        .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -88,7 +89,7 @@ fn spawn_inhibitor() -> Option<std::process::Child> {
 // ── Platform: Linux / other Unix ─────────────────────────────────────────────
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn spawn_inhibitor() -> Option<std::process::Child> {
+fn spawn_inhibitor(cwd: &std::path::Path) -> Option<std::process::Child> {
     let mut cmd = std::process::Command::new("systemd-inhibit");
     cmd.args([
         "--what=idle:sleep",
@@ -97,6 +98,7 @@ fn spawn_inhibitor() -> Option<std::process::Child> {
         "sleep",
         "infinity",
     ])
+    .current_dir(cwd)
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());

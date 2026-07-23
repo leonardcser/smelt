@@ -95,19 +95,34 @@ impl SkillLoader {
     /// directories. Later sources override earlier ones, so user skills
     /// can shadow built-ins by sharing the same `name:` in frontmatter.
     pub fn load(extra_paths: &[PathBuf]) -> Self {
+        let home = crate::home_dir();
+        let config_dir = crate::config_dir();
+        let data_dir = crate::data_dir();
         let cwd = std::env::current_dir().ok();
-        Self::load_with_project(extra_paths, cwd.as_deref())
+        Self::load_from_paths(extra_paths, &home, &config_dir, &data_dir, cwd.as_deref())
     }
 
-    pub fn load_for_cwd(extra_paths: &[PathBuf], cwd: &Path) -> Self {
-        Self::load_with_project(extra_paths, Some(cwd))
+    pub fn load_for_runtime(
+        extra_paths: &[PathBuf],
+        home: &Path,
+        config_dir: &Path,
+        data_dir: &Path,
+        cwd: &Path,
+    ) -> Self {
+        Self::load_from_paths(extra_paths, home, config_dir, data_dir, Some(cwd))
     }
 
-    fn load_with_project(extra_paths: &[PathBuf], cwd: Option<&Path>) -> Self {
+    fn load_from_paths(
+        extra_paths: &[PathBuf],
+        home: &Path,
+        config_dir: &Path,
+        data_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Self {
         let mut skills = HashMap::new();
 
         for (name, body) in BUILTIN_SKILLS {
-            let location = builtin_skill_path(name).display().to_string();
+            let location = builtin_skill_path(data_dir, name).display().to_string();
             match parse_skill_text(body, None, &location, SkillSource::Builtin) {
                 Some(entry) => {
                     insert_skill(&mut skills, entry);
@@ -118,11 +133,10 @@ impl SkillLoader {
             }
         }
 
-        let global = crate::config_dir().join("skills");
+        let global = config_dir.join("skills");
         scan_dir(&global, &mut skills);
-        scan_command_dir(&crate::config_dir().join("commands"), &mut skills);
+        scan_command_dir(&config_dir.join("commands"), &mut skills);
 
-        let home = crate::home_dir();
         scan_dir(&home.join(".claude/skills"), &mut skills);
         scan_dir(&home.join(".agents/skills"), &mut skills);
 
@@ -196,8 +210,8 @@ impl SkillLoader {
     }
 }
 
-fn builtin_skill_path(name: &str) -> PathBuf {
-    crate::data_dir()
+fn builtin_skill_path(data_dir: &Path, name: &str) -> PathBuf {
+    data_dir
         .join("builtins")
         .join("skills")
         .join(name)

@@ -6,7 +6,7 @@
 //! `runtime/lua/smelt/colorschemes/<name>.lua` return one and call
 //! `theme.use("<name>")`.
 
-use crate::theme::{compile, StyleDecl, ThemeSpec};
+use crate::theme::{StyleDecl, ThemeSpec};
 use mlua::prelude::*;
 use smelt_core::content::highlight::syntax_theme_names;
 use smelt_core::lua::doc::Tier;
@@ -33,16 +33,8 @@ install it as the active theme. String-valued group entries are resolved \
 at compile time; cycles and dangling references raise a runtime error.",
         &["spec"],
         |_, spec: ThemeSpec| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let is_light = app.ui.theme().is_light();
-                match compile(&spec, is_light) {
-                    Ok(theme) => {
-                        app.install_theme(theme);
-                        Ok(())
-                    }
-                    Err(e) => Err(LuaError::RuntimeError(format!("theme.apply: {e}"))),
-                }
-            })
+            crate::lua::with_runtime_host(|host| host.apply_theme(&spec))
+                .map_err(|error| LuaError::RuntimeError(format!("theme.apply: {error}")))
         },
     )?;
 
@@ -53,10 +45,9 @@ at compile time; cycles and dangling references raise a runtime error.",
 sticks until the next `apply()` or `use()` call.",
         &["group", "style"],
         |_, (group, style): (String, StyleDecl)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let is_light = app.ui.theme().is_light();
-                let s = style_decl_to_style(&style, is_light);
-                app.mutate_theme(|t| t.set(group, s));
+            crate::lua::with_runtime_host(|host| {
+                let style = style_decl_to_style(&style, host.theme_is_light());
+                host.set_theme_group(group, style);
             });
             Ok(())
         },
@@ -68,7 +59,7 @@ sticks until the next `apply()` or `use()` call.",
 resolve to an empty table.",
         &["group"],
         |lua, group: String| -> LuaResult<mlua::Table> {
-            let style = crate::lua::with_app(|app| app.ui.theme().get(&group));
+            let style = crate::lua::with_runtime_host(|host| host.theme_group(&group));
             style_to_lua(lua, style)
         },
     )?;
@@ -79,20 +70,7 @@ resolve to an empty table.",
 `{ group = StyleDecl }` table.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let pairs = crate::lua::with_app(|app| {
-                let theme = app.ui.theme();
-                let mut out: Vec<(String, Style)> = Vec::with_capacity(theme.len());
-                for (id, style) in theme.iter() {
-                    if let Some(name) = smelt_core::theme::name_of(id) {
-                        if name.starts_with("__anon__/") {
-                            continue;
-                        }
-                        out.push((name, *style));
-                    }
-                }
-                out.sort_by(|(a, _), (b, _)| a.cmp(b));
-                out
-            });
+            let pairs = crate::lua::with_runtime_host(|host| host.theme_snapshot());
             let out = lua.create_table()?;
             for (name, style) in pairs {
                 out.set(name, style_to_lua(lua, style)?)?;

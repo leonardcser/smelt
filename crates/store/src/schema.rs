@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
@@ -87,6 +87,9 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if (1..=7).contains(&current) {
         migrate_to_v8(conn)?;
+    }
+    if (1..=8).contains(&current) {
+        migrate_to_v9(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -437,7 +440,16 @@ fn migrate_to_v8(conn: &Connection) -> Result<()> {
              ADD COLUMN next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)",
         )?;
     }
-    conn.execute_batch(SCHEMA)?;
+    Ok(())
+}
+
+fn migrate_to_v9(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS transcript_blocks_descriptor_idx;
+         ALTER TABLE session_state RENAME COLUMN descriptor_len TO transcript_record_count;
+         ALTER TABLE transcript_blocks RENAME COLUMN descriptor_idx TO record_idx;
+         ALTER TABLE transcript_blocks RENAME COLUMN descriptor_json TO block_json;",
+    )?;
     Ok(())
 }
 
@@ -478,7 +490,7 @@ fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
             DROP TABLE IF EXISTS turn_tool_elapsed;
             "#,
         )?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(&legacy_schema_v8())?;
         conn.execute_batch(
             r#"
             INSERT INTO store_meta SELECT * FROM store_meta_legacy;
@@ -687,6 +699,13 @@ CREATE TABLE IF NOT EXISTS accounting_snapshots (
 );
 "#;
 
+fn legacy_schema_v8() -> String {
+    SCHEMA
+        .replace("transcript_record_count", "descriptor_len")
+        .replace("record_idx", "descriptor_idx")
+        .replace("block_json", "descriptor_json")
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS store_meta (
     key TEXT PRIMARY KEY,
@@ -716,7 +735,7 @@ CREATE TABLE IF NOT EXISTS session_state (
     history_len INTEGER NOT NULL DEFAULT 0 CHECK (history_len >= 0),
     created_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (updated_at >= 0),
-    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0),
+    transcript_record_count INTEGER NOT NULL DEFAULT 0 CHECK (transcript_record_count >= 0),
     next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)
 );
 
@@ -759,7 +778,7 @@ CREATE INDEX IF NOT EXISTS turns_history_idx ON turns(submitted_history_idx, tur
 
 CREATE TABLE IF NOT EXISTS transcript_blocks (
     block_idx INTEGER PRIMARY KEY CHECK (block_idx >= 0),
-    descriptor_idx INTEGER CHECK (descriptor_idx IS NULL OR descriptor_idx >= 0),
+    record_idx INTEGER CHECK (record_idx IS NULL OR record_idx >= 0),
     history_idx INTEGER REFERENCES history_items(idx) ON DELETE CASCADE CHECK (history_idx IS NULL OR history_idx >= 0),
     kind TEXT NOT NULL,
     tool_call_id TEXT,
@@ -768,21 +787,21 @@ CREATE TABLE IF NOT EXISTS transcript_blocks (
     estimated_text_bytes INTEGER NOT NULL DEFAULT 0 CHECK (estimated_text_bytes >= 0),
     estimated_rows INTEGER CHECK (estimated_rows IS NULL OR estimated_rows >= 0),
     preview_text TEXT,
-    descriptor_json TEXT,
+    block_json TEXT,
     origin_json TEXT,
     tool_state_json TEXT
 );
 CREATE INDEX IF NOT EXISTS transcript_blocks_history_idx ON transcript_blocks(history_idx, block_idx);
-CREATE UNIQUE INDEX IF NOT EXISTS transcript_blocks_descriptor_idx
-    ON transcript_blocks(descriptor_idx)
-    WHERE descriptor_json IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS transcript_blocks_record_idx
+    ON transcript_blocks(record_idx)
+    WHERE block_json IS NOT NULL;
 CREATE INDEX IF NOT EXISTS transcript_blocks_kind_idx
-    ON transcript_blocks(kind, descriptor_idx)
-    WHERE descriptor_json IS NOT NULL;
+    ON transcript_blocks(kind, record_idx)
+    WHERE block_json IS NOT NULL;
 CREATE INDEX IF NOT EXISTS transcript_blocks_tool_call_id_idx ON transcript_blocks(tool_call_id);
 CREATE INDEX IF NOT EXISTS transcript_blocks_extent_idx
-    ON transcript_blocks(descriptor_idx, kind, estimated_rows, estimated_text_bytes, preview_text)
-    WHERE descriptor_json IS NOT NULL;
+    ON transcript_blocks(record_idx, kind, estimated_rows, estimated_text_bytes, preview_text)
+    WHERE block_json IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS objects (
     hash TEXT PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
@@ -926,7 +945,7 @@ mod tests {
     use super::*;
 
     fn install_legacy_v4_schema(conn: &Connection) {
-        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(&legacy_schema_v8()).unwrap();
         conn.pragma_update(None, "foreign_keys", false).unwrap();
         conn.execute_batch(
             "DROP TABLE request_stats;
@@ -940,8 +959,8 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
     }
 
-    fn schema_without_v8() -> String {
-        let mut schema = SCHEMA.replace(
+    fn schema_v7() -> String {
+        let mut schema = legacy_schema_v8().replace(
             ",\n    next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)",
             "",
         );
@@ -1006,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v8_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v9_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -1088,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v8_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_to_v9_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "ignore_check_constraints", true)
@@ -1214,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v8_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v9_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1284,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v8_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v9_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1324,9 +1343,9 @@ mod tests {
     }
 
     #[test]
-    fn v6_to_v8_migration_caches_descriptor_count_without_rebuilding() {
+    fn v6_to_v9_migration_caches_transcript_record_count_without_rebuilding() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let v6_schema = schema_without_v8()
+        let v6_schema = schema_v7()
             .replace(
                 ",\n    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0)",
                 "",
@@ -1382,9 +1401,11 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
             "kept"
         );
         assert_eq!(
-            conn.query_row("SELECT descriptor_len FROM session_state", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            conn.query_row(
+                "SELECT transcript_record_count FROM session_state",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap(),
             2
         );
@@ -1408,9 +1429,9 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v7_to_v8_migration_adds_empty_canonical_turn_state() {
+    fn v7_to_v9_migration_adds_empty_canonical_turn_state() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&schema_without_v8()).unwrap();
+        conn.execute_batch(&schema_v7()).unwrap();
         conn.execute(
             "INSERT INTO session_state (
                  singleton, id, title, revision, history_len, descriptor_len, created_at, updated_at
@@ -1444,7 +1465,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
             conn.query_row(
-                "SELECT id, title, revision, history_len, descriptor_len, next_turn_id
+                "SELECT id, title, revision, history_len, transcript_record_count, next_turn_id
                  FROM session_state",
                 [],
                 |row| {
@@ -1468,6 +1489,55 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
         );
         assert!(schema_object_exists(&conn, "index", "turns_state_idx").unwrap());
         assert!(schema_object_exists(&conn, "index", "turns_history_idx").unwrap());
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v8_to_v9_migration_renames_transcript_storage_vocabulary() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&legacy_schema_v8()).unwrap();
+        conn.execute(
+            "INSERT INTO session_state (
+                 singleton, id, descriptor_len
+             ) VALUES (1, 'session', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_blocks (
+                 block_idx, descriptor_idx, kind, descriptor_json
+             ) VALUES (4, 0, 'text', '{\"kind\":\"text\"}')",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 8).unwrap();
+
+        migrate(&mut conn, "test-v9").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT transcript_record_count FROM session_state",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT record_idx, block_json FROM transcript_blocks WHERE block_idx = 4",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+            (0, "{\"kind\":\"text\"}".to_string())
+        );
+        assert!(!column_exists(&conn, "session_state", "descriptor_len").unwrap());
+        assert!(!column_exists(&conn, "transcript_blocks", "descriptor_idx").unwrap());
+        assert!(!column_exists(&conn, "transcript_blocks", "descriptor_json").unwrap());
+        assert!(schema_object_exists(&conn, "index", "transcript_blocks_record_idx").unwrap());
+        assert!(!schema_object_exists(&conn, "index", "transcript_blocks_descriptor_idx").unwrap());
         validate_read_only_schema(&conn).unwrap();
     }
 

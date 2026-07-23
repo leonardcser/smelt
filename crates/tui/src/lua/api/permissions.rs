@@ -208,15 +208,16 @@ pub(super) fn register(
         "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
         &[],
         |lua, ()| -> LuaResult<LuaPermissionList> {
-            let (session_entries, path_grants, cwd) = crate::lua::try_with_app(|app| {
-                let entries = app
-                    .session_permission_entries()
-                    .into_iter()
-                    .map(|e| (e.tool, e.pattern))
-                    .collect::<Vec<_>>();
-                (entries, app.session_path_grants(), app.cwd.clone())
-            })
-            .unwrap_or_default();
+            let snapshot = crate::lua::try_with_platform_host(|host| host.permission_snapshot());
+            let (session_entries, path_grants, workspace_rules) = snapshot
+                .map(|snapshot| {
+                    (
+                        snapshot.session_entries,
+                        snapshot.path_grants,
+                        snapshot.workspace_rules,
+                    )
+                })
+                .unwrap_or_default();
             let out = lua.create_table()?;
             let session_arr = lua.create_table()?;
             for (i, (tool, pattern)) in session_entries.into_iter().enumerate() {
@@ -240,10 +241,7 @@ pub(super) fn register(
             }
             out.set("path_grants", path_grants_arr)?;
             let workspace_arr = lua.create_table()?;
-            for (i, rule) in crate::permissions::store::load(&cwd)
-                .into_iter()
-                .enumerate()
-            {
+            for (i, rule) in workspace_rules.into_iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("tool", rule.tool)?;
                 let pats = lua.create_table()?;
@@ -257,11 +255,12 @@ pub(super) fn register(
             Ok(LuaPermissionList(out))
         },
     )?;
+    let sync_context = Arc::clone(&shared.core);
     m.fn_(
         "sync",
         "Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.",
         &["spec"],
-        |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
+        move |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
             let session_entries: Vec<smelt_core::PermissionEntry> = spec
                 .session
                 .into_iter()
@@ -273,7 +272,7 @@ pub(super) fn register(
             let session_path_grants = spec
                 .path_grants
                 .into_iter()
-                .map(lua_path_grant_to_runtime)
+                .map(|grant| lua_path_grant_to_runtime(grant, &sync_context))
                 .collect::<LuaResult<Vec<_>>>()?;
             let workspace_rules: Vec<crate::permissions::store::Rule> = spec
                 .workspace
@@ -283,21 +282,20 @@ pub(super) fn register(
                     patterns: r.patterns,
                 })
                 .collect();
-            crate::lua::with_app(|app| {
-                app.sync_permissions(session_entries, session_path_grants, workspace_rules)
+            crate::lua::with_platform_host(|host| {
+                host.sync_permissions(session_entries, session_path_grants, workspace_rules)
             });
             Ok(())
         },
     )?;
+    let grant_context = Arc::clone(&shared.core);
     m.fn_(
         "grant_session",
         "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode?, tool, access = \"read\"|\"write\", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` to scope the grant to one mode.",
         &["grant"],
-        |_, grant: LuaPermissionSessionPathGrant| -> LuaResult<()> {
-            let grant = lua_path_grant_to_runtime(grant)?;
-            crate::lua::with_app(|app| {
-                app.grant_session_path(grant.mode, grant.tool, grant.access, grant.dir)
-            });
+        move |_, grant: LuaPermissionSessionPathGrant| -> LuaResult<()> {
+            let grant = lua_path_grant_to_runtime(grant, &grant_context)?;
+            crate::lua::with_platform_host(|host| host.grant_session_path(grant));
             Ok(())
         },
     )?;
@@ -331,9 +329,8 @@ pub(super) fn register(
         "Decision primitives for tool `decide` callbacks. Returns \"allow\"/\"ask\"/\"deny\".",
         &["mode_str", "name"],
         |_, (mode_str, name): (String, String)| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| {
-                let mode = parse_mode(&mode_str);
-                decision_label(app.core.permissions.check_tool(mode, &name)).to_string()
+            Ok(crate::lua::try_with_platform_host(|host| {
+                host.check_tool_permission(&mode_str, &name).to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
         },
@@ -343,9 +340,8 @@ pub(super) fn register(
         "Decide a tool-specific pattern bucket (e.g. `(\"normal\", \"bash\", \"git status\")`) against the current policy. Returns `\"allow\"`, `\"ask\"`, or `\"deny\"`; defaults to `\"ask\"` when no app context is available.",
         &["mode_str", "bucket", "value"],
         |_, (mode_str, bucket, value): (String, String, String)| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| {
-                let mode = parse_mode(&mode_str);
-                decision_label(app.core.permissions.check_subcommand(mode, &bucket, &value))
+            Ok(crate::lua::try_with_platform_host(|host| {
+                host.check_subcommand_permission(&mode_str, &bucket, &value)
                     .to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
@@ -357,6 +353,7 @@ pub(super) fn register(
 
 fn lua_path_grant_to_runtime(
     grant: LuaPermissionSessionPathGrant,
+    context: &smelt_core::lua::LuaShared,
 ) -> LuaResult<smelt_core::permissions::SessionPathGrant> {
     if grant.kind != "path" {
         return Err(LuaError::RuntimeError(format!(
@@ -378,7 +375,7 @@ fn lua_path_grant_to_runtime(
         mode: grant.mode.map(|mode| parse_grant_mode(&mode)).transpose()?,
         tool: grant.tool,
         access: parse_path_access(&grant.access)?,
-        dir: std::path::PathBuf::from(grant.path_prefix),
+        dir: context.resolve_project_path(grant.path_prefix),
     })
 }
 
@@ -467,18 +464,5 @@ fn merge_policy(
     merge_mode(&mut base.default, incoming.default);
     for (name, mode) in incoming.modes {
         merge_mode(base.modes.entry(name).or_default(), mode);
-    }
-}
-
-fn parse_mode(s: &str) -> protocol::AgentMode {
-    protocol::AgentMode::parse(s).unwrap_or_default()
-}
-
-fn decision_label(d: protocol::Decision) -> &'static str {
-    match d {
-        protocol::Decision::Allow => "allow",
-        protocol::Decision::Ask => "ask",
-        protocol::Decision::Deny => "deny",
-        protocol::Decision::Error(_) => "ask",
     }
 }

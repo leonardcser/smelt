@@ -19,7 +19,7 @@ Seventeen targets covering distinct surfaces:
 | `provider_body`           | provider request construction and configuration                              | all body builders + routing, API-base, auth, catalog, extraction, and schema invariants          |
 | `provider_stream`         | provider SSE/response parsers                                                | raw-byte partitioning + Chat Completions/OpenAI/Anthropic lifecycle and response oracles         |
 | `permissions_rules`       | permission rule compilation/evaluation                                       | random rule sets, shell-aware subpatterns, mode behavior, workspace downgrade oracle            |
-| `store_state`             | canonical session persistence and maintenance                                | file-backed writer/reader state machine + independent history, descriptor, and revision model   |
+| `store_state`             | canonical session persistence and maintenance                                | file-backed writer/reader state machine + independent history, transcript-record, and revision model   |
 | `engine_events`           | engine lifecycle and canonical-history application                           | focused event state machine + independent active-turn and canonical-suffix model                |
 
 ## Setup once

@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::json;
 
-use crate::app::transcript::{TranscriptDisplayDocument, TranscriptProjectionRestore};
+use crate::app::transcript::TranscriptProjectionRestore;
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
 use crate::smelt_edit::{
@@ -133,13 +133,10 @@ impl TuiApp {
                 self.sync_transcript_renderer_generation();
                 let width = self.transcript_width() as u16;
                 let theme = self.ui.theme().clone();
-                let mut document = TranscriptDisplayDocument::new(
-                    &mut self.session_document.transcript,
-                    &self.lua,
-                    width,
-                    &theme,
-                );
-                Some(f(&mut document))
+                Some(
+                    self.conversation
+                        .with_transcript_display_document(&self.lua, width, &theme, f),
+                )
             }
             None if handle.is_some() => None,
             None => {
@@ -177,7 +174,7 @@ impl TuiApp {
                     );
                 Some(DocumentRenderCacheKey {
                     document: DocumentRenderCacheDocument::Registered(handle?),
-                    generation: self.session_document.transcript.projection_generation(),
+                    generation: self.conversation.transcript().projection_generation(),
                     width: self.transcript_width() as u16,
                     theme,
                     renderer_generation: self.lua.transcript_renderer_generation(),
@@ -323,19 +320,19 @@ impl TuiApp {
         };
 
         let trace_transcript_mouse = win == crate::app::TRANSCRIPT_WIN
-            && self.session_document.transcript.scroll_trace_enabled();
+            && self.conversation.transcript().scroll_trace_enabled();
         if trace_transcript_mouse {
-            let scroll_anchor = self.session_document.transcript.trace_anchor_at_row(
+            let scroll_anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport.content_width,
                 scroll_top,
             );
-            let cursor_anchor = self.session_document.transcript.trace_anchor_at_row(
+            let cursor_anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport.content_width,
                 state.cursor.row,
             );
-            self.session_document.transcript.record_scroll_trace_event(
+            self.conversation.record_transcript_scroll_trace_event(
                 "document_mouse_before",
                 json!({
                     "mouse_kind": format!("{:?}", event.kind),
@@ -374,20 +371,23 @@ impl TuiApp {
                 let (Some(win_ref), Some(buf_ref)) = (win_ref, buf_ref) else {
                     return (Status::Ignored, None);
                 };
-                let mut document = TranscriptDisplayDocument::new(
-                    &mut self.session_document.transcript,
+                let (status, copy) = self.conversation.with_transcript_display_document(
                     &self.lua,
                     width,
                     &theme,
+                    |document| {
+                        let (status, range) = win_ref.handle_document_view_mouse(
+                            buf_ref,
+                            document,
+                            event,
+                            click_count,
+                            now,
+                        );
+                        let copy =
+                            range.and_then(|range| document.copy_range(TextRange::Rows(range)));
+                        (status, copy)
+                    },
                 );
-                let (status, range) = win_ref.handle_document_view_mouse(
-                    buf_ref,
-                    &mut document,
-                    event,
-                    click_count,
-                    now,
-                );
-                let copy = range.and_then(|range| document.copy_range(TextRange::Rows(range)));
                 (
                     status,
                     copy,
@@ -473,12 +473,12 @@ impl TuiApp {
 
         if trace_transcript_mouse {
             let window_scroll_after = self.transcript_scroll_top();
-            let state_cursor_anchor = self.session_document.transcript.trace_anchor_at_row(
+            let state_cursor_anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport.content_width,
                 state_after.cursor.row,
             );
-            self.session_document.transcript.record_scroll_trace_event(
+            self.conversation.record_transcript_scroll_trace_event(
                 "document_mouse_after",
                 json!({
                     "mouse_kind": format!("{:?}", event.kind),
@@ -548,30 +548,30 @@ impl TuiApp {
         let window_scroll_before = scroll_top;
         if defer_local_transcript_scroll {
             scroll_top = self
-                .session_document
-                .transcript
+                .conversation
+                .transcript()
                 .local_command_scroll_top(scroll_top);
         }
         let command_scroll_before = scroll_top;
         let pending_local_scroll_before = defer_local_transcript_scroll
             && self
-                .session_document
-                .transcript
+                .conversation
+                .transcript()
                 .has_pending_local_scroll_top();
         let trace_transcript_command = win == crate::app::TRANSCRIPT_WIN
-            && self.session_document.transcript.scroll_trace_enabled();
+            && self.conversation.transcript().scroll_trace_enabled();
         if trace_transcript_command {
-            let scroll_anchor = self.session_document.transcript.trace_anchor_at_row(
+            let scroll_anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport_cols.max(1),
                 command_scroll_before,
             );
-            let cursor_anchor = self.session_document.transcript.trace_anchor_at_row(
+            let cursor_anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport_cols.max(1),
                 state.cursor.row,
             );
-            self.session_document.transcript.record_scroll_trace_event(
+            self.conversation.record_transcript_scroll_trace_event(
                 "document_command_before",
                 json!({
                     "command": format!("{:?}", command),
@@ -592,8 +592,8 @@ impl TuiApp {
             && viewport_rows > 0
         {
             if let Some(local_scroll) = self
-                .session_document
-                .transcript
+                .conversation
+                .transcript()
                 .local_scroll_for_document_command(
                     command,
                     viewport_rows,
@@ -602,7 +602,7 @@ impl TuiApp {
                 )
             {
                 if !pending_local_scroll_before {
-                    self.session_document.transcript.prime_local_scroll_base(
+                    self.conversation.prime_transcript_local_scroll_base(
                         &self.lua,
                         viewport_cols.max(1),
                         viewport_rows,
@@ -661,7 +661,7 @@ impl TuiApp {
                 let intent = if local_transcript_command {
                     TranscriptScrollIntent::UserDelta { rows }
                 } else {
-                    let anchor = self.session_document.transcript.trace_anchor_at_row(
+                    let anchor = self.conversation.transcript_trace_anchor_at_row(
                         &self.lua,
                         viewport_cols.max(1),
                         scroll_top,
@@ -687,7 +687,7 @@ impl TuiApp {
         let defer_transcript_window_scroll = defer_local_transcript_scroll;
         if defer_transcript_window_scroll {
             if !pending_local_scroll_before {
-                self.session_document.transcript.prime_local_scroll_base(
+                self.conversation.prime_transcript_local_scroll_base(
                     &self.lua,
                     viewport_cols.max(1),
                     viewport_rows,
@@ -731,9 +731,7 @@ impl TuiApp {
             }
         }
         if !defer_transcript_window_scroll {
-            self.session_document
-                .transcript
-                .clear_pending_local_scroll_top();
+            self.conversation.clear_pending_transcript_local_scroll();
             if let Some((label, intent, before, restore)) = transcript_scroll_intent.as_ref() {
                 self.record_transcript_scroll_intent_from_document_command(
                     *label,
@@ -745,12 +743,12 @@ impl TuiApp {
             }
         }
         if trace_transcript_command {
-            let cursor_anchor = self.session_document.transcript.trace_anchor_at_row(
+            let cursor_anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport_cols.max(1),
                 state.cursor.row,
             );
-            self.session_document.transcript.record_scroll_trace_event(
+            self.conversation.record_transcript_scroll_trace_event(
                 "document_command_after",
                 json!({
                     "command": format!("{:?}", command),

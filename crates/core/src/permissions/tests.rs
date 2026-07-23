@@ -131,6 +131,7 @@ fn permissions_from_mode(
         mode_behaviors,
         restrict_to_workspace,
         active_root: workspace.clone(),
+        home: engine::paths::home_dir(),
         allowed_roots: if workspace.as_os_str().is_empty() {
             Vec::new()
         } else {
@@ -3894,10 +3895,10 @@ fn permissions_handle_snapshots_policy_and_shares_session_approvals() {
 #[test]
 fn permission_resolution_reloads_workspace_grants_without_losing_session_grants() {
     let state = tempfile::tempdir().unwrap();
-    let _state_guard = crate::test_util::isolate_xdg_state(state.path());
+    let workspace_store = store::WorkspacePermissionStore::new(state.path().to_path_buf());
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
-    store::save(
+    workspace_store.save(
         &first.path().to_string_lossy(),
         &[store::Rule {
             tool: "bash".into(),
@@ -3910,7 +3911,11 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
         &ToolDefaults::default(),
         HashMap::new(),
         &settings,
-        first.path(),
+        PermissionRuntimePaths {
+            cwd: first.path(),
+            home: first.path(),
+        },
+        &workspace_store,
         None,
     ));
     handle
@@ -3929,7 +3934,11 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
         &ToolDefaults::default(),
         HashMap::new(),
         &settings,
-        second.path(),
+        PermissionRuntimePaths {
+            cwd: second.path(),
+            home: second.path(),
+        },
+        &workspace_store,
         None,
     ));
     let approvals = handle.approvals();

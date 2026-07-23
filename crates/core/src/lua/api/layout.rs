@@ -192,7 +192,11 @@ fn cap_middle_marker(value: Option<&str>) -> LuaResult<bool> {
     }
 }
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    shared: &std::sync::Arc<crate::lua::LuaShared>,
+) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -364,11 +368,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }))
         },
     )?;
+    let diff_context = std::sync::Arc::clone(shared);
     m.fn_(
         "diff",
         "Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax; `opts.full_file` treats `opts.old` as the complete pre-edit file for stable previews after writes.",
         &["opts"],
-        |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
+        move |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
             let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
             let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
@@ -377,6 +382,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .unwrap_or_else(|| old.clone());
             let lang: Option<String> = opts.get::<Option<String>>("lang")?;
             let full_file = opts.get::<Option<bool>>("full_file")?.unwrap_or(false);
+            let base = if full_file {
+                old.clone()
+            } else {
+                std::fs::read_to_string(diff_context.resolve_project_path(&path))
+                    .unwrap_or_default()
+            };
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Diff(DiffSpec {
                 old,
                 new,
@@ -384,6 +395,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 anchor,
                 lang,
                 full_file,
+                base,
             }))))
         },
     )?;

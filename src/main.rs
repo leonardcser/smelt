@@ -194,9 +194,6 @@ enum SessionCommand {
     Doctor(SessionDoctorArgs),
     /// Copy a transactionally consistent session database to a new file
     Backup(SessionBackupArgs),
-    /// Rebuild deprecated meta.json and content.txt compatibility exports
-    // COMPAT(session-derived-sidecar-exports): explicit alpha export rebuild command.
-    RebuildDerived(SessionTargetArgs),
     /// Delete objects unreachable from history and request audits
     Gc(SessionTargetArgs),
     /// Compact free database pages under exclusive ownership
@@ -246,8 +243,6 @@ struct SessionRecoveryDoctor {
     canonical_revision: u64,
     nonterminal_turns: Vec<NonterminalTurnDoctor>,
     catalog: DerivedRevisionDoctor,
-    compatibility_metadata: DerivedRevisionDoctor,
-    compatibility_content: DerivedRevisionDoctor,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -264,7 +259,6 @@ enum DerivedRevisionState {
     Lagging,
     Ahead,
     Missing,
-    Malformed,
     Unavailable,
 }
 
@@ -633,23 +627,6 @@ fn catalog_doctor(
     }
 }
 
-fn compatibility_revision_doctor(
-    canonical_revision: u64,
-    revision: smelt_core::session::CompatibilityExportRevision,
-) -> DerivedRevisionDoctor {
-    match revision {
-        smelt_core::session::CompatibilityExportRevision::Missing => {
-            missing_derived_revision(DerivedRevisionState::Missing)
-        }
-        smelt_core::session::CompatibilityExportRevision::Malformed => {
-            missing_derived_revision(DerivedRevisionState::Malformed)
-        }
-        smelt_core::session::CompatibilityExportRevision::Valid { source_revision } => {
-            derived_revision_doctor(canonical_revision, source_revision)
-        }
-    }
-}
-
 fn doctor_session(reference: &str) -> SessionDoctorOutput {
     let (session_id, dir) = match resolve_session_target(reference) {
         Ok(resolved) => resolved,
@@ -682,25 +659,12 @@ fn doctor_session(reference: &str) -> SessionDoctorOutput {
             })
             .collect();
         let catalog = catalog_doctor(&session_id, &dir, canonical_revision);
-        let (compatibility_metadata, compatibility_content) =
-            match smelt_core::session::compatibility_export_status(&dir) {
-                Ok(status) => (
-                    compatibility_revision_doctor(canonical_revision, status.metadata),
-                    compatibility_revision_doctor(canonical_revision, status.content),
-                ),
-                Err(error) => (
-                    unavailable_derived_revision(error.clone()),
-                    unavailable_derived_revision(error),
-                ),
-            };
         Ok::<_, smelt_store::StoreError>((
             report,
             SessionRecoveryDoctor {
                 canonical_revision,
                 nonterminal_turns,
                 catalog,
-                compatibility_metadata,
-                compatibility_content,
             },
         ))
     })();
@@ -740,7 +704,10 @@ fn print_doctor_output(output: &SessionDoctorOutput) {
     println!("database_bytes: {}", report.stats.database_bytes);
     println!("wal_bytes: {}", report.stats.wal_bytes);
     println!("history_rows: {}", report.stats.history_rows);
-    println!("descriptor_rows: {}", report.stats.descriptor_rows);
+    println!(
+        "transcript_record_rows: {}",
+        report.stats.transcript_record_rows
+    );
     println!("object_rows: {}", report.stats.object_rows);
     println!("object_raw_bytes: {}", report.stats.object_raw_bytes);
     println!("object_stored_bytes: {}", report.stats.object_stored_bytes);
@@ -755,31 +722,25 @@ fn print_doctor_output(output: &SessionDoctorOutput) {
             turn.created_at_ms
         );
     }
-    for (name, projection) in [
-        ("catalog", &recovery.catalog),
-        ("compatibility_metadata", &recovery.compatibility_metadata),
-        ("compatibility_content", &recovery.compatibility_content),
-    ] {
-        let state = match projection.state {
-            DerivedRevisionState::Current => "current",
-            DerivedRevisionState::Lagging => "lagging",
-            DerivedRevisionState::Ahead => "ahead",
-            DerivedRevisionState::Missing => "missing",
-            DerivedRevisionState::Malformed => "malformed",
-            DerivedRevisionState::Unavailable => "unavailable",
-        };
-        println!(
-            "{name}: state={state} source_revision={} revision_lag={}",
-            projection
-                .source_revision
-                .map_or_else(|| "none".to_string(), |revision| revision.to_string()),
-            projection
-                .revision_lag
-                .map_or_else(|| "none".to_string(), |lag| lag.to_string())
-        );
-        if let Some(error) = &projection.error {
-            println!("{name}_error: {error}");
-        }
+    let catalog = &recovery.catalog;
+    let catalog_state = match catalog.state {
+        DerivedRevisionState::Current => "current",
+        DerivedRevisionState::Lagging => "lagging",
+        DerivedRevisionState::Ahead => "ahead",
+        DerivedRevisionState::Missing => "missing",
+        DerivedRevisionState::Unavailable => "unavailable",
+    };
+    println!(
+        "catalog: state={catalog_state} source_revision={} revision_lag={}",
+        catalog
+            .source_revision
+            .map_or_else(|| "none".to_string(), |revision| revision.to_string()),
+        catalog
+            .revision_lag
+            .map_or_else(|| "none".to_string(), |lag| lag.to_string())
+    );
+    if let Some(error) = &catalog.error {
+        println!("catalog_error: {error}");
     }
     for issue in &report.issues {
         println!("issue: {issue}");
@@ -840,7 +801,7 @@ fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
 
 fn with_session_maintenance<T>(
     reference: &str,
-    action: impl FnOnce(&mut smelt_store::SessionMaintenance, &std::path::Path) -> Result<T, String>,
+    action: impl FnOnce(&mut smelt_store::SessionMaintenance) -> Result<T, String>,
 ) -> Result<T, String> {
     let (session_id, dir) = resolve_session_target(reference)?;
     let root = dir
@@ -848,7 +809,7 @@ fn with_session_maintenance<T>(
         .ok_or_else(|| "session directory has no parent".to_string())?;
     let mut maintenance = smelt_store::SessionMaintenance::open(root, session_id)
         .map_err(|err| format!("failed to acquire session maintenance ownership: {err}"))?;
-    let result = action(&mut maintenance, &dir);
+    let result = action(&mut maintenance);
     let release = maintenance
         .release()
         .map_err(|err| format!("failed to release session maintenance ownership: {err}"));
@@ -909,31 +870,18 @@ fn run_session_command(args: SessionArgs) {
             }
             result
         }
-        // COMPAT(session-derived-sidecar-exports): explicitly rebuild alpha exports.
-        SessionCommand::RebuildDerived(args) => {
-            with_session_maintenance(&args.session, |maintenance, dir| {
-                maintenance
-                    .rebuild_search_index()
-                    .map_err(|err| format!("failed to rebuild search index: {err}"))?;
-                smelt_core::session::rebuild_compatibility_exports(dir)
-                    .map_err(|err| format!("failed to rebuild compatibility exports: {err}"))?;
-                Ok(())
-            })
-        }
-        SessionCommand::Gc(args) => with_session_maintenance(&args.session, |maintenance, _| {
+        SessionCommand::Gc(args) => with_session_maintenance(&args.session, |maintenance| {
             let deleted = maintenance
                 .garbage_collect_objects()
                 .map_err(|err| format!("failed to collect session objects: {err}"))?;
             println!("deleted_objects: {deleted}");
             Ok(())
         }),
-        SessionCommand::Vacuum(args) => {
-            with_session_maintenance(&args.session, |maintenance, _| {
-                maintenance
-                    .vacuum()
-                    .map_err(|err| format!("failed to vacuum session: {err}"))
-            })
-        }
+        SessionCommand::Vacuum(args) => with_session_maintenance(&args.session, |maintenance| {
+            maintenance
+                .vacuum()
+                .map_err(|err| format!("failed to vacuum session: {err}"))
+        }),
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
@@ -1004,12 +952,15 @@ fn main() {
 }
 
 async fn async_main() {
+    let env = Arc::new(engine::env::RuntimeEnv::snapshot());
+
     // Mirror the embedded runtime tree to `<XDG_DATA_HOME>/smelt/builtins/`
     // on first launch / after a version bump, so the `customize` skill
     // can point the agent at on-disk source for inspection. Best-effort:
     // a failure here just means the skill's example links won't resolve,
     // not that smelt can't run.
-    if let Err(e) = smelt_core::lua::ensure_builtins_extracted() {
+    let data_dir = env.xdg_data().join("smelt");
+    if let Err(e) = smelt_core::lua::ensure_builtins_extracted(&data_dir) {
         eprintln!("smelt: failed to extract built-in runtime: {e}");
     }
 
@@ -1027,13 +978,16 @@ async fn async_main() {
     //
     // We do the early run BEFORE detecting the `auth` subcommand
     // because clap can't know about Lua flags until early has fired.
-    let mut lua_runtime = tui::lua::LuaRuntime::new();
+    let cwd = startup::resolve_project_cwd(std::env::args_os(), env.cwd());
+    env.set_cwd(cwd.clone());
+    let mut lua_runtime = tui::lua::LuaRuntime::new_for_runtime(
+        &env,
+        None,
+        std::env::var_os("SMELT_RUNTIME_DIR").map(std::path::PathBuf::from),
+        Some(cwd.clone()),
+    );
     lua_runtime.load_bundled_early();
     lua_runtime.load_early_init();
-    let cwd = startup::resolve_project_cwd(
-        std::env::args_os(),
-        std::env::current_dir().unwrap_or_default(),
-    );
     lua_runtime.load_project_early_init(&cwd);
 
     let lua_flag_specs: Vec<tui::CliFlagSpec> = lua_runtime
@@ -1095,7 +1049,7 @@ async fn async_main() {
         .config
         .as_deref()
         .map(std::path::PathBuf::from)
-        .or_else(smelt_core::lua::init_lua_path);
+        .or_else(|| Some(env.xdg_config().join("smelt").join("init.lua")));
     let has_provider_cli_flags = args.api_base.is_some()
         || args.api_key_env.is_some()
         || args.r#type.is_some()
@@ -1114,7 +1068,6 @@ async fn async_main() {
     lua_runtime.load_user_config();
     lua_runtime.load_global_plugins();
     let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
-    let env = Arc::new(engine::env::RuntimeEnv::snapshot());
     let project_trust = lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.permission_rules_snapshot();
@@ -1144,7 +1097,7 @@ async fn async_main() {
     lua_runtime
         .core_shared()
         .lsp
-        .configure_detached(runtime.lsp.clone());
+        .configure_detached(runtime.lsp.clone(), &cwd, env.home());
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
         engine::log::set_level(level);
@@ -1239,11 +1192,11 @@ async fn async_main() {
         });
     }
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = env.cwd();
     let instructions = if args.no_system_prompt {
         None
     } else {
-        tui::instructions::load()
+        tui::instructions::load(&env.xdg_config().join("smelt"), &cwd)
     };
     // Track the source path when `--system-prompt` points at a file so
     // `/reload` can re-read it. Inline strings keep `system_prompt_path = None`.
@@ -1271,18 +1224,20 @@ async fn async_main() {
     };
 
     let permission_rules = lua_permission_rules.unwrap_or_default();
-    let permission_paths: Arc<smelt_core::permissions::PathsFn> =
-        std::sync::Arc::new(|name, args| {
-            tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
-                .unwrap_or_default()
-        });
+    let workspace_permissions = smelt_core::permissions::store::WorkspacePermissionStore::new(
+        env.xdg_state().join("smelt"),
+    );
     let permission_resolution = smelt_core::permissions::resolve_permissions(
         &permission_rules,
         &lua_tool_defaults,
         lua_mode_behaviors,
         &runtime.settings,
-        &cwd,
-        Some(permission_paths),
+        smelt_core::permissions::PermissionRuntimePaths {
+            cwd: &cwd,
+            home: env.home(),
+        },
+        &workspace_permissions,
+        None,
     );
     let permissions =
         smelt_core::permissions::PermissionsHandle::from_resolution(permission_resolution);
@@ -1291,6 +1246,7 @@ async fn async_main() {
     // for declaring them lands, plumb the resolved list through here).
     let skill_extra_paths: Vec<std::path::PathBuf> = Vec::new();
     let (prompt_inputs, skill_loader) = tui::prompt_inputs::PromptInputs::load(
+        &env,
         skill_extra_paths,
         system_prompt_path,
         instructions,
@@ -1301,7 +1257,7 @@ async fn async_main() {
     // add servers later through `smelt.mcp.register` and the dispatcher
     // sees them live without the engine having to restart. Desired slots are
     // published now; process launch and tool discovery continue asynchronously.
-    let mcp_manager = smelt_core::mcp::McpManager::start_detached(&runtime.mcp);
+    let mcp_manager = smelt_core::mcp::McpManager::start_detached(&runtime.mcp, &cwd);
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
         Box::new(smelt_core::mcp::dispatcher::McpDispatcher::new(
             Arc::clone(&mcp_manager),
@@ -1425,12 +1381,12 @@ async fn async_main() {
                 startup_auth_error: startup_auth_error.take(),
                 app_events: Some((app_event_tx, app_event_rx)),
                 managed_models: Some(managed_models),
+                skills: Some(Arc::clone(&skill_loader)),
+                mcp: Some(Arc::clone(&mcp_manager)),
+                prompt_inputs: Some(prompt_inputs),
                 session_persistence,
             },
         );
-        app.core.skills = Some(Arc::clone(&skill_loader));
-        app.core.mcp = Some(Arc::clone(&mcp_manager));
-        app.prompt_inputs = prompt_inputs;
         redirect_stderr();
 
         println!();
@@ -1439,13 +1395,12 @@ async fn async_main() {
         // down at this point so stdout is in cooked mode - plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the
         // user's terminal scrollback.
-        let shutdown_ctx = app.shutdown_context();
-        let errs = app.lua.drain_shutdown_hooks(&shutdown_ctx);
-        for err in errs {
-            eprintln!("smelt: lifecycle.shutdown: {err}");
+        let (shutdown_errors, flush_error) = app.shutdown_lua();
+        for error in shutdown_errors {
+            eprintln!("smelt: {error}");
         }
-        if let Some(err) = app.lua.flush_persistent_state() {
-            eprintln!("smelt: flush persistent state: {err}");
+        if let Some(error) = flush_error {
+            eprintln!("smelt: flush persistent state: {error}");
         }
     }
     smelt_perf::perf::print_summary();

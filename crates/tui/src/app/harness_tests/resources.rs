@@ -1,35 +1,5 @@
 use super::*;
 
-struct EnvVarGuard {
-    name: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(name: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(name);
-        unsafe { std::env::set_var(name, value) };
-        Self { name, previous }
-    }
-
-    fn remove(name: &'static str) -> Self {
-        let previous = std::env::var_os(name);
-        unsafe { std::env::remove_var(name) };
-        Self { name, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-}
-
 #[test]
 fn builds_a_fresh_test_app() {
     let app = TestApp::builder().build();
@@ -44,7 +14,7 @@ fn builds_a_fresh_test_app() {
 #[test]
 fn no_model_state_is_explicit_and_blocks_dispatch() {
     let mut app = TestApp::builder().with_vim(false).without_model().build();
-    let initial_history_len = app.app.core.session.history.len();
+    let initial_history_len = app.session_snapshot().history.len();
 
     assert!(app.run_lua(
         r#"
@@ -72,8 +42,8 @@ fn no_model_state_is_explicit_and_blocks_dispatch() {
 
     assert_eq!(app.state().prompt_text, "hello without a model");
     assert!(!app.state().agent_running);
-    assert_eq!(app.app.core.session.history.len(), initial_history_len);
-    assert!(app.app.notification_win().is_some());
+    assert_eq!(app.session_snapshot().history.len(), initial_history_len);
+    assert!(app.notification_win().is_some());
     assert!(app.actions().iter().all(|action| {
         !matches!(
             action,
@@ -88,7 +58,7 @@ fn queued_input_is_retained_until_a_model_is_usable() {
     let mut app = TestApp::builder().without_model().build();
     app.push_queued_message("wait for a model".into());
 
-    assert!(app.app.start_next_queued_input_if_idle());
+    assert!(app.start_next_queued_input_if_idle());
 
     assert_eq!(app.state().queued_inputs, vec!["wait for a model"]);
     assert!(!app.state().agent_running);
@@ -104,10 +74,16 @@ fn queued_input_is_retained_until_a_model_is_usable() {
 #[test]
 fn unavailable_model_is_reported_and_blocks_dispatch() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.active_model_mut().unwrap().availability =
-        smelt_core::ModelAvailability::Unavailable {
-            reason: smelt_core::ModelUnavailableReason::InvalidTransport,
-        };
+    let mut model = app
+        .core_probe()
+        .config
+        .active_model()
+        .expect("test app has an active model")
+        .clone();
+    model.availability = smelt_core::ModelAvailability::Unavailable {
+        reason: smelt_core::ModelUnavailableReason::InvalidTransport,
+    };
+    app.replace_active_model_for_harness(model);
 
     assert!(app.run_lua(
         r#"
@@ -137,26 +113,23 @@ fn unavailable_model_is_reported_and_blocks_dispatch() {
 #[test]
 fn model_switch_marks_missing_credentials_unavailable() {
     let mut app = TestApp::builder().build();
-    app.app
-        .core
-        .config
-        .available_models
-        .push(smelt_core::config::ResolvedModel {
-            key: "missing/credentials".into(),
-            provider_name: "missing".into(),
-            model_name: "credentials".into(),
-            display_name: None,
-            api_base: "https://example.invalid/v1".into(),
-            api_key_env: "SMELT_TEST_INTENTIONALLY_MISSING_MODEL_KEY_7F31A9".into(),
-            provider_type: "openai-compatible".into(),
-            config: protocol::ModelConfig::default(),
-        });
+    let mut models = app.core_probe().config.available_models.clone();
+    models.push(smelt_core::config::ResolvedModel {
+        key: "missing/credentials".into(),
+        provider_name: "missing".into(),
+        model_name: "credentials".into(),
+        display_name: None,
+        api_base: "https://example.invalid/v1".into(),
+        api_key_env: "SMELT_TEST_INTENTIONALLY_MISSING_MODEL_KEY_7F31A9".into(),
+        provider_type: "openai-compatible".into(),
+        config: protocol::ModelConfig::default(),
+    });
+    app.set_available_models(models);
 
-    app.app.apply_model("missing/credentials", true);
+    app.apply_model("missing/credentials", true);
 
     assert!(matches!(
-        app.app
-            .core
+        app.core_probe()
             .config
             .active_model()
             .map(|model| &model.availability),
@@ -178,47 +151,35 @@ fn model_switch_marks_missing_credentials_unavailable() {
 fn context_window_discovery_does_not_repeat_missing_credentials_error() {
     const KEY_ENV: &str = "SMELT_TEST_CONTEXT_WINDOW_MISSING_KEY_6A41E2";
     let environment_guard = test_environment_guard();
-    let _key = EnvVarGuard::remove(KEY_ENV);
+    environment_guard.remove_var(KEY_ENV);
     let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    app.app.core.config.active_model_mut().unwrap().api_key_env = KEY_ENV.into();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.app.context_window_tx = Some(tx);
-    app.app.http_client = Some(engine::HttpClient::new());
 
-    app.app.refresh_context_window();
-    app.app.refresh_context_window();
+    app.refresh_context_window_twice_for_harness(KEY_ENV);
 
-    let messages = app.app.lua.core_shared().messages.lock().unwrap();
-    assert!(messages
-        .entries()
-        .iter()
-        .all(|entry| !entry.full.contains("required for API authentication")));
+    assert!(!app.lua_messages_contain("required for API authentication"));
 }
 
 #[test]
 fn restored_static_credentials_recover_without_model_reselection() {
     const KEY_ENV: &str = "SMELT_TEST_RESTORED_MODEL_KEY_9E76B1";
     let environment_guard = test_environment_guard();
-    unsafe { std::env::remove_var(KEY_ENV) };
+    environment_guard.remove_var(KEY_ENV);
     let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    app.app
-        .core
-        .config
-        .available_models
-        .push(smelt_core::config::ResolvedModel {
-            key: "restored/credentials".into(),
-            provider_name: "restored".into(),
-            model_name: "credentials".into(),
-            display_name: None,
-            api_base: "https://example.invalid/v1".into(),
-            api_key_env: KEY_ENV.into(),
-            provider_type: "openai-compatible".into(),
-            config: protocol::ModelConfig::default(),
-        });
-    app.app.apply_model("restored/credentials", true);
+    let mut models = app.core_probe().config.available_models.clone();
+    models.push(smelt_core::config::ResolvedModel {
+        key: "restored/credentials".into(),
+        provider_name: "restored".into(),
+        model_name: "credentials".into(),
+        display_name: None,
+        api_base: "https://example.invalid/v1".into(),
+        api_key_env: KEY_ENV.into(),
+        provider_type: "openai-compatible".into(),
+        config: protocol::ModelConfig::default(),
+    });
+    app.set_available_models(models);
+    app.apply_model("restored/credentials", true);
     assert!(matches!(
-        app.app
-            .core
+        app.core_probe()
             .config
             .active_model()
             .map(|model| &model.availability),
@@ -227,15 +188,14 @@ fn restored_static_credentials_recover_without_model_reselection() {
         })
     ));
 
-    unsafe { std::env::set_var(KEY_ENV, "restored-secret") };
+    environment_guard.set_var(KEY_ENV, "restored-secret");
     app.type_text("dispatch after credential restore");
     app.press(KeyCode::Enter);
-    unsafe { std::env::remove_var(KEY_ENV) };
+    environment_guard.remove_var(KEY_ENV);
 
     assert!(app.state().agent_running);
     assert!(matches!(
-        app.app
-            .core
+        app.core_probe()
             .config
             .active_model()
             .map(|model| &model.availability),
@@ -251,14 +211,20 @@ fn restored_static_credentials_recover_without_model_reselection() {
 #[test]
 fn api_base_endpoint_warning_is_persistent_and_deduped() {
     let mut app = TestApp::builder().build();
-    let active = app.app.core.config.active_model_mut().unwrap();
-    active.provider_type = "openai-compatible".into();
-    active.api_base = "https://api.cerebras.ai/v1/chat/completions".into();
+    let mut model = app
+        .core_probe()
+        .config
+        .active_model()
+        .expect("test app has an active model")
+        .clone();
+    model.provider_type = "openai-compatible".into();
+    model.api_base = "https://api.cerebras.ai/v1/chat/completions".into();
+    app.replace_active_model_for_harness(model);
 
-    app.app.warn_if_api_base_normalized();
-    app.app.warn_if_api_base_normalized();
+    app.warn_if_api_base_normalized();
+    app.warn_if_api_base_normalized();
 
-    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    let messages = app.lua_probe().core_shared().messages.lock().unwrap();
     let entries: Vec<_> = messages
         .entries()
         .iter()
@@ -313,7 +279,14 @@ fn keystroke_stays_within_default_alloc_budget() {
 #[test]
 fn skill_backed_commands_submit_skill_body_and_focus() {
     let mut app = TestApp::builder().with_vim(false).build();
-    app.app.core.skills = Some(std::sync::Arc::new(engine::SkillLoader::load(&[])));
+    let loader = std::sync::Arc::new(engine::SkillLoader::load_for_runtime(
+        &[],
+        app.core_probe().env.home(),
+        &app.core_probe().env.xdg_config().join("smelt"),
+        &app.core_probe().env.xdg_data().join("smelt"),
+        &app.core_probe().env.cwd(),
+    ));
+    app.install_skill_loader_for_harness(loader);
     app.type_text("/reflect focus area");
     app.press(KeyCode::Enter);
     let payload = app
@@ -350,8 +323,7 @@ fn custom_command_with_non_scalar_description_still_registers() {
         "require('smelt.commands.custom_commands').register_dir({dir_lua})"
     )));
     let command_registered = app
-        .app
-        .lua
+        .lua_probe()
         .shared()
         .commands
         .lock()
@@ -416,36 +388,34 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
 fn explicit_model_switch_sends_complete_context_only_for_an_active_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(r#"smelt.agent.add_system_prompt("model switch Lua prompt fragment")"#));
-    app.app
-        .core
-        .config
-        .available_models
-        .push(smelt_core::config::ResolvedModel {
-            key: "other/switched".into(),
-            provider_name: "other".into(),
-            model_name: "switched".into(),
-            display_name: None,
-            api_base: "https://switch.example/v1".into(),
-            api_key_env: String::new(),
-            provider_type: "anthropic".into(),
-            config: protocol::ModelConfig {
-                context_window: Some(200_000),
-                tool_calling: Some(false),
-                ..Default::default()
-            },
-        });
+    let mut models = app.core_probe().config.available_models.clone();
+    models.push(smelt_core::config::ResolvedModel {
+        key: "other/switched".into(),
+        provider_name: "other".into(),
+        model_name: "switched".into(),
+        display_name: None,
+        api_base: "https://switch.example/v1".into(),
+        api_key_env: String::new(),
+        provider_type: "anthropic".into(),
+        config: protocol::ModelConfig {
+            context_window: Some(200_000),
+            tool_calling: Some(false),
+            ..Default::default()
+        },
+    });
+    app.set_available_models(models);
     let _ = app.drain_engine_sends();
 
-    app.app.apply_model("other/switched", false);
+    app.apply_model("other/switched", false);
     assert!(app
         .drain_engine_sends()
         .into_iter()
         .all(|cmd| !matches!(cmd, protocol::UiCommand::SetTurnModel { .. })));
 
-    app.app.apply_model("test/test-model", false);
+    app.apply_model("test/test-model", false);
     let _ = app.drain_engine_sends();
     app.start_turn(1);
-    app.app.apply_model("other/switched", false);
+    app.apply_model("other/switched", false);
     let command = app
         .drain_engine_sends()
         .into_iter()
@@ -470,15 +440,23 @@ fn explicit_model_switch_sends_complete_context_only_for_an_active_turn() {
 #[test]
 fn custom_command_override_dispatches_its_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
-    let active = app.app.core.config.active_model_mut().unwrap();
+    let mut active = app
+        .core_probe()
+        .config
+        .active_model()
+        .expect("test app has an active model")
+        .clone();
     active.provider_type = "openai".into();
     active.config = protocol::ModelConfig {
         input_cost: Some(99.0),
         ..Default::default()
     };
-    app.app.core.config.settings.redact_secrets = true;
-    app.app.core.config.settings.cache_ttl_long = true;
-    app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
+    app.replace_active_model_for_harness(active);
+    let mut settings = app.core_probe().config.settings.clone();
+    settings.redact_secrets = true;
+    settings.cache_ttl_long = true;
+    app.set_settings_for_harness(settings);
+    app.set_available_models(vec![smelt_core::config::ResolvedModel {
         key: "other/target-model".into(),
         provider_name: "other".into(),
         model_name: "target-model".into(),
@@ -492,12 +470,11 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
             tool_calling: Some(false),
             ..Default::default()
         },
-    }];
+    }]);
     let _ = app.drain_engine_sends();
 
-    let turn = app
-        .app
-        .begin_command_request_turn(
+    assert!(
+        app.start_command_request_turn(
             "custom".into(),
             "body".into(),
             smelt_core::custom_commands::CommandOverrides {
@@ -506,9 +483,9 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
                 ..Default::default()
             },
             crate::app::CommandTurnStart::Fresh,
-        )
-        .expect("custom command target resolves");
-    app.app.agent = Some(turn);
+        ),
+        "custom command target resolves"
+    );
 
     let payload = app
         .drain_engine_sends()
@@ -554,7 +531,12 @@ fn custom_command_turn_includes_registered_lua_tools() {
 #[test]
 fn engine_ask_probe_dispatches_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
-    let active = app.app.core.config.active_model_mut().unwrap();
+    let mut active = app
+        .core_probe()
+        .config
+        .active_model()
+        .expect("test app has an active model")
+        .clone();
     active.model_name = "ask-model".into();
     active.api_base = "https://ask.example/v1".into();
     active.provider_type = "openai-compatible".into();
@@ -563,9 +545,12 @@ fn engine_ask_probe_dispatches_complete_target_and_request_config() {
         supports_reasoning: Some(true),
         ..Default::default()
     };
-    app.app.core.config.settings.cache_ttl_long = true;
-    app.app.core.config.settings.request_audit = "off".into();
-    app.app.core.config.request_audit = protocol::RequestAuditMode::Full;
+    app.replace_active_model_for_harness(active);
+    let mut settings = app.core_probe().config.settings.clone();
+    settings.cache_ttl_long = true;
+    settings.request_audit = "off".into();
+    app.set_settings_for_harness(settings);
+    app.set_request_audit_for_harness(protocol::RequestAuditMode::Full);
     let _ = app.drain_engine_sends();
 
     app.start_engine_ask_probe("summarize this");
@@ -607,7 +592,7 @@ fn engine_ask_probe_dispatches_complete_target_and_request_config() {
 #[test]
 fn request_settings_changes_only_affect_requests_created_after_reconciliation() {
     let mut app = TestApp::builder().with_vim(false).build();
-    let revision_before = app.app.core.config.revision;
+    let revision_before = app.core_probe().config.revision;
     app.start_engine_ask_probe("before settings change");
     let before = app
         .actions()
@@ -630,7 +615,7 @@ fn request_settings_changes_only_affect_requests_created_after_reconciliation() 
         "#,
     ));
     assert_eq!(
-        app.app.core.config.revision,
+        app.core_probe().config.revision,
         revision_before.wrapping_add(1),
         "one callback with multiple writes must commit one runtime revision"
     );
@@ -659,7 +644,7 @@ fn request_settings_changes_only_affect_requests_created_after_reconciliation() 
 #[tokio::test]
 async fn installing_the_runtime_http_client_starts_managed_refreshes() {
     let environment_guard = test_environment_guard();
-    let _tokens = EnvVarGuard::set(
+    environment_guard.set_var(
         "SMELT_CODEX_TOKENS",
         r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at":9999999999,"account_id":"test-account","last_refresh":0}"#,
     );
@@ -673,20 +658,17 @@ async fn installing_the_runtime_http_client_starts_managed_refreshes() {
         })
         "#,
     ));
-    app.app.reconcile_committed_lua_runtime().unwrap();
-    app.app.handle_managed_auth_checked(vec![(
+    app.reconcile_committed_lua_runtime().unwrap();
+    app.handle_managed_auth_checked(vec![(
         engine::auth::AuthProvider::Codex,
         engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
         Vec::new(),
     )]);
 
-    app.app.install_http_client(engine::HttpClient::new());
+    app.install_http_client(engine::HttpClient::new());
 
     assert_eq!(
-        app.app
-            .managed_models
-            .provider(engine::auth::AuthProvider::Codex)
-            .status,
+        app.managed_model_status(engine::auth::AuthProvider::Codex),
         smelt_core::ManagedModelsStatus::Refreshing
     );
 }
@@ -694,7 +676,7 @@ async fn installing_the_runtime_http_client_starts_managed_refreshes() {
 #[tokio::test]
 async fn managed_model_refresh_notifications_follow_error_and_revision_lifecycle() {
     let environment_guard = test_environment_guard();
-    let _tokens = EnvVarGuard::set(
+    environment_guard.set_var(
         "SMELT_CODEX_TOKENS",
         r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at":9999999999,"account_id":"test-account","last_refresh":0}"#,
     );
@@ -708,81 +690,61 @@ async fn managed_model_refresh_notifications_follow_error_and_revision_lifecycle
         })
         "#,
     ));
-    app.app.reconcile_committed_lua_runtime().unwrap();
-    app.app.handle_managed_auth_checked(vec![(
+    app.reconcile_committed_lua_runtime().unwrap();
+    app.handle_managed_auth_checked(vec![(
         engine::auth::AuthProvider::Codex,
         engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
         Vec::new(),
     )]);
     let provider = engine::auth::AuthProvider::Codex;
     let first = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("first refresh token");
 
-    app.app.handle_managed_models_refresh(
+    app.handle_managed_model_refresh(
         first,
         engine::auth::ManagedModelsRefreshOutcome::Failed(
             engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
         ),
     );
-    assert!(app.app.managed_models.activate_retry(
-        provider,
-        first.auth_revision,
-        first.desired_revision
-    ));
+    assert!(app.activate_managed_model_retry_for_harness(first));
     let second = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("retry refresh token");
-    app.app.handle_managed_models_refresh(
+    app.handle_managed_model_refresh(
         second,
         engine::auth::ManagedModelsRefreshOutcome::Failed(
             engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
         ),
     );
 
-    assert!(app.app.managed_models.activate_retry(
-        provider,
-        second.auth_revision,
-        second.desired_revision
-    ));
+    assert!(app.activate_managed_model_retry_for_harness(second));
     let changed_error = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("changed-error refresh token");
-    app.app.handle_managed_models_refresh(
+    app.handle_managed_model_refresh(
         changed_error,
         engine::auth::ManagedModelsRefreshOutcome::Failed(
             engine::auth::ManagedModelsRefreshFailure::Retryable("different failure".into()),
         ),
     );
 
-    assert!(app.app.managed_models.activate_retry(
-        provider,
-        changed_error.auth_revision,
-        changed_error.desired_revision
-    ));
+    assert!(app.activate_managed_model_retry_for_harness(changed_error));
     let success = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("successful refresh token");
-    app.app.handle_managed_models_refresh(
+    app.handle_managed_model_refresh(
         success,
         engine::auth::ManagedModelsRefreshOutcome::Fresh {
             models: Vec::new(),
             cache_warning: None,
         },
     );
-    assert!(app.app.managed_models.apply_auth_snapshot(
+    app.handle_managed_auth_checked(vec![(
         provider,
         engine::auth::credential_fingerprint(provider),
         vec![protocol::ModelMetadata {
@@ -794,14 +756,12 @@ async fn managed_model_refresh_notifications_follow_error_and_revision_lifecycle
             supports_fast_mode: None,
             input_modalities: None,
         }],
-    ));
+    )]);
     let after_success = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("post-success refresh token");
-    app.app.handle_managed_models_refresh(
+    app.handle_managed_model_refresh(
         after_success,
         engine::auth::ManagedModelsRefreshOutcome::Failed(
             engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
@@ -816,46 +776,38 @@ async fn managed_model_refresh_notifications_follow_error_and_revision_lifecycle
         }],
         ..Default::default()
     };
-    assert!(app.app.managed_models.sync_desired(
+    assert!(app.sync_managed_models_for_harness(
         &smelt_core::config::Config::default(),
         after_success.desired_revision + 1,
     ));
-    assert!(app
-        .app
-        .managed_models
-        .sync_desired(&enabled_config, after_success.desired_revision + 2,));
+    assert!(
+        app.sync_managed_models_for_harness(&enabled_config, after_success.desired_revision + 2,)
+    );
     let after_reenable = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("re-enabled refresh token");
-    app.app.handle_managed_models_refresh(
+    app.handle_managed_model_refresh(
         after_reenable,
         engine::auth::ManagedModelsRefreshOutcome::Failed(
             engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
         ),
     );
 
-    let messages = app.app.lua.core_shared().messages.lock().unwrap();
-    let repeated = messages
-        .entries()
-        .iter()
-        .filter(|entry| entry.full == "Codex model refresh: same failure")
-        .count();
-    let changed = messages
-        .entries()
-        .iter()
-        .filter(|entry| entry.full == "Codex model refresh: different failure")
-        .count();
-    assert_eq!(repeated, 3);
-    assert_eq!(changed, 1);
+    assert_eq!(
+        app.lua_message_count("Codex model refresh: same failure"),
+        3
+    );
+    assert_eq!(
+        app.lua_message_count("Codex model refresh: different failure"),
+        1
+    );
 }
 
 #[test]
 fn managed_model_refresh_event_updates_the_running_catalog() {
     let environment_guard = test_environment_guard();
-    let _tokens = EnvVarGuard::set(
+    environment_guard.set_var(
         "SMELT_CODEX_TOKENS",
         r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at":9999999999,"account_id":"test-account","last_refresh":0}"#,
     );
@@ -869,44 +821,40 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
         })
         "#,
     ));
-    app.app.reconcile_committed_lua_runtime().unwrap();
-    app.app.handle_managed_auth_checked(vec![(
+    app.reconcile_committed_lua_runtime().unwrap();
+    app.handle_managed_auth_checked(vec![(
         engine::auth::AuthProvider::Codex,
         engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
         Vec::new(),
     )]);
-    app.app.core.config.model_selection = smelt_core::ModelSelectionState {
+    app.set_model_selection_for_harness(smelt_core::ModelSelectionState {
         requested_key: Some("codex/fresh-model".into()),
         requested_by: smelt_core::ModelSelectionSource::Session,
         active: None,
-    };
+    });
     let token = app
-        .app
-        .managed_models
-        .begin_refreshes()
+        .begin_managed_model_refreshes()
         .pop()
         .expect("codex refresh token");
 
-    app.app
-        .handle_app_event(crate::app::AppEvent::ManagedModelsRefreshCompleted {
-            token,
-            outcome: engine::auth::ManagedModelsRefreshOutcome::Fresh {
-                models: vec![protocol::ModelMetadata {
-                    id: "fresh-model".into(),
-                    display_name: Some("Fresh Model".into()),
-                    context_window: Some(128_000),
-                    max_output_tokens: Some(8_192),
-                    supports_reasoning: Some(true),
-                    supports_fast_mode: Some(true),
-                    input_modalities: Some(vec!["text".into()]),
-                }],
-                cache_warning: None,
-            },
-        });
+    app.handle_app_event(crate::app::AppEvent::ManagedModelsRefreshCompleted {
+        token,
+        outcome: engine::auth::ManagedModelsRefreshOutcome::Fresh {
+            models: vec![protocol::ModelMetadata {
+                id: "fresh-model".into(),
+                display_name: Some("Fresh Model".into()),
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+                supports_reasoning: Some(true),
+                supports_fast_mode: Some(true),
+                input_modalities: Some(vec!["text".into()]),
+            }],
+            cache_warning: None,
+        },
+    });
 
     let model = app
-        .app
-        .core
+        .core_probe()
         .config
         .available_models
         .iter()
@@ -915,8 +863,7 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
     assert_eq!(model.display_name.as_deref(), Some("Fresh Model"));
     assert_eq!(model.config.max_tokens, Some(8_192));
     let active = app
-        .app
-        .core
+        .core_probe()
         .config
         .active_model()
         .expect("pending selection");
@@ -932,14 +879,9 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
         "#,
     ));
 
-    app.app.handle_managed_auth_checked(vec![(
-        engine::auth::AuthProvider::Codex,
-        None,
-        Vec::new(),
-    )]);
+    app.handle_managed_auth_checked(vec![(engine::auth::AuthProvider::Codex, None, Vec::new())]);
     assert!(app
-        .app
-        .core
+        .core_probe()
         .config
         .available_models
         .iter()
@@ -954,7 +896,7 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
         "#,
     ));
 
-    app.app.handle_managed_auth_checked(vec![(
+    app.handle_managed_auth_checked(vec![(
         engine::auth::AuthProvider::Codex,
         engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
         vec![protocol::ModelMetadata {
@@ -968,8 +910,7 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
         }],
     )]);
     assert_eq!(
-        app.app
-            .core
+        app.core_probe()
             .config
             .active_model()
             .map(|model| model.key.as_str()),
@@ -982,7 +923,7 @@ fn ctrl_w_pane_chord_expires_after_tick_past_window() {
     let mut app = TestApp::builder().build();
     app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
     assert!(
-        app.app.timers.pending_pane_chord.is_some(),
+        app.timers_probe().pending_pane_chord.is_some(),
         "Ctrl-W arms the pane chord"
     );
 
@@ -992,7 +933,7 @@ fn ctrl_w_pane_chord_expires_after_tick_past_window() {
     // returns None so the key falls through to normal dispatch.
     app.press(KeyCode::Char('j'));
     assert!(
-        app.app.timers.pending_pane_chord.is_none(),
+        app.timers_probe().pending_pane_chord.is_none(),
         "expired pane chord should be cleared on the next key"
     );
 }

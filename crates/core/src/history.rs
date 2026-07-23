@@ -17,7 +17,14 @@ const RECORD_SEP_BYTE: u8 = 0x1e;
 
 impl History {
     pub fn load() -> Self {
-        let path = config::state_dir().join("history");
+        Self::load_from_path(config::state_dir().join("history"))
+    }
+
+    pub fn load_from_state_root(state_root: impl AsRef<std::path::Path>) -> Self {
+        Self::load_from_path(state_root.as_ref().join("history"))
+    }
+
+    fn load_from_path(path: PathBuf) -> Self {
         let buffer = std::fs::read_to_string(&path).unwrap_or_default();
         let ranges = compute_ranges(&buffer);
         let cursor = ranges.len();

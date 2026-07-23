@@ -138,12 +138,11 @@ the platform temporary directory when `XDG_RUNTIME_DIR` is unset.
 indexes, and storage sizes without modifying the session. It also reports:
 
 - canonical revision and any `ready` or `running` turns;
-- catalog state and source-revision lag;
-- `meta.json` and `content.txt` compatibility-export state and lag.
+- catalog state and source-revision lag.
 
 Use `--json` for machine-readable output or `--all` to inspect every visible
-session. Missing, stale, malformed, or unavailable derived data is reported but
-does not make a canonically healthy session fail the command.
+session. Missing, stale, or unavailable catalog data is reported but does not
+make a canonically healthy session fail the command.
 
 A writable restart deterministically changes every durable `ready` or `running`
 turn to `interrupted`. smelt does not automatically resend such a provider
@@ -152,11 +151,10 @@ already accepted or billed. Review the transcript and retry explicitly if
 needed; an explicit retry creates a new linked turn.
 
 `smelt session backup <SESSION> <OUTPUT>` creates a transactionally consistent
-SQLite backup and manifest without overwriting an existing destination.
-`rebuild-derived` explicitly regenerates the deprecated compatibility exports
-from canonical SQLite. `gc` removes unreachable objects, and `vacuum` compacts
-free pages. Maintenance commands requiring mutation acquire exclusive session
-ownership and fail rather than racing an active writer.
+SQLite backup and manifest without overwriting an existing destination. `gc`
+removes unreachable objects, and `vacuum` compacts free pages. Maintenance
+commands requiring mutation acquire exclusive session ownership and fail rather
+than racing an active writer.
 
 ## Connection
 

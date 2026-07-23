@@ -6,7 +6,7 @@ fn picker_open_focuses_overlay() {
     let leaf = open_test_picker(&mut app, &["one", "two", "three"], 0);
     let s = app.state();
     assert!(s.focused_overlay.is_some());
-    assert_eq!(app.app.ui.focus(), Some(leaf));
+    assert_eq!(app.ui_probe().focus(), Some(leaf));
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn prompt_picker_ctrl_c_dismisses_before_idle_quit() {
     ));
     drive_lua_tasks(&mut app);
     assert!(
-        !app.app.picker_state.is_empty(),
+        app.overlays_probe().has_pickers(),
         "prompt picker should open"
     );
 
@@ -41,7 +41,7 @@ fn prompt_picker_ctrl_c_dismisses_before_idle_quit() {
 
     assert!(!app.quit_requested(), "first Ctrl-C should not quit");
     assert!(
-        app.app.picker_state.is_empty(),
+        !app.overlays_probe().has_pickers(),
         "first Ctrl-C should dismiss picker"
     );
     assert!(app.run_lua(r#"assert(_G.prompt_picker_dismissed == true)"#));
@@ -77,14 +77,17 @@ fn prompt_picker_esc_fires_on_dismiss() {
     ));
     drive_lua_tasks(&mut app);
     assert!(
-        !app.app.picker_state.is_empty(),
+        app.overlays_probe().has_pickers(),
         "prompt picker should open"
     );
 
     app.press(KeyCode::Esc);
     drive_lua_tasks(&mut app);
 
-    assert!(app.app.picker_state.is_empty(), "Esc should dismiss picker");
+    assert!(
+        !app.overlays_probe().has_pickers(),
+        "Esc should dismiss picker"
+    );
     assert!(app.run_lua(r#"assert(_G.prompt_picker_esc_dismissed == true)"#));
     assert!(app.run_lua(r#"assert(_G.prompt_picker_esc_on_dismiss == 1)"#));
 }
@@ -109,7 +112,7 @@ fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
     ));
     drive_lua_tasks(&mut app);
     assert!(
-        !app.app.picker_state.is_empty(),
+        app.overlays_probe().has_pickers(),
         "floating picker should open"
     );
 
@@ -118,7 +121,7 @@ fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
 
     assert!(!app.quit_requested(), "first Ctrl-C should not quit");
     assert!(
-        app.app.picker_state.is_empty(),
+        !app.overlays_probe().has_pickers(),
         "first Ctrl-C should dismiss picker"
     );
     assert!(app.run_lua(r#"assert(_G.floating_picker_dismissed == true)"#));
@@ -149,7 +152,7 @@ fn picker_set_items_replaces_buffer_contents() {
         .iter()
         .map(|s| crate::picker::PickerItem::new(*s))
         .collect();
-    crate::picker::set_items(&mut app.app, leaf, new_items, 0);
+    app.set_picker_items(leaf, new_items, 0);
     let lines = picker_buffer_lines(&app, leaf);
     assert_eq!(lines.len(), 3);
     assert!(lines[0].contains("x"));
@@ -160,10 +163,10 @@ fn picker_set_items_replaces_buffer_contents() {
 fn picker_set_selected_moves_cursor() {
     let mut app = TestApp::builder().build();
     let leaf = open_test_picker(&mut app, &["a", "b", "c", "d"], 0);
-    let initial_cpos = app.app.ui.win(leaf).map(|w| w.cpos()).unwrap_or(0);
+    let initial_cpos = app.ui_probe().win(leaf).map(|w| w.cpos()).unwrap_or(0);
 
-    crate::picker::set_selected(&mut app.app, leaf, 2);
-    let new_cpos = app.app.ui.win(leaf).map(|w| w.cpos()).unwrap_or(0);
+    app.set_picker_selected(leaf, 2);
+    let new_cpos = app.ui_probe().win(leaf).map(|w| w.cpos()).unwrap_or(0);
     assert_ne!(initial_cpos, new_cpos, "cursor moved with selection");
 }
 
@@ -174,26 +177,22 @@ fn picker_wheel_pans_viewport_when_unfocused() {
     let items: Vec<crate::picker::PickerItem> = (0..40)
         .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
         .collect();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    let leaf = crate::picker::open(
-        &mut app.app,
-        items,
-        0,
-        crate::picker::PickerPlacement::ScreenCenter,
-        false, // non-focusable: focus stays on prompt
-        false,
-        10,
-    )
-    .expect("picker leaf created");
-    drop(_guard);
+    let leaf = app
+        .open_picker(
+            items,
+            0,
+            crate::picker::PickerPlacement::ScreenCenter,
+            false, // non-focusable: focus stays on prompt
+            false,
+            10,
+        )
+        .expect("picker leaf created");
 
     // Render to populate the viewport.
-    app.app.render_normal();
-    assert_eq!(app.app.ui.win(leaf).map(|w| w.scroll_top()), Some(0));
+    app.render();
+    assert_eq!(app.ui_probe().win(leaf).map(|w| w.scroll_top()), Some(0));
 
     let leaf_rect = app
-        .app
-        .ui
         .paint_rect(crate::smelt_edit::PaintId::from(leaf))
         .expect("picker leaf has a rect after render");
     // Pick a cell inside the picker rect.
@@ -209,9 +208,9 @@ fn picker_wheel_pans_viewport_when_unfocused() {
     let _ = scroll; // silence unused-warning if path below ignores it
     let _ = MouseButton::Left;
 
-    let pre_scroll = app.app.ui.win(leaf).unwrap().scroll_top();
-    let _ = app.app.ui.scroll_at(row, col, 3);
-    let post_scroll = app.app.ui.win(leaf).unwrap().scroll_top();
+    let pre_scroll = app.ui_probe().win(leaf).unwrap().scroll_top();
+    let _ = app.scroll_at(row, col, 3);
+    let post_scroll = app.ui_probe().win(leaf).unwrap().scroll_top();
     assert!(
         post_scroll > pre_scroll,
         "wheel over unfocused picker must pan scroll_top (pre={pre_scroll}, post={post_scroll})",
@@ -222,10 +221,10 @@ fn picker_wheel_pans_viewport_when_unfocused() {
 fn picker_forget_drops_state() {
     let mut app = TestApp::builder().build();
     let leaf = open_test_picker(&mut app, &["a", "b"], 0);
-    assert!(app.app.picker_state.contains_key(&leaf));
+    assert!(app.overlays_probe().has_picker(leaf));
 
-    crate::picker::forget(&mut app.app, leaf);
-    assert!(!app.app.picker_state.contains_key(&leaf));
+    app.forget_picker(leaf);
+    assert!(!app.overlays_probe().has_picker(leaf));
 }
 
 #[test]
@@ -239,14 +238,14 @@ fn picker_filter_workflow_via_set_items() {
         .iter()
         .map(|s| crate::picker::PickerItem::new(*s))
         .collect();
-    crate::picker::set_items(&mut app.app, leaf, filtered, 0);
+    app.set_picker_items(leaf, filtered, 0);
     assert_eq!(picker_buffer_lines(&app, leaf).len(), 2);
 
     let single: Vec<_> = ["apple"]
         .iter()
         .map(|s| crate::picker::PickerItem::new(*s))
         .collect();
-    crate::picker::set_items(&mut app.app, leaf, single, 0);
+    app.set_picker_items(leaf, single, 0);
     let lines = picker_buffer_lines(&app, leaf);
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("apple"));
@@ -260,29 +259,23 @@ fn prompt_docked_picker_clamps_height_to_headroom() {
     let items: Vec<crate::picker::PickerItem> = (0..40)
         .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
         .collect();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    let leaf = crate::picker::open(
-        &mut app.app,
-        items,
-        0,
-        crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
-        false,
-        false,
-        30,
-    )
-    .expect("picker leaf created");
-    drop(_guard);
+    let leaf = app
+        .open_picker(
+            items,
+            0,
+            crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
+            false,
+            false,
+            30,
+        )
+        .expect("picker leaf created");
 
-    app.app.render_normal();
+    app.render();
 
     let picker_rect = app
-        .app
-        .ui
         .paint_rect(crate::smelt_edit::PaintId::from(leaf))
         .expect("picker has a rect");
     let prompt_rect = app
-        .app
-        .ui
         .split_rect(crate::app::PROMPT_WIN)
         .expect("prompt has a rect");
 
@@ -309,32 +302,26 @@ fn prompt_docked_picker_relayouts_on_resize() {
     let items: Vec<crate::picker::PickerItem> = (0..40)
         .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
         .collect();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    let leaf = crate::picker::open(
-        &mut app.app,
-        items,
-        0,
-        crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
-        false,
-        false,
-        30,
-    )
-    .expect("picker leaf created");
-    drop(_guard);
+    let leaf = app
+        .open_picker(
+            items,
+            0,
+            crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
+            false,
+            false,
+            30,
+        )
+        .expect("picker leaf created");
 
-    app.app.render_normal();
+    app.render();
     let tall_rect = app
-        .app
-        .ui
         .paint_rect(crate::smelt_edit::PaintId::from(leaf))
         .expect("picker has a rect");
     assert_eq!(tall_rect.height, 8);
 
     app.set_terminal_size(80, 6);
-    app.app.render_normal();
+    app.render();
     let short_rect = app
-        .app
-        .ui
         .paint_rect(crate::smelt_edit::PaintId::from(leaf))
         .expect("picker has a rect");
 
@@ -343,8 +330,6 @@ fn prompt_docked_picker_relayouts_on_resize() {
         "picker should shrink after resize: tall={tall_rect:?}, short={short_rect:?}"
     );
     let prompt_rect = app
-        .app
-        .ui
         .split_rect(crate::app::PROMPT_WIN)
         .expect("prompt has a rect");
     assert!(

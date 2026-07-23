@@ -133,7 +133,7 @@ fn create_published_session(root: &Path) -> PathBuf {
             items: Vec::new(),
         },
         side_tables: smelt_store::SideTableSuffixes::default(),
-        descriptors: None,
+        transcript_records: None,
     };
     writer.commit_session(&command).expect("commit session");
     let session_dir = writer.publish().expect("publish session");
@@ -230,8 +230,14 @@ fn legacy_lock_holder_blocks_root_lease_migration() {
     let db_path = create_published_session(dir.path());
     let connection = rusqlite::Connection::open(&db_path).expect("open database");
     connection
-        .pragma_update(None, "user_version", 5)
-        .expect("downgrade version marker");
+        .execute_batch(
+            "ALTER TABLE session_state
+                 RENAME COLUMN transcript_record_count TO descriptor_len;
+             ALTER TABLE transcript_blocks RENAME COLUMN record_idx TO descriptor_idx;
+             ALTER TABLE transcript_blocks RENAME COLUMN block_json TO descriptor_json;
+             PRAGMA user_version = 8;",
+        )
+        .expect("restore the historical v8 schema");
     drop(connection);
     let ready = dir.path().join("legacy-lock.ready");
     let release = dir.path().join("legacy-lock.release");

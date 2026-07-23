@@ -3038,7 +3038,7 @@ mod tests {
                 items: history,
             },
             side_tables: smelt_store::SideTableSuffixes::default(),
-            descriptors: None,
+            transcript_records: None,
         }
     }
 

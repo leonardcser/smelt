@@ -15,8 +15,11 @@ pub fn expand_tilde(p: &Path) -> PathBuf {
 /// Replace a leading home directory prefix with `~`.
 /// Paths outside the home directory are returned as-is.
 pub fn collapse_tilde(p: &Path) -> PathBuf {
-    let home = home_dir();
-    if let Ok(rest) = p.strip_prefix(&home) {
+    collapse_tilde_from(p, &home_dir())
+}
+
+pub fn collapse_tilde_from(p: &Path, home: &Path) -> PathBuf {
+    if let Ok(rest) = p.strip_prefix(home) {
         PathBuf::from("~").join(rest)
     } else {
         p.to_path_buf()
@@ -199,27 +202,14 @@ mod tests {
     // ---- XDG-based dir helpers ----
 
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let saved: Vec<_> = vars
-            .iter()
-            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
-            .collect();
-        unsafe {
-            for (k, v) in vars {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        for (name, value) in vars {
+            match value {
+                Some(value) => environment.set_var(name, value),
+                None => environment.remove_var(name),
             }
         }
         f();
-        unsafe {
-            for (k, v) in saved {
-                match v {
-                    Some(val) => std::env::set_var(&k, val),
-                    None => std::env::remove_var(&k),
-                }
-            }
-        }
     }
 
     #[test]

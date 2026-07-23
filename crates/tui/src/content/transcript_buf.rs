@@ -3563,7 +3563,7 @@ impl smelt_core::buffer::BufferCopy for TranscriptCopier {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use smelt_core::content::stream_parser::StreamParser;
     use smelt_core::content::transcript::Transcript;
@@ -6427,6 +6427,33 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn project_with_lua(
+        projection: &mut TranscriptProjection,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        buf: &mut Buffer,
+        history: &mut BlockHistory,
+        width: u16,
+        theme: &Theme,
+        scroll_target: ScrollTarget,
+        viewport_rows: u16,
+    ) -> MaterializedRows {
+        let plan = projection.plan_projection_measured(
+            lua,
+            history,
+            width,
+            theme,
+            scroll_target,
+            viewport_rows,
+        );
+        projection.project_planned(lua, buf, history, theme, plan)
+    }
+
+    #[cfg(feature = "transcript-bench")]
+    #[rustfmt::skip]
+    pub(crate) mod benchmark_support {
+        use super::*;
+
     fn push_large_mixed_transcript_fixture(
         transcript: &mut Transcript,
         target_bytes: usize,
@@ -6547,28 +6574,6 @@ mod tests {
             }
         }
         bytes
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn project_with_lua(
-        projection: &mut TranscriptProjection,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        buf: &mut Buffer,
-        history: &mut BlockHistory,
-        width: u16,
-        theme: &Theme,
-        scroll_target: ScrollTarget,
-        viewport_rows: u16,
-    ) -> MaterializedRows {
-        let plan = projection.plan_projection_measured(
-            lua,
-            history,
-            width,
-            theme,
-            scroll_target,
-            viewport_rows,
-        );
-        projection.project_planned(lua, buf, history, theme, plan)
     }
 
     fn push_markdown_heavy_transcript_fixture(
@@ -6888,8 +6893,8 @@ mod tests {
             "store:history:read_all_rows",
             "store:session:load_full_snapshot",
             "store:session:full_snapshot_rows_read",
-            "store:transcript:read_descriptors_full",
-            "store:transcript:descriptors_full_loaded",
+            "store:transcript:read_records_full",
+            "store:transcript:records_full_loaded",
             "transcript:build_from_session:history_items",
         ] {
             let value = perf_value_max(snapshot, label);
@@ -6898,22 +6903,22 @@ mod tests {
                 "display-only resume recorded {label}={value}, expected no full-session work"
             );
         }
-        let loaded = perf_value_max(snapshot, "store:transcript:descriptors_loaded");
+        let loaded = perf_value_max(snapshot, "store:transcript:records_loaded");
         assert!(
             loaded <= 256,
-            "display-only resume loaded {loaded} descriptors from {history_items} history items"
+            "display-only resume loaded {loaded} records from {history_items} history items"
         );
-        let descriptor_total = perf_value_max(snapshot, "transcript:sqlite:descriptor_total");
+        let record_total = perf_value_max(snapshot, "transcript:sqlite:record_total");
         assert!(
-            descriptor_total >= history_items as u64 / 2,
-            "display-only resume did not observe total descriptor count: {descriptor_total} for {history_items} history items"
+            record_total >= history_items as u64 / 2,
+            "display-only resume did not observe total record count: {record_total} for {history_items} history items"
         );
     }
 
     fn resume_perf_metric(label: &str) -> bool {
         [
             "transcript:resume_tail",
-            "transcript:descriptor_window",
+            "transcript:record_window",
             "store:db",
             "store:transcript",
         ]
@@ -7042,75 +7047,75 @@ mod tests {
             .collect()
     }
 
-    const RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES: usize = 4 * 1024;
-    const RESUME_DESCRIPTOR_WRITE_CHUNK: usize = 2048;
+    const RESUME_RECORD_BLOCK_TEXT_BYTES: usize = 4 * 1024;
+    const RESUME_RECORD_WRITE_CHUNK: usize = 2048;
 
-    fn resume_descriptor_content(block_idx: usize) -> String {
+    fn resume_record_content(block_idx: usize) -> String {
         let mut content = format!("# Resume benchmark response {block_idx}\n\n");
-        let paragraph = "This descriptor-backed resume fixture stores full transcript text in SQLite without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
-        while content.len() < RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES {
+        let paragraph = "This record-backed resume fixture stores full transcript text in SQLite without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
+        while content.len() < RESUME_RECORD_BLOCK_TEXT_BYTES {
             content.push_str(paragraph);
         }
-        content.truncate(RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES);
+        content.truncate(RESUME_RECORD_BLOCK_TEXT_BYTES);
         content
     }
 
-    fn resume_descriptor_record(
+    fn resume_block_record(
         block_idx: usize,
         content: String,
-    ) -> smelt_store::TranscriptDescriptorRecord {
-        let descriptor = smelt_core::transcript_model::TranscriptBlockDescriptor::Text {
+    ) -> smelt_store::StoredTranscriptBlock {
+        let record = smelt_core::Block::Text {
             content: content.clone(),
         };
         let indexed_text = format!("resume benchmark block {block_idx}");
-        smelt_store::TranscriptDescriptorRecord {
+        smelt_store::StoredTranscriptBlock {
             block_idx: block_idx as u64,
             history_idx: None,
-            kind: descriptor.kind().to_string(),
+            kind: record.kind().to_string(),
             tool_call_id: None,
             tool_name: None,
             content_hash: (block_idx as u64).saturating_add(1).to_string(),
             estimated_text_bytes: content.len() as u64,
             preview_text: format!("resume benchmark response {block_idx}"),
             indexed_text,
-            descriptor_json: serde_json::to_string(&descriptor)
-                .expect("serialize resume descriptor"),
+            block_json: serde_json::to_string(&record).expect("serialize resume record"),
             origin_json: None,
             tool_state_json: None,
         }
     }
 
-    fn write_descriptor_backed_resume_fixture(
+    fn write_record_backed_resume_fixture(
+        sessions: &smelt_core::session::SessionStorage,
         session: &smelt_core::session::Session,
         target_bytes: usize,
     ) -> (usize, usize, f64) {
         let setup_start = std::time::Instant::now();
-        let session_dir = smelt_core::session::dir_for(session);
+        let session_dir = sessions.dir_for(session);
         let _ = std::fs::remove_dir_all(&session_dir);
-        std::fs::create_dir_all(&session_dir).expect("create descriptor resume fixture dir");
+        std::fs::create_dir_all(&session_dir).expect("create record resume fixture dir");
         let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))
-            .expect("open descriptor resume fixture db");
+            .expect("open record resume fixture db");
         let command = smelt_core::session::initial_store_commit_from_session(session)
-            .expect("prepare descriptor resume fixture state");
+            .expect("prepare record resume fixture state");
         db.apply_session_commit(&command)
-            .expect("initialize descriptor resume fixture state");
-        let target_bytes = target_bytes.max(RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES);
+            .expect("initialize record resume fixture state");
+        let target_bytes = target_bytes.max(RESUME_RECORD_BLOCK_TEXT_BYTES);
         let mut generated_bytes = 0usize;
-        let mut descriptor_count = 0usize;
+        let mut record_count = 0usize;
         while generated_bytes < target_bytes {
-            let mut records = Vec::with_capacity(RESUME_DESCRIPTOR_WRITE_CHUNK);
-            while generated_bytes < target_bytes && records.len() < RESUME_DESCRIPTOR_WRITE_CHUNK {
-                let content = resume_descriptor_content(descriptor_count);
+            let mut records = Vec::with_capacity(RESUME_RECORD_WRITE_CHUNK);
+            while generated_bytes < target_bytes && records.len() < RESUME_RECORD_WRITE_CHUNK {
+                let content = resume_record_content(record_count);
                 generated_bytes = generated_bytes.saturating_add(content.len());
-                records.push(resume_descriptor_record(descriptor_count, content));
-                descriptor_count += 1;
+                records.push(resume_block_record(record_count, content));
+                record_count += 1;
             }
-            let start_descriptor_idx = descriptor_count.saturating_sub(records.len());
-            db.apply_transcript_descriptor_suffix_fixture(start_descriptor_idx, &records)
-                .expect("write descriptor resume fixture chunk");
+            let start_record_idx = record_count.saturating_sub(records.len());
+            db.apply_transcript_record_suffix_fixture(start_record_idx, &records)
+                .expect("write record resume fixture chunk");
         }
         let setup_ms = elapsed_ms(setup_start.elapsed());
-        (descriptor_count, generated_bytes, setup_ms)
+        (record_count, generated_bytes, setup_ms)
     }
 
     fn run_true_resume_bench_sample(target_bytes: usize) {
@@ -7123,15 +7128,21 @@ mod tests {
             std::env::current_dir().unwrap_or_default(),
         );
         let session_id = session.id.clone();
-        let (descriptor_count, generated_bytes, setup_ms) =
-            write_descriptor_backed_resume_fixture(&session, target_bytes);
+        let storage_dir = tempfile::tempdir().expect("resume benchmark storage");
+        let sessions = smelt_core::session::SessionStorage::new(storage_dir.path().join("smelt"));
+        let (record_count, generated_bytes, setup_ms) =
+            write_record_backed_resume_fixture(&sessions, &session, target_bytes);
 
         smelt_perf::perf::clear();
         let tail_alloc_before = smelt_perf::alloc::snapshot();
         let tail_load_start = std::time::Instant::now();
-        let tail_resumed =
-            crate::app::history::load_transcript_tail_from_sqlite_id(&session_id, 100, 40)
-                .expect("tail-load benchmark transcript descriptors");
+        let tail_resumed = crate::app::history::load_transcript_tail_from_sqlite_id(
+            &sessions,
+            &session_id,
+            100,
+            40,
+        )
+        .expect("tail-load benchmark transcript records");
         let mut tail_document =
             crate::app::transcript::TranscriptDocument::from_loaded_transcript(tail_resumed);
         let tail_load_ms = elapsed_ms(tail_load_start.elapsed());
@@ -7153,20 +7164,20 @@ mod tests {
         assert!(tail_rows.total_rows > 0);
         let tail_snapshot = smelt_perf::perf::snapshot();
         print_resume_perf_snapshot(&tail_snapshot);
-        assert_resume_tail_perf_gates(&tail_snapshot, descriptor_count);
+        assert_resume_tail_perf_gates(&tail_snapshot, record_count);
         assert_eq!(
-            perf_value_max(&tail_snapshot, "transcript:sqlite:descriptor_total"),
-            descriptor_count as u64,
-            "display-only resume did not observe the descriptor-backed fixture size"
+            perf_value_max(&tail_snapshot, "transcript:sqlite:record_total"),
+            record_count as u64,
+            "display-only resume did not observe the record-backed fixture size"
         );
 
         smelt_core::session::delete(&session_id).expect("delete resume benchmark session");
         smelt_perf::perf::set_enabled(false);
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes={} generated_bytes={} descriptors={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} tail_bytes_allocated={} tail_bytes_deallocated={} tail_current_bytes_before={} tail_current_bytes_after={} tail_retained_bytes={}",
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=record_backed target_bytes={} generated_bytes={} records={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} tail_bytes_allocated={} tail_bytes_deallocated={} tail_current_bytes_before={} tail_current_bytes_after={} tail_retained_bytes={}",
             target_bytes,
             generated_bytes,
-            descriptor_count,
+            record_count,
             tail_rows.total_rows,
             setup_ms,
             tail_load_ms,
@@ -7178,10 +7189,10 @@ mod tests {
             tail_retained_bytes,
         );
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"mode\":\"descriptor_backed\",\"target_bytes\":{},\"generated_bytes\":{},\"descriptors\":{},\"rows\":{},\"setup_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"tail_bytes_allocated\":{},\"tail_bytes_deallocated\":{},\"tail_current_bytes_before\":{},\"tail_current_bytes_after\":{},\"tail_retained_bytes\":{}}}",
+            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"mode\":\"record_backed\",\"target_bytes\":{},\"generated_bytes\":{},\"records\":{},\"rows\":{},\"setup_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"tail_bytes_allocated\":{},\"tail_bytes_deallocated\":{},\"tail_current_bytes_before\":{},\"tail_current_bytes_after\":{},\"tail_retained_bytes\":{}}}",
             target_bytes,
             generated_bytes,
-            descriptor_count,
+            record_count,
             tail_rows.total_rows,
             setup_ms,
             tail_load_ms,
@@ -7612,9 +7623,7 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "manual transcript layout benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
-    fn transcript_layout_benchmark_suite() {
+    pub(crate) fn run_layout_benchmark() {
         let runs = transcript_bench_runs();
         let workloads = transcript_bench_workloads();
         assert!(!workloads.is_empty(), "no benchmark workloads selected");
@@ -7660,9 +7669,7 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "manual true session resume benchmark; run with --ignored --nocapture"]
-    fn transcript_true_resume_benchmark_suite() {
+    pub(crate) fn run_true_resume_benchmark() {
         let target_bytes = std::env::var("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -7670,45 +7677,6 @@ mod tests {
         run_true_resume_bench_sample(target_bytes);
     }
 
-    #[test]
-    #[ignore = "manual large-transcript baseline; run with --ignored --nocapture"]
-    fn mixed_large_transcript_projection_baseline() {
-        let workload = TranscriptBenchWorkload {
-            name: "mixed_10mib",
-            target_bytes: 10 * 1024 * 1024,
-            build: push_large_mixed_transcript_fixture,
-        };
-        let sample = run_transcript_bench_sample(workload);
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={} generated_bytes={} blocks={} total_rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} append_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} visible_rows={} copied_rows={} appended_rows={} scroll_materialized_rows={}",
-            sample.input_bytes,
-            sample.generated_bytes,
-            sample.blocks,
-            sample.total_rows,
-            sample.first_ms,
-            sample.resize_ms,
-            sample.theme_ms,
-            sample.scroll12_ms,
-            sample.visible_ms,
-            sample.copy_ms,
-            sample.append_ms,
-            sample.no_cache_ms,
-            sample.allocs,
-            sample.bytes_allocated,
-            sample.visible_rows,
-            sample.copied_rows,
-            sample.appended_rows,
-            sample.scroll_materialized_rows,
-        );
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_COUNTERS first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} no_cache={:?}",
-            sample.first_counters,
-            sample.resize_counters,
-            sample.theme_counters,
-            sample.scroll_counters,
-            sample.visible_counters,
-            sample.no_cache_counters,
-        );
     }
 
     fn project_tool_title(name: &str, summary: protocol::StyledLines) -> Buffer {

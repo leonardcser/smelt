@@ -160,14 +160,17 @@ impl TuiApp {
                 win.pin_current_scroll();
             }
         }
-        self.session_document
-            .transcript
-            .set_pending_projection_with_hint(intent.clone(), restore, local_scroll_top, hint);
-        if !self.session_document.transcript.scroll_trace_enabled() {
+        self.conversation.set_pending_transcript_projection(
+            intent.clone(),
+            restore,
+            local_scroll_top,
+            hint,
+        );
+        if !self.conversation.transcript().scroll_trace_enabled() {
             return;
         }
         let window_scroll_after_input = self.transcript_scroll_top();
-        self.session_document.transcript.record_scroll_trace_event(
+        self.conversation.record_transcript_scroll_trace_event(
             "scroll_intent_input",
             json!({
                 "label": &label,
@@ -176,13 +179,13 @@ impl TuiApp {
                 "window_scroll_after_input": window_scroll_after_input,
             }),
         );
-        self.session_document
-            .transcript
-            .set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
+        self.conversation.set_next_transcript_scroll_trace_input(
+            TranscriptScrollTraceRenderInput {
                 input_event_or_tick: label,
                 scroll_intent: intent,
                 window_scroll_before,
                 window_scroll_after_input,
-            });
+            },
+        );
     }
 }

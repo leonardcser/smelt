@@ -1,45 +1,73 @@
-//! TLS slot for `&mut Core`, used by Host-tier Lua bindings.
+//! Scoped Core access for Lua bindings.
 //!
-//! Whichever frontend drives Lua installs its `Core` here; bindings reborrow
-//! through [`with_core`] / [`try_with_core`]. `HeadlessApp` installs only the
-//! Core pointer; UiHost-only bindings return an error from headless context.
+//! A frontend lends its `Core` to Lua only for the dynamic extent of one Lua
+//! entry. The scoped slot carries the borrow lifetime, so callbacks cannot
+//! retain host authority or alias an ordinary Rust borrow.
 
 use super::runtime::Core;
-use std::cell::RefCell;
+use scoped_tls_hkt::scoped_thread_local;
 
-thread_local! {
-    static CORE_PTR: RefCell<Option<*mut Core>> = const { RefCell::new(None) };
+/// Exclusive access to the core capability during one Lua entry.
+///
+/// The callback form lets a frontend delegate Core access without exposing or
+/// downcasting its frontend root. The callback must run synchronously and may
+/// not retain the borrowed Core.
+pub trait LuaHost {
+    fn with_core(&mut self, callback: &mut dyn FnMut(&mut Core));
 }
 
-/// Install `core` as the TLS pointer for the duration of the returned guard.
-pub fn install_core_ptr(core: &mut Core) -> CorePtrGuard {
-    let ptr: *mut Core = core;
-    let old = CORE_PTR.with(|cell| cell.replace(Some(ptr)));
-    CorePtrGuard { old }
-}
-
-pub struct CorePtrGuard {
-    old: Option<*mut Core>,
-}
-
-impl Drop for CorePtrGuard {
-    fn drop(&mut self) {
-        CORE_PTR.with(|cell| *cell.borrow_mut() = self.old);
+impl LuaHost for Core {
+    fn with_core(&mut self, callback: &mut dyn FnMut(&mut Core)) {
+        callback(self);
     }
 }
 
-/// Panics if called outside an [`install_core_ptr`] scope.
-pub fn with_core<R>(f: impl FnOnce(&mut Core) -> R) -> R {
-    let ptr = CORE_PTR
-        .with(|cell| *cell.borrow())
-        .expect("with_core called outside Lua entry");
-    // SAFETY: the pointer is set only by `install_core_ptr`, which
-    // borrows `&mut Core` exclusively. The caller holds that borrow
-    // across subsequent Lua calls but does not access it while Lua runs.
-    unsafe { f(&mut *ptr) }
+scoped_thread_local!(static mut HOST: for<'a> &'a mut dyn LuaHost);
+
+/// Lend one frontend root to Lua for the duration of `body`.
+pub fn scope_host<R>(host: &mut dyn LuaHost, body: impl FnOnce() -> R) -> R {
+    HOST.set(host, body)
 }
 
-pub fn try_with_core<R>(f: impl FnOnce(&mut Core) -> R) -> Option<R> {
-    let ptr = CORE_PTR.with(|cell| *cell.borrow())?;
-    Some(unsafe { f(&mut *ptr) })
+/// Lend a standalone Core to Lua for the duration of `body`.
+pub fn scope_core<R>(core: &mut Core, body: impl FnOnce() -> R) -> R {
+    scope_host(core, body)
+}
+
+/// Return whether this thread is currently executing a scoped Lua entry.
+///
+/// Frontends use this to defer work that would require an ordinary mutable host
+/// borrow until the active Lua callback returns.
+pub fn host_access_active() -> bool {
+    HOST.is_set()
+}
+
+/// Borrow the Core currently lent to Lua.
+///
+/// Panics when called outside [`scope_host`] or [`scope_core`].
+pub fn with_core<R>(callback: impl FnOnce(&mut Core) -> R) -> R {
+    let mut callback = Some(callback);
+    let mut result = None;
+    HOST.with(|host| {
+        host.with_core(&mut |core| {
+            let callback = callback
+                .take()
+                .expect("Lua Core callback ran more than once");
+            result = Some(callback(core));
+        });
+    });
+    result.expect("Lua host did not provide Core access")
+}
+
+/// Borrow the Core currently lent to Lua, or return `None` outside a Lua entry.
+pub fn try_with_core<R>(callback: impl FnOnce(&mut Core) -> R) -> Option<R> {
+    HOST.is_set().then(|| with_core(callback))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn host_is_unavailable_outside_a_scoped_lua_entry() {
+        assert!(super::try_with_core(|_| ()).is_none());
+    }
 }

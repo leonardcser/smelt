@@ -136,7 +136,7 @@ impl TuiApp {
         if self.well_known.cmdline.is_some() {
             return;
         }
-        self.cmdline.mode = mode;
+        self.overlays.begin_cmdline(mode);
         let prefix = mode.prefix();
 
         let buf = self.buf_create(BufCreateOpts::default());
@@ -167,7 +167,6 @@ impl TuiApp {
 
         self.set_focus(win);
         self.well_known.cmdline = Some(win);
-        self.cmdline.completer = None;
         self.cmdline_apply_status_bg();
     }
 
@@ -197,14 +196,12 @@ impl TuiApp {
         if let Some(win) = self.well_known.cmdline.take() {
             self.close_overlay_leaf(win);
         }
-        self.cmdline.mode = CmdlineMode::Command;
+        let _ = self.overlays.reset_cmdline();
     }
 
     fn cmdline_close_completer(&mut self) {
-        if let Some(mut completer) = self.cmdline.completer.take() {
-            if let Some(win) = completer.picker.take() {
-                self.close_overlay_leaf(win);
-            }
+        if let Some(win) = self.overlays.dismiss_cmdline_completer() {
+            self.close_overlay_leaf(win);
         }
     }
 
@@ -213,11 +210,7 @@ impl TuiApp {
     }
 
     fn cmdline_completer_open(&self) -> bool {
-        self.cmdline
-            .completer
-            .as_ref()
-            .and_then(|c| c.picker)
-            .is_some()
+        self.overlays.cmdline_completer_is_open()
     }
 
     fn cmdline_text(&self) -> String {
@@ -229,7 +222,7 @@ impl TuiApp {
             .and_then(|b| self.ui.buf(b))
             .and_then(|b| b.get_line(0).map(|s| s.to_string()))
             .unwrap_or_default();
-        let prefix = self.cmdline.mode.prefix();
+        let prefix = self.overlays.cmdline_mode().prefix();
         line.strip_prefix(prefix).unwrap_or(&line).to_string()
     }
 
@@ -237,7 +230,7 @@ impl TuiApp {
         let Some(win) = self.well_known.cmdline else {
             return;
         };
-        let prefix = self.cmdline.mode.prefix();
+        let prefix = self.overlays.cmdline_mode().prefix();
         let new_line = format!("{prefix}{payload}");
         if let Some(buf_id) = self.ui.win(win).map(|w| w.buf) {
             if let Some(b) = self.ui.buf_mut(buf_id) {
@@ -252,7 +245,7 @@ impl TuiApp {
 
     fn cmdline_edit(&self) -> crate::line_input::LineEdit {
         let payload = self.cmdline_text();
-        let prefix_len = self.cmdline.mode.prefix().len();
+        let prefix_len = self.overlays.cmdline_mode().prefix().len();
         let (cursor, anchor) = self
             .well_known
             .cmdline
@@ -281,13 +274,13 @@ impl TuiApp {
 
     /// Handles a keystroke for a focused cmdline; `Some(true)` → quit, `Some(false)` → handled, `None` → unrecognised.
     pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
-        match CmdlineInputAction::from_key(self.cmdline.mode, k)? {
+        match CmdlineInputAction::from_key(self.overlays.cmdline_mode(), k)? {
             CmdlineInputAction::Cancel => {
                 if self.cmdline_completer_open() {
                     self.cmdline_dismiss_completer();
                     return Some(false);
                 }
-                if matches!(self.cmdline.mode, CmdlineMode::Search { .. }) {
+                if matches!(self.overlays.cmdline_mode(), CmdlineMode::Search { .. }) {
                     self.clear_search();
                 }
                 self.close_cmdline();
@@ -348,38 +341,40 @@ impl TuiApp {
         self.cmdline_set_payload(&text, cursor);
         if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
-                let prefix_len = self.cmdline.mode.prefix().len();
+                let prefix_len = self.overlays.cmdline_mode().prefix().len();
                 w.set_selection_anchor(selection_anchor.map(|a| prefix_len + a));
             }
         }
         if text != old_text {
             self.cmdline_dismiss_completer();
-            self.cmdline.history_browse = None;
-            self.cmdline.history_stash = String::new();
+            self.overlays.reset_cmdline_history_browse();
         }
     }
 
     fn active_history(&self) -> Vec<String> {
         let payload = self.cmdline_text();
-        self.cmdline
-            .history
-            .matching(command_history_kind(self.cmdline.mode, &payload))
+        self.overlays
+            .matching_cmdline_history(command_history_kind(self.overlays.cmdline_mode(), &payload))
     }
 
     fn cmdline_history_up(&mut self) {
         let current = self.cmdline_text();
         let history = self.active_history();
         let owned =
-            super::cmdline_edit::history_up(&history, self.cmdline.history_browse).into_owned();
+            super::cmdline_edit::history_up(&history, self.overlays.cmdline_history_browse())
+                .into_owned();
         self.apply_history_step(owned, current);
     }
 
     fn cmdline_history_down(&mut self) {
-        let stash = self.cmdline.history_stash.clone();
+        let stash = self.overlays.cmdline_history_stash().to_string();
         let history = self.active_history();
-        let owned =
-            super::cmdline_edit::history_down(&history, self.cmdline.history_browse, &stash)
-                .into_owned();
+        let owned = super::cmdline_edit::history_down(
+            &history,
+            self.overlays.cmdline_history_browse(),
+            &stash,
+        )
+        .into_owned();
         self.apply_history_step(owned, String::new());
     }
 
@@ -399,17 +394,14 @@ impl TuiApp {
                 entry,
                 stash_current,
             } => {
-                if stash_current {
-                    self.cmdline.history_stash = current_for_stash;
-                }
-                self.cmdline.history_browse = Some(idx);
+                self.overlays
+                    .apply_cmdline_history_browse(idx, stash_current.then_some(current_for_stash));
                 let cursor = entry.len();
                 self.cmdline_set_payload(&entry, cursor);
                 self.cmdline_dismiss_completer();
             }
             HistoryStepOwned::Restore { stash } => {
-                self.cmdline.history_browse = None;
-                self.cmdline.history_stash = String::new();
+                self.overlays.restore_cmdline_history_stash();
                 let cursor = stash.len();
                 self.cmdline_set_payload(&stash, cursor);
                 self.cmdline_dismiss_completer();
@@ -419,11 +411,11 @@ impl TuiApp {
 
     fn cmdline_submit(&mut self) -> bool {
         let line = self.cmdline_text();
-        let mode = self.cmdline.mode;
+        let mode = self.overlays.cmdline_mode();
         match mode {
             CmdlineMode::Command => {
                 let kind = command_history_kind(mode, &line);
-                self.cmdline.history.push(kind, line.clone());
+                self.overlays.push_cmdline_history(kind, line.clone());
                 self.close_cmdline();
                 if line.is_empty() {
                     return false;
@@ -435,7 +427,7 @@ impl TuiApp {
                 );
                 match action {
                     CommandAction::Exec(handle) => {
-                        self.exec = Some(handle);
+                        self.overlays.install_execution(handle);
                         false
                     }
                     CommandAction::Continue => self.pending_quit,
@@ -443,7 +435,7 @@ impl TuiApp {
             }
             CmdlineMode::Search { target, direction } => {
                 let kind = command_history_kind(mode, &line);
-                self.cmdline.history.push(kind, line.clone());
+                self.overlays.push_cmdline_history(kind, line.clone());
                 self.close_cmdline();
                 self.submit_search(target, direction, line);
                 false
@@ -463,19 +455,19 @@ impl TuiApp {
         if !self.cmdline_completer_open() {
             return;
         }
-        let Some(comp) = self.cmdline.completer.as_ref() else {
+        let n = self.overlays.cmdline_completion_len();
+        let Some(selected) = self.overlays.cmdline_completion_selected() else {
             return;
         };
-        let n = comp.items.len();
         if n == 0 {
             return;
         }
-        let next = (comp.selected as isize + delta).rem_euclid(n as isize) as usize;
+        let next = (selected as isize + delta).rem_euclid(n as isize) as usize;
         self.cmdline_select_completion(next);
     }
 
     fn cmdline_open_completer(&mut self) {
-        if !matches!(self.cmdline.mode, CmdlineMode::Command) {
+        if !matches!(self.overlays.cmdline_mode(), CmdlineMode::Command) {
             return;
         }
         let typed = self.cmdline_text();
@@ -514,20 +506,11 @@ impl TuiApp {
         ) else {
             return;
         };
-        self.cmdline.completer = Some(CmdlineCompleter {
-            items: ranked,
-            selected: 0,
-            picker: Some(picker),
-        });
+        self.overlays.install_cmdline_completer(ranked, picker);
     }
 
     fn cmdline_accept_completion(&mut self) {
-        let label = self
-            .cmdline
-            .completer
-            .as_ref()
-            .and_then(|comp| comp.items.get(comp.selected))
-            .map(|item| item.label.clone());
+        let label = self.overlays.selected_cmdline_completion_label();
         let Some(label) = label else {
             return;
         };
@@ -537,18 +520,8 @@ impl TuiApp {
     }
 
     fn cmdline_select_completion(&mut self, selected: usize) {
-        let (picker, selected) = {
-            let Some(comp) = self.cmdline.completer.as_mut() else {
-                return;
-            };
-            if comp.items.is_empty() {
-                return;
-            }
-            comp.selected = selected.min(comp.items.len() - 1);
-            (comp.picker, comp.selected)
-        };
-        if let Some(win) = picker {
-            crate::picker::set_selected(self, win, selected);
+        if let Some((picker, selected)) = self.overlays.select_cmdline_completion(selected) {
+            crate::picker::set_selected(self, picker, selected);
         }
     }
 }

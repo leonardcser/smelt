@@ -39,7 +39,10 @@ shellexpand = "3.1.2"
 smelt-store = { workspace = true }
 chrono = "0.4.45"
 brush-parser = "0.4.0"
+scoped-tls-hkt = "0.1.5"
+process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "process-group", "job-object"] }
 
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }
+smelt-test-support = { workspace = true }
 tempfile = { workspace = true }

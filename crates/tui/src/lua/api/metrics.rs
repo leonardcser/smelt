@@ -18,7 +18,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return raw entries from the on-disk metrics ledger. Lua commands aggregate and render these records into UI.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let entries = crate::metrics::load();
+            let entries = crate::lua::try_with_platform_host(|host| host.metrics_entries())
+                .unwrap_or_default();
             let out = lua.create_table()?;
             for (i, e) in entries.iter().enumerate() {
                 let row = lua.create_table()?;

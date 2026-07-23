@@ -1,6 +1,5 @@
 //! `smelt.engine` - cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
 
-use crate::app::QueuedInput;
 use crate::lua::{LuaHandle, LuaShared};
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
@@ -161,7 +160,7 @@ pub struct LuaAskResponseFormat {
 /// provider call fails. `kind` is a stable string the caller can branch
 /// on; `message` is a human-readable single-line description. The
 /// struct exists purely as a doc / LuaCATS schema target - the actual
-/// table is built in `LuaRuntime::fire_ask_callback` because it lands
+/// table is built in `LuaExecution::fire_ask_callback` because it lands
 /// on a callback path that bypasses `FromLua` decoding.
 #[allow(dead_code)]
 #[derive(Debug, LuaOpts)]
@@ -302,13 +301,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.",
         &[],
         |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                if app.queued_inputs.is_empty() {
-                    app.discard_turn(crate::app::TurnEnd::Cancelled);
-                } else {
-                    app.drain_queued_inputs_into_prompt();
-                }
-            });
+            crate::lua::with_agent_host(|host| host.cancel_engine_work());
             Ok(())
         },
     )?;
@@ -316,7 +309,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "is_running",
         "Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).",
         &[],
-        |_, ()| Ok(crate::lua::try_with_app(|app| app.agent_is_running()).unwrap_or(false)),
+        |_, ()| Ok(crate::lua::try_with_agent_host(|host| host.agent_is_running()).unwrap_or(false)),
     )?;
     m.fn_(
         "summary_prefix",
@@ -357,14 +350,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. An open modal is dismissed before the request is queued.",
         &[],
         |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                if app.prompt_input_is_busy() {
-                    app.notify_error("cannot reload while agent is working".into());
-                    return;
-                }
-                while app.close_active_modal() {}
-                app.schedule_lua_reload();
-            });
+            crate::lua::with_agent_host(|host| host.reload_lua_now());
             Ok(())
         },
     )?;
@@ -374,7 +360,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`. Returns `true` when this call queued a new reload and `false` when one was already pending.",
         &[],
         |_, ()| -> LuaResult<bool> {
-            Ok(crate::lua::try_with_app(|app| app.schedule_lua_reload()).unwrap_or(false))
+            Ok(crate::lua::try_with_agent_host(|host| host.schedule_lua_reload()).unwrap_or(false))
         },
     )?;
 
@@ -391,40 +377,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )|
          -> LuaResult<()> {
             let parsed = overrides.map(Into::into).unwrap_or_default();
-            crate::lua::with_app(|app| {
-                let cmd = smelt_core::custom_commands::CustomCommand {
-                    display: display.unwrap_or_else(|| name.clone()),
-                    name,
-                    body,
-                    overrides: parsed,
-                };
-                if app.prompt_input_is_busy() {
-                    let text = if app.core.config.settings.redact_secrets {
-                        engine::redact::redact(&cmd.body)
-                    } else {
-                        cmd.body.clone()
-                    };
-                    let display = if app.core.config.settings.redact_secrets {
-                        engine::redact::redact(&format!("/{}", cmd.display))
-                    } else {
-                        format!("/{}", cmd.display)
-                    };
-                    let queued = QueuedInput::custom_command_request(display, text, cmd.overrides);
-                    let target = smelt_core::lua::current_command_queue_target()
-                        .map(crate::app::QueueStage::from_command_target)
-                        .unwrap_or(crate::app::QueueStage::Turn);
-                    match target {
-                        crate::app::QueueStage::Turn => {
-                            app.queued_inputs.try_push_turn(queued);
-                        }
-                        crate::app::QueueStage::Request => {
-                            app.queue_input_for_request(queued);
-                        }
-                    }
-                    return;
-                }
-                app.agent = app.begin_custom_command_turn(cmd);
-            });
+            let command = smelt_core::custom_commands::CustomCommand {
+                display: display.unwrap_or_else(|| name.clone()),
+                name,
+                body,
+                overrides: parsed,
+            };
+            crate::lua::with_agent_host(|host| host.submit_custom_command(command));
             Ok(())
         },
     )?;
@@ -446,18 +405,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 return Ok(false);
             };
             let parsed = overrides.map(Into::into).unwrap_or_default();
-            Ok(crate::lua::with_app(|app| {
-                if app.prompt_input_is_busy() || !app.consume_continuation_token(continuation_token) {
-                    return false;
-                }
-                let cmd = smelt_core::custom_commands::CustomCommand {
-                    display: display.unwrap_or_else(|| name.clone()),
-                    name,
-                    body,
-                    overrides: parsed,
-                };
-                app.agent = app.begin_custom_command_continuation(cmd);
-                app.agent.is_some()
+            let command = smelt_core::custom_commands::CustomCommand {
+                display: display.unwrap_or_else(|| name.clone()),
+                name,
+                body,
+                overrides: parsed,
+            };
+            Ok(crate::lua::with_agent_host(|host| {
+                host.submit_custom_command_continuation(command, continuation_token)
             }))
         },
     )?;
@@ -476,7 +431,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     ));
                 }
 
-                let mut messages: Vec<protocol::Message> = spec
+                let messages: Vec<protocol::Message> = spec
                     .messages
                     .as_ref()
                     .map(|table| crate::lua::api::session::lua_messages_to_protocol(lua, table))
@@ -505,42 +460,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
-                let dispatched = crate::lua::try_with_app(|app| {
-                    if let Some(q) = question {
-                        messages.push(protocol::Message::user(protocol::Content::text(&q)));
-                    }
-                    let target = match model_ref.as_deref() {
-                        Some(reference) => resolve_model_for_ask(app, reference),
-                        None => active_model_target(app),
-                    };
-                    let Some(target) = target else {
-                        return false;
-                    };
-                    let request_config = app.core.config.request_runtime_config();
-                    let session_id = app.core.session.id.clone();
-                    let session_dir = smelt_core::session::dir_for(&app.core.session);
-                    let persistence = protocol::PersistenceScope {
-                        epoch: app.persistence.as_ref().map_or(0, |actor| actor.epoch().get()),
-                        required_generation: app.session_document.generation().get(),
-                        store_revision: app.session_document.acknowledged_head().revision.get(),
-                    };
-                    app.core.engine.send(protocol::UiCommand::EngineAsk {
+                let dispatched = crate::lua::try_with_agent_host(|host| {
+                    host.dispatch_engine_ask(
                         id,
                         system,
                         messages,
-                        target: Box::new(target),
-                        request_config,
+                        model_ref,
+                        question,
                         response_format,
                         reasoning_effort,
-                        fast_mode: false,
-                        tools: Vec::new(),
-                        session_id,
-                        session_dir,
-                        persistence,
                         stream,
                         visible_retries,
-                    });
-                    true
+                    )
                 })
                 .unwrap_or(false);
                 if !dispatched {
@@ -564,7 +495,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
             move |lua, spec: LuaInheritedAskSpec| -> LuaResult<u64> {
-                let mut messages: Vec<protocol::Message> = spec
+                let messages: Vec<protocol::Message> = spec
                     .messages
                     .as_ref()
                     .map(|table| crate::lua::api::session::lua_messages_to_protocol(lua, table))
@@ -592,49 +523,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
-                let dispatched = crate::lua::try_with_app(|app| {
-                    let system = app.assemble_system_prompt();
-                    if messages.is_empty() {
-                        messages = app.model_history_messages();
-                    }
-                    if let Some(q) = question {
-                        messages.push(protocol::Message::user(protocol::Content::text(&q)));
-                    }
-                    let target = match model_ref.as_deref() {
-                        Some(reference) => resolve_model_for_ask(app, reference),
-                        None => active_model_target(app),
-                    };
-                    let Some(target) = target else {
-                        return false;
-                    };
-                    let request_config = app.core.config.request_runtime_config();
-                    let session_id = app.core.session.id.clone();
-                    let session_dir = smelt_core::session::dir_for(&app.core.session);
-                    let persistence = protocol::PersistenceScope {
-                        epoch: app.persistence.as_ref().map_or(0, |actor| actor.epoch().get()),
-                        required_generation: app.session_document.generation().get(),
-                        store_revision: app.session_document.acknowledged_head().revision.get(),
-                    };
-                    app.core.engine.send(protocol::UiCommand::EngineAsk {
+                let dispatched = crate::lua::try_with_agent_host(|host| {
+                    host.dispatch_inherited_engine_ask(
                         id,
-                        system,
                         messages,
-                        target: Box::new(target),
-                        request_config,
+                        model_ref,
+                        question,
                         response_format,
                         reasoning_effort,
-                        fast_mode: app.fast_mode_active(),
-                        tools: app.lua.tool_defs(
-                            app.core.config.mode.clone(),
-                            smelt_core::lua::ToolVisibility::Interactive,
-                        ),
-                        session_id,
-                        session_dir,
-                        persistence,
                         stream,
                         visible_retries,
-                    });
-                    true
+                    )
                 })
                 .unwrap_or(false);
                 if !dispatched {
@@ -673,26 +572,4 @@ fn register_ask_callbacks(
         }
     }
     Ok(stream)
-}
-
-/// Resolve a Lua-provided model reference into a complete dispatch target.
-/// Notifies on error and returns `None`.
-fn resolve_model_for_ask(
-    app: &mut crate::app::TuiApp,
-    reference: &str,
-) -> Option<protocol::ModelTarget> {
-    let resolved =
-        match smelt_core::config::resolve_model_ref(&app.core.config.available_models, reference) {
-            Ok(m) => m.clone(),
-            Err(err) => {
-                app.notify_error_sticky(format!("smelt.engine: {err}"));
-                return None;
-            }
-        };
-    let api_key = app.resolve_api_key_for_env(&resolved.api_key_env)?;
-    Some(resolved.target(api_key))
-}
-
-fn active_model_target(app: &mut crate::app::TuiApp) -> Option<protocol::ModelTarget> {
-    app.resolve_model_target()
 }

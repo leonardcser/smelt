@@ -35,35 +35,57 @@ impl Compositor {
         self.force_redraw = true;
     }
 
-    /// Render one frame. `paint` writes into `current`. The hardware caret
-    /// stays hidden for the lifetime of the app - any visible cursor is
-    /// painted into the grid as a styled cell, so it rides the diff atomically
-    /// with the rest of the frame and can never flicker through the
-    /// intermediate `MoveTo`s that `flush_diff` emits between cell runs.
+    /// Paint a frame into an owned grid without flushing it.
+    ///
+    /// Separating paint from flush lets callers safely run callbacks against the
+    /// completed frame after releasing borrows of the UI that produced it.
+    pub fn paint_frame<F: FnOnce(&mut Grid, &Theme)>(&mut self, theme: &Theme, paint: F) -> Grid {
+        let mut frame = std::mem::replace(&mut self.current, Grid::new(0, 0));
+        if frame.width() != self.width || frame.height() != self.height {
+            frame.resize(self.width, self.height);
+        } else {
+            frame.clear_all();
+        }
+        paint(&mut frame, theme);
+        frame
+    }
+
+    /// Flush a frame returned by [`Self::paint_frame`] and recycle its grid.
+    pub fn flush_frame<W: Write>(&mut self, w: &mut W, mut frame: Grid) -> std::io::Result<()> {
+        let result = (|| {
+            w.queue(BeginSynchronizedUpdate)?;
+
+            if self.force_redraw {
+                flush_full(&frame, w)?;
+            } else {
+                flush_diff(w, frame.diff(&self.previous))?;
+            }
+
+            w.queue(EndSynchronizedUpdate)?;
+            w.flush()
+        })();
+
+        if result.is_ok() {
+            frame.swap_with(&mut self.previous);
+            self.force_redraw = false;
+        } else {
+            self.force_redraw = true;
+        }
+        self.current = frame;
+        result
+    }
+
+    /// Render one frame. The hardware caret stays hidden for the lifetime of
+    /// the app - any visible cursor is painted into the grid, so it rides the
+    /// diff atomically with the rest of the frame.
     pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme)>(
         &mut self,
         theme: &Theme,
         w: &mut W,
         paint: F,
     ) -> std::io::Result<()> {
-        self.current.clear_all();
-        paint(&mut self.current, theme);
-
-        w.queue(BeginSynchronizedUpdate)?;
-
-        if self.force_redraw {
-            flush_full(&self.current, w)?;
-        } else {
-            flush_diff(w, self.current.diff(&self.previous))?;
-        }
-
-        w.queue(EndSynchronizedUpdate)?;
-        w.flush()?;
-
-        self.current.swap_with(&mut self.previous);
-        self.force_redraw = false;
-
-        Ok(())
+        let frame = self.paint_frame(theme, paint);
+        self.flush_frame(w, frame)
     }
 
     pub fn force_redraw(&mut self) {
@@ -149,4 +171,72 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
     w.queue(SetAttribute(Attribute::Reset))?;
     w.queue(ResetColor)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Style;
+
+    #[test]
+    fn staged_paint_and_flush_matches_render_with() {
+        let theme = Theme::default();
+        let mut direct = Compositor::new(4, 2);
+        let mut staged = Compositor::new(4, 2);
+        let mut direct_out = Vec::new();
+        let mut staged_out = Vec::new();
+
+        direct
+            .render_with(&theme, &mut direct_out, |grid, _| {
+                grid.set(1, 0, 'x', Style::default());
+                grid.set(3, 1, 'y', Style::default());
+            })
+            .unwrap();
+        let frame = staged.paint_frame(&theme, |grid, _| {
+            grid.set(1, 0, 'x', Style::default());
+            grid.set(3, 1, 'y', Style::default());
+        });
+        staged.flush_frame(&mut staged_out, frame).unwrap();
+
+        assert_eq!(staged_out, direct_out);
+        assert_eq!(staged.previous().cell(1, 0).symbol, 'x');
+        assert_eq!(staged.previous().cell(3, 1).symbol, 'y');
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected flush failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected flush failure"))
+        }
+    }
+
+    #[test]
+    fn failed_flush_recycles_frame_and_forces_full_redraw() {
+        let theme = Theme::default();
+        let mut compositor = Compositor::new(3, 1);
+        let failed = compositor.paint_frame(&theme, |grid, _| {
+            grid.set(0, 0, 'x', Style::default());
+        });
+
+        assert!(compositor.flush_frame(&mut FailingWriter, failed).is_err());
+        assert!(compositor.force_redraw);
+        assert_eq!(compositor.previous().cell(0, 0).symbol, ' ');
+
+        let recovered = compositor.paint_frame(&theme, |grid, _| {
+            assert_eq!(grid.width(), 3);
+            assert_eq!(grid.height(), 1);
+            assert_eq!(grid.cell(0, 0).symbol, ' ');
+            grid.set(1, 0, 'y', Style::default());
+        });
+        compositor.flush_frame(&mut Vec::new(), recovered).unwrap();
+
+        assert!(!compositor.force_redraw);
+        assert_eq!(compositor.previous().cell(0, 0).symbol, ' ');
+        assert_eq!(compositor.previous().cell(1, 0).symbol, 'y');
+    }
 }

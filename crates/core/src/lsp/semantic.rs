@@ -15,11 +15,11 @@ pub(super) struct SimpleLocation {
 }
 
 impl SimpleLocation {
-    pub(super) fn to_json(&self) -> Value {
+    pub(super) fn to_json(&self, cwd: &Path, home: &Path) -> Value {
         let mut out = Map::new();
         out.insert(
             "file_path".into(),
-            Value::String(display_path(&self.file_path)),
+            Value::String(display_path(&self.file_path, cwd, home)),
         );
         out.insert("line".into(), json!(self.line));
         out.insert("column".into(), json!(self.column));
@@ -165,12 +165,19 @@ pub(super) async fn optional_lsp_locations(
     client: &Arc<LspClient>,
     method: &str,
     params: Value,
+    cwd: &Path,
+    home: &Path,
 ) -> Value {
     match client.request(method, params).await {
         Ok(value) => {
             let mut locations = normalize_locations(&value);
             add_location_previews(&mut locations);
-            Value::Array(locations.into_iter().map(|loc| loc.to_json()).collect())
+            Value::Array(
+                locations
+                    .into_iter()
+                    .map(|loc| loc.to_json(cwd, home))
+                    .collect(),
+            )
         }
         Err(err) => json!({ "error": err }),
     }
@@ -478,6 +485,8 @@ pub(super) fn collect_workspace_symbols(
     server: &str,
     kind_filter: Option<&str>,
     path_glob: Option<&str>,
+    cwd: &Path,
+    home: &Path,
     out: &mut Vec<WorkspaceSymbol>,
 ) {
     let Some(items) = value.as_array() else {
@@ -497,7 +506,7 @@ pub(super) fn collect_workspace_symbols(
             continue;
         };
         if let Some(pattern) = path_glob {
-            if !path_matches_glob(file_path, pattern) {
+            if !path_matches_glob(file_path, pattern, cwd) {
                 continue;
             }
         }
@@ -511,7 +520,7 @@ pub(super) fn collect_workspace_symbols(
             kind: symbol_model.kind,
             detail: symbol_model.detail,
             container_name: symbol_model.container_name,
-            file_path: display_path(file_path),
+            file_path: display_path(file_path, cwd, home),
             line: position.map(|(line, _)| line),
             column: position.map(|(_, column)| column),
             server: server.to_string(),
@@ -760,7 +769,7 @@ pub(super) fn bounded_limit(limit: usize, default: usize, max: usize) -> usize {
     }
 }
 
-fn path_matches_glob(file_path: &str, pattern: &str) -> bool {
+fn path_matches_glob(file_path: &str, pattern: &str, cwd: &Path) -> bool {
     let Ok(glob) = Glob::new(pattern) else {
         return false;
     };
@@ -769,16 +778,14 @@ fn path_matches_glob(file_path: &str, pattern: &str) -> bool {
     if matcher.is_match(path) {
         return true;
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(relative) = path.strip_prefix(cwd) {
-            return matcher.is_match(relative);
-        }
+    if let Ok(relative) = path.strip_prefix(cwd) {
+        return matcher.is_match(relative);
     }
     false
 }
 
-pub(super) fn display_path(file_path: &str) -> String {
-    crate::path_display::display_path(file_path)
+pub(super) fn display_path(file_path: &str, cwd: &Path, home: &Path) -> String {
+    crate::path_display::display_path_from(file_path, cwd, home)
 }
 
 fn trim_preview(preview: &str) -> Option<String> {
@@ -792,16 +799,13 @@ fn trim_preview(preview: &str) -> Option<String> {
     }
 }
 
-pub(super) fn absolute_path_string(file_path: &str) -> String {
+pub(super) fn absolute_path_string(file_path: &str, cwd: &Path) -> String {
     let path = PathBuf::from(file_path);
     if path.is_absolute() {
-        return path.display().to_string();
+        path.display().to_string()
+    } else {
+        cwd.join(path).display().to_string()
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(path)
-        .display()
-        .to_string()
 }
 
 fn uri_path_string(uri: &str) -> String {
@@ -827,6 +831,8 @@ mod tests {
             "rust-analyzer",
             None,
             None,
+            Path::new("/tmp"),
+            Path::new("/home/test"),
             &mut symbols,
         );
         rank_workspace_symbols(&mut symbols, "handle_request", false);
@@ -971,12 +977,12 @@ mod tests {
     }
 
     #[test]
-    fn display_paths_are_relative_inside_current_directory() {
-        let path = std::env::current_dir()
-            .unwrap()
-            .join("crates/core/src/lsp/mod.rs");
+    fn display_paths_are_relative_inside_runtime_directory() {
+        let cwd = Path::new("/workspace/project");
+        let home = Path::new("/home/test");
+        let path = cwd.join("crates/core/src/lsp/mod.rs");
         assert_eq!(
-            display_path(&path.display().to_string()),
+            display_path(&path.display().to_string(), cwd, home),
             "crates/core/src/lsp/mod.rs"
         );
 
@@ -986,7 +992,7 @@ mod tests {
             column: 3,
             preview: None,
         }
-        .to_json();
+        .to_json(cwd, home);
         assert_eq!(loc["file_path"], "crates/core/src/lsp/mod.rs");
     }
 

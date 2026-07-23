@@ -2,8 +2,7 @@ use super::*;
 
 fn prompt_has_command_highlight(app: &mut TestApp) -> bool {
     app.render_silent();
-    !app.app
-        .ui
+    !app.ui_probe()
         .buf(crate::app::PROMPT_EDIT_BUF)
         .expect("prompt buffer")
         .highlights_at(0)
@@ -15,9 +14,7 @@ fn lua_config_auto_reload_success_notifies_for_real_edits() {
     let mut app = TestApp::builder().build();
     assert!(app.state().notification.is_none());
 
-    crate::lua::with_app_ptr(&mut app.app, |app| {
-        app.reload_lua_config();
-    });
+    app.reload_lua_config();
 
     assert!(app.state().notification.is_some());
 }
@@ -26,9 +23,7 @@ fn lua_config_auto_reload_success_notifies_for_real_edits() {
 fn manual_lua_reload_success_notifies() {
     let mut app = TestApp::builder().build();
 
-    crate::lua::with_app_ptr(&mut app.app, |app| {
-        app.reload_lua();
-    });
+    app.reload_lua();
 
     assert!(app.state().notification.is_some());
 }
@@ -67,7 +62,7 @@ fn candidate_layout_registration_does_not_invoke_committed_composer() {
     let init = tmp.path().join("init.lua");
     std::fs::write(&init, "").unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let committed_generation = app.app.lua.id;
+    let committed_generation = app.lua_probe().id;
     let marker = "committed composer invoked during candidate load";
 
     assert!(app.run_lua(&format!(
@@ -77,14 +72,13 @@ fn candidate_layout_registration_does_not_invoke_committed_composer() {
         end)
         "#
     )));
-    app.app.lua.core_shared().messages.lock().unwrap().clear();
+    app.clear_lua_messages();
 
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
     assert!(
-        app.app
-            .lua
+        app.lua_probe()
             .core_shared()
             .messages
             .lock()
@@ -113,9 +107,9 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     )
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let command_names = app.app.lua.command_names_handle();
-    let committed_generation = app.app.lua.id;
-    let committed_runtime = app.app.core.config.clone();
+    let command_names = app.lua_probe().command_names_handle();
+    let committed_generation = app.lua_probe().id;
+    let committed_runtime = app.core_probe().config.clone();
     assert!(command_names.lock().unwrap().contains("committed_command"));
     app.type_text("/committed_command");
     assert!(prompt_has_command_highlight(&mut app));
@@ -143,38 +137,47 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     .unwrap();
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation);
-    assert_eq!(app.app.core.config, committed_runtime);
+    assert_eq!(app.lua_probe().id, committed_generation);
+    assert_eq!(app.core_probe().config, committed_runtime);
     assert!(
         prompt_has_command_highlight(&mut app),
         "a failed candidate must leave prompt recognition on the committed catalog"
     );
     assert!(!app
-        .app
-        .core
+        .core_probe()
         .timers
         .contains_generation(committed_generation.wrapping_add(1)));
-    assert!(!app.app.core.signals.contains("phase3_candidate_only"));
+    assert!(!app.core_probe().signals.contains("phase3_candidate_only"));
     assert!(
         command_names.lock().unwrap().contains("committed_command"),
         "a failed candidate must leave the committed command callable"
     );
     let committed_buffer = app
-        .app
-        .ui
+        .ui_probe()
         .named_buf("phase3.transaction.buffer")
         .expect("committed named buffer");
     assert_eq!(
-        app.app.ui.buf(committed_buffer).unwrap().source(),
+        app.ui_probe().buf(committed_buffer).unwrap().source(),
         "committed"
     );
-    assert!(app.app.lua.run_command("committed_command", None));
+    assert!(app.lua_probe().run_command("committed_command", None));
     assert!(app.run_lua("assert(_G.__committed_command_ran == true)"));
-    let failure_message_count = app.app.lua.core_shared().messages.lock().unwrap().count();
+    let failure_message_count = app
+        .lua_probe()
+        .core_shared()
+        .messages
+        .lock()
+        .unwrap()
+        .count();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     assert_eq!(
-        app.app.lua.core_shared().messages.lock().unwrap().count(),
+        app.lua_probe()
+            .core_shared()
+            .messages
+            .lock()
+            .unwrap()
+            .count(),
         failure_message_count,
         "equal candidate failures should remain one sticky diagnostic"
     );
@@ -188,8 +191,8 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     .unwrap();
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
-    let replacement_names = app.app.lua.command_names_handle();
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
+    let replacement_names = app.lua_probe().command_names_handle();
     let replacement_names = replacement_names.lock().unwrap();
     assert!(replacement_names.contains("replacement_command"));
     assert!(!replacement_names.contains("committed_command"));
@@ -217,8 +220,7 @@ fn repeated_failed_candidates_do_not_leak_handles_or_resources() {
     app.reload_lua();
 
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -273,7 +275,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
     )
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let committed_generation = app.app.lua.id;
+    let committed_generation = app.lua_probe().id;
 
     let immediate_path = serde_json::to_string(&immediate_effect.to_string_lossy()).unwrap();
     let ready_path = serde_json::to_string(&ready_effect.to_string_lossy()).unwrap();
@@ -293,12 +295,14 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
     .unwrap();
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     assert!(!immediate_effect.exists());
     assert!(!ready_effect.exists());
-    assert!(app.app.lua.run_command("committed_external_guard", None));
+    assert!(app
+        .lua_probe()
+        .run_command("committed_external_guard", None));
     assert!(app.run_lua("assert(_G.__committed_external_guard == true)"));
-    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    let messages = app.lua_probe().core_shared().messages.lock().unwrap();
     assert!(
         messages
             .entries()
@@ -324,11 +328,10 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
     .unwrap();
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
     assert_eq!(std::fs::read_to_string(ready_effect).unwrap(), "ran");
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .core_shared()
         .messages
         .lock()
@@ -337,8 +340,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
         .iter()
         .any(|entry| entry.source == "phase3-committed"));
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -355,7 +357,7 @@ fn candidate_rejects_unstaged_perf_mutations() {
     )
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let committed_generation = app.app.lua.id;
+    let committed_generation = app.lua_probe().id;
 
     for effect in [
         "smelt.metrics.perf.set_enabled(true)",
@@ -365,10 +367,9 @@ fn candidate_rejects_unstaged_perf_mutations() {
         std::fs::write(&init, effect).unwrap();
         app.reload_lua();
         assert!(!smelt_perf::perf::enabled());
-        assert_eq!(app.app.lua.id, committed_generation);
+        assert_eq!(app.lua_probe().id, committed_generation);
         assert!(app
-            .app
-            .lua
+            .lua_probe()
             .command_names_handle()
             .lock()
             .unwrap()
@@ -388,7 +389,7 @@ fn candidate_rejects_raw_lua_external_effects() {
     )
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let committed_generation = app.app.lua.id;
+    let committed_generation = app.lua_probe().id;
 
     for effect in [
         format!("local f = assert(io.open({protected_lua}, 'w')); f:write('mutated'); f:close()"),
@@ -398,10 +399,9 @@ fn candidate_rejects_raw_lua_external_effects() {
         std::fs::write(&init, effect).unwrap();
         app.reload_lua();
         assert_eq!(std::fs::read_to_string(&protected).unwrap(), "preserved");
-        assert_eq!(app.app.lua.id, committed_generation);
+        assert_eq!(app.lua_probe().id, committed_generation);
         assert!(app
-            .app
-            .lua
+            .lua_probe()
             .command_names_handle()
             .lock()
             .unwrap()
@@ -419,7 +419,7 @@ fn candidate_filesystem_watchers_activate_only_at_commit() {
     )
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let committed_generation = app.app.lua.id;
+    let committed_generation = app.lua_probe().id;
     let missing = tmp.path().join("missing");
     let missing = serde_json::to_string(&missing.to_string_lossy()).unwrap();
     std::fs::write(
@@ -435,10 +435,9 @@ fn candidate_filesystem_watchers_activate_only_at_commit() {
 
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -453,7 +452,7 @@ fn candidate_filesystem_watchers_activate_only_at_commit() {
     )
     .unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
 }
 
 #[test]
@@ -482,11 +481,15 @@ fn mcp_and_lsp_declarations_apply_only_after_candidate_commit() {
     std::fs::write(&init, config("committed", false)).unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
     app.reload_lua();
-    let committed_generation = app.app.lua.id;
-    assert!(app.app.lua.desired().config.mcp.contains_key("committed"));
+    let committed_generation = app.lua_probe().id;
     assert!(app
-        .app
-        .lua
+        .lua_probe()
+        .desired()
+        .config
+        .mcp
+        .contains_key("committed"));
+    assert!(app
+        .lua_probe()
         .shared()
         .lsp
         .config_snapshot()
@@ -495,17 +498,27 @@ fn mcp_and_lsp_declarations_apply_only_after_candidate_commit() {
 
     std::fs::write(&init, config("discarded", true)).unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
-    assert!(app.app.lua.desired().config.mcp.contains_key("committed"));
-    let live_lsp = app.app.lua.shared().lsp.config_snapshot();
+    assert_eq!(app.lua_probe().id, committed_generation);
+    assert!(app
+        .lua_probe()
+        .desired()
+        .config
+        .mcp
+        .contains_key("committed"));
+    let live_lsp = app.lua_probe().shared().lsp.config_snapshot();
     assert!(live_lsp.servers.contains_key("committed"));
     assert!(!live_lsp.servers.contains_key("discarded"));
 
     std::fs::write(&init, config("replacement", false)).unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
-    assert!(app.app.lua.desired().config.mcp.contains_key("replacement"));
-    let live_lsp = app.app.lua.shared().lsp.config_snapshot();
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
+    assert!(app
+        .lua_probe()
+        .desired()
+        .config
+        .mcp
+        .contains_key("replacement"));
+    let live_lsp = app.lua_probe().shared().lsp.config_snapshot();
     assert!(live_lsp.servers.contains_key("replacement"));
     assert!(!live_lsp.servers.contains_key("committed"));
 }
@@ -543,12 +556,11 @@ fn failed_early_lua_candidate_preserves_committed_generation_and_recovers() {
     )
     .unwrap();
     app.reload_lua();
-    let committed_generation = app.app.lua.id;
-    assert!(app.app.lua.manifest.files.contains(&early));
-    assert!(app.app.lua.manifest.files.contains(&init));
+    let committed_generation = app.lua_probe().id;
+    assert!(app.lua_probe().manifest.files.contains(&early));
+    assert!(app.lua_probe().manifest.files.contains(&init));
     assert!(app
-        .app
-        .core
+        .core_probe()
         .config
         .available_models
         .iter()
@@ -557,13 +569,13 @@ fn failed_early_lua_candidate_preserves_committed_generation_and_recovers() {
     std::fs::write(&early, "this is not valid Lua @@@").unwrap();
     app.reload_lua();
 
-    assert_eq!(app.app.lua.id, committed_generation);
-    assert!(app.app.lua.run_command("early_phase_committed", None));
+    assert_eq!(app.lua_probe().id, committed_generation);
+    assert!(app.lua_probe().run_command("early_phase_committed", None));
     assert!(app.run_lua("assert(_G.__early_phase_committed == true)"));
 
     std::fs::write(&early, "-- fixed\n").unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
 }
 
 #[test]
@@ -590,13 +602,12 @@ fn changed_early_launch_declarations_use_defaults_and_warn_for_restart() {
     app.reload_lua();
 
     assert!(app.run_lua("assert(smelt.cli.get('phase3_new_flag') == 'candidate-default')"));
-    assert_eq!(app.app.lua.warnings().len(), 1);
-    assert!(app.app.lua.warnings()[0].contains("restart smelt"));
+    assert_eq!(app.lua_probe().warnings().len(), 1);
+    assert!(app.lua_probe().warnings()[0].contains("restart smelt"));
 }
 
 #[test]
 fn failed_candidate_at_each_filesystem_load_phase_recovers() {
-    let environment_guard = test_environment_guard();
     let project = tempfile::tempdir().unwrap();
     let smelt_dir = project.path().join(".smelt");
     std::fs::create_dir_all(&smelt_dir).unwrap();
@@ -623,13 +634,12 @@ fn failed_candidate_at_each_filesystem_load_phase_recovers() {
         .with_init_lua(&init)
         .with_lua_load_paths(&config_dir, Some(runtime.path().to_path_buf()))
         .with_cwd(project.path())
-        .build_with_test_environment_guard(&environment_guard);
-    smelt_core::trust::mark_trusted(project.path()).unwrap();
+        .build();
+    app.mark_project_trusted(project.path()).unwrap();
     app.reload_lua();
-    let mut committed_generation = app.app.lua.id;
+    let mut committed_generation = app.lua_probe().id;
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -640,25 +650,23 @@ fn failed_candidate_at_each_filesystem_load_phase_recovers() {
     let global_plugin = global_plugin_dir.join("phase3_failure.lua");
     std::fs::write(&global_plugin, "error('global plugin candidate failure')").unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
         .contains("phase3_project"));
     std::fs::remove_file(&global_plugin).unwrap();
     app.reload_lua();
-    committed_generation = app.app.lua.id;
+    committed_generation = app.lua_probe().id;
 
     std::fs::write(&project_init, "this is not valid project Lua @@@").unwrap();
-    smelt_core::trust::mark_trusted(project.path()).unwrap();
+    app.mark_project_trusted(project.path()).unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -668,18 +676,18 @@ fn failed_candidate_at_each_filesystem_load_phase_recovers() {
         r#"smelt.cmd.register("phase3_project_recovered", function() end)"#,
     )
     .unwrap();
-    smelt_core::trust::mark_trusted(project.path()).unwrap();
+    app.mark_project_trusted(project.path()).unwrap();
     app.reload_lua();
-    committed_generation = app.app.lua.id;
+    committed_generation = app.lua_probe().id;
 
     let autoload_override = runtime_smelt.join("commands/color.lua");
     std::fs::write(&autoload_override, "error('autoload candidate failure')").unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     std::fs::write(&autoload_override, "return true\n").unwrap();
     app.reload_lua();
-    committed_generation = app.app.lua.id;
-    assert!(app.app.lua.manifest.files.contains(&autoload_override));
+    committed_generation = app.lua_probe().id;
+    assert!(app.lua_probe().manifest.files.contains(&autoload_override));
     std::fs::remove_file(&autoload_override).unwrap();
 
     let bootstrap_override = runtime_smelt.join("_bootstrap.lua");
@@ -691,15 +699,15 @@ fn failed_candidate_at_each_filesystem_load_phase_recovers() {
     )
     .unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     assert!(!bootstrap_effect.exists());
 
     std::fs::write(&bootstrap_override, "this is not valid bootstrap Lua @@@").unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.lua_probe().id, committed_generation);
     std::fs::remove_file(&bootstrap_override).unwrap();
     app.reload_lua();
-    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
 }
 
 #[test]
@@ -739,27 +747,80 @@ fn provider_reload_rebuilds_the_running_model_catalog() {
 fn setting_write_updates_desired_state_before_live_effects() {
     let mut app = TestApp::builder().build();
 
-    let succeeded = {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load(
-                r#"
+    let succeeded = app
+        .exec_lua_entry(
+            r#"
                 smelt.settings.show_slug = false
                 assert(smelt.settings.show_slug == false)
                 "#,
-            )
-            .exec()
-            .is_ok()
-    };
+        )
+        .is_ok();
     assert!(succeeded);
-    assert!(app.app.pending_runtime_reconcile);
-    assert!(app.app.core.config.settings.show_slug);
-    assert!(!app.app.lua.to_config().settings.show_slug);
+    assert!(app.lua_runtime_reconcile_pending());
+    assert!(app.core_probe().config.settings.show_slug);
+    assert!(!app.lua_probe().to_config().settings.show_slug);
 
     assert!(app.drain_idle_work());
-    assert!(!app.app.core.config.settings.show_slug);
+    assert!(!app.core_probe().config.settings.show_slug);
+}
+
+#[test]
+fn desired_state_reconstruction_lends_the_tui_host() {
+    let mut app = TestApp::builder().build();
+
+    app.run_lua_result(
+        r#"
+            local original_list = smelt.mode.list
+            smelt.mode.list = function()
+                assert(smelt.session.id() ~= "")
+                return original_list()
+            end
+            smelt.settings.show_slug = false
+            "#,
+    )
+    .expect("reconcile desired state through host-capable mode callback");
+
+    assert!(app
+        .lua_probe()
+        .desired()
+        .modes
+        .cycle
+        .iter()
+        .any(|mode| mode.as_str() == "normal"));
+}
+
+#[test]
+fn shutdown_hooks_and_state_flush_lend_the_tui_host() {
+    let mut app = TestApp::builder().build();
+    let expected_session_id = app.session_snapshot().id.clone();
+    app.exec_lua_entry(
+        r#"
+            smelt.lifecycle.on_shutdown(function(ctx)
+                _G.__shutdown_host_session = smelt.session.id()
+                _G.__shutdown_ctx_session = ctx.session_id
+            end)
+            smelt.__flush_persistent_state = function()
+                _G.__flush_host_session = smelt.session.id()
+            end
+            "#,
+    )
+    .expect("register shutdown callbacks");
+
+    let (errors, flush_error) = app.shutdown_lua();
+
+    assert!(errors.is_empty(), "shutdown errors: {errors:?}");
+    assert_eq!(flush_error, None);
+    let values: (String, String, String) = app
+        .eval_lua("return __shutdown_host_session, __shutdown_ctx_session, __flush_host_session")
+        .expect("read shutdown callback results");
+    assert_eq!(
+        values,
+        (
+            expected_session_id.clone(),
+            expected_session_id.clone(),
+            expected_session_id,
+        )
+    );
 }
 
 #[test]
@@ -767,11 +828,10 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
     use smelt_core::config::{SettingKind, SettingValue, SETTINGS};
 
     let mut app = TestApp::builder().build();
-    app.app
-        .set_placeholder(crate::app::PROMPT_WIN, "stale prediction".into());
+    app.set_prompt_placeholder_text("stale prediction".into());
 
     for declaration in SETTINGS {
-        let current = (declaration.read)(&app.app.core.config.settings);
+        let current = (declaration.read)(&app.core_probe().config.settings);
         let next = match (declaration.key, declaration.kind, current) {
             (_, SettingKind::Bool, SettingValue::Bool(value)) => SettingValue::Bool(!value),
             ("compact_threshold", SettingKind::Number, _) => SettingValue::Number(0.65),
@@ -803,13 +863,13 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
             declaration.key
         );
         assert_eq!(
-            app.app.core.config.settings.get(declaration.key),
+            app.core_probe().config.settings.get(declaration.key),
             Some(next.clone()),
             "resolved setting stayed stale for {}",
             declaration.key
         );
         assert_eq!(
-            app.app.lua.to_config().settings.get(declaration.key),
+            app.lua_probe().to_config().settings.get(declaration.key),
             Some(next),
             "desired setting stayed stale for {}",
             declaration.key
@@ -817,41 +877,57 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
     }
 
     assert!(app
-        .app
-        .ui
+        .ui_probe()
         .win(crate::app::PROMPT_WIN)
         .expect("prompt window")
         .vim_enabled());
     assert_eq!(
-        app.app.placeholder_text(crate::app::PROMPT_WIN),
+        app.placeholder_text(crate::app::PROMPT_WIN),
         None,
         "disabling prediction must clear existing ghost text"
     );
     assert_eq!(
-        app.app.core.signals.get::<bool>("settings_terminal_title"),
+        app.core_probe()
+            .signals
+            .get::<bool>("settings_terminal_title"),
         Some(false)
     );
-    assert!(!app.app.auto_reload.start_pending);
-    assert!(app.app.auto_reload.handle.is_none());
-    assert!(app.app.auto_reload.events.is_none());
-    assert!(app.app.auto_reload.setup.is_none());
+    assert!(!app.auto_reload_probe().start_pending);
+    assert!(app.auto_reload_probe().handle.is_none());
+    assert!(app.auto_reload_probe().events.is_none());
+    assert!(app.auto_reload_probe().setup.is_none());
     assert!(app.run_lua("smelt.settings.auto_reload = true"));
-    assert!(app.app.auto_reload.start_pending);
+    assert!(app.auto_reload_probe().start_pending);
     assert!(app.run_lua("smelt.settings.auto_reload = false"));
-    assert!(!app.app.auto_reload.start_pending);
-    assert!(app.app.core.config.request_runtime_config().redact_secrets);
-    assert!(app.app.core.config.request_runtime_config().cache_ttl_long);
+    assert!(!app.auto_reload_probe().start_pending);
+    assert!(
+        app.core_probe()
+            .config
+            .request_runtime_config()
+            .redact_secrets
+    );
+    assert!(
+        app.core_probe()
+            .config
+            .request_runtime_config()
+            .cache_ttl_long
+    );
 }
 
 #[test]
 fn permission_policy_is_snapshotted_per_turn_while_session_approvals_stay_live() {
     let mut app = TestApp::builder().build();
     app.start_turn(7);
-    let turn_permissions = app.app.agent.as_ref().unwrap().permissions.clone();
+    let turn_permissions = app
+        .conversation_probe()
+        .active()
+        .unwrap()
+        .permissions
+        .clone();
     assert!(turn_permissions.restrict_to_workspace());
 
     assert!(app.run_lua("smelt.settings.restrict_to_workspace = false"));
-    let current_permissions = app.app.core.permissions.snapshot();
+    let current_permissions = app.core_probe().permissions.snapshot();
     assert!(!current_permissions.restrict_to_workspace());
     assert!(
         turn_permissions.restrict_to_workspace(),
@@ -863,7 +939,7 @@ fn permission_policy_is_snapshotted_per_turn_while_session_approvals_stay_live()
     ));
 
     let trusted = std::env::temp_dir().join("smelt-phase4-session-approval");
-    app.app.grant_session_path(
+    app.grant_session_path(
         None,
         "read_file".into(),
         smelt_core::permissions::PathAccess::Read,
@@ -879,13 +955,39 @@ fn permission_policy_is_snapshotted_per_turn_while_session_approvals_stay_live()
 }
 
 #[test]
+fn relative_lua_session_path_grant_uses_runtime_cwd() {
+    let mut app = TestApp::builder().build();
+    let relative = std::path::Path::new("permission-fixtures/nested");
+    let expected = std::path::Path::new(app.cwd_str()).join(relative);
+
+    assert!(app.run_lua(
+        r#"
+        smelt.permissions.grant_session({
+          kind = "path",
+          tool = "read_file",
+          access = "read",
+          path_prefix = "permission-fixtures/nested",
+        })
+        "#,
+    ));
+
+    assert!(app.session_path_grants().iter().any(|grant| {
+        grant.tool == "read_file"
+            && grant.access == smelt_core::permissions::PathAccess::Read
+            && grant.dir == expected
+    }));
+}
+
+#[test]
 fn setting_write_reads_desired_value_while_preserving_startup_precedence() {
     let mut app = TestApp::builder().build();
-    app.app.core.startup_overrides.settings.insert(
+    app.set_startup_setting_override_for_harness(
         "show_slug".into(),
         smelt_core::config::SettingValue::Bool(true),
     );
-    app.app.core.config.settings.show_slug = true;
+    let mut settings = app.core_probe().config.settings.clone();
+    settings.show_slug = true;
+    app.set_settings_for_harness(settings);
 
     assert!(app.run_lua(
         r#"
@@ -899,14 +1001,14 @@ fn setting_write_reads_desired_value_while_preserving_startup_precedence() {
         "#,
     ));
 
-    assert!(app.app.core.config.settings.show_slug);
-    assert!(!app.app.lua.to_config().settings.show_slug);
+    assert!(app.core_probe().config.settings.show_slug);
+    assert!(!app.lua_probe().to_config().settings.show_slug);
 }
 
 #[test]
 fn table_settings_are_owned_only_by_lua_state() {
     let mut app = TestApp::builder().build();
-    let runtime_before = app.app.core.config.clone();
+    let runtime_before = app.core_probe().config.clone();
 
     assert!(app.run_lua(
         r#"
@@ -917,17 +1019,17 @@ fn table_settings_are_owned_only_by_lua_state() {
         "#,
     ));
 
-    assert_eq!(app.app.core.config, runtime_before);
+    assert_eq!(app.core_probe().config, runtime_before);
 }
 
 #[test]
 fn lua_config_session_and_transcript_contracts_are_available() {
     let mut app = TestApp::builder().build();
     app.push_user_block("hello from lua api test");
-    app.app.push_block(smelt_core::Block::Text {
+    app.push_transcript_block(smelt_core::Block::Text {
         content: "assistant line".into(),
     });
-    app.app.render_normal_to(&mut std::io::sink());
+    app.render_normal_to(&mut std::io::sink());
 
     assert!(app.run_lua(
         r#"
@@ -956,7 +1058,7 @@ fn lua_config_session_and_transcript_contracts_are_available() {
             assert(text:find("hello from lua api test", 1, true))
             local blocks = smelt.transcript.loaded_blocks_expensive()
             assert(#blocks >= 1)
-            assert(type(blocks[1].descriptor_index) == "number")
+            assert(type(blocks[1].record_index) == "number")
             assert(type(blocks[1].role) == "string")
             assert(type(smelt.transcript.rows(0, 2)) == "table")
 
@@ -972,7 +1074,7 @@ fn lua_config_session_and_transcript_contracts_are_available() {
 #[test]
 fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
     let mut app = TestApp::builder().build();
-    app.app.handle_resize(100, 32);
+    app.set_terminal_size(100, 32);
     for index in 0..700 {
         let marker = match index {
             10 => "lua sparse early exact marker",
@@ -981,33 +1083,25 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
         };
         let content = format!("block {index}: {marker}");
         if index == 10 {
-            app.app.push_block(smelt_core::Block::User {
+            app.push_transcript_block(smelt_core::Block::User {
                 text: content,
                 image_labels: Vec::new(),
                 command: false,
             });
         } else {
-            app.app.push_block(smelt_core::Block::Text { content });
+            app.push_transcript_block(smelt_core::Block::Text { content });
         }
     }
-    app.app.save_session_and_flush();
-    let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(
-        smelt_core::session::dir_for(&app.app.core.session),
-        100,
-        32,
-    )
-    .expect("load sparse transcript");
-    app.app.clear_transcript();
-    app.app
-        .session_document
-        .transcript
-        .replace_loaded_transcript(loaded);
-    app.app.session_document.transcript.set_memory_budget(
-        crate::app::transcript::TranscriptMemoryBudget {
-            hydrated_blocks: 1,
-            ..Default::default()
-        },
-    );
+    app.save_session_and_flush();
+    let loaded =
+        crate::app::history::load_transcript_tail_from_sqlite_dir(app.session_dir(), 100, 32)
+            .expect("load sparse transcript");
+    app.clear_transcript();
+    app.replace_loaded_transcript_for_harness(loaded);
+    app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 1,
+        ..Default::default()
+    });
     app.render_silent();
 
     assert!(app.run_lua(
@@ -1020,7 +1114,7 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
             assert(type(rows) == "table")
         "#,
     ));
-    let tail_snapshot = app.app.session_document.transcript.memory_snapshot();
+    let tail_snapshot = app.conversation_probe().transcript().memory_snapshot();
     assert!(tail_snapshot.hydration_reads > 0);
     assert!(
         tail_snapshot.hydrated_blocks < 100,
@@ -1042,7 +1136,7 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
             assert(text:find("lua sparse early exact marker", 1, true))
         "#,
     ));
-    let early_snapshot = app.app.session_document.transcript.memory_snapshot();
+    let early_snapshot = app.conversation_probe().transcript().memory_snapshot();
     assert!(early_snapshot.hydration_reads > tail_snapshot.hydration_reads);
     assert!(
         early_snapshot.hydrated_blocks < 100,
@@ -1053,15 +1147,11 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
 #[test]
 fn lua_context_note_updates_named_history_notes_independently() {
     let mut app = TestApp::builder().build();
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::User {
-            content: protocol::Content::text("hello"),
-            display: None,
-            command: false,
-        });
+    app.session_append_history(protocol::HistoryItem::User {
+        content: protocol::Content::text("hello"),
+        display: None,
+        command: false,
+    });
 
     assert!(app.run_lua(
         r#"
@@ -1071,7 +1161,7 @@ fn lua_context_note_updates_named_history_notes_independently() {
         "#,
     ));
 
-    let history = &app.app.core.session.history;
+    let history = &app.session_snapshot().history;
     assert!(history.iter().any(|item| matches!(
         item,
         protocol::HistoryItem::Note(note)
@@ -1092,7 +1182,7 @@ fn lua_context_note_updates_named_history_notes_independently() {
     );
 
     assert!(app.run_lua(r#"smelt.session.context_note("goal", nil)"#));
-    let history = &app.app.core.session.history;
+    let history = &app.session_snapshot().history;
     assert!(!history.iter().any(|item| matches!(
         item,
         protocol::HistoryItem::Note(note) if note.context_name() == Some("goal")
@@ -1146,7 +1236,7 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
     let mut app = TestApp::builder().build();
 
     assert!(app.run_lua(r#"require("smelt.goal").setup()"#));
-    let tools = app.app.lua.tool_defs(
+    let tools = app.lua_probe().tool_defs(
         protocol::AgentMode::normal(),
         smelt_core::lua::ToolVisibility::Interactive,
     );
@@ -1208,7 +1298,7 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
     ));
 
     app.feed_one(SourceEvent::Tick(1300));
-    app.app.tick_timers();
+    app.tick_timers();
     assert!(app.run_lua(
         r##"
             assert(_G.__goal_submit.name == "goal")
@@ -1227,18 +1317,35 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
 }
 
 #[test]
+fn relative_lua_cwd_change_resolves_from_runtime_cwd() {
+    let process_cwd = std::env::current_dir().expect("process cwd");
+    let mut app = TestApp::builder().build();
+    let target = std::path::Path::new(app.cwd_str()).join("nested-project");
+    std::fs::create_dir_all(&target).expect("create nested runtime cwd");
+    let expected = std::fs::canonicalize(&target).expect("canonical nested runtime cwd");
+
+    assert!(app.run_lua(
+        r#"
+        local out = smelt.session.switch_cwd("nested-project")
+        assert(out.pending == true)
+        "#,
+    ));
+    assert!(app.drain_idle_work());
+
+    assert_eq!(app.core_probe().env.cwd(), expected);
+    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+}
+
+#[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
-    let environment_guard = test_environment_guard();
+    let process_cwd = std::env::current_dir().expect("process cwd");
+    let process_pwd = std::env::var_os("PWD");
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let mut app = TestApp::builder().build();
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
 
-    app.app
-        .lua
-        .lua
-        .globals()
-        .set("__switch_cwd_target", expected.clone())
+    app.set_lua_string_global("__switch_cwd_target", expected.clone())
         .expect("set Lua target cwd");
     let _ = app.drain_engine_sends();
 
@@ -1252,18 +1359,21 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     ));
     assert!(app.drain_idle_work());
 
-    assert_eq!(app.app.cwd, expected);
-    assert_eq!(app.app.core.session.cwd.as_deref(), Some(expected.as_str()));
-    assert_eq!(app.app.core.env.cwd(), target);
-    assert_eq!(std::env::current_dir().expect("process cwd"), target);
-    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+    assert_eq!(app.workspace_probe().cwd(), expected);
     assert_eq!(
-        app.app.core.signals.get::<String>("cwd").as_deref(),
+        app.session_snapshot().cwd.as_deref(),
+        Some(expected.as_str())
+    );
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().expect("process cwd"), process_cwd);
+    assert_eq!(std::env::var_os("PWD"), process_pwd);
+    assert_eq!(
+        app.core_probe().signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
     );
     assert!(app
-        .app
-        .pending_history_appends
+        .conversation_probe()
+        .pending_history_appends()
         .iter()
         .any(|pending| matches!(
             pending.history_item(),
@@ -1276,14 +1386,14 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
             if context.cwd.to_string_lossy() == expected
     )));
 
-    let session_id = app.app.core.session.id.clone();
-    app.app
-        .session_append_history(protocol::HistoryItem::user(protocol::Content::text(
-            "persist cwd",
-        )));
-    app.app.save_session_and_flush();
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "persist cwd",
+    )));
+    app.save_session_and_flush();
     assert_eq!(
         crate::app::history::materialize_full_session(
+            &app.core_probe().sessions,
             &session_id,
             crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
         )
@@ -1296,7 +1406,7 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
 
 #[test]
 fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
-    let environment_guard = test_environment_guard();
+    let process_cwd = std::env::current_dir().expect("process cwd");
     let target_dir = tempfile::TempDir::new().expect("create tool cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
     let expected = target.to_string_lossy().into_owned();
@@ -1317,11 +1427,11 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
     )
     .unwrap();
 
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    smelt_core::trust::mark_trusted(&target).unwrap();
+    let mut app = TestApp::builder().build();
+    app.mark_project_trusted(&target).unwrap();
     app.start_turn(42);
-    let original_generation = app.app.lua.id;
-    let original_permissions = app.app.active_permissions();
+    let original_generation = app.lua_probe().id;
+    let original_permissions = app.active_permissions();
     let _ = app.drain_engine_sends();
     app.clear_actions();
 
@@ -1335,29 +1445,28 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
         )]),
     }));
 
-    assert_eq!(app.app.cwd, expected);
-    assert_eq!(app.app.core.env.cwd(), target);
-    assert_eq!(std::env::current_dir().unwrap(), target);
-    assert_eq!(app.app.lua.id, original_generation.wrapping_add(1));
-    assert!(app.app.pending_cwd_change.is_none());
+    assert_eq!(app.workspace_probe().cwd(), expected);
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+    assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
+    assert!(!app.workspace_probe().has_pending_change());
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .tool_defs(
-            app.app.core.config.mode.clone(),
+            app.core_probe().config.mode.clone(),
             smelt_core::lua::ToolVisibility::Interactive,
         )
         .iter()
         .any(|tool| tool.name == "target_cwd_probe"));
 
-    let active_permissions = app.app.active_permissions();
+    let active_permissions = app.active_permissions();
     assert!(!std::sync::Arc::ptr_eq(
         &active_permissions,
         &original_permissions
     ));
     assert!(std::sync::Arc::ptr_eq(
         &active_permissions,
-        &app.app.core.permissions.snapshot()
+        &app.core_probe().permissions.snapshot()
     ));
 
     let commands: Vec<_> = app
@@ -1401,11 +1510,10 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
 
 #[test]
 fn concurrent_model_tool_cannot_commit_a_cwd_change() {
-    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create concurrent tool cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    let original_cwd = app.app.cwd.clone();
+    let mut app = TestApp::builder().build();
+    let original_cwd = app.workspace_probe().cwd().to_owned();
     let original_process_cwd = std::env::current_dir().unwrap();
     assert!(app.run_lua(
         r#"
@@ -1437,9 +1545,9 @@ fn concurrent_model_tool_cannot_commit_a_cwd_change() {
         )]),
     }));
 
-    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
     assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
-    assert!(app.app.pending_cwd_change.is_none());
+    assert!(!app.workspace_probe().has_pending_change());
     assert!(app.actions().iter().any(|action| matches!(
         action,
         Action::EngineSend(command)
@@ -1459,11 +1567,10 @@ fn concurrent_model_tool_cannot_commit_a_cwd_change() {
 
 #[test]
 fn cancelled_sequential_tool_discards_its_pending_cwd_change() {
-    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create cancelled tool cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    let original_cwd = app.app.cwd.clone();
+    let mut app = TestApp::builder().build();
+    let original_cwd = app.workspace_probe().cwd().to_owned();
     assert!(app.run_lua(
         r#"
             smelt.tools.register({
@@ -1494,18 +1601,17 @@ fn cancelled_sequential_tool_discards_its_pending_cwd_change() {
             serde_json::Value::String(target.to_string_lossy().into_owned()),
         )]),
     }));
-    assert!(app.app.pending_cwd_change.is_some());
+    assert!(app.workspace_probe().has_pending_change());
 
-    app.app.discard_turn(crate::app::TurnEnd::Cancelled);
-    assert_eq!(app.app.cwd, original_cwd);
-    assert!(app.app.pending_cwd_change.is_none());
+    app.discard_turn(crate::app::TurnEnd::Cancelled);
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
+    assert!(!app.workspace_probe().has_pending_change());
     app.drain_idle_work();
-    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
 }
 
 #[test]
 fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
-    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create deferred cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
     let expected = target.to_string_lossy().into_owned();
@@ -1540,15 +1646,11 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
         ),
     )
     .unwrap();
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    smelt_core::trust::mark_trusted(&target).unwrap();
-    let original_cwd = app.app.cwd.clone();
-    let original_generation = app.app.lua.id;
-    app.app
-        .lua
-        .lua
-        .globals()
-        .set("__deferred_cwd_target", expected.clone())
+    let mut app = TestApp::builder().build();
+    app.mark_project_trusted(&target).unwrap();
+    let original_cwd = app.workspace_probe().cwd().to_owned();
+    let original_generation = app.lua_probe().id;
+    app.set_lua_string_global("__deferred_cwd_target", expected.clone())
         .unwrap();
     let _ = app.drain_engine_sends();
     app.start_turn(42);
@@ -1561,15 +1663,15 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
             assert(smelt.session.cwd() ~= _G.__deferred_cwd_target)
         "#,
     ));
-    assert_eq!(app.app.cwd, original_cwd);
-    assert_eq!(app.app.lua.id, original_generation);
-    assert!(app.app.pending_cwd_change.is_some());
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
+    assert_eq!(app.lua_probe().id, original_generation);
+    assert!(app.workspace_probe().has_pending_change());
     assert!(!app
         .drain_engine_sends()
         .into_iter()
         .any(|cmd| matches!(cmd, protocol::UiCommand::UpdateAgentProjectContext(_))));
 
-    app.app.complete_lua_tool(
+    app.complete_lua_tool(
         smelt_core::lua::ToolInvocationContext {
             request_id: 99,
             execution_mode: protocol::ToolExecutionMode::Concurrent,
@@ -1579,9 +1681,9 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
         false,
         None,
     );
-    assert_eq!(app.app.cwd, original_cwd);
-    assert_eq!(app.app.lua.id, original_generation);
-    assert!(app.app.pending_cwd_change.is_some());
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
+    assert_eq!(app.lua_probe().id, original_generation);
+    assert!(app.workspace_probe().has_pending_change());
     let commands = app.drain_engine_sends();
     assert!(!commands
         .iter()
@@ -1597,16 +1699,15 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
         } if call_id == "unrelated-tool" && content == "unrelated result"
     )));
 
-    app.app.discard_turn(crate::app::TurnEnd::Complete);
+    app.discard_turn(crate::app::TurnEnd::Complete);
     assert!(app.drain_idle_work());
 
-    assert_eq!(app.app.cwd, expected);
-    assert_eq!(app.app.core.env.cwd(), target);
-    assert_eq!(app.app.lua.id, original_generation.wrapping_add(1));
-    assert!(app.app.pending_cwd_change.is_none());
+    assert_eq!(app.workspace_probe().cwd(), expected);
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
+    assert!(!app.workspace_probe().has_pending_change());
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -1620,21 +1721,20 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
 
 #[test]
 fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
-    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create failed tool cwd tempdir");
     let smelt_dir = target_dir.path().join(".smelt");
     std::fs::create_dir_all(&smelt_dir).unwrap();
     std::fs::write(smelt_dir.join("init.lua"), "this is invalid target Lua @@@").unwrap();
 
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    let mut app = TestApp::builder().build();
+    app.mark_project_trusted(target_dir.path()).unwrap();
     app.start_turn(42);
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
-    let original_cwd = app.app.cwd.clone();
-    let original_runtime_cwd = app.app.core.env.cwd();
+    let original_cwd = app.workspace_probe().cwd().to_owned();
+    let original_runtime_cwd = app.core_probe().env.cwd();
     let original_process_cwd = std::env::current_dir().unwrap();
-    let original_generation = app.app.lua.id;
-    let original_permissions = app.app.active_permissions();
+    let original_generation = app.lua_probe().id;
+    let original_permissions = app.active_permissions();
     let _ = app.drain_engine_sends();
     app.clear_actions();
 
@@ -1648,13 +1748,13 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
         )]),
     }));
 
-    assert_eq!(app.app.cwd, original_cwd);
-    assert_eq!(app.app.core.env.cwd(), original_runtime_cwd);
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
+    assert_eq!(app.core_probe().env.cwd(), original_runtime_cwd);
     assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
-    assert_eq!(app.app.lua.id, original_generation);
-    assert!(app.app.pending_cwd_change.is_none());
+    assert_eq!(app.lua_probe().id, original_generation);
+    assert!(!app.workspace_probe().has_pending_change());
     assert!(std::sync::Arc::ptr_eq(
-        &app.app.active_permissions(),
+        &app.active_permissions(),
         &original_permissions
     ));
 
@@ -1688,7 +1788,6 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
 
 #[test]
 fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
-    let environment_guard = test_environment_guard();
     let repo = tempfile::TempDir::new().expect("create worktree repository");
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
@@ -1711,11 +1810,11 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
     git(&["add", "."]);
     git(&["commit", "-m", "initial"]);
 
-    let mut app = TestApp::builder()
-        .with_cwd(repo.path())
-        .build_with_test_environment_guard(&environment_guard);
-    app.app.core.config.settings.worktree_root = ".worktrees".into();
-    let original_cwd = app.app.cwd.clone();
+    let mut app = TestApp::builder().with_cwd(repo.path()).build();
+    let mut settings = app.core_probe().config.settings.clone();
+    settings.worktree_root = ".worktrees".into();
+    app.set_settings_for_harness(settings);
+    let original_cwd = app.workspace_probe().cwd().to_owned();
     let original_process_cwd = std::env::current_dir().unwrap();
     let invalid_init = "this is invalid target Lua @@@";
     let project_config = repo.path().join(".smelt");
@@ -1727,7 +1826,7 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
     let target = repo.path().join(".worktrees").join("broken-context");
     std::fs::create_dir_all(target.join(".smelt")).unwrap();
     std::fs::write(target.join(".smelt/init.lua"), invalid_init).unwrap();
-    smelt_core::trust::mark_trusted(&target).unwrap();
+    app.mark_project_trusted(&target).unwrap();
     std::fs::remove_dir_all(&target).unwrap();
 
     app.start_turn(42);
@@ -1743,13 +1842,13 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
         )]),
     }));
 
-    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
     assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
     assert!(
         target.is_dir(),
         "worktree creation side effect should remain"
     );
-    assert!(app.app.pending_cwd_change.is_none());
+    assert!(!app.workspace_probe().has_pending_change());
     assert!(!app.actions().iter().any(|action| matches!(
         action,
         Action::EngineSend(command)
@@ -1801,32 +1900,27 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
 
 #[test]
 fn failed_cwd_candidate_preserves_the_complete_project_context() {
-    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create failed cwd tempdir");
     let smelt_dir = target_dir.path().join(".smelt");
     std::fs::create_dir_all(&smelt_dir).unwrap();
     let init = smelt_dir.join("init.lua");
     std::fs::write(&init, "this is invalid target Lua @@@").unwrap();
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
-    let original_cwd = app.app.cwd.clone();
-    let original_runtime_cwd = app.app.core.env.cwd();
+    let mut app = TestApp::builder().build();
+    app.mark_project_trusted(target_dir.path()).unwrap();
+    let original_cwd = app.workspace_probe().cwd().to_owned();
+    let original_runtime_cwd = app.core_probe().env.cwd();
     let original_process_cwd = std::env::current_dir().unwrap();
-    let original_generation = app.app.lua.id;
+    let original_generation = app.lua_probe().id;
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
     let expected = target.to_string_lossy().into_owned();
-    app.app
-        .lua
-        .lua
-        .globals()
-        .set("__failed_cwd_target", expected.clone())
+    app.set_lua_string_global("__failed_cwd_target", expected.clone())
         .unwrap();
 
     assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__failed_cwd_target).pending == true)"));
     assert!(app.drain_idle_work());
-    assert_eq!(app.app.cwd, original_cwd);
-    assert_eq!(app.app.core.env.cwd(), original_runtime_cwd);
-    assert_eq!(app.app.lua.id, original_generation);
+    assert_eq!(app.workspace_probe().cwd(), original_cwd);
+    assert_eq!(app.core_probe().env.cwd(), original_runtime_cwd);
+    assert_eq!(app.lua_probe().id, original_generation);
     assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
 
     std::fs::write(
@@ -1834,18 +1928,20 @@ fn failed_cwd_candidate_preserves_the_complete_project_context() {
         r#"smelt.cmd.register("recovered_cwd_project", function() end)"#,
     )
     .unwrap();
-    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    app.mark_project_trusted(target_dir.path()).unwrap();
     assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__failed_cwd_target).pending == true)"));
     assert!(app.drain_idle_work());
-    assert_eq!(app.app.cwd, expected);
-    assert_eq!(app.app.lua.id, original_generation.wrapping_add(1));
-    assert!(!app.app.notification.as_ref().is_some_and(|notification| {
-        notification.summary.starts_with("cwd change:")
-            || notification.summary.starts_with("session cwd unavailable:")
-    }));
+    assert_eq!(app.workspace_probe().cwd(), expected);
+    assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
+    assert!(!app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            notification.summary.starts_with("cwd change:")
+                || notification.summary.starts_with("session cwd unavailable:")
+        }));
     assert!(app
-        .app
-        .lua
+        .lua_probe()
         .command_names_handle()
         .lock()
         .unwrap()
@@ -1854,33 +1950,37 @@ fn failed_cwd_candidate_preserves_the_complete_project_context() {
 
 #[test]
 fn loading_session_restores_persisted_cwd() {
-    let environment_guard = test_environment_guard();
+    let process_cwd = std::env::current_dir().expect("process cwd");
+    let process_pwd = std::env::var_os("PWD");
     let target_dir = tempfile::TempDir::new().expect("create resumed cwd tempdir");
-    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let mut app = TestApp::builder().build();
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
     let _ = app.drain_engine_sends();
 
-    let mut session = smelt_core::session::Session::new(app.app.core.env.pid(), target.clone());
+    let mut session = smelt_core::session::Session::new(app.core_probe().env.pid(), target.clone());
     session
         .history
         .push(protocol::HistoryItem::user(protocol::Content::text(
             "hello",
         )));
 
-    app.app.load_session(session);
+    app.load_session(session);
     assert!(app.drain_idle_work());
 
-    assert_eq!(app.app.cwd, expected);
-    assert_eq!(app.app.core.session.cwd.as_deref(), Some(expected.as_str()));
-    assert_eq!(app.app.core.env.cwd(), target);
-    assert_eq!(std::env::current_dir().expect("process cwd"), target);
-    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+    assert_eq!(app.workspace_probe().cwd(), expected);
     assert_eq!(
-        app.app.core.signals.get::<String>("cwd").as_deref(),
+        app.session_snapshot().cwd.as_deref(),
         Some(expected.as_str())
     );
-    assert!(app.app.session_document.live_session.is_none());
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().expect("process cwd"), process_cwd);
+    assert_eq!(std::env::var_os("PWD"), process_pwd);
+    assert_eq!(
+        app.core_probe().signals.get::<String>("cwd").as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(!app.conversation_probe().has_live_session());
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
         protocol::UiCommand::UpdateAgentProjectContext(context)
@@ -1892,11 +1992,11 @@ fn loading_session_restores_persisted_cwd() {
         std::fs::canonicalize(display_target_dir.path()).expect("canonical display-only cwd");
     let display_expected = display_target.to_string_lossy().into_owned();
     let display_session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), display_target.clone());
+        smelt_core::session::Session::new(app.core_probe().env.pid(), display_target.clone());
     let display_session_id = display_session.id.clone();
     let transcript = smelt_core::content::transcript::Transcript::new();
 
-    app.app.load_store_backed_session(
+    app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             display_session,
             crate::app::transcript::LoadedTranscript::full(transcript),
@@ -1906,17 +2006,15 @@ fn loading_session_restores_persisted_cwd() {
     );
     assert!(app.drain_idle_work());
 
-    assert_eq!(app.app.cwd, display_expected);
+    assert_eq!(app.workspace_probe().cwd(), display_expected);
     assert_eq!(
-        app.app.core.session.cwd.as_deref(),
+        app.session_snapshot().cwd.as_deref(),
         Some(display_expected.as_str())
     );
-    assert_eq!(app.app.core.env.cwd(), display_target);
+    assert_eq!(app.core_probe().env.cwd(), display_target);
     assert_eq!(
-        app.app
-            .session_document
-            .live_session
-            .as_ref()
+        app.conversation_probe()
+            .live_session()
             .map(|live| live.id()),
         Some(display_session_id.as_str())
     );
@@ -1931,25 +2029,24 @@ fn loading_session_restores_persisted_cwd() {
     std::fs::create_dir(&missing_path).expect("create missing cwd before deletion");
     let missing_path = std::fs::canonicalize(&missing_path).expect("canonical missing cwd");
     drop(missing_dir);
-    let fallback = app.app.cwd.clone();
-    let fallback_path = app.app.core.env.cwd();
+    let fallback = app.workspace_probe().cwd().to_owned();
+    let fallback_path = app.core_probe().env.cwd();
     let missing_cwd = missing_path.to_string_lossy().into_owned();
     let missing_session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), missing_path.clone());
+        smelt_core::session::Session::new(app.core_probe().env.pid(), missing_path.clone());
 
-    app.app.load_session(missing_session);
+    app.load_session(missing_session);
 
-    assert_eq!(app.app.cwd, fallback);
+    assert_eq!(app.workspace_probe().cwd(), fallback);
     assert_eq!(
-        app.app.core.session.cwd.as_deref(),
+        app.session_snapshot().cwd.as_deref(),
         Some(missing_cwd.as_str()),
         "runtime fallback must not rewrite canonical session metadata"
     );
-    assert_eq!(app.app.core.env.cwd(), fallback_path);
+    assert_eq!(app.core_probe().env.cwd(), fallback_path);
     assert!(app
-        .app
-        .notification
-        .as_ref()
+        .overlays_probe()
+        .notification()
         .is_some_and(|n| n.summary.contains("session cwd unavailable")));
 }
 
@@ -1986,7 +2083,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
         )),
         meta: None,
     }));
-    assert_eq!(app.app.core.session.current_context_tokens(), Some(123));
+    assert_eq!(app.session_snapshot().current_context_tokens(), Some(123));
     assert!(app.run_lua("assert(smelt.session.context_tokens() == 123)"));
 
     let mut in_flight_history = completed_history;
@@ -1997,18 +2094,18 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
         update: protocol::CanonicalHistoryDelta::new(0, in_flight_history),
     }));
 
-    assert_eq!(app.app.core.session.current_context_tokens(), None);
-    assert_eq!(app.app.core.session.display_context_tokens(), Some(123));
+    assert_eq!(app.session_snapshot().current_context_tokens(), None);
+    assert_eq!(app.session_snapshot().display_context_tokens(), Some(123));
     assert!(app.run_lua("assert(smelt.session.context_tokens() == 123)"));
 }
 
 #[test]
 fn lua_history_entries_and_search_return_sequences() {
     let mut app = TestApp::builder().build();
-    app.app.input_history.push("first prompt".into());
-    app.app.input_history.push("older bun prompt".into());
-    app.app.input_history.push("newer bun prompt".into());
-    app.app.input_history.push("second search target".into());
+    app.push_history_entry("first prompt".into());
+    app.push_history_entry("older bun prompt".into());
+    app.push_history_entry("newer bun prompt".into());
+    app.push_history_entry("second search target".into());
 
     assert!(app.run_lua(
         r#"
@@ -2111,13 +2208,8 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
 fn lua_buf_win_overlay_contracts_are_available() {
     let mut app = TestApp::builder().build();
 
-    {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load(
-                r##"
+    app.run_lua_result(
+        r##"
             local ns = smelt.ns("coverage.buf_win_overlay")
             assert(type(ns) == "number", "ns returns number")
 
@@ -2161,8 +2253,14 @@ fn lua_buf_win_overlay_contracts_are_available() {
             assert(type(win:scroll()) == "table")
             assert(win:scroll(0) == win)
             assert(win:scroll("tail") == win)
-            local win_reg = win:key("x", function() end)
+            local key_win = smelt.prompt.win()
+            local win_reg = key_win:key("x", function() error("removed keymap fired") end)
             assert(win_reg:remove() == true)
+            _G.coverage_replacement_hits = 0
+            _G.coverage_replacement_reg = key_win:key("x", function()
+                _G.coverage_replacement_hits = _G.coverage_replacement_hits + 1
+            end)
+            key_win:focus()
 
             local measure = smelt.ui.layout.measure(12, 3)
             local mw, mh = measure:get()
@@ -2187,16 +2285,19 @@ fn lua_buf_win_overlay_contracts_are_available() {
             local overlay_reg = overlay:key("y", function() end)
             assert(overlay_reg:remove() == true)
         "##,
-            )
-            .exec()
-            .expect("lua buf/win/overlay contracts");
-    }
+    )
+    .expect("lua buf/win/overlay contracts");
 
-    assert!(app.app.ui.named_buf("coverage.contract.buf").is_some());
-    assert!(app.app.ui.named_win("coverage.contract.win").is_some());
+    app.press(KeyCode::Char('x'));
+    let replacement_hits: u32 = app
+        .eval_lua("return _G.coverage_replacement_hits")
+        .expect("replacement keymap hit count");
+    assert_eq!(replacement_hits, 1);
+
+    assert!(app.ui_probe().named_buf("coverage.contract.buf").is_some());
+    assert!(app.ui_probe().named_win("coverage.contract.win").is_some());
     assert!(app
-        .app
-        .ui
+        .ui_probe()
         .named_overlay("coverage.contract.overlay")
         .is_some());
 }
@@ -2205,13 +2306,8 @@ fn lua_buf_win_overlay_contracts_are_available() {
 fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
     let mut app = TestApp::builder().with_vim(true).build();
 
-    {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load(
-                r##"
+    app.run_lua_result(
+        r##"
             smelt.prompt.set_text("aéz")
             assert(smelt.prompt.text() == "aéz", "prompt text roundtrip")
             assert(smelt.prompt.cursor(999) == #"aéz", "prompt cursor clamps")
@@ -2265,10 +2361,8 @@ fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
             assert(smelt.vim.mode() == "normal", "vim mode set")
             smelt.vim.set_mode("insert")
         "##,
-            )
-            .exec()
-            .expect("lua prompt/text/theme/work/keymap/vim contracts");
-    }
+    )
+    .expect("lua prompt/text/theme/work/keymap/vim contracts");
 
     assert_eq!(app.state().prompt_text, "aXz");
 }
@@ -2277,13 +2371,8 @@ fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
 fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
     let mut app = TestApp::builder().build();
 
-    {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load(
-                r#"
+    app.run_lua_result(
+        r#"
             local size = smelt.ui.size()
             assert(type(size.width) == "number" and type(size.height) == "number", "ui size")
             assert(type(smelt.win.transcript()) == "userdata", "transcript win")
@@ -2327,17 +2416,15 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
             assert(limit:remove() == true, "context hook remove")
             assert(not pcall(function() smelt.engine.ask({ system = "" }) end), "ask validates system")
         "#,
-            )
-            .exec()
-            .expect("lua picker/permissions/notify/engine/ui contracts");
-    }
+    )
+    .expect("lua picker/permissions/notify/engine/ui contracts");
 }
 
 #[test]
 fn lua_layout_is_applied_before_first_render() {
     let mut app = TestApp::builder().build();
 
-    assert!(app.run_lua(
+    app.run_lua_result(
         r#"
             local top = require("smelt.prompt_bar").top_win:rect()
             local transcript = smelt.win.transcript():rect()
@@ -2345,19 +2432,18 @@ fn lua_layout_is_applied_before_first_render() {
             assert(transcript ~= nil, "transcript has layout rect before first render")
             assert(top.row > transcript.row, "top bar is below transcript")
         "#,
-    ));
+    )
+    .expect("Lua layout is available before first render");
 }
 
 #[test]
 fn empty_banner_returns_to_startup_position_after_resize_round_trip() {
     fn banner_label_rect(app: &TestApp) -> crate::smelt_edit::Rect {
         let win = app
-            .app
-            .ui
+            .ui_probe()
             .named_win("smelt.banner.label.win")
             .expect("banner label window");
-        app.app
-            .ui
+        app.ui_probe()
             .win(win)
             .and_then(|win| win.viewport.map(|vp| vp.rect))
             .expect("banner label viewport")
@@ -2365,17 +2451,13 @@ fn empty_banner_returns_to_startup_position_after_resize_round_trip() {
 
     fn paint_and_emit_resize(app: &mut TestApp) {
         app.render_silent();
-        crate::lua::with_app_ptr(&mut app.app, |app| {
-            app.dispatch_ui_window_events(false);
-        });
+        app.dispatch_ui_window_events(false);
     }
 
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    crate::lua::with_app_ptr(&mut app.app, |app| {
-        let err = app.bring_up_lua("launch", true);
-        assert_eq!(err, None);
-    });
+    let err = app.bring_up_lua("launch", true);
+    assert_eq!(err, None);
 
     let startup = banner_label_rect(&app);
 
@@ -2395,12 +2477,10 @@ fn empty_banner_stays_inside_transcript_when_prompt_grows() {
 
     fn banner_label_rect(app: &TestApp) -> crate::smelt_edit::Rect {
         let win = app
-            .app
-            .ui
+            .ui_probe()
             .named_win("smelt.banner.label.win")
             .expect("banner label window");
-        app.app
-            .ui
+        app.ui_probe()
             .win(win)
             .and_then(|win| win.viewport.map(|vp| vp.rect))
             .expect("banner label viewport")
@@ -2408,30 +2488,24 @@ fn empty_banner_stays_inside_transcript_when_prompt_grows() {
 
     fn paint_and_emit_resize(app: &mut TestApp) {
         app.render_silent();
-        crate::lua::with_app_ptr(&mut app.app, |app| {
-            app.dispatch_ui_window_events(false);
-        });
+        app.dispatch_ui_window_events(false);
     }
 
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    crate::lua::with_app_ptr(&mut app.app, |app| {
-        let err = app.bring_up_lua("launch", true);
-        assert_eq!(err, None);
-    });
+    let err = app.bring_up_lua("launch", true);
+    assert_eq!(err, None);
 
     app.type_text("one\ntwo\nthree\nfour\nfive\nsix");
     paint_and_emit_resize(&mut app);
 
     let label = banner_label_rect(&app);
     let transcript = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(crate::app::TRANSCRIPT_WIN)
         .expect("transcript rect");
     let prompt = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(crate::app::PROMPT_WIN)
         .expect("prompt rect");
 
@@ -2453,8 +2527,7 @@ fn win_rect_prefers_current_layout_after_resize_before_paint() {
 
     app.set_terminal_size(100, 30);
     let expected = app
-        .app
-        .ui
+        .ui_probe()
         .split_rect(crate::app::TRANSCRIPT_WIN)
         .expect("transcript split rect after resize");
 
@@ -2490,7 +2563,7 @@ fn reload_clears_surviving_prompt_keymaps() {
     app.type_char('X');
 
     assert_eq!(app.state().prompt_text, "aXb");
-    assert_eq!(app.app.prompt_win().cpos(), 2);
+    assert_eq!(app.prompt_cpos(), 2);
 }
 
 #[test]
@@ -2515,9 +2588,7 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
     }
 
     fn transcript_rows(app: &mut TestApp) -> Vec<String> {
-        let _guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .materialize_loaded_transcript_display_rows_expensive()
+        app.materialize_loaded_transcript_display_rows_expensive()
             .iter()
             .cloned()
             .collect()
@@ -2528,14 +2599,14 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
     write_renderer(&init, Some("reload-marker-v1"));
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    app.app.handle_resize(100, 30);
-    app.app.start_tool(
+    app.set_terminal_size(100, 30);
+    app.start_tool(
         "reload-call-1".into(),
         "bash".into(),
         protocol::StyledLines::from_plain("echo reload"),
         std::collections::HashMap::new(),
     );
-    app.app.finish_tool(
+    app.finish_tool(
         "reload-call-1",
         smelt_core::transcript_model::ToolStatus::Ok,
         Some(Box::new(smelt_core::transcript_model::ToolOutput {
@@ -2566,10 +2637,8 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
 #[test]
 fn named_overlay_open_refreshes_title_in_place() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
 
-    let lua = &app.app.lua.lua;
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "perf_panel.buf" })
             local win = smelt.win.new(buf, { name = "perf_panel.win", surface = "inert" })
@@ -2584,13 +2653,14 @@ fn named_overlay_open_refreshes_title_in_place() {
             })
             "#,
     )
-    .exec()
     .expect("first open");
 
-    let id1 = app.app.ui.named_overlay("perf_panel").expect("named id");
+    let id1 = app
+        .ui_probe()
+        .named_overlay("perf_panel")
+        .expect("named id");
     let title1 = app
-        .app
-        .ui
+        .ui_probe()
         .overlay(id1)
         .and_then(|ov| {
             ov.layout
@@ -2602,7 +2672,7 @@ fn named_overlay_open_refreshes_title_in_place() {
         .unwrap_or_default();
     assert_eq!(title1, "old title");
 
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "perf_panel.buf" })
             local win = smelt.win.new(buf, { name = "perf_panel.win", surface = "inert" })
@@ -2617,18 +2687,15 @@ fn named_overlay_open_refreshes_title_in_place() {
             })
             "#,
     )
-    .exec()
     .expect("second open");
 
     let id2 = app
-        .app
-        .ui
+        .ui_probe()
         .named_overlay("perf_panel")
         .expect("named id after refresh");
     assert_eq!(id1, id2, "same OverlayId across refresh");
     let title2 = app
-        .app
-        .ui
+        .ui_probe()
         .overlay(id2)
         .and_then(|ov| {
             ov.layout
@@ -2644,36 +2711,32 @@ fn named_overlay_open_refreshes_title_in_place() {
 #[test]
 fn named_win_refresh_preserves_wrap_when_omitted() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    let lua = &app.app.lua.lua;
 
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "w.buf" })
             smelt.win.new(buf, { name = "w.win", wrap = false })
             "#,
     )
-    .exec()
     .expect("first open");
 
-    let wid = app.app.ui.named_win("w.win").expect("named win");
+    let wid = app.ui_probe().named_win("w.win").expect("named win");
     assert!(
-        !app.app.ui.win(wid).unwrap().wrap,
+        !app.ui_probe().win(wid).unwrap().wrap,
         "wrap should be false after explicit open"
     );
 
     // Re-open with the same name but no `wrap` key → wrap should stay false.
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "w.buf" })
             smelt.win.new(buf, { name = "w.win" })
             "#,
     )
-    .exec()
     .expect("refresh");
 
     assert!(
-        !app.app.ui.win(wid).unwrap().wrap,
+        !app.ui_probe().win(wid).unwrap().wrap,
         "wrap must be preserved across named refresh (regression)"
     );
 }
@@ -2681,30 +2744,26 @@ fn named_win_refresh_preserves_wrap_when_omitted() {
 #[test]
 fn named_buf_and_win_survive_across_open_calls() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    let lua = &app.app.lua.lua;
 
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "x.buf" })
             smelt.win.new(buf, { name = "x.win" })
             "#,
     )
-    .exec()
     .expect("first");
-    let first_buf = app.app.ui.named_buf("x.buf").expect("buf 1");
-    let first_win = app.app.ui.named_win("x.win").expect("win 1");
+    let first_buf = app.ui_probe().named_buf("x.buf").expect("buf 1");
+    let first_win = app.ui_probe().named_win("x.win").expect("win 1");
 
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "x.buf" })
             smelt.win.new(buf, { name = "x.win" })
             "#,
     )
-    .exec()
     .expect("second");
-    let second_buf = app.app.ui.named_buf("x.buf").expect("buf 2");
-    let second_win = app.app.ui.named_win("x.win").expect("win 2");
+    let second_buf = app.ui_probe().named_buf("x.buf").expect("buf 2");
+    let second_win = app.ui_probe().named_win("x.win").expect("win 2");
 
     assert_eq!(
         first_buf, second_buf,
@@ -2716,10 +2775,8 @@ fn named_buf_and_win_survive_across_open_calls() {
 #[test]
 fn named_overlay_refresh_replaces_layout_structure() {
     let mut app = TestApp::builder().build();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    let lua = &app.app.lua.lua;
 
-    lua.load(
+    app.run_lua_result(
         r#"
             local buf = smelt.buf.new({ name = "a.buf" })
             local win = smelt.win.new(buf, { name = "a.win" })
@@ -2731,19 +2788,17 @@ fn named_overlay_refresh_replaces_layout_structure() {
             })
             "#,
     )
-    .exec()
     .expect("first open");
 
-    let id = app.app.ui.named_overlay("ov").expect("named");
+    let id = app.ui_probe().named_overlay("ov").expect("named");
     let leaves_before = app
-        .app
-        .ui
+        .ui_probe()
         .overlay(id)
         .map(|ov| ov.layout.leaves_in_order().len())
         .unwrap_or(0);
     assert_eq!(leaves_before, 1);
 
-    lua.load(
+    app.run_lua_result(
         r#"
             local b1 = smelt.buf.new({ name = "a.buf" })
             local b2 = smelt.buf.new({ name = "b.buf" })
@@ -2760,12 +2815,10 @@ fn named_overlay_refresh_replaces_layout_structure() {
             })
             "#,
     )
-    .exec()
     .expect("structural refresh");
 
     let leaves_after = app
-        .app
-        .ui
+        .ui_probe()
         .overlay(id)
         .map(|ov| ov.layout.leaves_in_order().len())
         .unwrap_or(0);
@@ -2882,20 +2935,20 @@ fn reload_lua_refreshes_overlay_title_from_disk() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
         assert_eq!(read_overlay_title(&app, "plug").as_deref(), Some("v1"));
     }
-    let id1 = app.app.ui.named_overlay("plug").unwrap();
+    let id1 = app.ui_probe().named_overlay("plug").unwrap();
 
     std::fs::write(&init, body("v2")).unwrap();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
-    let id2 = app.app.ui.named_overlay("plug").expect("overlay survives");
+    let id2 = app
+        .ui_probe()
+        .named_overlay("plug")
+        .expect("overlay survives");
     assert_eq!(id1, id2, "OverlayId preserved across reload");
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
         assert_eq!(read_overlay_title(&app, "plug").as_deref(), Some("v2"));
     }
 }
@@ -2915,23 +2968,14 @@ fn reload_lua_preserves_nested_state_tables() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
-        app.app.reload_lua();
+        app.reload_lua();
+        app.reload_lua();
     }
     let width: u64 = app
-        .app
-        .lua
-        .lua
-        .load("return __smelt_state__.nested.cfg.panel.width")
-        .eval()
+        .eval_lua("return __smelt_state__.nested.cfg.panel.width")
         .unwrap();
     let last: u64 = app
-        .app
-        .lua
-        .lua
-        .load("return __smelt_state__.nested.cfg.panel.history[3]")
-        .eval()
+        .eval_lua("return __smelt_state__.nested.cfg.panel.history[3]")
         .unwrap();
     assert_eq!(width, 80);
     assert_eq!(last, 3);
@@ -2939,7 +2983,6 @@ fn reload_lua_preserves_nested_state_tables() {
 
 #[test]
 fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
-    let _home_guard = test_home_guard();
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(
@@ -2951,10 +2994,9 @@ fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
     )
     .unwrap();
 
-    let mut app = TestApp::builder()
-        .with_init_lua(&init)
-        .build_with_test_home_guard(&_home_guard);
-    let state_path = smelt_core::config::state_dir()
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let state_path = app
+        .session_storage_root()
         .join("plugins")
         .join("flush_reload.json");
     assert!(
@@ -2962,18 +3004,10 @@ fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
         "debounced save should not have reached disk before reload"
     );
     let dirty_before: bool = app
-        .app
-        .lua
-        .lua
-        .load("return __smelt_persistent_state__.flush_reload.dirty == true")
-        .eval()
+        .eval_lua("return __smelt_persistent_state__.flush_reload.dirty == true")
         .unwrap();
     let pending_before: bool = app
-        .app
-        .lua
-        .lua
-        .load("return __smelt_persistent_state__.flush_reload.pending ~= nil")
-        .eval()
+        .eval_lua("return __smelt_persistent_state__.flush_reload.pending ~= nil")
         .unwrap();
     assert!(
         dirty_before,
@@ -2990,11 +3024,7 @@ fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
     assert_eq!(json["value"], "before-reload");
 
     let entry_swept_after: bool = app
-        .app
-        .lua
-        .lua
-        .load("return __smelt_persistent_state__.flush_reload == nil")
-        .eval()
+        .eval_lua("return __smelt_persistent_state__.flush_reload == nil")
         .unwrap();
     assert!(
         entry_swept_after,
@@ -3030,35 +3060,27 @@ fn reload_lua_does_not_double_wrap_tools_register() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
         for _ in 0..5 {
-            app.app.reload_lua();
+            app.reload_lua();
         }
         // Register a tool with no `summary`; the bootstrap wrap should
         // populate it once. If the wrap had compounded across reloads
         // the call would still succeed - but every reload would add a
         // closure frame on top. The functional check: registration
         // works and the registered summary handler runs.
-        app.app
-            .lua
-            .lua
-            .load(
-                r#"
-                    smelt.tools.register({
-                        name = "t",
-                        description = "",
-                        parameters = { type = "object", properties = {} },
-                        execute = function() return "" end,
-                    })
-                    "#,
-            )
-            .exec()
-            .expect("register after many reloads");
+        app.exec_lua_entry(
+            r#"
+                smelt.tools.register({
+                    name = "t",
+                    description = "",
+                    parameters = { type = "object", properties = {} },
+                    execute = function() return "" end,
+                })
+                "#,
+        )
+        .expect("register after many reloads");
     }
-    let summary = app
-        .app
-        .lua
-        .tool_summary("t", &std::collections::HashMap::new());
+    let summary = app.tool_summary("t", &std::collections::HashMap::new());
     // `default_summary` returns "" when args have no recognised keys.
     assert!(
         summary.is_empty(),
@@ -3110,10 +3132,10 @@ fn reload_lua_reaps_anonymous_overlay_keeps_named() {
     // after reload while the named one survives. (Total overlay
     // count is noisy: reload_lua emits a `notify(...)` toast which
     // adds its own short-lived overlay.)
-    let named_id = app.app.ui.named_overlay("mix").expect("named");
+    let named_id = app.ui_probe().named_overlay("mix").expect("named");
     let anon_id = (1u32..)
         .map(crate::smelt_edit::OverlayId)
-        .find(|id| *id != named_id && app.app.ui.overlay(*id).is_some())
+        .find(|id| *id != named_id && app.ui_probe().overlay(*id).is_some())
         .expect("anonymous overlay present");
 
     // Second version drops the anonymous overlay; named one stays.
@@ -3136,15 +3158,14 @@ fn reload_lua_reaps_anonymous_overlay_keeps_named() {
     )
     .unwrap();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
     assert!(
-        app.app.ui.named_overlay("mix").is_some(),
+        app.ui_probe().named_overlay("mix").is_some(),
         "named overlay survives reload"
     );
     assert!(
-        app.app.ui.overlay(anon_id).is_none(),
+        app.ui_probe().overlay(anon_id).is_none(),
         "anonymous overlay {} should be reaped",
         anon_id.0
     );
@@ -3175,25 +3196,26 @@ fn reload_lua_retires_named_resources_not_declared_by_the_candidate() {
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
     let overlay = app
-        .app
-        .ui
+        .ui_probe()
         .named_overlay("retired.overlay")
         .expect("committed named overlay");
     let paint = app
-        .app
-        .paint_registry
+        .paint_registry_probe()
         .id_by_name("retired.paint")
         .expect("committed named paint");
 
     std::fs::write(&init, "-- resource declarations removed\n").unwrap();
     app.reload_lua();
 
-    assert!(app.app.ui.overlay(overlay).is_none());
-    assert!(app.app.ui.named_overlay("retired.overlay").is_none());
-    assert!(app.app.ui.named_win("retired.win").is_none());
-    assert!(app.app.ui.named_buf("retired.buf").is_none());
-    assert!(!app.app.paint_registry.contains(paint));
-    assert!(app.app.paint_registry.id_by_name("retired.paint").is_none());
+    assert!(app.ui_probe().overlay(overlay).is_none());
+    assert!(app.ui_probe().named_overlay("retired.overlay").is_none());
+    assert!(app.ui_probe().named_win("retired.win").is_none());
+    assert!(app.ui_probe().named_buf("retired.buf").is_none());
+    assert!(!app.paint_registry_probe().contains(paint));
+    assert!(app
+        .paint_registry_probe()
+        .id_by_name("retired.paint")
+        .is_none());
 }
 
 #[test]
@@ -3221,25 +3243,22 @@ fn reload_lua_preserves_named_paint_slot() {
     let mut app = TestApp::builder().with_init_lua(&init).build();
 
     let pre_named = app
-        .app
-        .paint_registry
+        .paint_registry_probe()
         .id_by_name("probe.named")
         .expect("named pre id");
     // The anonymous slot has no name binding; locate it as the only
     // un-named PaintId currently registered.
-    let pre_anon = find_anon_paint(&app.app);
+    let pre_anon = find_anon_paint(&app);
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
 
     let post_named = app
-        .app
-        .paint_registry
+        .paint_registry_probe()
         .id_by_name("probe.named")
         .expect("named post id");
-    let post_anon = find_anon_paint(&app.app);
+    let post_anon = find_anon_paint(&app);
     assert_eq!(
         pre_named, post_named,
         "named paint slot must keep stable PaintId across reload"
@@ -3249,11 +3268,11 @@ fn reload_lua_preserves_named_paint_slot() {
         "anonymous paint slot must allocate a fresh id on reload"
     );
     assert!(
-        !app.app.paint_registry.contains(pre_anon),
+        !app.paint_registry_probe().contains(pre_anon),
         "old anonymous PaintId must be reaped"
     );
-    assert!(app.app.paint_registry.contains(post_named));
-    assert!(app.app.paint_registry.contains(post_anon));
+    assert!(app.paint_registry_probe().contains(post_named));
+    assert!(app.paint_registry_probe().contains(post_anon));
 }
 
 #[test]
@@ -3280,27 +3299,23 @@ fn reload_lua_drains_ready_hooks_with_kind_reload() {
     // banner). Fire it manually here since this test specifically
     // covers the `kind = "launch"` drain.
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        let _ = app.app.bring_up_lua("launch", true);
+        let _ = app.bring_up_lua("launch", true);
     }
 
-    let read = |rt: &crate::lua::LuaRuntime, k: &str| -> String {
-        rt.lua
-            .load(format!(
-                "return tostring(__smelt_state__['ready_kind_probe'].{k})"
-            ))
-            .eval::<String>()
-            .unwrap()
+    let read = |app: &mut TestApp, k: &str| -> String {
+        app.eval_lua(&format!(
+            "return tostring(__smelt_state__['ready_kind_probe'].{k})"
+        ))
+        .unwrap()
     };
-    assert_eq!(read(&app.app.lua, "fires"), "1");
-    assert_eq!(read(&app.app.lua, "last_kind"), "launch");
+    assert_eq!(read(&mut app, "fires"), "1");
+    assert_eq!(read(&mut app, "last_kind"), "launch");
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
-    assert_eq!(read(&app.app.lua, "fires"), "2");
-    assert_eq!(read(&app.app.lua, "last_kind"), "reload");
+    assert_eq!(read(&mut app, "fires"), "2");
+    assert_eq!(read(&mut app, "last_kind"), "reload");
 }
 
 #[test]
@@ -3319,16 +3334,13 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
     .unwrap();
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let exists = |rt: &crate::lua::LuaRuntime, k: &str| -> bool {
-        rt.lua
-            .load(format!("return __smelt_state__['{k}'] ~= nil"))
-            .eval::<bool>()
+    let exists = |app: &mut TestApp, k: &str| -> bool {
+        app.eval_lua(&format!("return __smelt_state__['{k}'] ~= nil"))
             .unwrap()
     };
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        assert!(exists(&app.app.lua, "kept"));
-        assert!(exists(&app.app.lua, "dropped"));
+        assert!(exists(&mut app, "kept"));
+        assert!(exists(&mut app, "dropped"));
     }
 
     // Edit: only the "kept" plugin remains.
@@ -3340,11 +3352,10 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
     )
     .unwrap();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
-        assert!(exists(&app.app.lua, "kept"));
+        app.reload_lua();
+        assert!(exists(&mut app, "kept"));
         assert!(
-            !exists(&app.app.lua, "dropped"),
+            !exists(&mut app, "dropped"),
             "dropped plugin's state should be swept"
         );
     }
@@ -3352,7 +3363,6 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
 
 #[test]
 fn reload_clears_every_lua_surface() {
-    let environment_guard = test_environment_guard();
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     // Populate every observable surface from user init.lua so the
@@ -3416,10 +3426,8 @@ fn reload_clears_every_lua_surface() {
     )
     .unwrap();
 
-    let mut app = TestApp::builder()
-        .with_init_lua(&init)
-        .build_with_test_environment_guard(&environment_guard);
-    let shared = app.app.lua.shared().core.clone();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let shared = app.lua_probe().shared().core.clone();
 
     // Pre-reload: every surface has at least the seeded entry.
     assert!(shared.commands.lock().unwrap().contains_key("seed_cmd"));
@@ -3446,20 +3454,20 @@ fn reload_clears_every_lua_surface() {
         .any(|p| p.name.as_deref() == Some("seed_provider")));
     assert!(!shared.hooks.tool_before.is_empty());
     assert!(!shared.hooks.provider_response.is_empty());
-    assert!(!app.app.core.timers.is_empty());
+    assert!(!app.core_probe().timers.is_empty());
     assert!(!shared.tasks.lock().unwrap().is_empty());
     let anon_overlay = (1u32..)
         .map(crate::smelt_edit::OverlayId)
         .find(|id| {
-            Some(*id) != app.app.ui.named_overlay("seed.ov") && app.app.ui.overlay(*id).is_some()
+            Some(*id) != app.ui_probe().named_overlay("seed.ov")
+                && app.ui_probe().overlay(*id).is_some()
         })
         .expect("anonymous overlay present");
 
     // Edit init.lua to empty + drop the "seed_plugin" state slot.
     std::fs::write(&init, "").unwrap();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
 
     // Post-reload: every user-registered surface and UI resource from the
@@ -3515,7 +3523,7 @@ fn reload_clears_every_lua_surface() {
         shared.hooks.provider_response.is_empty(),
         "provider middleware cleared"
     );
-    assert!(app.app.core.timers.is_empty(), "timers cleared");
+    assert!(app.core_probe().timers.is_empty(), "timers cleared");
     assert!(shared.tasks.lock().unwrap().is_empty(), "tasks cleared");
     assert!(
         shared.task_inbox.lock().unwrap().is_empty(),
@@ -3526,19 +3534,15 @@ fn reload_clears_every_lua_surface() {
         "json_inbox drained"
     );
     assert!(
-        app.app.ui.named_overlay("seed.ov").is_none(),
+        app.ui_probe().named_overlay("seed.ov").is_none(),
         "stale named overlay retired"
     );
     assert!(
-        app.app.ui.overlay(anon_overlay).is_none(),
+        app.ui_probe().overlay(anon_overlay).is_none(),
         "anonymous overlay reaped"
     );
     let dropped_state: bool = app
-        .app
-        .lua
-        .lua
-        .load("return __smelt_state__.seed_plugin ~= nil")
-        .eval()
+        .eval_lua("return __smelt_state__.seed_plugin ~= nil")
         .unwrap();
     assert!(!dropped_state, "dropped-plugin state slot swept");
 }
@@ -3561,35 +3565,18 @@ fn reload_lua_cancels_in_flight_tasks() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     // Sanity: task is parked but not complete.
-    let completed: bool = app
-        .app
-        .lua
-        .lua
-        .load("return _G.__task_completed__")
-        .eval()
-        .unwrap();
+    let completed: bool = app.eval_lua("return _G.__task_completed__").unwrap();
     assert!(!completed, "task shouldn't have completed yet");
 
     // Edit init.lua so reload doesn't re-spawn the task.
     std::fs::write(&init, "_G.__task_completed__ = false").unwrap();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
     // Drive: cancelled tasks should be a no-op since we cleared them.
-    let outs = app.app.lua.drive_tasks(app.app.core.clock.instant_now());
-    assert!(
-        outs.is_empty(),
-        "no task outputs after reload cancellation (saw {} entries)",
-        outs.len()
-    );
-    let completed: bool = app
-        .app
-        .lua
-        .lua
-        .load("return _G.__task_completed__")
-        .eval()
-        .unwrap();
+    let output_count = app.drive_lua_tasks_once();
+    assert_eq!(output_count, 0, "no task outputs after reload cancellation");
+    let completed: bool = app.eval_lua("return _G.__task_completed__").unwrap();
     assert!(!completed, "cancelled task must not have run to completion");
 }
 
@@ -3616,42 +3603,33 @@ async fn reload_lua_via_engine_dismisses_open_modal() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.apply_lua_command("open_modal");
-        app.app.drive_lua_tasks();
+        app.apply_lua_command("open_modal");
+        app.drive_lua_tasks();
     }
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.ui_probe().active_modal().is_some(),
         "modal should be open after /open_modal"
     );
 
     // Drive the reload through the Lua binding (the gate lives there,
     // not in `TuiApp::reload_lua`). The binding should dismiss the
     // modal and call through to `reload_lua` instead of bailing out.
-    {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load("smelt.engine.reload()")
-            .exec()
-            .expect("reload succeeds even with modal open");
-    }
+    app.exec_lua_entry("smelt.engine.reload()")
+        .expect("reload succeeds even with modal open");
     assert!(app.pending_lua_reload());
     assert!(app.drain_idle_work());
     assert!(
-        app.app.ui.active_modal().is_none(),
+        app.ui_probe().active_modal().is_none(),
         "modal must be dismissed after reload"
     );
 
     // Reload should have re-registered the command - reopen works.
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.apply_lua_command("open_modal");
-        app.app.drive_lua_tasks();
+        app.apply_lua_command("open_modal");
+        app.drive_lua_tasks();
     }
     assert!(
-        app.app.ui.active_modal().is_some(),
+        app.ui_probe().active_modal().is_some(),
         "command survived reload and reopens modal"
     );
 }
@@ -3682,19 +3660,16 @@ fn reload_lua_preserves_user_size_override() {
     .unwrap();
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let id = app.app.ui.named_overlay("res").unwrap();
+    let id = app.ui_probe().named_overlay("res").unwrap();
     // Simulate a user resize gesture.
-    if let Some(ov) = app.app.ui.overlay_mut(id) {
-        ov.size_override = Some((50, 18));
-    }
+    app.set_overlay_size_override(id, (50, 18));
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
-    let id2 = app.app.ui.named_overlay("res").expect("survives");
+    let id2 = app.ui_probe().named_overlay("res").expect("survives");
     assert_eq!(id, id2);
-    let ov = app.app.ui.overlay(id2).unwrap();
+    let ov = app.ui_probe().overlay(id2).unwrap();
     assert_eq!(
         ov.size_override,
         Some((50, 18)),
@@ -3713,7 +3688,7 @@ fn scheduled_reload_runs_after_turn_is_idle() {
 
     app.start_turn(1);
     assert!(app.run_lua("return smelt.engine.reload_when_idle()"));
-    assert!(app.app.pending_lua_reload);
+    assert!(app.pending_lua_reload());
     assert_eq!(app.lua_int_global("reload_count"), Some(1));
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
@@ -3722,7 +3697,7 @@ fn scheduled_reload_runs_after_turn_is_idle() {
         meta: None,
     }));
 
-    assert!(!app.app.pending_lua_reload);
+    assert!(!app.pending_lua_reload());
     assert_eq!(
         app.lua_int_global("reload_count"),
         Some(1),
@@ -3745,23 +3720,22 @@ fn hot_reload_reconciles_plan_mode_cycle_and_permissions() {
         ])
         .build();
     let plan = AgentMode::parse("plan").unwrap();
-    assert!(!app.app.core.config.mode_cycle.contains(&plan));
+    assert!(!app.core_probe().config.mode_cycle.contains(&plan));
 
     std::fs::write(&init, "require(\"smelt.plugins.plan_mode\")\n").unwrap();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app.reload_lua();
+        app.reload_lua();
     }
 
-    assert!(app.app.core.config.mode_cycle.contains(&plan));
-    let outcome = app.app.core.permissions.evaluate_tool(
+    assert!(app.core_probe().config.mode_cycle.contains(&plan));
+    let outcome = app.core_probe().permissions.evaluate_tool(
         plan.clone(),
         smelt_core::permissions::ToolOrigin::Lua,
         "smelt_reload",
         &std::collections::HashMap::new(),
     );
     assert_eq!(outcome.decision, protocol::Decision::Deny);
-    let outcome = app.app.core.permissions.evaluate_tool(
+    let outcome = app.core_probe().permissions.evaluate_tool(
         plan,
         smelt_core::permissions::ToolOrigin::Lua,
         "present_plan",
@@ -3782,8 +3756,7 @@ fn plan_mode_reload_registers_present_plan_when_already_in_plan() {
         .with_mode(plan.clone())
         .build();
     let tools = app
-        .app
-        .lua
+        .lua_probe()
         .tool_defs(plan, smelt_core::lua::ToolVisibility::Interactive);
     assert!(
         tools.iter().any(|t| t.name == "present_plan"),

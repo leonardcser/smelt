@@ -2,20 +2,20 @@
 //! Files: `<cache_dir>/web/<hash>`, format: `<expires_unix_secs>\n<body>`.
 
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
 
-fn cache_dir() -> PathBuf {
-    engine::paths::cache_dir().join("web")
+fn cache_dir(cache_root: &Path) -> PathBuf {
+    cache_root.join("web")
 }
 
-fn key_path(key: &str) -> PathBuf {
+fn key_path(cache_root: &Path, key: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
     let hash = hasher.finish();
-    cache_dir().join(format!("{hash:x}"))
+    cache_dir(cache_root).join(format!("{hash:x}"))
 }
 
 fn now_secs() -> u64 {
@@ -26,8 +26,8 @@ fn now_secs() -> u64 {
 }
 
 /// Return the cached body for `key`, or `None` if missing or expired (expired entries deleted).
-pub(crate) fn get(key: &str) -> Option<String> {
-    let path = key_path(key);
+pub(crate) fn get(cache_root: &Path, key: &str) -> Option<String> {
+    let path = key_path(cache_root, key);
     let contents = std::fs::read_to_string(&path).ok()?;
     let (first_line, rest) = contents.split_once('\n')?;
     let expires: u64 = first_line.parse().ok()?;
@@ -39,16 +39,16 @@ pub(crate) fn get(key: &str) -> Option<String> {
 }
 
 /// Cache `value` under `key` with the default TTL (15 minutes).
-pub(crate) fn put(key: &str, value: &str) {
-    put_with_ttl(key, value, DEFAULT_TTL);
+pub(crate) fn put(cache_root: &Path, key: &str, value: &str) {
+    put_with_ttl(cache_root, key, value, DEFAULT_TTL);
 }
 
 /// Cache `value` under `key` with an explicit TTL.
 /// Uses temp-file + rename so readers never see a partial write.
-pub(crate) fn put_with_ttl(key: &str, value: &str, ttl: Duration) {
-    let dir = cache_dir();
+pub(crate) fn put_with_ttl(cache_root: &Path, key: &str, value: &str, ttl: Duration) {
+    let dir = cache_dir(cache_root);
     let _ = std::fs::create_dir_all(&dir);
-    let path = key_path(key);
+    let path = key_path(cache_root, key);
     let tmp = dir.join(format!("{}.tmp", std::process::id()));
     let expires = now_secs() + ttl.as_secs();
     let data = format!("{expires}\n{value}");

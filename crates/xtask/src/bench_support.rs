@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
+
+type TestExecutableCache = Mutex<HashMap<(String, bool, String), PathBuf>>;
 
 pub(crate) struct CargoTestBenchmark {
     pub(crate) package: &'static str,
@@ -12,6 +16,7 @@ pub(crate) struct CargoTestBenchmark {
     pub(crate) features: &'static [&'static str],
     pub(crate) env: Vec<(String, String)>,
     pub(crate) bench_name: &'static str,
+    pub(crate) ignored: bool,
 }
 
 pub(crate) fn run_cargo_test_benchmark(bench: CargoTestBenchmark) {
@@ -30,11 +35,32 @@ pub(crate) fn run_cargo_test_benchmark(bench: CargoTestBenchmark) {
 }
 
 fn build_test_binary(bench: &CargoTestBenchmark) -> Result<PathBuf, String> {
+    static EXECUTABLES: OnceLock<TestExecutableCache> = OnceLock::new();
+    let key = (
+        bench.package.to_string(),
+        bench.release,
+        bench.features.join(","),
+    );
+    let mut executables = EXECUTABLES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(executable) = executables.get(&key).filter(|path| path.is_file()) {
+        return Ok(executable.clone());
+    }
+
+    let executable = compile_test_binary(bench)?;
+    executables.insert(key, executable.clone());
+    Ok(executable)
+}
+
+fn compile_test_binary(bench: &CargoTestBenchmark) -> Result<PathBuf, String> {
     let mut cmd = Command::new("cargo");
     cmd.args([
         "test",
         "-p",
         bench.package,
+        "--lib",
         "--no-run",
         "--message-format=json",
     ]);
@@ -44,7 +70,6 @@ fn build_test_binary(bench: &CargoTestBenchmark) -> Result<PathBuf, String> {
     if !bench.features.is_empty() {
         cmd.arg("--features").arg(bench.features.join(","));
     }
-    cmd.arg(bench.test_filter);
 
     let output = cmd
         .output()
@@ -122,12 +147,11 @@ fn run_test_binary_with_time(
     cmd.args(["-v", "-o"])
         .arg(&time_output)
         .arg(&executable)
-        .args([
-            bench.test_filter,
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ]);
+        .arg(bench.test_filter);
+    if bench.ignored {
+        cmd.arg("--ignored");
+    }
+    cmd.args(["--nocapture", "--test-threads=1"]);
     for (key, value) in &bench.env {
         cmd.env(key, value);
     }
@@ -146,12 +170,11 @@ fn run_test_binary_with_proc_sampler(
     executable: PathBuf,
 ) -> Result<std::process::ExitStatus, String> {
     let mut cmd = Command::new(&executable);
-    cmd.args([
-        bench.test_filter,
-        "--ignored",
-        "--nocapture",
-        "--test-threads=1",
-    ]);
+    cmd.arg(bench.test_filter);
+    if bench.ignored {
+        cmd.arg("--ignored");
+    }
+    cmd.args(["--nocapture", "--test-threads=1"]);
     for (key, value) in &bench.env {
         cmd.env(key, value);
     }

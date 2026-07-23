@@ -230,13 +230,17 @@ pub fn store_error(
 }
 
 pub fn ensure_session_db_read_only(dir_path: &Path) -> SessionStoreResult<()> {
-    open_session_db(dir_path)
+    let state_root = crate::config::state_dir();
+    ensure_session_db_read_only_in(&state_root, dir_path)
 }
 
-fn open_session_db(dir_path: &Path) -> SessionStoreResult<()> {
-    reject_symlink(dir_path, "open")?;
+pub(crate) fn ensure_session_db_read_only_in(
+    state_root: &Path,
+    dir_path: &Path,
+) -> SessionStoreResult<()> {
+    reject_symlink_in(state_root, dir_path, "open")?;
     let db_path = dir_path.join("session.db");
-    reject_symlink(&db_path, "open")?;
+    reject_symlink_in(state_root, &db_path, "open")?;
     if !db_path.is_file() {
         return Err(SessionStoreError::MissingDatabase {
             id: session_dir_id(dir_path),
@@ -249,7 +253,26 @@ fn open_session_db(dir_path: &Path) -> SessionStoreResult<()> {
 
 pub(crate) fn reject_symlink(path: &Path, operation: &'static str) -> SessionStoreResult<()> {
     let state_root = crate::config::state_dir();
-    let inspect_state_ancestors = path.starts_with(&state_root);
+    let root = if path.starts_with(&state_root) {
+        state_root.as_path()
+    } else {
+        path
+    };
+    reject_symlink_in(root, path, operation)
+}
+
+pub(crate) fn reject_symlink_in(
+    state_root: &Path,
+    path: &Path,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    if !path.starts_with(state_root) {
+        return Err(SessionStoreError::Io {
+            operation: "confine session path beneath",
+            path: state_root.display().to_string(),
+            message: format!("{} escaped its storage root", path.display()),
+        });
+    }
     for candidate in path.ancestors() {
         match std::fs::symlink_metadata(candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -268,11 +291,15 @@ pub(crate) fn reject_symlink(path: &Path, operation: &'static str) -> SessionSto
                 });
             }
         }
-        if !inspect_state_ancestors || candidate == state_root {
-            break;
+        if candidate == state_root {
+            return Ok(());
         }
     }
-    Ok(())
+    Err(SessionStoreError::Io {
+        operation: "inspect storage root for",
+        path: path.display().to_string(),
+        message: format!("storage root {} was not an ancestor", state_root.display()),
+    })
 }
 
 fn session_dir_id(dir_path: &Path) -> String {

@@ -26,6 +26,62 @@ pub enum TrustState {
     Untrusted { hash: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct TrustStore {
+    path: PathBuf,
+}
+
+impl TrustStore {
+    pub fn new(state_root: PathBuf) -> Self {
+        Self {
+            path: state_root.join(TRUST_FILE),
+        }
+    }
+
+    pub fn from_process() -> Self {
+        Self::new(engine::state_dir())
+    }
+
+    pub fn project_trust_state(&self, cwd: &Path) -> TrustState {
+        let Some(hash) = project_content_hash(cwd) else {
+            return TrustState::NoContent;
+        };
+        let store = self.load();
+        let key = canonical_key(cwd);
+        match store.get(&key) {
+            Some(entry) if entry.hash == hash => TrustState::Trusted { hash },
+            _ => TrustState::Untrusted { hash },
+        }
+    }
+
+    /// Returns the recorded hash, or `Err` if no relevant content exists.
+    pub fn mark_trusted(&self, cwd: &Path) -> Result<String, String> {
+        let hash = project_content_hash(cwd)
+            .ok_or_else(|| "no project content under .smelt/ to trust".to_string())?;
+        let mut store = self.load();
+        store.insert(canonical_key(cwd), TrustEntry { hash: hash.clone() });
+        self.save(&store)?;
+        Ok(hash)
+    }
+
+    fn load(&self) -> BTreeMap<String, TrustEntry> {
+        let Ok(bytes) = fs::read(&self.path) else {
+            return BTreeMap::new();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    fn save(&self, store: &BTreeMap<String, TrustEntry>) -> Result<(), String> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create trust dir: {e}"))?;
+        }
+        let bytes =
+            serde_json::to_vec_pretty(store).map_err(|e| format!("serialize trust: {e}"))?;
+        fs::write(&self.path, bytes).map_err(|e| format!("write trust file: {e}"))?;
+        Ok(())
+    }
+}
+
 pub fn trust_path() -> PathBuf {
     engine::state_dir().join(TRUST_FILE)
 }
@@ -105,25 +161,11 @@ fn relevant_file(rel: &Path) -> bool {
 }
 
 pub fn project_trust_state(cwd: &Path) -> TrustState {
-    let Some(hash) = project_content_hash(cwd) else {
-        return TrustState::NoContent;
-    };
-    let store = load_store();
-    let key = canonical_key(cwd);
-    match store.get(&key) {
-        Some(entry) if entry.hash == hash => TrustState::Trusted { hash },
-        _ => TrustState::Untrusted { hash },
-    }
+    TrustStore::from_process().project_trust_state(cwd)
 }
 
-/// Returns the recorded hash, or `Err` if no relevant content exists.
 pub fn mark_trusted(cwd: &Path) -> Result<String, String> {
-    let hash = project_content_hash(cwd)
-        .ok_or_else(|| "no project content under .smelt/ to trust".to_string())?;
-    let mut store = load_store();
-    store.insert(canonical_key(cwd), TrustEntry { hash: hash.clone() });
-    save_store(&store)?;
-    Ok(hash)
+    TrustStore::from_process().mark_trusted(cwd)
 }
 
 fn canonical_key(cwd: &Path) -> String {
@@ -131,24 +173,6 @@ fn canonical_key(cwd: &Path) -> String {
         .unwrap_or_else(|_| cwd.to_path_buf())
         .to_string_lossy()
         .into_owned()
-}
-
-fn load_store() -> BTreeMap<String, TrustEntry> {
-    let path = trust_path();
-    let Ok(bytes) = fs::read(&path) else {
-        return BTreeMap::new();
-    };
-    serde_json::from_slice(&bytes).unwrap_or_default()
-}
-
-fn save_store(store: &BTreeMap<String, TrustEntry>) -> Result<(), String> {
-    let path = trust_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create trust dir: {e}"))?;
-    }
-    let bytes = serde_json::to_vec_pretty(store).map_err(|e| format!("serialize trust: {e}"))?;
-    fs::write(&path, bytes).map_err(|e| format!("write trust file: {e}"))?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -764,12 +764,13 @@ fn compile_layout_ir_with_cache(
                         Some(&spec.old),
                     )
                 } else {
-                    smelt_core::content::highlight::build_diff_ir_ext(
+                    smelt_core::content::highlight::build_diff_ir_ext_with_source(
                         &spec.old,
                         &spec.new,
                         &spec.path,
                         &spec.anchor,
                         ext,
+                        &spec.base,
                     )
                 };
                 SourceViewIr::Diff(ir)

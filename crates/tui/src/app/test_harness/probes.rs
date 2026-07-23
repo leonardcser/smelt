@@ -55,7 +55,7 @@ impl TestApp {
             overrides: smelt_core::custom_commands::CommandOverrides::default(),
         };
         let turn = self.app.begin_custom_command_turn(cmd)?;
-        self.app.agent = Some(turn);
+        self.app.conversation.set_active(Some(turn));
         self.drain_cmd();
         self.actions.iter().rev().find_map(|a| match a {
             Action::EngineSend(cmd) => match cmd.as_ref() {
@@ -94,14 +94,14 @@ impl TestApp {
         // Prompt-docked pickers own the prompt through Lua registrations on
         // the prompt window, not through overlay focus. Reloading drops those
         // registrations before the probe installs its own clean prompt state.
-        if !self.app.picker_state.is_empty() {
+        if !!self.app.overlays.has_pickers() {
             self.reload_lua();
         }
         self.app.timers.pending_chord = None;
         self.app.timers.pending_pane_chord = None;
         self.app.ui.cancel_pointer_interaction();
         self.app.app_focus = AppFocus::Prompt;
-        self.app.term_focused = true;
+        self.app.set_terminal_focus_for_harness(true);
         self.app.clear_prompt_prediction();
         let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
         if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
@@ -123,8 +123,7 @@ impl TestApp {
             .collect()
     }
 
-    fn respond_ask_with_text(&mut self, id: u64, text: &str) {
-        let _g = crate::lua::install_app_ptr(&mut self.app);
+    pub(crate) fn respond_ask_with_text(&mut self, id: u64, text: &str) {
         self.app
             .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                 id,
@@ -138,8 +137,40 @@ impl TestApp {
         self.app.drive_lua_tasks();
     }
 
-    fn publish_turn_end_for_probe(&mut self) {
-        let _g = crate::lua::install_app_ptr(&mut self.app);
+    pub(crate) fn respond_ask_with_error(&mut self, id: u64, kind: protocol::EngineAskErrorKind) {
+        self.app
+            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id,
+                message: None,
+                error: Some(protocol::EngineAskError {
+                    kind,
+                    message: kind.as_str().to_string(),
+                }),
+            });
+        self.app.drive_lua_tasks();
+    }
+
+    pub(crate) fn respond_ask_with_tool_call(&mut self, id: u64, call_id: &str, name: &str) {
+        self.app
+            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id,
+                message: Some(protocol::Message::assistant(
+                    None,
+                    None,
+                    Some(vec![protocol::ToolCall::new(
+                        call_id.into(),
+                        protocol::FunctionCall {
+                            name: name.into(),
+                            arguments: "{}".into(),
+                        },
+                    )]),
+                )),
+                error: None,
+            });
+        self.app.drive_lua_tasks();
+    }
+
+    pub(crate) fn publish_turn_end_for_probe(&mut self) {
         self.app.core.signals.emit_dyn(
             "turn_end",
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
@@ -153,22 +184,18 @@ impl TestApp {
     }
 
     fn bump_input_epoch_for_probe(&mut self) {
-        let _g = crate::lua::install_app_ptr(&mut self.app);
         self.app.bump_epoch("input_epoch");
         self.app.pump_lua();
     }
 
     fn probe_stale_prompt_prediction_response(&mut self, variant: u8) {
-        let seq = self.app.core.session.history.len();
+        let seq = self.app.conversation.session().history.len();
         self.app
-            .core
-            .session
-            .history
-            .push(protocol::HistoryItem::user(protocol::Content::text(
+            .conversation
+            .append_history_item(protocol::HistoryItem::user(protocol::Content::text(
                 format!("fuzz stale prompt prediction {variant}/{seq}"),
             )));
         {
-            let _g = crate::lua::install_app_ptr(&mut self.app);
             self.app.bump_epoch("history_epoch");
             self.app.pump_lua();
         }
@@ -198,11 +225,11 @@ impl TestApp {
         // Prompt-docked pickers can open from pending Lua tasks after the
         // probe's initial cleanup. Reloading drops their prompt keymaps while
         // leaving the prediction placeholder intact for the oracle below.
-        if !self.app.picker_state.is_empty() {
+        if !!self.app.overlays.has_pickers() {
             self.reload_lua();
         }
         self.app.app_focus = AppFocus::Prompt;
-        self.app.term_focused = true;
+        self.app.set_terminal_focus_for_harness(true);
         let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
         if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
             if win.vim_enabled() {
@@ -237,7 +264,7 @@ impl TestApp {
                 self.app.timers.pending_chord.is_some(),
                 self.app.timers.pending_pane_chord.is_some(),
                 self.app.ui.overlay_count(),
-                self.app.picker_state.len(),
+                self.app.overlays.picker_count(),
             );
         }
         assert_eq!(self.state().prompt_text, "ab");
@@ -270,7 +297,7 @@ impl TestApp {
             self.cancel();
         }
         self.force_prompt_keyboard_focus();
-        self.app.queued_inputs.clear();
+        self.app.prompt.clear_queue();
         let _ = self.run_lua(r#"smelt.prompt.set_text("")"#);
         if variant % 4 == 1 {
             self.install_prompt_cursor_trap(variant);
@@ -355,25 +382,16 @@ impl TestApp {
         self.app.set_settings_for_harness(settings);
 
         self.app.core.config.context_window = Some(100);
-        let session = &mut self.app.core.session;
-        session.context_tokens = None;
-        session.context_tokens_history_len = None;
-        session.context_token_identity = None;
-        session.display_context_tokens = None;
-        session.display_context_token_identity = None;
-        session.checkpoint = None;
-        session.context_snapshots.clear();
-        session.turn_metas.clear();
-        session.history.clear();
-        session
-            .history
-            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        self.app.conversation.reset_context_accounting_for_harness();
+        self.app
+            .conversation
+            .replace_history_for_harness(vec![protocol::HistoryItem::user(
+                protocol::Content::text("u1"),
+            )]);
         self.push_assistant_text("a1");
         self.app
-            .core
-            .session
-            .history
-            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+            .conversation
+            .append_history_item(protocol::HistoryItem::user(protocol::Content::text("u2")));
     }
 
     /// Side-channel: exercise the real compaction prepare-request path through
@@ -385,7 +403,6 @@ impl TestApp {
         // compaction history so stale callbacks from earlier random input are
         // not attributed to the prepare-request lifecycle.
         {
-            let _g = crate::lua::install_app_ptr(&mut self.app);
             self.app.flush_lua_callbacks();
             self.app.drive_lua_tasks();
         }
@@ -429,7 +446,6 @@ impl TestApp {
         let full_history = protocol::history_to_messages(&self.app.model_history());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         {
-            let _g = crate::lua::install_app_ptr(&mut self.app);
             self.app
                 .dispatch_host_call(engine::HostCall::PrepareRequest {
                     messages: engine::PreparedRequestMessages::model_only(full_history),
@@ -457,7 +473,6 @@ impl TestApp {
         };
 
         {
-            let _g = crate::lua::install_app_ptr(&mut self.app);
             self.app
                 .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                     id: ask_id,

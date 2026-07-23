@@ -763,7 +763,7 @@ Asynchronous HTTP get/post.
 
 #### `smelt.http.cache`
 
-Process-wide HTTP response cache.
+Runtime-owned HTTP response cache.
 
 - `smelt.http.cache.read` :: `fun(key: string): string?`
   Look up a cached HTTP response by `key`.
@@ -908,18 +908,16 @@ Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.
   Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure.
 - `smelt.os.getenv` :: `fun(name: string): string?`
   Return the value of the environment variable `name`, or `nil` if it is not set.
-- `smelt.os.home` :: `fun(): string?`
-  Return the user's home directory, or `nil` if it cannot be determined.
+- `smelt.os.home` :: `fun(): string`
+  Return the runtime home directory.
 - `smelt.os.open_url` :: `fun(url: string): boolean, string?`
   Open `url` in the system's default browser.
 - `smelt.os.open_url_if_available` :: `fun(url: string): table`
   Open `url` only when the host environment can auto-open a browser.
 - `smelt.os.pid` :: `fun(): integer`
-  Return the OS process id of the running smelt instance.
+  Return the runtime process id.
 - `smelt.os.platform` :: `fun(): string`
   Return the target operating system as reported by `std::env::consts::OS` (e.g.
-- `smelt.os.set_cwd` :: `fun(p: string): boolean, string?`
-  Change the process working directory to `p`.
 - `smelt.os.setenv` :: `fun(name: string, value: string): nil`
   Set the process environment variable `name` to `value`.
 - `smelt.os.tempdir` :: `fun(): string`
@@ -945,9 +943,9 @@ Pure path arithmetic: normalize, join, relative, expand, display, etc.
 - `smelt.path.canonical` :: `fun(p: string): string?, string?`
   Resolve `p` to its canonical absolute form (following symlinks).
 - `smelt.path.commands_dir` :: `fun(): string`
-  Return the absolute path to the slash-commands directory under the user config root.
+  Return the absolute path to the slash-commands directory under the runtime config root.
 - `smelt.path.config_dir` :: `fun(): string`
-  Return the absolute path to smelt's user config directory.
+  Return the absolute path to smelt's runtime config directory.
 - `smelt.path.display` :: `fun(p: string): string`
   Return a user-friendly rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).
 - `smelt.path.display_streaming` :: `fun(p: string): string`
@@ -1787,7 +1785,7 @@ Register and list slash commands.
 - `smelt.cmd.register` (Host) :: `fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg`
   Register a slash command `name` whose `handler` is invoked when the user runs it.
 - `smelt.cmd.run` (UiHost) :: `fun(line: string): nil`
-  Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it.
+  Schedule the slash-command line `line` (with or without leading `/`) as if the user had typed it.
 
 #### `smelt.mode`
 
@@ -1873,7 +1871,7 @@ Transcript display policy and rendered transcript inspection.
 - `smelt.transcript.loaded_block_at_row` (UiHost) :: `fun(row: integer): table?`
   Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block.
 - `smelt.transcript.loaded_blocks_expensive` (UiHost) :: `fun(): table`
-  Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`.
+  Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`.
 - `smelt.transcript.loaded_text_expensive` (UiHost) :: `fun(): string`
   Return the currently loaded transcript display text as a single newline-joined string.
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
@@ -1889,7 +1887,7 @@ Transcript display policy and rendered transcript inspection.
 - `smelt.transcript.view` (UiHost) :: `fun(): smelt.transcript.View?`
   Return the latest committed transcript view, or nil before the first projection.
 - `smelt.transcript.visible_blocks` (UiHost) :: `fun(): table`
-  Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries.
+  Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line }` entries.
 - `smelt.transcript.watch_view` (UiHost) :: `fun(callback: fun(value: smelt.transcript.View)): smelt.Reg`
   Observe committed transcript views.
 

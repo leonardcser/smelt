@@ -183,17 +183,17 @@ impl TuiApp {
     }
 
     fn transcript_indexed_text_for_entry(&self, entry: &TranscriptSearchLayoutEntry) -> String {
-        let history = self.session_document.transcript.history();
+        let history = self.conversation.transcript().history();
         let mut text = String::new();
         for id in &entry.block_ids {
-            let Some(descriptor) = history.descriptor(*id) else {
+            let Some(record) = history.cloned_block(*id) else {
                 continue;
             };
-            let tool_state = descriptor
+            let tool_state = record
                 .tool_call_id()
                 .and_then(|call_id| history.tool_state(call_id));
             let block_text =
-                smelt_core::transcript_model::transcript_indexed_text(&descriptor, tool_state)
+                smelt_core::transcript_model::transcript_indexed_text(&record, tool_state)
                     .indexed_text;
             if !text.is_empty() {
                 text.push('\n');
@@ -225,34 +225,30 @@ impl TuiApp {
         };
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
-        let _ = self
-            .session_document
-            .transcript
-            .activate_descriptor_window_for_block_idx(width, block_idx, viewport_rows);
+        let _ = self.conversation.activate_transcript_search_record_window(
+            width,
+            block_idx,
+            viewport_rows,
+        );
     }
 
     fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
-        let Some(start) = self
-            .session_document
-            .transcript
-            .history()
-            .descriptor_dirty_from()
-        else {
+        let Some(start) = self.conversation.transcript().history().record_dirty_from() else {
             return Vec::new();
         };
         let _perf = smelt_perf::perf::begin("search:transcript:dirty_candidate_scan");
-        let history = self.session_document.transcript.history();
+        let history = self.conversation.transcript().history();
         let mut scanned = 0u64;
         let mut out = Vec::new();
         for id in history.order.iter().skip(start.min(history.order.len())) {
-            let Some(descriptor) = history.descriptor(*id) else {
+            let Some(record) = history.cloned_block(*id) else {
                 continue;
             };
             scanned = scanned.saturating_add(1);
-            let tool_state = descriptor
+            let tool_state = record
                 .tool_call_id()
                 .and_then(|call_id| history.tool_state(call_id));
-            if smelt_core::transcript_model::transcript_indexed_text(&descriptor, tool_state)
+            if smelt_core::transcript_model::transcript_indexed_text(&record, tool_state)
                 .indexed_text
                 .contains(query)
             {
@@ -269,22 +265,24 @@ impl TuiApp {
 
     fn transcript_search_store(&mut self) -> Option<&smelt_store::SessionReader> {
         let session_dir = self
-            .session_document
-            .transcript
+            .conversation
+            .transcript()
             .session_dir()
             .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| smelt_core::session::dir_for(&self.core.session));
+            .unwrap_or_else(|| self.conversation.current_session_dir());
         if self
-            .search
-            .transcript_store
-            .as_ref()
+            .overlays
+            .transcript_search_store()
             .is_none_or(|store| store.session_dir != session_dir)
         {
             let db =
                 smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
-            self.search.transcript_store = Some(TranscriptSearchStore { session_dir, db });
+            self.overlays
+                .install_transcript_search_store(TranscriptSearchStore { session_dir, db });
         }
-        self.search.transcript_store.as_ref().map(|store| &store.db)
+        self.overlays
+            .transcript_search_store()
+            .map(|store| &store.db)
     }
 
     fn sqlite_transcript_candidate_blocks(
@@ -296,9 +294,8 @@ impl TuiApp {
         let dirty_blocks = self.dirty_transcript_candidate_blocks(query);
         let width = self.transcript_width() as u16;
         let origin_block = self
-            .session_document
-            .transcript
-            .block_id_at_or_before_row(
+            .conversation
+            .transcript_search_block_at_row(
                 &self.lua,
                 width,
                 origin.row,
@@ -310,7 +307,7 @@ impl TuiApp {
             SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
         };
         let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
-        let descriptors_persisted = self.session_document.descriptors_persisted();
+        let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
                 .search_transcript_candidate_page(query, origin_block, store_direction, limit)
@@ -333,9 +330,7 @@ impl TuiApp {
                     }
                 }
             }
-            if page.is_empty()
-                && !descriptors_persisted
-                && db.transcript_descriptor_count().ok() == Some(0)
+            if page.is_empty() && !records_persisted && db.transcript_record_count().ok() == Some(0)
             {
                 return None;
             }
@@ -376,30 +371,20 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let layout = {
             let _perf = smelt_perf::perf::begin("search:transcript:candidate_layout");
-            match candidate_blocks {
-                Some(candidate_blocks) => self
-                    .session_document
-                    .transcript
-                    .materialize_exact_loaded_search_layout_for_blocks(
-                        &self.lua,
-                        width,
-                        candidate_blocks,
-                    ),
-                None => self
-                    .session_document
-                    .transcript
-                    .materialize_exact_loaded_search_layout(&self.lua, width),
-            }
+            self.conversation.materialize_transcript_search_layout(
+                &self.lua,
+                width,
+                candidate_blocks,
+            )
         };
         let candidate_key = candidate_blocks.unwrap_or(&[]);
         let key = self.transcript_search_key(layout.generation, candidate_key);
         if self
-            .search
-            .transcript_index
-            .as_ref()
+            .overlays
+            .transcript_search_index()
             .is_some_and(|index| index.key == key)
         {
-            return self.search.transcript_index.as_ref();
+            return self.overlays.transcript_search_index();
         }
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_build");
@@ -408,14 +393,12 @@ impl TuiApp {
             "search:transcript:index_trigram_build_enabled",
             u64::from(index_trigrams),
         );
-        self.search.transcript_index = Some(build_transcript_search_index(
-            key,
-            &layout,
-            index_trigrams,
-            |layout_entry| self.transcript_indexed_text_for_entry(layout_entry),
-        ));
-        record_index_size(self.search.transcript_index.as_ref()?);
-        self.search.transcript_index.as_ref()
+        let index = build_transcript_search_index(key, &layout, index_trigrams, |layout_entry| {
+            self.transcript_indexed_text_for_entry(layout_entry)
+        });
+        record_index_size(&index);
+        self.overlays.install_transcript_search_index(index);
+        self.overlays.transcript_search_index()
     }
 
     pub(super) fn new_transcript_search_session(
@@ -450,9 +433,8 @@ impl TuiApp {
         smelt_perf::perf::record_value("search:transcript:candidates", candidates.len() as u64);
         let width = self.transcript_width() as u16;
         let total_rows = self
-            .session_document
-            .transcript
-            .approximate_scrollbar_total_rows(&self.lua, width)
+            .conversation
+            .transcript_search_total_rows(&self.lua, width)
             .max(indexed_total_rows);
         Some(TranscriptSearchSession {
             key,
@@ -489,7 +471,10 @@ impl TuiApp {
                 .next_unscanned_transcript_candidate_block(session, origin, direction)
                 .is_some();
         }
-        let current_key = self.search.transcript_index.as_ref().map(|index| index.key);
+        let current_key = self
+            .overlays
+            .transcript_search_index()
+            .map(|index| index.key);
         current_key == Some(session.key)
             && self
                 .next_unscanned_transcript_candidate(session, origin, direction)
@@ -616,9 +601,8 @@ impl TuiApp {
         let row = origin.row.min(session.total_rows.saturating_sub(1));
         let width = self.transcript_width() as u16;
         let anchor = self
-            .session_document
-            .transcript
-            .search_anchor_at_row(&self.lua, width, row);
+            .conversation
+            .transcript_search_anchor_at_row(&self.lua, width, row);
         let key = match (anchor, direction) {
             (
                 crate::app::transcript::TranscriptSearchAnchor::EstimatedRow(_),
@@ -736,7 +720,7 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> Option<usize> {
-        let index = self.search.transcript_index.as_ref()?;
+        let index = self.overlays.transcript_search_index()?;
         match direction {
             SearchDirection::Forward => session.candidates.iter().copied().find(|entry_index| {
                 !session.scanned.get(*entry_index).copied().unwrap_or(true)
@@ -819,9 +803,8 @@ impl TuiApp {
         direction: SearchDirection,
     ) -> Option<u64> {
         let width = self.transcript_width() as u16;
-        self.session_document
-            .transcript
-            .block_id_at_or_before_row(
+        self.conversation
+            .transcript_search_block_at_row(
                 &self.lua,
                 width,
                 origin.row,
@@ -843,14 +826,16 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
-        let _ = self
-            .session_document
-            .transcript
-            .activate_descriptor_window_for_block_idx(width, block_idx, viewport_rows);
-        let layout = self
-            .session_document
-            .transcript
-            .materialize_exact_loaded_search_layout_for_blocks(&self.lua, width, &[block_idx]);
+        let _ = self.conversation.activate_transcript_search_record_window(
+            width,
+            block_idx,
+            viewport_rows,
+        );
+        let layout = self.conversation.materialize_transcript_search_layout(
+            &self.lua,
+            width,
+            Some(&[block_idx]),
+        );
         let theme = self.ui.theme().clone();
         let mut scanned_rows = 0;
         for entry in layout.entries {
@@ -861,17 +846,14 @@ impl TuiApp {
             if entry.rows == 0 {
                 continue;
             }
-            let found = self
-                .session_document
-                .transcript
-                .search_matches_for_row_range(
-                    &self.lua,
-                    width,
-                    &theme,
-                    entry.first_row,
-                    entry.rows,
-                    query,
-                );
+            let found = self.conversation.transcript_search_matches_for_row_range(
+                &self.lua,
+                width,
+                &theme,
+                entry.first_row,
+                entry.rows,
+                query,
+            );
             merge_transcript_matches(&mut session.matches, found);
         }
         smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
@@ -890,9 +872,8 @@ impl TuiApp {
     ) {
         let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate");
         let Some((block_ids, first_row, rows)) = self
-            .search
-            .transcript_index
-            .as_ref()
+            .overlays
+            .transcript_search_index()
             .and_then(|index| index.entries.get(entry_index))
             .map(|entry| (entry.block_ids.clone(), entry.first_row, entry.rows))
         else {
@@ -910,10 +891,9 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let found = self
-            .session_document
-            .transcript
-            .search_matches_for_row_range(&self.lua, width, &theme, first_row, rows, query);
+        let found = self.conversation.transcript_search_matches_for_row_range(
+            &self.lua, width, &theme, first_row, rows, query,
+        );
         merge_transcript_matches(&mut session.matches, found);
         smelt_perf::perf::record_value(
             "search:transcript:cached_matches",
@@ -1147,16 +1127,16 @@ mod tests {
         }
         let match_id = app
             .app
-            .session_document
-            .transcript
+            .conversation
+            .transcript()
             .history()
             .order
             .iter()
             .copied()
             .find(|id| {
                 app.app
-                    .session_document
-                    .transcript
+                    .conversation
+                    .transcript()
                     .history()
                     .block(*id)
                     .and_then(smelt_core::transcript_model::Block::raw_text)
@@ -1164,19 +1144,18 @@ mod tests {
             })
             .expect("search target block");
         app.app.save_session_and_flush();
-        let session_dir = smelt_core::session::dir_for(&app.app.core.session);
         let loaded =
-            crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 100, 32)
+            crate::app::history::load_transcript_tail_from_sqlite_dir(app.session_dir(), 100, 32)
                 .expect("load sparse transcript");
         app.app.clear_transcript();
         app.app
-            .session_document
-            .transcript
-            .replace_loaded_transcript(loaded);
+            .conversation
+            .replace_transcript_document_for_harness(
+                crate::app::transcript::TranscriptDocument::from_loaded_transcript(loaded),
+            );
         app.app
-            .session_document
-            .transcript
-            .set_memory_budget(TranscriptMemoryBudget {
+            .conversation
+            .set_transcript_memory_budget_for_harness(TranscriptMemoryBudget {
                 hydrated_blocks: 1,
                 ..Default::default()
             });
@@ -1189,7 +1168,10 @@ mod tests {
         app.app
             .submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
         app.render_silent();
-        let first = app.app.session_document.transcript.memory_snapshot();
+        let first = app
+            .app
+            .conversation
+            .transcript_memory_snapshot_for_harness();
         assert!(first.hydration_reads > 0);
         assert!(
             first.hydration_reads <= 64,
@@ -1197,40 +1179,45 @@ mod tests {
         );
         assert!(app
             .app
-            .session_document
-            .transcript
+            .conversation
+            .transcript()
             .history()
             .order
             .iter()
-            .filter_map(|id| app.app.session_document.transcript.history().block(*id))
+            .filter_map(|id| app.app.conversation.transcript().history().block(*id))
             .filter_map(smelt_core::transcript_model::Block::raw_text)
             .any(|text| text.contains(QUERY)));
 
         app.render_silent();
         assert_eq!(
             app.app
-                .session_document
-                .transcript
-                .memory_snapshot()
+                .conversation
+                .transcript_memory_snapshot_for_harness()
                 .hydration_reads,
             first.hydration_reads,
             "render reread a block that remained in the viewport working set"
         );
 
-        assert!(app.app.reveal_transcript_descriptor_block(699, 0, true));
+        assert!(app.app.reveal_transcript_record_block(699, 0, true));
         app.render_silent();
         assert!(!app
             .app
-            .session_document
-            .transcript
+            .conversation
+            .transcript()
             .history()
             .is_materialized(match_id));
-        let before_reveal = app.app.session_document.transcript.memory_snapshot();
+        let before_reveal = app
+            .app
+            .conversation
+            .transcript_memory_snapshot_for_harness();
 
         app.app
             .submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
         app.render_silent();
-        let revealed = app.app.session_document.transcript.memory_snapshot();
+        let revealed = app
+            .app
+            .conversation
+            .transcript_memory_snapshot_for_harness();
         assert!(revealed.hydration_reads > before_reveal.hydration_reads);
         assert!(
             revealed.hydration_reads - before_reveal.hydration_reads <= 64,
@@ -1238,12 +1225,12 @@ mod tests {
         );
         assert!(app
             .app
-            .session_document
-            .transcript
+            .conversation
+            .transcript()
             .history()
             .order
             .iter()
-            .filter_map(|id| app.app.session_document.transcript.history().block(*id))
+            .filter_map(|id| app.app.conversation.transcript().history().block(*id))
             .filter_map(smelt_core::transcript_model::Block::raw_text)
             .any(|text| text.contains(QUERY)));
     }

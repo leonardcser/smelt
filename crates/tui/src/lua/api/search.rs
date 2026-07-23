@@ -15,7 +15,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Clear the active search session and remove search highlights from its target window.",
         &[],
         |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.clear_search());
+            crate::lua::with_ui_host(|host| host.clear_search());
             Ok(())
         },
     )?;

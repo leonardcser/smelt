@@ -24,9 +24,7 @@ impl TuiApp {
     pub(crate) fn dispatch_terminal_event(&mut self, ev: Event) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             let focused = matches!(ev, Event::FocusGained);
-            if self.term_focused != focused {
-                self.term_focused = focused;
-            }
+            self.platform.set_terminal_focus(focused);
             if !focused {
                 self.ui.cancel_pointer_interaction();
             }
@@ -48,14 +46,16 @@ impl TuiApp {
                 && self.well_known.cmdline.is_none()
             {
                 let pctx = crate::input::prompt_ctx_ref(&self.ui);
-                let ctx = self.input.key_context(pctx, self.turn_input_is_active());
+                let ctx = self.prompt.key_context(pctx, self.turn_input_is_active());
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
-                        self.lua.cycle_mode();
+                        let lua = self.lua.execution();
+                        crate::lua::scope_app(self, move || lua.cycle_mode());
                         return false;
                     }
                     Some(KeyAction::CycleReasoning) => {
-                        self.lua.cycle_reasoning();
+                        let lua = self.lua.execution();
+                        crate::lua::scope_app(self, move || lua.cycle_reasoning());
                         return false;
                     }
                     _ => {}
@@ -66,9 +66,8 @@ impl TuiApp {
         // Ctrl+C kills a focused shell-output command before modal dismiss sees it.
         if self.shell_panel_is_focused()
             && self
-                .exec
-                .as_ref()
-                .is_some_and(|handle| handle.sink == crate::commands::ShellSink::Overlay)
+                .overlays
+                .execution_uses_sink(crate::commands::ShellSink::Overlay)
             && matches!(
                 ev,
                 Event::Key(KeyEvent {
@@ -78,9 +77,7 @@ impl TuiApp {
                 })
             )
         {
-            if let Some(handle) = self.exec.take() {
-                handle.kill.notify_one();
-            }
+            self.overlays.cancel_execution();
             return false;
         }
 
@@ -153,7 +150,7 @@ impl TuiApp {
         }
 
         // Ctrl+C kills a running exec process.
-        if self.exec.is_some()
+        if self.overlays.execution_is_running()
             && matches!(
                 ev,
                 Event::Key(KeyEvent {
@@ -163,9 +160,7 @@ impl TuiApp {
                 })
             )
         {
-            if let Some(handle) = self.exec.take() {
-                handle.kill.notify_one();
-            }
+            self.overlays.cancel_execution();
             return false;
         }
 
@@ -204,11 +199,12 @@ impl TuiApp {
                 false
             }
             EventOutcome::ContinueTurn => {
-                self.agent = self.begin_agent_turn("", protocol::Content::text(""));
+                let turn = self.begin_agent_turn("", protocol::Content::text(""));
+                self.conversation.set_active(turn);
                 false
             }
             EventOutcome::Exec(handle) => {
-                self.exec = Some(handle);
+                self.overlays.install_execution(handle);
                 false
             }
             EventOutcome::Submit {
@@ -227,8 +223,8 @@ impl TuiApp {
                             false
                         } else {
                             self.commit_prompt_submission(edit.take().expect("submit edit"));
-                            self.queued_inputs
-                                .try_push_turn(QueuedInput::request(display.clone(), content));
+                            self.prompt
+                                .try_queue_turn(QueuedInput::request(display.clone(), content));
                             true
                         }
                     }
@@ -248,7 +244,7 @@ impl TuiApp {
                                             self.commit_prompt_submission(
                                                 edit.take().expect("submit edit"),
                                             );
-                                            self.agent = Some(turn);
+                                            self.conversation.set_active(Some(turn));
                                             true
                                         }
                                         None => false,
@@ -275,7 +271,7 @@ impl TuiApp {
                 // Don't restore stash if a dialog opened - it restores on close.
                 if accepted && self.ui.active_modal().is_none() {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    self.input.restore_stash(&mut pctx);
+                    self.prompt.restore_stash(&mut pctx);
                 }
                 false
             }
@@ -284,7 +280,7 @@ impl TuiApp {
 
     fn commit_prompt_submission(&mut self, edit: crate::input::SubmitEdit) {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.input.apply_submit_edit(&mut pctx, edit);
+        self.prompt.apply_submit_edit(&mut pctx, edit);
     }
 
     fn handle_focused_search_key(&mut self, k: KeyEvent) -> bool {
@@ -420,8 +416,11 @@ impl TuiApp {
             return false;
         };
         let vim_mode = self.current_vim_mode_label();
+        let lua = self.lua.execution();
         use smelt_core::lua::runtime::KeymapResult;
-        match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
+        let result =
+            crate::lua::scope_app(self, || lua.run_keymap(&token, vim_mode.as_deref(), None));
+        match result {
             KeymapResult::Consumed => {
                 self.flush_lua_callbacks();
                 true
@@ -472,7 +471,10 @@ impl TuiApp {
         // single-key binding gets a chance, matching Vim's modal mapping feel.
         // Observe-only keys seed prefixes without stealing the local key action.
         if !had_pending && !observe_prefix {
-            match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
+            let lua = self.lua.execution();
+            let result =
+                crate::lua::scope_app(self, || lua.run_keymap(&token, vim_mode.as_deref(), None));
+            match result {
                 KeymapResult::Consumed => {
                     self.timers.pending_chord = None;
                     self.flush_lua_callbacks();
@@ -488,7 +490,7 @@ impl TuiApp {
         if self.timers.pending_chord.is_none() {
             self.timers.pending_chord = Some(crate::app::PendingChord {
                 tokens: Vec::new(),
-                vim_mode_at_start: if self.input.vim_enabled(self.prompt_win()) {
+                vim_mode_at_start: if self.prompt.vim_enabled(self.prompt_win()) {
                     Some(self.prompt_win().vim_mode())
                 } else {
                     None
@@ -503,12 +505,15 @@ impl TuiApp {
         };
         tokens.push(token);
 
+        let lua = self.lua.execution();
         let mut oracle = LuaChordOracle {
-            lua: &self.lua,
+            lua: &lua,
             vim_mode: vim_mode.as_deref(),
             vim_mode_at_start,
         };
-        let outcome = smelt_core::keymap::match_chord(tokens, &mut oracle);
+        let outcome = crate::lua::scope_app(self, || {
+            smelt_core::keymap::match_chord(tokens, &mut oracle)
+        });
         self.flush_lua_callbacks();
         match outcome {
             smelt_core::keymap::ChordOutcome::Consumed => Some(EventOutcome::Noop),
@@ -591,7 +596,7 @@ impl TuiApp {
         {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
-                    !self.input.vim_enabled(self.prompt_win())
+                    !self.prompt.vim_enabled(self.prompt_win())
                         || self.prompt_win().vim_mode() == crate::smelt_edit::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
@@ -633,7 +638,7 @@ impl TuiApp {
             }
 
             let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.input.key_context(pctx_ref, false);
+            let ctx = self.prompt.key_context(pctx_ref, false);
 
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
@@ -643,7 +648,7 @@ impl TuiApp {
                     KeyAction::ClearBuffer => {
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.input.clear_with_undo(&mut pctx);
+                        self.prompt.clear_with_undo(&mut pctx);
                         return EventOutcome::Redraw;
                     }
                     _ => {}
@@ -653,13 +658,9 @@ impl TuiApp {
 
         let now = self.core.clock.instant_now();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        let action = self.input.handle_event(
-            &mut pctx,
-            ev,
-            Some(&mut self.input_history),
-            &mut self.core.clipboard,
-            now,
-        );
+        let action = self
+            .prompt
+            .handle_event(&mut pctx, ev, true, &mut self.core.clipboard, now);
         self.dispatch_input_action(action)
     }
 
@@ -680,7 +681,7 @@ impl TuiApp {
         }) = ev
         {
             let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.input.key_context(pctx_ref, true);
+            let ctx = self.prompt.key_context(pctx_ref, true);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
@@ -689,7 +690,7 @@ impl TuiApp {
                     KeyAction::ClearBuffer => {
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.input.clear_with_undo(&mut pctx);
+                        self.prompt.clear_with_undo(&mut pctx);
                         return EventOutcome::Noop;
                     }
                     _ => {}
@@ -709,13 +710,9 @@ impl TuiApp {
 
         let now = self.core.clock.instant_now();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        let input_action = self.input.handle_event(
-            &mut pctx,
-            ev,
-            Some(&mut self.input_history),
-            &mut self.core.clipboard,
-            now,
-        );
+        let input_action =
+            self.prompt
+                .handle_event(&mut pctx, ev, true, &mut self.core.clipboard, now);
         self.dispatch_running_input_action(input_action)
     }
 
@@ -786,7 +783,7 @@ impl TuiApp {
         let queued = QueuedInput::request(display, content);
         match target {
             QueueStage::Turn => {
-                self.queued_inputs.try_push_turn(queued);
+                self.prompt.try_queue_turn(queued);
             }
             QueueStage::Request => {
                 self.queue_input_for_request(queued);
@@ -799,10 +796,10 @@ impl TuiApp {
         match self.prompt_work_state() {
             PromptWorkState::TurnActive => {
                 self.clear_prompt_prediction();
-                if self.queued_inputs.has_request() {
+                if self.prompt.has_queued_request() {
                     return EventOutcome::InterruptWithQueued;
                 }
-                if self.queued_inputs.front_turn_is_request() {
+                if self.prompt.front_turn_can_be_request() {
                     self.promote_next_queued_turn_to_request();
                 }
                 return EventOutcome::Noop;
@@ -814,7 +811,7 @@ impl TuiApp {
             PromptWorkState::Idle => {}
         }
 
-        if !self.queued_inputs.is_empty() {
+        if !self.prompt.queue_is_empty() {
             self.start_next_queued_input_if_idle();
             return EventOutcome::Noop;
         }
@@ -827,7 +824,7 @@ impl TuiApp {
     }
 
     fn promote_next_queued_turn_to_request(&mut self) {
-        let Some(queued) = self.queued_inputs.promote_turn_to_request() else {
+        let Some(queued) = self.prompt.promote_turn_to_request() else {
             return;
         };
         let Some(input) = queued.steer_input() else {
@@ -839,17 +836,16 @@ impl TuiApp {
     }
 
     fn interrupt_with_next_queued(&mut self) {
-        let (unsteer_count, next, remaining) = self.queued_inputs.take_for_interrupt();
-        if unsteer_count > 0 {
+        let interrupted = self.prompt.suspend_for_interrupt();
+        if interrupted.unsteer_count() > 0 {
             self.core.engine.send(protocol::UiCommand::Unsteer {
-                count: unsteer_count,
+                count: interrupted.unsteer_count(),
             });
         }
         self.discard_turn(crate::app::TurnEnd::Cancelled);
-        self.queued_inputs = remaining;
-        if let Some(queued) = next {
+        if let Some(queued) = self.prompt.restore_after_interrupt(interrupted) {
             if let Err(queued) = self.start_queued_input(queued) {
-                self.queued_inputs.push_front(QueueStage::Turn, queued);
+                self.prompt.queue_front(QueueStage::Turn, queued);
             }
         }
     }
@@ -886,7 +882,7 @@ impl TuiApp {
             return outcome;
         }
 
-        if !self.queued_inputs.is_empty() {
+        if !self.prompt.queue_is_empty() {
             self.drain_queued_inputs_into_prompt();
             return EventOutcome::Noop;
         }
@@ -915,13 +911,8 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
         let action = {
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-            self.input.handle_event(
-                &mut pctx,
-                ev,
-                Some(&mut self.input_history),
-                &mut self.core.clipboard,
-                now,
-            )
+            self.prompt
+                .handle_event(&mut pctx, ev, true, &mut self.core.clipboard, now)
         };
         if running {
             self.dispatch_running_input_action(action)
@@ -931,7 +922,7 @@ impl TuiApp {
     }
 
     fn prompt_escape_owned_by_vim(&self) -> bool {
-        if !self.input.vim_enabled(self.prompt_win()) {
+        if !self.prompt.vim_enabled(self.prompt_win()) {
             return false;
         }
         match self.prompt_win().vim_mode() {
@@ -944,12 +935,12 @@ impl TuiApp {
 
     fn apply_prompt_escape_to_input(&mut self, ev: Event, now: std::time::Instant) {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.input
-            .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
+        self.prompt
+            .handle_event(&mut pctx, ev, false, &mut self.core.clipboard, now);
     }
 
     fn handle_notification_key(&mut self, key: KeyEvent) -> Option<EventOutcome> {
-        let notification = self.notification.as_ref()?;
+        let sticky = self.overlays.notification_is_sticky()?;
         if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
             if matches!(self.app_focus, crate::app::AppFocus::Prompt)
                 && self.prompt_escape_owned_by_vim()
@@ -959,7 +950,7 @@ impl TuiApp {
             self.dismiss_notification();
             return Some(EventOutcome::Redraw);
         }
-        if !notification.lifetime.is_sticky() {
+        if !sticky {
             self.dismiss_notification();
         }
         None
@@ -1012,25 +1003,27 @@ impl TuiApp {
     }
 
     fn edit_in_editor(&mut self) {
-        let req = match crate::input::editor::prepare(self.prompt_buf().source()) {
+        let req = match crate::input::editor::prepare(
+            self.prompt_buf().source(),
+            self.core.env.xdg_runtime(),
+        ) {
             Ok(req) => req,
             Err(e) => {
                 self.notify_error(format!("editor: {e}"));
                 return;
             }
         };
+        let cwd = self.core.env.cwd();
         let spawn = || {
             std::process::Command::new(&req.program)
                 .args(&req.args)
+                .current_dir(cwd)
                 .status()
         };
-        let status = match self.terminal.as_mut() {
-            Some(t) => t.suspended(spawn),
-            None => {
-                self.notify_error("editor: unavailable without an attached terminal".to_string());
-                self.ui.force_redraw();
-                return;
-            }
+        let Some(status) = self.platform.suspend_terminal(spawn) else {
+            self.notify_error("editor: unavailable without an attached terminal".to_string());
+            self.ui.force_redraw();
+            return;
         };
         // Vim et al re-show the hardware cursor and scribble over the alt
         // screen; force a full repaint so the diff baseline is rebuilt.
@@ -1038,7 +1031,7 @@ impl TuiApp {
         match crate::input::editor::finalize(req, status) {
             Ok(text) => {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.input.replace_text(&mut pctx, text);
+                self.prompt.replace_text(&mut pctx, text);
             }
             Err(msg) => self.notify_error(msg),
         }
@@ -1051,12 +1044,9 @@ impl TuiApp {
         let _ = self
             .ui
             .dispatch_event(crate::smelt_edit::Event::Resize(w, h), &mut |_, _, _| {});
-        crate::lua::with_app_ptr(self, |app| {
-            app.refresh_main_layout();
-        });
+        self.refresh_main_layout();
         if width_changed {
             self.ui.cancel_pointer_interaction();
-            self.invalidate_for_width(w);
         }
     }
 
@@ -1068,9 +1058,9 @@ impl TuiApp {
         }
 
         let trimmed = input.trim();
-        self.input_history.push(input.to_string());
+        self.prompt.push_history(input.to_string());
 
-        let is_from_paste = self.input.skip_shell_escape();
+        let is_from_paste = self.prompt.skip_shell_escape();
         let parsed = crate::commands::parse_command_line(trimmed);
 
         if let crate::commands::ParsedCommand::Slash { name, .. } = &parsed {
@@ -1108,8 +1098,7 @@ impl TuiApp {
     /// `Ui::win_close` cascades to overlay close when the leaf belongs to one.
     pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::smelt_edit::WinId) {
         crate::picker::forget(self, win_id);
-        self.placeholders.remove(&win_id);
-        self.placeholder_opts.remove(&win_id);
+        self.prompt.clear_placeholder(win_id);
         for id in self.win_close(win_id) {
             self.lua.remove_callback(id);
         }
@@ -1513,13 +1502,14 @@ impl TuiApp {
 
         let (result, fallback_text) = match action {
             SpanAction::OpenUrl(url) => {
-                let result = engine::opener::open_url_if_available(&url);
+                let result = engine::opener::open_url_if_available_in(&url, &self.core.env.cwd());
                 (result, url)
             }
             SpanAction::OpenFile { path, line, col } => {
                 let target = engine::opener::FileOpenTarget::new(path, line, col);
                 let fallback_text = target.display_location();
-                let result = engine::opener::open_file_if_available(&target);
+                let result =
+                    engine::opener::open_file_if_available_in(&target, &self.core.env.cwd());
                 if result.opened() {
                     self.record_notice(
                         MessageKind::Info,
@@ -1828,7 +1818,7 @@ impl TuiApp {
 /// into the live Lua keymap registry. Carries the `vim_mode_at_chord_start`
 /// context pair that handlers see on multi-key matches.
 struct LuaChordOracle<'a> {
-    lua: &'a crate::lua::LuaRuntime,
+    lua: &'a crate::lua::LuaExecution,
     vim_mode: Option<&'a str>,
     vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
 }
@@ -1897,12 +1887,12 @@ mod tests {
     }
 
     fn queue_stages(app: &TestApp) -> Vec<String> {
-        app.app.queued_inputs.display_kinds()
+        app.app.prompt.queued_kinds()
     }
 
     fn insert_prompt_image(app: &mut TestApp, label: &str) {
         let mut pctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
-        app.app.input.insert_image(
+        app.app.prompt.insert_image_for_harness(
             &mut pctx,
             label.to_string(),
             "data:image/png;base64,AAAA".to_string(),
@@ -1978,7 +1968,12 @@ mod tests {
     #[test]
     fn empty_enter_promotes_turn_queue_during_compacting() {
         let mut app = TestApp::builder().build();
-        app.app.dispatching_turn_id = Some(1);
+        app.start_turn(1);
+        let _dispatch = app
+            .app
+            .conversation
+            .begin_dispatch()
+            .expect("test turn enters dispatch");
         app.app.working.begin(TurnPhase::Compacting);
 
         app.type_text("check this first");
@@ -2046,7 +2041,7 @@ mod tests {
             state.prompt_text,
             format!("see {}", crate::input::ATTACHMENT_MARKER)
         );
-        assert!(app.app.notification.is_some());
+        assert!(app.app.overlays.notification().is_some());
         assert!(!app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
@@ -2269,8 +2264,8 @@ mod tests {
         app.start_turn(1);
         let note = protocol::HistoryNote::process_status("Background process 42 exited.");
         app.app
-            .queued_inputs
-            .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
+            .prompt
+            .try_queue_turn(crate::app::QueuedInput::ProcessStatus(note));
 
         app.clear_actions();
         app.press(KeyCode::Enter);
@@ -2381,12 +2376,12 @@ mod tests {
         ));
         let user_blocks_before = app
             .app
-            .session_document
-            .transcript
+            .conversation
+            .transcript()
             .history()
             .order
             .iter()
-            .filter_map(|id| app.app.session_document.transcript.history().block(*id))
+            .filter_map(|id| app.app.conversation.transcript().history().block(*id))
             .filter(|block| matches!(block, smelt_core::Block::User { .. }))
             .count();
         app.clear_actions();
@@ -2394,7 +2389,7 @@ mod tests {
         app.press(KeyCode::Enter);
 
         assert!(app.agent_running());
-        let history = app.app.session_document.transcript.history();
+        let history = app.app.conversation.transcript().history();
         let user_blocks_after = history
             .order
             .iter()

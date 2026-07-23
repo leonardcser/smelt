@@ -134,12 +134,14 @@ impl LspManager {
             .to_string());
         }
         let symbol = symbols.first().unwrap();
+        let runtime = self.runtime_paths();
         Ok((
             absolute_path_string(
                 symbol
                     .get("file_path")
                     .and_then(Value::as_str)
                     .ok_or_else(|| format!("symbol has no file_path: {query}"))?,
+                &runtime.cwd,
             ),
             symbol
                 .get("line")

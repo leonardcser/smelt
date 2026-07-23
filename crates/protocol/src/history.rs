@@ -733,7 +733,7 @@ enum HistoryTranscriptProjection {
 }
 
 impl HistoryTranscriptProjection {
-    fn from_descriptor_kind(kind: &str) -> Option<Self> {
+    fn from_block_kind(kind: &str) -> Option<Self> {
         match kind {
             "user" => Some(Self::User),
             "assistant" | "thinking" | "tool" | "exec" | "code" => Some(Self::Assistant),
@@ -767,16 +767,11 @@ fn history_item_transcript_projection(item: &HistoryItem) -> Option<HistoryTrans
     }
 }
 
-pub fn transcript_descriptor_kind_matches_history_item(
-    descriptor_kind: &str,
-    item: &HistoryItem,
-) -> bool {
-    let Some(descriptor_projection) =
-        HistoryTranscriptProjection::from_descriptor_kind(descriptor_kind)
-    else {
+pub fn transcript_block_kind_matches_history_item(block_kind: &str, item: &HistoryItem) -> bool {
+    let Some(block_projection) = HistoryTranscriptProjection::from_block_kind(block_kind) else {
         return false;
     };
-    history_item_transcript_projection(item) == Some(descriptor_projection)
+    history_item_transcript_projection(item) == Some(block_projection)
 }
 
 /// Convert user-role wire content into semantic history.
@@ -1131,17 +1126,15 @@ mod tests {
         );
         let item = history_item_from_user_content(content);
         assert!(matches!(item, HistoryItem::User { .. }));
-        assert!(transcript_descriptor_kind_matches_history_item(
+        assert!(transcript_block_kind_matches_history_item(
             "compacted",
             &item
         ));
-        assert!(!transcript_descriptor_kind_matches_history_item(
-            "user", &item
-        ));
+        assert!(!transcript_block_kind_matches_history_item("user", &item));
     }
 
     #[test]
-    fn transcript_descriptor_compatibility_uses_semantic_history_projection() {
+    fn transcript_block_compatibility_uses_semantic_history_projection() {
         let user = HistoryItem::user(Content::text("follow up"));
         let legacy_mode =
             HistoryItem::user(Content::text(crate::note::mode_change_note("apply mode")));
@@ -1159,7 +1152,7 @@ mod tests {
             ("mode", &mode),
             ("process_status", &process),
         ] {
-            assert!(transcript_descriptor_kind_matches_history_item(kind, item));
+            assert!(transcript_block_kind_matches_history_item(kind, item));
         }
         for (kind, item) in [
             ("user", &legacy_mode),
@@ -1168,7 +1161,7 @@ mod tests {
             ("user", &context),
             ("unknown", &context),
         ] {
-            assert!(!transcript_descriptor_kind_matches_history_item(kind, item));
+            assert!(!transcript_block_kind_matches_history_item(kind, item));
         }
     }
 

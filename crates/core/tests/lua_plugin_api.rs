@@ -10,11 +10,13 @@
 //! `process.run`) use `#[tokio::test]`; everything else uses the
 //! plain `#[test]` form.
 
-use smelt_core::lua::{LuaRuntime, TaskDriveOutput, ToolEnv, ToolExecResult, ToolVisibility};
+use smelt_core::lua::{
+    LuaRuntime, LuaShared, TaskDriveOutput, ToolEnv, ToolExecResult, ToolVisibility,
+};
 use smelt_core::permissions::ToolEffectKind;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// Inlined copy of `runtime/lua/smelt/_bootstrap.lua` so the host-only
@@ -1360,6 +1362,56 @@ async fn process_run_happy_path() {
     assert_eq!(stdout.trim_end(), "hello async");
     assert_eq!(exit, 0);
     assert!(err.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_run_uses_runtime_cwd_without_core_host() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir(&cwd).expect("runtime cwd");
+    let env = engine::env::RuntimeEnv::scripted(
+        4242,
+        root.path().join("home"),
+        root.path().join("config"),
+        root.path().join("state"),
+        root.path().join("cache"),
+        root.path().join("data"),
+        root.path().join("runtime"),
+        cwd.clone(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    #[allow(clippy::arc_with_non_send_sync)]
+    let shared = Arc::new(LuaShared::default());
+    let rt = LuaRuntime::with_shared_for_runtime(shared, &env, None, None, None);
+    rt.lua
+        .load(BOOTSTRAP_LUA)
+        .set_name("smelt/_bootstrap.lua")
+        .exec()
+        .expect("bootstrap");
+    rt.lua
+        .load(
+            r#"
+            smelt.spawn(function()
+                local out = assert(smelt.process.run("pwd"))
+                PROCESS_CWD = out.stdout
+            end)
+            "#,
+        )
+        .exec()
+        .expect("spawn run");
+
+    assert!(
+        pump_until_async(&rt, 2000, |rt| rt
+            .lua
+            .globals()
+            .get::<Option<String>>("PROCESS_CWD")
+            .ok()
+            .flatten()
+            .is_some())
+        .await
+    );
+    let actual: String = get_global(&rt, "PROCESS_CWD");
+    assert_eq!(actual.trim_end(), cwd.to_string_lossy());
 }
 
 #[tokio::test(flavor = "current_thread")]

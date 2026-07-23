@@ -2515,19 +2515,45 @@ impl Ui {
         )
     }
 
-    /// Paint a frame while reusing split windows prepared by an earlier host phase.
-    /// Reused requests are still passed to `after_layout`; overlays, decorations,
-    /// and all remaining splits are prepared from their current state.
+    /// Paint and flush a frame while reusing split windows prepared by an earlier host phase.
     pub fn render_with_prepared_splits_and_paints<W, I, P, D, F>(
         &mut self,
         w: &mut W,
         prepared_splits: I,
-        mut prepare: P,
-        mut after_layout: D,
-        mut paint: F,
+        prepare: P,
+        after_layout: D,
+        paint: F,
     ) -> std::io::Result<()>
     where
         W: std::io::Write,
+        I: IntoIterator<Item = PreparedWindowRequest>,
+        P: FnMut(&mut Ui, MaterializeRequest),
+        D: FnMut(&mut Ui, PreparedWindowRequest),
+        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
+        let frame = self.paint_frame_with_prepared_splits_and_paints(
+            prepared_splits,
+            prepare,
+            after_layout,
+            paint,
+        );
+        self.flush_prepared_frame(w, frame)
+    }
+
+    /// Paint a frame into an owned grid while reusing previously prepared splits.
+    ///
+    /// Reused requests are still passed to `after_layout`; overlays, decorations,
+    /// and all remaining splits are prepared from their current state. The owned
+    /// grid can be amended after this method releases its UI borrow, then passed to
+    /// [`Self::flush_prepared_frame`].
+    pub fn paint_frame_with_prepared_splits_and_paints<I, P, D, F>(
+        &mut self,
+        prepared_splits: I,
+        mut prepare: P,
+        mut after_layout: D,
+        mut paint: F,
+    ) -> Grid
+    where
         I: IntoIterator<Item = PreparedWindowRequest>,
         P: FnMut(&mut Ui, MaterializeRequest),
         D: FnMut(&mut Ui, PreparedWindowRequest),
@@ -2597,7 +2623,7 @@ impl Ui {
         });
         self.surface
             .compositor_mut()
-            .render_with(&theme_for_compositor, w, move |grid, _theme| {
+            .paint_frame(&theme_for_compositor, move |grid, _theme| {
                 let theme = &theme_arc;
                 let mut dispatch = |id: PaintId,
                                     area: Rect,
@@ -2671,6 +2697,15 @@ impl Ui {
             })
     }
 
+    /// Flush an owned frame returned by [`Self::paint_frame_with_prepared_splits_and_paints`].
+    pub fn flush_prepared_frame<W: std::io::Write>(
+        &mut self,
+        w: &mut W,
+        frame: Grid,
+    ) -> std::io::Result<()> {
+        self.surface.compositor_mut().flush_frame(w, frame)
+    }
+
     /// Paint directly into the compositor's `Grid`, bypassing layout and overlay machinery.
     pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
@@ -2710,6 +2745,14 @@ impl Ui {
     pub fn snapshot(&mut self) -> SnapshotFrame {
         let mut sink = std::io::sink();
         self.render(&mut sink).expect("snapshot render to sink");
+        self.flushed_snapshot()
+    }
+
+    /// Return the most recently flushed frame without composing another one.
+    ///
+    /// Callers that render through a custom paint pipeline must use this method so
+    /// capturing the frame does not replace callback-painted cells with a plain UI render.
+    pub fn flushed_snapshot(&self) -> SnapshotFrame {
         SnapshotFrame::from_grid(self.surface.compositor().previous())
     }
 
@@ -4210,6 +4253,30 @@ mod tests {
                 .scroll_row_total(ui.buf(buf_id).unwrap()),
             20
         );
+    }
+
+    #[test]
+    fn staged_paint_jobs_can_amend_owned_frame_before_flush() {
+        let mut ui = make_ui();
+        let paint_id = PaintId(1u64 << 32);
+        ui.overlay_open(
+            Overlay::new(LayoutTree::leaf(paint_id), layout::Anchor::ScreenCenter)
+                .with_size((4, 2)),
+        );
+        let mut jobs = Vec::new();
+        let mut frame = ui.paint_frame_with_prepared_splits_and_paints(
+            std::iter::empty(),
+            |_, _| {},
+            |_, _| {},
+            |id, slice, _| jobs.push((id, slice.grid_rect())),
+        );
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, paint_id);
+        frame.slice_mut(jobs[0].1).set(0, 0, 'X', Style::default());
+        ui.flush_prepared_frame(&mut Vec::new(), frame).unwrap();
+
+        assert!(ui.flushed_snapshot().text().contains('X'));
     }
 
     #[test]

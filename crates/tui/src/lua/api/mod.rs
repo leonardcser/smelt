@@ -3,7 +3,7 @@
 
 mod buf;
 mod config;
-mod confirm;
+pub(crate) mod confirm;
 mod dialog;
 mod engine;
 mod history;
@@ -38,6 +38,7 @@ use mlua::prelude::*;
 use smelt_core::lua::api::reasoning::LuaReasoningEffort;
 use smelt_core::lua::doc::{record_module_doc, Tier};
 use smelt_core::lua::module::LuaMod;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Schema version of the Lua API surface, exposed as `smelt.api_version`.
@@ -71,7 +72,12 @@ fn optional_str(s: &str) -> Option<&str> {
 }
 
 impl LuaRuntime {
-    pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    pub(super) fn register_api(
+        lua: &Lua,
+        shared: &Arc<LuaShared>,
+        state_root: &Path,
+        cache_root: &Path,
+    ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
@@ -93,7 +99,14 @@ impl LuaRuntime {
         record_module_doc("smelt.input", "First-class single-line input widget. `smelt.input.new(opts)` returns a handle with `:win()`, `:buf()`, `:text()`, `:set_text()`, `:on()`, and `:key()`; editing keys and paste use the shared line-input core. UiHost-only.");
         record_module_doc("smelt.list", "Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.");
 
-        smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
+        smelt_core::lua::api::register_host_api(
+            lua,
+            &smelt,
+            &smelt_keymap,
+            &shared.core,
+            state_root,
+            cache_root,
+        )?;
 
         // UiHost-tier bindings
         buf::register(lua, &smelt, shared)?;
@@ -105,7 +118,7 @@ impl LuaRuntime {
         work::register(lua, &smelt)?;
         prompt::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
-        confirm::register(lua, &smelt)?;
+        confirm::register(lua, &smelt, shared)?;
         layout::register(lua, &smelt, shared)?;
         notebook::register(lua, &smelt, shared)?;
         paint::register(lua, &smelt, shared)?;
@@ -131,13 +144,15 @@ impl LuaRuntime {
 
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
+        let command_shared = Arc::clone(shared);
         LuaMod::extend(lua, cmd_tbl, "smelt.cmd", Tier::UiHost).fn_(
             "run",
-            "Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.",
+            "Schedule the slash-command line `line` (with or without leading `/`) as if the user had typed it. The app executes it after the current Lua callback returns. Errors are surfaced as in-app notifications.",
             &["line"],
-            |_, line: String| -> LuaResult<()> {
-                crate::lua::with_app(|app| app.apply_lua_command(&line));
-                Ok(())
+            move |_, line: String| -> LuaResult<()> {
+                command_shared
+                    .queue_command(line)
+                    .map_err(LuaError::RuntimeError)
             },
         )?;
         LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).fn_(
@@ -147,7 +162,7 @@ impl LuaRuntime {
             |_, mode: String| -> LuaResult<()> {
                 let mode = protocol::AgentMode::parse(&mode)
                     .ok_or_else(|| LuaError::RuntimeError(format!("invalid mode `{mode}`")))?;
-                crate::lua::with_app(|app| app.set_mode(mode, true));
+                crate::lua::with_agent_host(|host| host.set_mode(mode));
                 Ok(())
             },
         )?;
@@ -162,7 +177,7 @@ impl LuaRuntime {
             "Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.",
             &["effort"],
             |_, effort: LuaReasoningEffort| -> LuaResult<()> {
-                crate::lua::with_app(|app| app.set_reasoning_effort(effort.into(), true));
+                crate::lua::with_agent_host(|host| host.set_reasoning_effort(effort.into()));
                 Ok(())
             },
         )?;
@@ -180,11 +195,10 @@ impl LuaRuntime {
             "Return which top-level pane currently has focus: `\"transcript\"` or `\"prompt\"`.",
             &[],
             |_, ()| -> LuaResult<String> {
-                Ok(crate::lua::try_with_app(|app| match app.app_focus {
-                    crate::app::AppFocus::Content => "transcript".to_string(),
-                    crate::app::AppFocus::Prompt => "prompt".to_string(),
-                })
-                .unwrap_or_default())
+                Ok(
+                    crate::lua::try_with_agent_host(|host| host.focus_name().to_string())
+                        .unwrap_or_default(),
+                )
             },
         )?;
         smelt_root.fn_(
@@ -192,7 +206,7 @@ impl LuaRuntime {
             "Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.",
             &[],
             |_, ()| -> LuaResult<()> {
-                crate::lua::with_app(|app| app.pending_quit = true);
+                crate::lua::with_agent_host(|host| host.request_quit());
                 Ok(())
             },
         )?;

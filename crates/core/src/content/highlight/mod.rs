@@ -78,10 +78,10 @@ pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
 }
 
 pub use diff::{
-    build_diff_ir_ext, build_diff_ir_ext_with_base, build_file_view_ir, compute_split_diff,
-    measure_diff_ir, print_diff_ir, print_diff_ir_with_width, print_inline_diff,
-    print_inline_diff_ext, print_split_diff, print_split_diff_side, DiffIr, SplitDiffPlan,
-    SplitSide,
+    build_diff_ir_ext, build_diff_ir_ext_with_base, build_diff_ir_ext_with_source,
+    build_file_view_ir, compute_split_diff, measure_diff_ir, print_diff_ir,
+    print_diff_ir_with_width, print_inline_diff, print_inline_diff_ext, print_split_diff,
+    print_split_diff_side, DiffIr, SplitDiffPlan, SplitSide,
 };
 pub use inline::{
     emit_inline_spans, inline_spans_width, lower_inline_event_lines,

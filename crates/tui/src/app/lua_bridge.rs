@@ -24,8 +24,8 @@ impl TuiApp {
             crate::app::AppFocus::Content if self.transcript_win().vim_enabled() => {
                 Some(self.transcript_win().vim_mode())
             }
-            crate::app::AppFocus::Prompt if self.input.vim_enabled(self.prompt_win()) => {
-                Some(self.input.vim_mode(self.prompt_win()))
+            crate::app::AppFocus::Prompt if self.prompt.vim_enabled(self.prompt_win()) => {
+                Some(self.prompt.vim_mode(self.prompt_win()))
             }
             _ => None,
         }
@@ -50,7 +50,7 @@ impl TuiApp {
                     .ui
                     .win_mut(crate::app::PROMPT_WIN)
                     .expect("prompt window");
-                self.input.set_vim_mode(win, mode);
+                self.prompt.set_vim_mode(win, mode);
             }
             _ => {}
         }
@@ -59,11 +59,10 @@ impl TuiApp {
     /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
     pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
         let current_text = self.prompt_buf().source().to_string();
-        if self.last_prompt_text == current_text {
+        if !self.prompt.publish_text_if_changed(&current_text) {
             return;
         }
         let cursor_before = self.prompt_win().cpos();
-        self.last_prompt_text = current_text.clone();
         let lua = &self.lua;
         let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
                               win: crate::smelt_edit::WinId,
@@ -96,12 +95,41 @@ impl TuiApp {
 
     pub(crate) fn flush_lua_callbacks(&mut self) {
         self.drain_lua_invocations();
+        self.drain_lua_commands();
         self.lua.pump_task_events();
+    }
+
+    fn drain_lua_commands(&mut self) {
+        let mut remaining = crate::lua::MAX_PENDING_LUA_COMMANDS;
+        loop {
+            let commands = self.lua.shared().drain_commands();
+            if commands.is_empty() {
+                return;
+            }
+            let overflowed = commands.len() > remaining;
+            for line in commands.into_iter().take(remaining) {
+                self.apply_lua_command(&line);
+                remaining -= 1;
+            }
+            if overflowed || remaining == 0 {
+                let queued_more = !self.lua.shared().drain_commands().is_empty();
+                if overflowed || queued_more {
+                    self.notify_error_sticky(format!(
+                        "deferred Lua commands exceeded {} in one flush",
+                        crate::lua::MAX_PENDING_LUA_COMMANDS
+                    ));
+                }
+                return;
+            }
+        }
     }
 
     /// Drive cell subscribers + invocation queue + task inbox to a fixpoint.
     /// Either pass can re-feed the other, so loop until both are quiet.
     pub(crate) fn pump_lua(&mut self) {
+        if smelt_core::host::host_access_active() {
+            return;
+        }
         loop {
             let cells_had_work = self.core.signals.has_pending();
             if cells_had_work {
@@ -116,9 +144,9 @@ impl TuiApp {
 
     /// Drain invocations queued by `ui.dispatch_event` / `ui.fire_win_event`.
     ///
-    /// Two-phase to keep `&mut TuiApp` aliasing clean: phase 1 collects (func, payload) while
-    /// `&mut self` is live; phase 2 installs the TLS app pointer and calls each function with no
-    /// Rust borrow on self - so Lua bodies that reach back via `with_app` get the sole reborrow.
+    /// Two-phase to keep host borrowing explicit: phase 1 collects `(func, payload)` while
+    /// `&mut self` is live; phase 2 lends the frontend root only for the callbacks' dynamic
+    /// extent, so Lua cannot retain host authority after the calls return.
     pub(crate) fn drain_lua_invocations(&mut self) {
         loop {
             let pending = self.lua.drain_invocations();
@@ -134,22 +162,24 @@ impl TuiApp {
                     Some((func, payload, inv.handle.0))
                 })
                 .collect();
-            let _guard = crate::lua::install_app_ptr(self);
-            for (func, payload, handle_id) in prepared {
-                let _perf = smelt_perf::perf::begin("lua:event_cb");
-                if let Err(e) = func.call::<()>(payload) {
-                    crate::lua::try_with_app(|app| {
-                        app.lua.record_callback_error(handle_id, e);
-                    });
+            let lua = self.lua.execution();
+            crate::lua::scope_app(self, move || {
+                for (func, payload, handle_id) in prepared {
+                    let _perf = smelt_perf::perf::begin("lua:event_cb");
+                    if let Err(e) = func.call::<()>(payload) {
+                        lua.record_error(format!("callback `{handle_id}`: {e}"));
+                    }
                 }
-            }
+            });
             // A callback may itself queue further invocations; drain in the same tick.
         }
     }
 
     pub(crate) fn drive_lua_tasks(&mut self) {
         self.flush_lua_callbacks();
-        let outs = self.lua.drive_tasks(self.core.clock.instant_now());
+        let now = self.core.clock.instant_now();
+        let lua = self.lua.execution();
+        let outs = crate::lua::scope_app(self, move || lua.drive_tasks(now));
         // Drain ops pushed before the coroutine yielded so `OpenLuaDialog` sees created buffers.
         self.flush_lua_callbacks();
         for out in outs {

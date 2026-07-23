@@ -14,10 +14,8 @@ fn queued_goal_command_waits_until_transcript_activation() {
     );
     assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
 
-    crate::lua::with_app_ptr(&mut app.app, |app| {
-        app.discard_turn(crate::app::TurnEnd::Complete);
-    });
-    let history = app.app.session_document.transcript.history();
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    let history = app.conversation_probe().transcript().history();
     assert!(history.order.iter().any(|id| matches!(
         history.block(*id),
         Some(smelt_core::transcript_model::Block::User { text, .. })
@@ -109,12 +107,11 @@ fn lua_goal_banner_is_fully_selectable() {
     app.render_silent();
 
     let win_id = app
-        .app
-        .ui
+        .ui_probe()
         .named_win("smelt.headerline")
         .expect("headerline window");
-    let buf_id = app.app.ui.win(win_id).expect("headerline win").buf;
-    let buf = app.app.ui.buf(buf_id).expect("headerline buffer");
+    let buf_id = app.ui_probe().win(win_id).expect("headerline win").buf;
+    let buf = app.ui_probe().buf(buf_id).expect("headerline buffer");
     let spans = buf.highlights_at(0);
 
     assert!(!spans.is_empty(), "banner should be highlighted");
@@ -127,7 +124,7 @@ fn lua_goal_banner_is_fully_selectable() {
 #[test]
 fn lua_goal_state_writes_nested_session_updates_immediately() {
     let mut app = TestApp::builder().build();
-    let session_id = app.app.core.session.id.clone();
+    let session_id = app.session_snapshot().id.clone();
 
     assert!(app.run_lua(
         r#"
@@ -138,12 +135,7 @@ fn lua_goal_state_writes_nested_session_updates_immediately() {
         "#,
     ));
 
-    let state_home =
-        std::env::var_os("XDG_STATE_HOME").expect("XDG_STATE_HOME set by test harness");
-    let state_path = std::path::PathBuf::from(state_home)
-        .join("smelt")
-        .join("plugins")
-        .join("goal.json");
+    let state_path = app.session_storage_root().join("plugins").join("goal.json");
     let raw = std::fs::read_to_string(&state_path).unwrap_or_else(|err| {
         panic!("read {}: {err}", state_path.display());
     });
@@ -159,10 +151,10 @@ fn lua_goal_state_writes_nested_session_updates_immediately() {
 
 #[test]
 fn lua_goal_state_restores_for_same_resumed_session_id() {
-    let guard = test_home_guard();
+    let runtime = tempfile::TempDir::new().expect("create shared runtime root");
     let session_id = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        let session_id = app.app.core.session.id.clone();
+        let mut app = TestApp::builder().with_runtime_home(runtime.path()).build();
+        let session_id = app.session_snapshot().id.clone();
         assert!(app.run_lua(
             r#"
                 local goal = require("smelt.goal")
@@ -173,8 +165,8 @@ fn lua_goal_state_restores_for_same_resumed_session_id() {
         session_id
     };
 
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.core.session.id = session_id;
+    let mut resumed = TestApp::builder().with_runtime_home(runtime.path()).build();
+    resumed.set_session_id_for_harness(session_id);
 
     assert!(resumed.run_lua(
         r#"
@@ -310,17 +302,15 @@ fn lua_goal_banner_stays_above_transcript_scroll_pill() {
             assert(goal.create("keep the banner visible", { auto_continue = false }))
         "#,
     ));
-    app.app
-        .push_block(smelt_core::transcript_model::Block::User {
-            text: "earlier user message".into(),
-            image_labels: Vec::new(),
-            command: false,
-        });
+    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        text: "earlier user message".into(),
+        image_labels: Vec::new(),
+        command: false,
+    });
     for i in 0..40 {
-        app.app
-            .push_block(smelt_core::transcript_model::Block::Text {
-                content: format!("assistant row {i:02}"),
-            });
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("assistant row {i:02}"),
+        });
     }
     app.render_silent();
     assert!(app.run_lua(r#"smelt.win.transcript():reveal(30, { cursor = true })"#));
@@ -404,10 +394,10 @@ fn lua_submit_command_continuation_carries_last_turn_elapsed_without_using_queue
     assert!(app.agent_running());
     let _ = app.drain_engine_sends();
     app.feed_one(SourceEvent::Tick(750));
-    app.app.discard_turn(crate::app::TurnEnd::Complete);
+    app.discard_turn(crate::app::TurnEnd::Complete);
     let token = app
-        .app
-        .pending_continuation_token
+        .conversation_probe()
+        .pending_continuation_token()
         .expect("completed turn continuation token");
     app.feed_one(SourceEvent::Tick(1200));
 
@@ -420,15 +410,15 @@ fn lua_submit_command_continuation_carries_last_turn_elapsed_without_using_queue
         token
     )));
 
-    assert!(app.app.queued_inputs.is_empty());
+    assert!(app.prompt_probe().queue_is_empty());
     assert_eq!(
-        app.app.working.elapsed(),
+        app.working_probe().elapsed(),
         Some(std::time::Duration::from_millis(750))
     );
 
     app.feed_one(SourceEvent::Tick(250));
     assert_eq!(
-        app.app.working.elapsed(),
+        app.working_probe().elapsed(),
         Some(std::time::Duration::from_millis(1000))
     );
 }

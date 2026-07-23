@@ -1475,14 +1475,10 @@ fn is_symlink_escape(canonical_root: &Path, path: &Path, path_is_symlink: bool) 
 }
 
 fn normalize_cwd(cwd: &Path) -> PathBuf {
-    let cwd = if cwd.is_absolute() {
-        cwd.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(cwd)
-    };
-    std::fs::canonicalize(&cwd).unwrap_or(cwd)
+    if !cwd.is_absolute() {
+        return cwd.to_path_buf();
+    }
+    std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
 }
 
 #[cfg(test)]

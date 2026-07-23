@@ -15,11 +15,11 @@ path.basename = nil
 ---@type fun(p: string): string?, string?
 path.canonical = nil
 
---- Return the absolute path to the slash-commands directory under the user config root.
+--- Return the absolute path to the slash-commands directory under the runtime config root.
 ---@type fun(): string
 path.commands_dir = nil
 
---- Return the absolute path to smelt's user config directory.
+--- Return the absolute path to smelt's runtime config directory.
 ---@type fun(): string
 path.config_dir = nil
 

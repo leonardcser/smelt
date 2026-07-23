@@ -91,12 +91,10 @@ app_story!(text_block_markdown_inline_emphasis, |ctx| {
 
 app_story!(text_block_markdown_inline_file_icons, |ctx| {
     // Existing file paths inside inline code get non-copyable file-type icons.
-    std::fs::create_dir_all("src").unwrap();
-    std::fs::create_dir_all("scripts").unwrap();
-    std::fs::write("Cargo.toml", "[package]\nname = \"demo\"\n").unwrap();
-    std::fs::write("src/main.rs", "fn main() {}\n").unwrap();
-    std::fs::write("README.md", "# Demo\n").unwrap();
-    std::fs::write("scripts/run.sh", "#!/bin/sh\n").unwrap();
+    ctx.write_workspace_file("Cargo.toml", "[package]\nname = \"demo\"\n");
+    ctx.write_workspace_file("src/main.rs", "fn main() {}\n");
+    ctx.write_workspace_file("README.md", "# Demo\n");
+    ctx.write_workspace_file("scripts/run.sh", "#!/bin/sh\n");
     ctx.set_viewport(80, 10);
     ctx.run_lua("smelt.settings.file_icons = true");
     ctx.engine(EngineEvent::Text {

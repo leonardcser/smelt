@@ -227,7 +227,7 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 
 ### `smelt.engine.AskError`
 
-Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaRuntime::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
+Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaExecution::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1055,7 +1055,7 @@ Transcript-shaped streaming renderer for plugin-owned buffers. Append model text
 
 ### `smelt.transcript.Target`
 
-Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse descriptor coordinates are intentionally hidden.
+Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

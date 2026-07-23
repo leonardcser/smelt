@@ -115,7 +115,7 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_search(&mut self) {
-        let Some(session) = self.search.session.take() else {
+        let Some(session) = self.overlays.take_search_session() else {
             return;
         };
         if let Some(win) = self.ui.win_mut(session.target) {
@@ -127,10 +127,9 @@ impl TuiApp {
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _)
                 if self
-                    .search
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| s.target == target) =>
+                    .overlays
+                    .search_session()
+                    .is_some_and(|session| session.target == target) =>
             {
                 self.clear_search();
                 true
@@ -172,7 +171,7 @@ impl TuiApp {
                 direction,
                 None,
             );
-            self.search.session = Some(SearchSession {
+            self.overlays.install_search_session(SearchSession {
                 target,
                 target_buf,
                 query,
@@ -196,7 +195,7 @@ impl TuiApp {
             .buf(target_buf)
             .map(Buffer::changedtick)
             .unwrap_or_default();
-        self.search.session = Some(SearchSession {
+        self.overlays.install_search_session(SearchSession {
             target,
             target_buf,
             query,
@@ -208,9 +207,8 @@ impl TuiApp {
             },
         });
         if let Some(range) = self
-            .search
-            .session
-            .as_ref()
+            .overlays
+            .search_session()
             .and_then(SearchSession::current_range)
             .and_then(|range| range.rows())
         {
@@ -219,7 +217,7 @@ impl TuiApp {
     }
 
     fn repeat_search(&mut self, target: WinId, reverse: bool) -> bool {
-        let Some(session) = self.search.session.as_ref() else {
+        let Some(session) = self.overlays.search_session() else {
             return false;
         };
         if session.target != target || session.query.is_empty() {
@@ -232,7 +230,10 @@ impl TuiApp {
         };
 
         if matches!(session.backend, SearchBackend::Transcript(_)) {
-            let mut session = self.search.session.take().expect("search session exists");
+            let mut session = self
+                .overlays
+                .take_search_session()
+                .expect("search session exists");
             let query = session.query.clone();
             let matched = match &mut session.backend {
                 SearchBackend::Transcript(transcript) => {
@@ -254,7 +255,7 @@ impl TuiApp {
                         let Some(new_session) =
                             self.new_transcript_search_session(&query, origin, direction)
                         else {
-                            self.search.session = Some(session);
+                            self.overlays.install_search_session(session);
                             return false;
                         };
                         *transcript = new_session;
@@ -271,10 +272,10 @@ impl TuiApp {
                 SearchBackend::Full { .. } => None,
             };
             let Some(matched) = matched else {
-                self.search.session = Some(session);
+                self.overlays.install_search_session(session);
                 return false;
             };
-            self.search.session = Some(session);
+            self.overlays.install_search_session(session);
             self.jump_to_transcript_search_match(matched);
             return true;
         }
@@ -288,7 +289,7 @@ impl TuiApp {
             FullSearchRefresh::Changed(None) => return false,
         }
 
-        let Some((query, origin)) = self.search.session.as_ref().and_then(|session| {
+        let Some((query, origin)) = self.overlays.search_session().and_then(|session| {
             let SearchBackend::Full {
                 matches, current, ..
             } = &session.backend
@@ -318,17 +319,7 @@ impl TuiApp {
         let Some(range) = self.search_next_match(target, &query, origin, direction) else {
             return false;
         };
-        if let Some(SearchSession {
-            backend: SearchBackend::Full {
-                matches, current, ..
-            },
-            ..
-        }) = self.search.session.as_mut()
-        {
-            matches.clear();
-            matches.push(TextRange::Rows(range));
-            *current = Some(0);
-        }
+        self.overlays.replace_full_search_match(range);
         self.jump_to_search_range(range);
         true
     }
@@ -338,7 +329,7 @@ impl TuiApp {
         target: WinId,
         direction: SearchDirection,
     ) -> FullSearchRefresh {
-        let Some(session) = self.search.session.as_ref() else {
+        let Some(session) = self.overlays.search_session() else {
             return FullSearchRefresh::Unchanged;
         };
         let SearchBackend::Full { changedtick, .. } = &session.backend else {
@@ -356,20 +347,8 @@ impl TuiApp {
         let range = self.search_next_match(target, &query, origin, direction);
         let matches = range.map(TextRange::Rows).into_iter().collect::<Vec<_>>();
         let current = (!matches.is_empty()).then_some(0);
-        if let Some(SearchSession {
-            backend:
-                SearchBackend::Full {
-                    matches: session_matches,
-                    current: session_current,
-                    changedtick,
-                },
-            ..
-        }) = self.search.session.as_mut()
-        {
-            *session_matches = matches;
-            *session_current = current;
-            *changedtick = buf_tick;
-        }
+        self.overlays
+            .refresh_full_search(matches, current, buf_tick);
         FullSearchRefresh::Changed(range)
     }
 
@@ -422,29 +401,15 @@ impl TuiApp {
         target: WinId,
         range: DocRange,
     ) {
-        let Some(session) = self.search.session.as_mut() else {
-            return;
-        };
-        if session.target != target {
-            return;
-        }
-        let SearchBackend::Transcript(transcript) = &mut session.backend else {
-            return;
-        };
-        let Some(current) = transcript.current else {
-            return;
-        };
-        let Some(matched) = transcript.matches.get_mut(current) else {
-            return;
-        };
-        matched.range = range;
+        self.overlays
+            .update_current_transcript_search_range(target, range);
     }
 
     fn jump_to_transcript_search_match(
         &mut self,
         matched: crate::app::transcript::TranscriptSearchMatch,
     ) {
-        let Some(target) = self.search.session.as_ref().map(|session| session.target) else {
+        let Some(target) = self.overlays.search_session().map(|session| session.target) else {
             return;
         };
         let window_scroll_before = self.transcript_scroll_top();
@@ -481,7 +446,7 @@ impl TuiApp {
     }
 
     fn jump_to_search_range(&mut self, range: DocRange) {
-        let Some(target) = self.search.session.as_ref().map(|session| session.target) else {
+        let Some(target) = self.overlays.search_session().map(|session| session.target) else {
             return;
         };
         self.reveal_position(

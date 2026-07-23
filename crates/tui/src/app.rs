@@ -3,6 +3,7 @@ pub(crate) mod cmdline;
 pub(crate) mod cmdline_edit;
 pub(crate) mod cmdline_history;
 pub(crate) mod content_keys;
+pub(crate) mod conversation;
 pub(crate) mod cwd;
 pub(crate) mod dialog;
 pub(crate) mod document;
@@ -17,7 +18,10 @@ pub(crate) mod lua_bridge;
 pub(crate) mod lua_handlers;
 pub(crate) mod managed_models;
 pub(crate) mod mouse;
+pub(crate) mod overlay_runtime;
 pub(crate) mod pane_focus;
+pub(crate) mod platform_runtime;
+pub(crate) mod prompt_runtime;
 pub(crate) mod queue;
 pub(crate) mod render_loop;
 pub(crate) mod reveal;
@@ -43,7 +47,6 @@ use smelt_core::FrontendKind;
 use std::sync::Arc;
 
 use crossterm::{event, terminal};
-use session_document::TuiSessionDocument;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -79,13 +82,6 @@ pub(crate) struct ContextWindowUpdate {
     pub(crate) value: Option<u32>,
 }
 
-#[derive(Default)]
-pub(crate) struct ContextWindowController {
-    desired: Option<ContextWindowTarget>,
-    desired_revision: u64,
-    observed_revision: u64,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControllerRevisionStatus {
     pub desired_revision: u64,
@@ -113,13 +109,6 @@ pub(crate) struct ManagedProviderStatusSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ManagedModelRefreshNotification {
-    pub(crate) auth_revision: u64,
-    pub(crate) desired_revision: u64,
-    pub(crate) message: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelStatusSnapshot {
     pub(crate) current: Option<String>,
     pub(crate) requested: Option<String>,
@@ -137,21 +126,6 @@ pub(crate) struct LuaBringUpError {
 impl std::fmt::Display for LuaBringUpError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
-    }
-}
-
-impl ContextWindowController {
-    pub(crate) fn prepare(&mut self, desired: Option<ContextWindowTarget>) -> Option<u64> {
-        if self.desired == desired {
-            return None;
-        }
-        self.desired_revision = self.desired_revision.wrapping_add(1);
-        self.desired = desired;
-        Some(self.desired_revision)
-    }
-
-    fn accepts(&self, update: &ContextWindowUpdate) -> bool {
-        update.revision == self.desired_revision && self.desired.as_ref() == Some(&update.target)
     }
 }
 
@@ -191,9 +165,13 @@ impl SessionPersistence {
         matches!(self, Self::Ephemeral { .. })
     }
 
-    fn session_dir(&self, session: &smelt_core::session::Session) -> std::path::PathBuf {
+    fn session_dir(
+        &self,
+        sessions: &smelt_core::session::SessionStorage,
+        session: &smelt_core::session::Session,
+    ) -> std::path::PathBuf {
         match self {
-            Self::Persistent => smelt_core::session::dir_for(session),
+            Self::Persistent => sessions.dir_for(session),
             Self::Ephemeral { dir } => dir.path().to_path_buf(),
         }
     }
@@ -206,6 +184,9 @@ pub struct TuiAppOptions {
         tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     )>,
     pub managed_models: Option<smelt_core::ManagedModels>,
+    pub skills: Option<Arc<engine::SkillLoader>>,
+    pub mcp: Option<Arc<smelt_core::mcp::McpManager>>,
+    pub prompt_inputs: Option<crate::prompt_inputs::PromptInputs>,
     pub session_persistence: SessionPersistence,
 }
 
@@ -215,6 +196,9 @@ impl Default for TuiAppOptions {
             startup_auth_error: None,
             app_events: None,
             managed_models: None,
+            skills: None,
+            mcp: None,
+            prompt_inputs: None,
             session_persistence: SessionPersistence::persistent(),
         }
     }
@@ -255,89 +239,26 @@ pub(crate) struct CommittedTranscriptView {
 }
 
 pub struct TuiApp {
-    pub core: smelt_core::Core,
-    pub lua: crate::lua::LuaGeneration,
+    pub(crate) core: smelt_core::Core,
+    pub(crate) conversation: crate::app::conversation::ConversationRuntime,
+    pub(crate) lua: crate::app::lua_handlers::LuaRuntimeController,
     command_catalog: Arc<smelt_core::commands::CommandCatalog>,
-    pub(crate) session_document: TuiSessionDocument,
-    pub(crate) committed_transcript_view: Option<CommittedTranscriptView>,
     pub(crate) document_render_cache: crate::app::document::DocumentRenderCache,
-    pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
-    pub(crate) draft_tools: crate::app::drafts::ToolDraftController,
-    pub(crate) resume_preview_cache: crate::app::transcript::ResumePreviewCache,
-    pub(crate) input_history: History,
-    pub(crate) input: PromptState,
-    pub(crate) exec: Option<crate::commands::ExecHandle>,
-    pub(crate) shell_panel: Option<ShellPanel>,
-    /// Wakeup transport shared with the currently committed Lua generation.
-    lua_wakeup_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    /// Wakeup from cross-thread tasks that pushed to the Lua inbox. Drains the inbox so parked coroutines resume.
-    lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-    pub(crate) queued_inputs: InputQueues,
-    /// Current working directory, updated when the process cwd changes.
-    pub(crate) cwd: String,
-    pub(crate) cwd_project: String,
-    pub(crate) cwd_branch: String,
-    pub(crate) cwd_worktree: String,
-    pub(crate) cwd_worktree_path: String,
-    pub(crate) cwd_managed_worktree: bool,
-    pub(crate) shared_session: Arc<Mutex<Option<SharedSessionState>>>,
+    pub(crate) prompt: crate::app::prompt_runtime::PromptRuntime,
+    pub(crate) overlays: crate::app::overlay_runtime::OverlayRuntime,
+    pub(crate) workspace: crate::app::cwd::WorkspaceState,
     pub(crate) task_label: Option<String>,
-    pub(crate) pending_dialog: bool,
     pub(crate) pending_quit: bool,
-    pub(crate) notification: Option<Notification>,
-    pub(crate) suspended_notification: Option<SuspendedNotification>,
-    pub(crate) cmdline: crate::app::cmdline::CmdlineState,
-    pub(crate) search: crate::app::search::SearchState,
-    pub(crate) picker_state: HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
-    /// Drives cursor suppression when unfocused so input from another app
-    /// doesn't draw a stale cursor in our window.
-    pub(crate) term_focused: bool,
     pub(crate) working: smelt_core::working::WorkingState,
     /// Viewport layout updated each frame; read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
-
-    /// Owned here so reducer handlers (`apply_ops`) can mutate it directly
-    /// instead of threading `&mut Option<TurnState>` through every call.
-    pub(crate) agent: Option<TurnState>,
-    pub(crate) inspect_server: Arc<Mutex<Option<crate::inspect_server::Server>>>,
-    pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
-    pub(crate) persistence: Option<crate::persist::SessionPersistence>,
-    pub(crate) persistence_epoch: crate::persist::SessionEpoch,
-    observed_persistence_status: Option<crate::persist::SessionPersistenceStatus>,
-    pub(crate) session_access: SessionAccess,
-    pub(crate) session_persistence: SessionPersistence,
+    platform: crate::app::platform_runtime::PlatformRuntime,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
-    pub(crate) next_turn_id: u64,
-    pub(crate) last_terminal_turn_id: Option<u64>,
-    pub(crate) next_continuation_token: u64,
-    pub(crate) pending_continuation_token: Option<u64>,
-    pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
-    pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
-    process_completion_rx:
-        tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
-    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
-    pub(crate) managed_models: smelt_core::ManagedModels,
-    managed_model_refresh_notifications:
-        HashMap<engine::auth::AuthProvider, ManagedModelRefreshNotification>,
-    next_managed_auth_check: Instant,
-    managed_auth_check_in_flight: bool,
-    pub(crate) context_tokens_updated_this_turn: bool,
-    /// Agent mode that is known to be in effect for the active turn/request.
-    pub(crate) applied_agent_mode: protocol::AgentMode,
-    /// Reasoning effort that is known to be in effect for the active turn/request.
-    pub(crate) applied_reasoning_effort: protocol::ReasoningEffort,
-    pub(crate) cancel_generation: u64,
-    /// Set while routing an engine event whose `TurnState` has been moved
-    /// out of `self.agent` to satisfy borrowing. Lua callbacks can still
-    /// observe the active turn through `active_agent_turn_id`.
-    pub(crate) dispatching_turn_id: Option<u64>,
-    pub(crate) dispatching_turn_permissions:
-        Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+    managed_models: crate::app::managed_models::ManagedModelState,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
@@ -347,69 +268,17 @@ pub struct TuiApp {
     /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
     pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
     pub(crate) app_focus: AppFocus,
-    /// Tracks the last text dispatched as `TextChanged` on `PROMPT_WIN`.
-    pub(crate) last_prompt_text: String,
     /// On-disk inputs that feed the agent's system prompt. Single
     /// home for `AGENTS.md`, the [`engine::SkillLoader`] section, and
     /// the `--system-prompt` file content; refreshed in place by
     /// `/reload`.
-    pub prompt_inputs: crate::prompt_inputs::PromptInputs,
+    pub(crate) prompt_inputs: crate::prompt_inputs::PromptInputs,
     /// Latest-desired owner for filesystem watcher setup and events.
     pub(crate) auto_reload: crate::auto_reload::AutoReloadController,
-    /// Latest requested cwd transition. It commits at idle or at the explicit
-    /// completion barrier of a model tool that requested the transition.
-    pub(crate) pending_cwd_change: Option<crate::app::cwd::PendingCwdChange>,
-    /// Coalesced live desired-state writes waiting for the current Lua callback
-    /// to return before runtime effects are applied.
-    pub(crate) pending_runtime_reconcile: bool,
-    /// Config reload requested from a busy context. Drained once the app is idle
-    /// enough that wiping Lua callbacks cannot strand an active turn or modal.
-    pub(crate) pending_lua_reload: bool,
-    /// Whether the pending reload should also refresh prompt inputs such as
-    /// AGENTS.md, skills, and `--system-prompt`.
-    pub(crate) pending_lua_reload_refresh_agent_inputs: bool,
-    /// Last candidate failure shown to the user. Equal failures remain one
-    /// sticky diagnostic until a successful generation clears it.
-    pub(crate) lua_reload_failure: Option<LuaBringUpError>,
-    pub ui: crate::smelt_edit::Ui,
+    pub(crate) ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
     /// Timers + chord state observed and updated by event dispatch.
     pub(crate) timers: Timers,
-    /// Confirm/dialog requests deferred while the user is still typing.
-    pub(crate) pending_dialogs: VecDeque<DeferredDialog>,
-    /// Owned for the lifetime of `run()`. `None` outside that scope - the
-    /// test harness constructs a `TuiApp` without a real terminal and skips
-    /// claiming. `Drop` here restores the terminal even on panic.
-    pub(crate) terminal: Option<crate::term_setup::TuiTerminal>,
-    /// Public process status exported for terminal managers and scripts.
-    pub(crate) public_status: Option<smelt_core::public_status::StatusPublisher>,
-    /// Shared HTTP client used for background side-fetches (context window).
-    /// `None` in the test harness.
-    pub(crate) http_client: Option<engine::HttpClient>,
-    /// Sender into the channel `run()` drains for context-window updates.
-    /// `apply_model` spawns a fetch task that pushes the result here so the
-    /// UI footer reflects the new model immediately.
-    pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<ContextWindowUpdate>>,
-    /// Latest-desired owner for context-window metadata fetches.
-    pub(crate) context_window: ContextWindowController,
-    /// Current prompt input viewport height in rows after applying auto-wrap,
-    /// manual resize, and terminal clamps. Updated during layout each frame.
-    pub(crate) prompt_input_rows: u16,
-    /// User-resized prompt input height. `None` means follow the auto-measured
-    /// wrapped source/ghost-text height.
-    pub(crate) prompt_input_rows_override: Option<u16>,
-    /// In-flight drag from non-selectable prompt top chrome.
-    prompt_resize_drag: Option<PromptResizeDrag>,
-    /// Last prompt resize-handle click, used to reset manual height on double-click.
-    pub(crate) prompt_resize_last_click: Option<PromptResizeClick>,
-    /// Parser-visible prompt placeholder. `placeholders` owns the app-level text;
-    /// this mirror lets the prompt parser render it as wrapped ghost text.
-    pub(crate) prompt_placeholder_display: Arc<Mutex<Option<String>>>,
-    /// Per-window placeholder text set through the app/Lua API.
-    pub(crate) placeholders: HashMap<crate::smelt_edit::WinId, String>,
-    /// Per-window placeholder dispatch options. Static placeholders may have text
-    /// without dispatch opts; entries here are the interactive subset.
-    pub placeholder_opts: HashMap<crate::smelt_edit::WinId, PlaceholderOpts>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -421,10 +290,131 @@ pub(crate) struct PromptResizeDrag {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PromptResizeClick {
-    pub(crate) row: u16,
-    pub(crate) col: u16,
-    pub(crate) at: Instant,
+struct PromptResizeClick {
+    row: u16,
+    col: u16,
+    at: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct PromptHeightState {
+    rows: u16,
+    manual_rows: Option<u16>,
+    drag: Option<PromptResizeDrag>,
+    last_click: Option<PromptResizeClick>,
+}
+
+impl Default for PromptHeightState {
+    fn default() -> Self {
+        Self {
+            rows: 1,
+            manual_rows: None,
+            drag: None,
+            last_click: None,
+        }
+    }
+}
+
+impl PromptHeightState {
+    const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    #[cfg(test)]
+    pub(crate) fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    #[cfg(test)]
+    pub(crate) fn manual_rows(&self) -> Option<u16> {
+        self.manual_rows
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_manual_rows(&mut self, rows: Option<u16>) {
+        self.manual_rows = rows;
+    }
+
+    pub(crate) fn max_auto_rows(term_height: u16) -> u16 {
+        (term_height / 2).max(1)
+    }
+
+    pub(crate) fn max_manual_rows(term_height: u16) -> u16 {
+        ((term_height as u32 * 7) / 10).max(1) as u16
+    }
+
+    pub(crate) fn resolve_rows(&mut self, wrapped_rows: u16, term_height: u16) -> u16 {
+        self.rows = match self.manual_rows {
+            Some(rows) => rows.clamp(1, Self::max_manual_rows(term_height)),
+            None => wrapped_rows.clamp(1, Self::max_auto_rows(term_height)),
+        };
+        self.rows
+    }
+
+    pub(crate) fn drag(&self) -> Option<PromptResizeDrag> {
+        self.drag
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_drag(&mut self, drag: Option<PromptResizeDrag>) {
+        self.drag = drag;
+    }
+
+    pub(crate) fn active_chrome(&self) -> &'static str {
+        self.drag.map(|drag| drag.chrome).unwrap_or_default()
+    }
+
+    pub(crate) fn start_drag(&mut self, chrome: &'static str, row: u16) {
+        self.drag = Some(PromptResizeDrag {
+            chrome,
+            start_row: row,
+            start_input_rows: self.rows.max(1),
+            dragged: false,
+        });
+    }
+
+    pub(crate) fn resize_drag_to(&mut self, row: u16, term_height: u16) -> bool {
+        let Some(mut drag) = self.drag else {
+            return false;
+        };
+        self.last_click = None;
+        drag.dragged = true;
+        self.drag = Some(drag);
+        let delta = drag.start_row as i32 - row as i32;
+        let rows = (drag.start_input_rows as i32 + delta)
+            .clamp(1, Self::max_manual_rows(term_height) as i32) as u16;
+        self.manual_rows = Some(rows);
+        self.rows = rows;
+        true
+    }
+
+    pub(crate) fn finish_drag(&mut self) -> bool {
+        let Some(drag) = self.drag.take() else {
+            return false;
+        };
+        if drag.dragged && self.manual_rows == Some(1) {
+            self.reset();
+        }
+        true
+    }
+
+    pub(crate) fn register_click(&mut self, row: u16, col: u16, now: Instant) -> bool {
+        let double_click = self.last_click.is_some_and(|last| {
+            last.row == row
+                && last.col == col
+                && now.saturating_duration_since(last.at) <= Self::DOUBLE_CLICK_WINDOW
+        });
+        if double_click {
+            self.reset();
+            return true;
+        }
+        self.last_click = Some(PromptResizeClick { row, col, at: now });
+        false
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.manual_rows = None;
+        self.drag = None;
+        self.last_click = None;
+    }
 }
 
 #[derive(Debug)]
@@ -538,9 +528,89 @@ pub struct PlaceholderOpts {
     pub dismiss_keys: Vec<crate::smelt_edit::KeyBind>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PlaceholderState {
+    prompt_display: Arc<Mutex<Option<String>>>,
+    text: HashMap<crate::smelt_edit::WinId, String>,
+    options: HashMap<crate::smelt_edit::WinId, PlaceholderOpts>,
+}
+
+impl Default for PlaceholderState {
+    fn default() -> Self {
+        Self {
+            prompt_display: Arc::new(Mutex::new(None)),
+            text: HashMap::new(),
+            options: HashMap::new(),
+        }
+    }
+}
+
+impl PlaceholderState {
+    fn prompt_display(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.prompt_display)
+    }
+
+    pub(crate) fn text(&self, win: crate::smelt_edit::WinId) -> Option<&str> {
+        self.text.get(&win).map(String::as_str)
+    }
+
+    pub(crate) fn options(&self, win: crate::smelt_edit::WinId) -> Option<&PlaceholderOpts> {
+        self.options.get(&win)
+    }
+
+    pub(crate) fn set_options(&mut self, win: crate::smelt_edit::WinId, options: PlaceholderOpts) {
+        debug_assert!(self.text.contains_key(&win));
+        self.options.insert(win, options);
+    }
+
+    pub(crate) fn set_text(&mut self, win: crate::smelt_edit::WinId, text: String) {
+        debug_assert!(!text.is_empty());
+        self.text.insert(win, text);
+    }
+
+    pub(crate) fn clear(&mut self, win: crate::smelt_edit::WinId) {
+        self.text.remove(&win);
+        self.options.remove(&win);
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn contains_options(&self, win: crate::smelt_edit::WinId) -> bool {
+        self.options.contains_key(&win)
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn option_windows(&self) -> impl Iterator<Item = crate::smelt_edit::WinId> + '_ {
+        self.options.keys().copied()
+    }
+
+    pub(crate) fn fork_for_lua_generation(&self, ui: &crate::smelt_edit::Ui) -> Self {
+        let mut candidate = self.clone();
+        candidate.retain_windows(ui);
+        candidate
+    }
+
+    pub(crate) fn retain_windows(&mut self, ui: &crate::smelt_edit::Ui) {
+        self.text.retain(|win, _| ui.win(*win).is_some());
+        self.options.retain(|win, _| ui.win(*win).is_some());
+    }
+
+    pub(crate) fn sync_prompt_display(&self) -> bool {
+        let text = self.text.get(&crate::app::PROMPT_WIN).cloned();
+        let mut display = self
+            .prompt_display
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *display == text {
+            return false;
+        }
+        *display = text;
+        true
+    }
+}
+
 #[cfg(any(test, feature = "harness"))]
 pub(crate) use queue::MAX_QUEUED_MESSAGES;
-pub(crate) use queue::{InputQueues, QueueStage, QueuedInput, QueuedTurnOptions};
+pub(crate) use queue::{QueueStage, QueuedInput, QueuedTurnOptions};
 
 pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_DOCUMENT, TRANSCRIPT_WIN};
 
@@ -551,71 +621,121 @@ pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_DOCUMENT, TRANSCRIP
 /// glyph can advance even when no agent turn is live.
 #[derive(Default)]
 pub(crate) struct BusyStack {
+    state: std::rc::Rc<std::cell::RefCell<BusyStackState>>,
+}
+
+#[derive(Default)]
+struct BusyStackState {
     entries: Vec<(u64, String)>,
     next_id: u64,
     since: Option<Instant>,
+}
+
+pub(crate) struct BusyToken {
+    state: std::rc::Weak<std::cell::RefCell<BusyStackState>>,
+    id: u64,
+}
+
+impl BusyToken {
+    pub(crate) fn release(self) -> bool {
+        self.state
+            .upgrade()
+            .is_some_and(|state| release_busy_entry(&mut state.borrow_mut(), self.id))
+    }
 }
 
 pub use smelt_core::signals::WorkBusyEntry;
 
 impl BusyStack {
     pub(crate) fn push(&mut self, label: String) -> u64 {
-        self.next_id += 1;
-        let id = self.next_id;
-        if self.entries.is_empty() {
-            self.since = Some(Instant::now());
+        self.push_entry(label).0
+    }
+
+    pub(crate) fn push_token(&mut self, label: String) -> BusyToken {
+        let (id, state) = self.push_entry(label);
+        BusyToken {
+            state: std::rc::Rc::downgrade(&state),
+            id,
         }
-        self.entries.push((id, label));
-        id
+    }
+
+    fn push_entry(
+        &mut self,
+        label: String,
+    ) -> (u64, std::rc::Rc<std::cell::RefCell<BusyStackState>>) {
+        let mut state = self.state.borrow_mut();
+        state.next_id += 1;
+        let id = state.next_id;
+        if state.entries.is_empty() {
+            state.since = Some(Instant::now());
+        }
+        state.entries.push((id, label));
+        drop(state);
+        (id, std::rc::Rc::clone(&self.state))
     }
 
     /// Drop the entry with `id`. Returns `true` if an entry was removed.
     pub(crate) fn release(&mut self, id: u64) -> bool {
-        if let Some(pos) = self.entries.iter().position(|(i, _)| *i == id) {
-            self.entries.remove(pos);
-            if self.entries.is_empty() {
-                self.since = None;
-            }
-            true
-        } else {
-            false
-        }
+        release_busy_entry(&mut self.state.borrow_mut(), id)
     }
 
     pub(crate) fn is_busy(&self) -> bool {
-        !self.entries.is_empty()
+        !self.state.borrow().entries.is_empty()
     }
 
     pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-        self.since = None;
+        let mut state = self.state.borrow_mut();
+        state.entries.clear();
+        state.since = None;
     }
 
     pub(crate) fn top_label(&self) -> Option<String> {
-        self.entries.last().map(|(_, l)| l.clone())
+        self.state
+            .borrow()
+            .entries
+            .last()
+            .map(|(_, label)| label.clone())
     }
 
     /// Elapsed time since the first token was pushed, or `None` when empty.
     pub(crate) fn elapsed(&self) -> Option<std::time::Duration> {
-        self.since.map(|t| t.elapsed())
+        self.state.borrow().since.map(|instant| instant.elapsed())
     }
 
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn since(&self) -> Option<Instant> {
-        self.since
+        self.state.borrow().since
     }
 
     /// Full stack newest-last, projected onto `WorkBusyEntry`. Cheap
     /// clone of the per-entry `(id, label)` pair; called once per tick
     /// by the cell publisher.
     pub(crate) fn entries_snapshot(&self) -> Vec<WorkBusyEntry> {
-        self.entries
+        self.state
+            .borrow()
+            .entries
             .iter()
             .map(|(id, label)| WorkBusyEntry {
                 id: *id,
                 label: label.clone(),
             })
             .collect()
+    }
+}
+
+fn release_busy_entry(state: &mut BusyStackState, id: u64) -> bool {
+    if let Some(position) = state
+        .entries
+        .iter()
+        .position(|(entry_id, _)| *entry_id == id)
+    {
+        state.entries.remove(position);
+        if state.entries.is_empty() {
+            state.since = None;
+        }
+        true
+    } else {
+        false
     }
 }
 
@@ -729,6 +849,34 @@ pub(crate) const NOTIFICATION_TTL_MS: u64 = 5000;
 
 pub(crate) enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
+}
+
+#[derive(Default)]
+pub(crate) struct DeferredDialogs {
+    queue: VecDeque<DeferredDialog>,
+}
+
+impl DeferredDialogs {
+    pub(crate) fn defer_confirm(&mut self, request: Box<ConfirmRequest>) {
+        self.queue.push_back(DeferredDialog::Confirm(request));
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<DeferredDialog> {
+        self.queue.pop_front()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.queue.clear();
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn len(&self) -> usize {
+        self.queue.len()
+    }
 }
 
 pub(crate) enum SessionControl {
@@ -940,26 +1088,26 @@ impl TuiApp {
     }
 
     pub(crate) fn reasoning_effort_pending(&self) -> bool {
-        self.applied_reasoning_effort != self.core.config.reasoning_effort
+        self.conversation.applied_reasoning_effort() != self.core.config.reasoning_effort
     }
 
     pub(crate) fn mode_pending(&self) -> bool {
-        self.active_agent_turn_id().is_some() && self.applied_agent_mode != self.core.config.mode
+        self.active_agent_turn_id().is_some()
+            && self.conversation.applied_mode() != &self.core.config.mode
     }
 
     pub(crate) fn sync_agent_mode_applied(&mut self) {
-        self.applied_agent_mode = self.core.config.mode.clone();
+        self.conversation
+            .set_applied_mode(self.core.config.mode.clone());
     }
 
     pub(crate) fn sync_reasoning_effort_applied(&mut self) {
-        self.applied_reasoning_effort = self.core.config.reasoning_effort;
+        self.conversation
+            .set_applied_reasoning_effort(self.core.config.reasoning_effort);
     }
 
     pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
-        self.agent
-            .as_ref()
-            .map(|agent| agent.turn_id)
-            .or(self.dispatching_turn_id)
+        self.conversation.active_id()
     }
 
     pub(crate) fn agent_is_running(&self) -> bool {
@@ -994,7 +1142,7 @@ impl TuiApp {
     }
 
     pub(crate) fn has_visible_session_history(&self) -> bool {
-        if let Some(live) = &self.session_document.live_session {
+        if let Some(live) = self.conversation.live_session() {
             return live
                 .any_transcript_visible_before(live.history_len())
                 .unwrap_or_else(|_err| {
@@ -1002,43 +1150,27 @@ impl TuiApp {
                     false
                 });
         }
-        self.core
-            .session
+        self.conversation
+            .session()
             .history
             .iter()
             .any(protocol::HistoryItem::is_transcript_visible)
     }
 
     pub(crate) fn ephemeral(&self) -> bool {
-        self.session_persistence.is_ephemeral()
+        self.conversation.is_ephemeral()
     }
 
     pub(crate) fn current_session_dir(&self) -> std::path::PathBuf {
-        self.session_persistence.session_dir(&self.core.session)
-    }
-
-    pub(crate) fn has_resume_hint_messages(&self) -> bool {
-        !self.session_is_empty()
-            || !self.session_document.transcript.is_empty()
-            || self.session_document.live_session.is_some()
+        self.conversation.current_session_dir()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
-        ShutdownContext {
-            session_id: self.core.session.id.clone(),
-            has_messages: self.has_resume_hint_messages(),
-            ephemeral: self.ephemeral(),
-        }
+        self.conversation.shutdown_context()
     }
 
     pub(crate) fn publish_shared_session_state(&self) {
-        if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(SharedSessionState {
-                id: self.core.session.id.clone(),
-                has_messages: self.has_resume_hint_messages(),
-                ephemeral: self.ephemeral(),
-            });
-        }
+        self.conversation.publish_shared_state();
     }
 
     pub(crate) fn can_continue_turn(&self) -> bool {
@@ -1047,10 +1179,10 @@ impl TuiApp {
 
     pub(crate) fn queue_input_for_request(&mut self, queued: QueuedInput) -> bool {
         if !self.turn_input_is_active() {
-            return self.queued_inputs.try_push_turn(queued);
+            return self.prompt.try_queue_turn(queued);
         }
         let input = queued.steer_input();
-        if !self.queued_inputs.try_push_request(queued) {
+        if !self.prompt.try_queue_request(queued) {
             return false;
         }
         if let Some(input) = input.filter(|input| !input.provider_content().is_empty()) {
@@ -1060,7 +1192,7 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_queued_inputs_into_prompt(&mut self) {
-        let (request_count, queued) = self.queued_inputs.drain_for_prompt();
+        let (request_count, queued) = self.prompt.drain_for_prompt();
         if request_count > 0 {
             self.core.engine.send(protocol::UiCommand::Unsteer {
                 count: request_count,
@@ -1079,7 +1211,7 @@ impl TuiApp {
         if !prefix.is_empty() && !pctx.buf.source().is_empty() {
             prefix.push('\n');
         }
-        self.input.prepend_text(&mut pctx, prefix);
+        self.prompt.prepend_text(&mut pctx, prefix);
     }
 
     pub(crate) fn clear_prompt_prediction(&mut self) {
@@ -1132,73 +1264,37 @@ impl TuiApp {
     }
 
     pub(crate) fn mode_at_history_boundary(&self, hist_idx: usize) -> protocol::AgentMode {
-        let fallback = self.core.session.mode.as_deref().unwrap_or("normal");
-        let mode = if let Some(live) = &self.session_document.live_session {
+        let fallback = self
+            .conversation
+            .session()
+            .mode
+            .as_deref()
+            .unwrap_or("normal");
+        let mode = if let Some(live) = self.conversation.live_session() {
             live.effective_mode_at(hist_idx, fallback)
                 .unwrap_or_else(|_err| {
                     smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
                     fallback.to_string()
                 })
         } else {
-            protocol::effective_mode_at(&self.core.session.history, hist_idx, fallback).to_string()
+            protocol::effective_mode_at(&self.conversation.session().history, hist_idx, fallback)
+                .to_string()
         };
         protocol::AgentMode::parse(&mode).unwrap_or_else(protocol::AgentMode::normal)
     }
 
     pub(crate) fn current_context_note_text(&self) -> String {
-        smelt_core::context_notes::cwd_note(
-            std::path::Path::new(&self.cwd),
-            std::path::Path::new(&self.core.config.settings.worktree_root),
-        )
-    }
-
-    pub(crate) fn refresh_cwd_status(&mut self) {
-        let ctx = smelt_core::worktree::project_context(
-            std::path::Path::new(&self.cwd),
-            Some(std::path::Path::new(
-                &self.core.config.settings.worktree_root,
-            )),
-        );
-        self.cwd_worktree_path = Self::worktree_display_path(&ctx);
-        self.cwd_project = ctx.project_name;
-        self.cwd_branch = ctx.branch;
-        self.cwd_worktree = ctx.worktree_name.unwrap_or_default();
-        self.cwd_managed_worktree = ctx.managed_worktree;
-    }
-
-    fn worktree_display_path(ctx: &smelt_core::worktree::ProjectContext) -> String {
-        if !ctx.managed_worktree {
-            return String::new();
-        }
-        if let Some(base_path) = ctx.base_path.as_deref() {
-            if let Ok(suffix) = ctx.active_root.strip_prefix(base_path) {
-                return suffix.display().to_string();
-            }
-        }
-        engine::paths::collapse_tilde(&ctx.active_root)
-            .display()
-            .to_string()
-    }
-
-    fn cwd_status_context(
-        cwd: &std::path::Path,
-        worktree_root: &std::path::Path,
-    ) -> smelt_core::worktree::ProjectContext {
-        smelt_core::worktree::project_context(cwd, Some(worktree_root))
+        self.workspace.context_note(std::path::Path::new(
+            &self.core.config.settings.worktree_root,
+        ))
     }
 
     fn latest_context_note_text(&self, name: &str) -> Option<&str> {
-        for pending in self.pending_history_appends.iter().rev() {
-            if pending.replace_context_name.as_deref() != Some(name) {
-                continue;
-            }
-            if pending.remove_context {
-                return None;
-            }
-            return pending.item.as_note().map(protocol::HistoryNote::text);
+        if let Some(text) = self.conversation.pending_context_note(name) {
+            return text;
         }
-        self.core
-            .session
+        self.conversation
+            .session()
             .history
             .iter()
             .rev()
@@ -1224,56 +1320,13 @@ impl TuiApp {
         if self.agent_is_running() || self.has_visible_session_history() {
             self.queue_history_append(append);
         } else {
-            self.replace_or_push_pending_history_append(append);
+            self.conversation.replace_or_push_history_append(append);
         }
-    }
-
-    fn queue_pending_history_append(
-        &mut self,
-        append: PendingHistoryAppend,
-        mode_base: Option<&protocol::AgentMode>,
-    ) {
-        let replace_note_kind = append.replacement_note_kind();
-        if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
-            let Some(new_mode) = append.mode().map(str::to_string) else {
-                self.replace_or_push_pending_history_append(append);
-                return;
-            };
-            let existing_idx = self.pending_history_appends.iter().position(|pending| {
-                pending.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
-            });
-            if let Some(idx) = existing_idx {
-                if mode_base.is_some_and(|base| base.as_str() == new_mode.as_str()) {
-                    self.pending_history_appends.remove(idx);
-                } else {
-                    self.pending_history_appends[idx] = append;
-                }
-            } else if mode_base.is_none_or(|base| base.as_str() != new_mode.as_str()) {
-                self.pending_history_appends.push(append);
-            }
-            return;
-        }
-
-        self.replace_or_push_pending_history_append(append);
-    }
-
-    fn replace_or_push_pending_history_append(&mut self, append: PendingHistoryAppend) {
-        if append.replacement_note_kind().is_some() {
-            if let Some(existing) = self
-                .pending_history_appends
-                .iter_mut()
-                .find(|pending| pending.same_replacement_target(&append))
-            {
-                *existing = append;
-                return;
-            }
-        }
-        self.pending_history_appends.push(append);
     }
 
     pub(crate) fn mode_append_base(&self) -> protocol::AgentMode {
         if self.agent_is_running() {
-            self.applied_agent_mode.clone()
+            self.conversation.applied_mode().clone()
         } else {
             self.mode_history_base()
         }
@@ -1296,7 +1349,7 @@ impl TuiApp {
             } else {
                 append.clone()
             };
-            self.queue_pending_history_append(
+            self.conversation.queue_history_append(
                 pending_append,
                 match &history_append.policy {
                     protocol::HistoryAppendPolicy::ModeChange { base } => Some(base),
@@ -1314,16 +1367,12 @@ impl TuiApp {
                 self.commit_history_append_block(block, replace_note_kind, result);
             }
         } else if replace_note_kind.is_some() {
-            self.pending_history_appends
-                .retain(|pending| !pending.same_replacement_target(&append));
+            self.conversation.remove_matching_history_append(&append);
         }
     }
 
     pub(crate) fn run_queued_command_line(&mut self, line: &str) {
-        let line = line.to_string();
-        crate::lua::with_app_ptr(self, |app| {
-            crate::commands::run_command(app, &line);
-        });
+        crate::commands::run_command(self, line);
     }
 
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) -> Result<(), QueuedInput> {
@@ -1335,17 +1384,21 @@ impl TuiApp {
                 match req.turn_options {
                     QueuedTurnOptions::CustomCommand { overrides } => {
                         let text = req.content.text_content().into_owned();
-                        self.agent = self.begin_command_request_turn(
+                        let turn = self.begin_command_request_turn(
                             req.display,
                             text,
                             *overrides,
                             CommandTurnStart::Fresh,
                         );
-                        self.agent.is_some()
+                        let started = turn.is_some();
+                        self.conversation.set_active(turn);
+                        started
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
-                        self.agent = self.begin_agent_turn(&req.display, req.content);
-                        self.agent.is_some()
+                        let turn = self.begin_agent_turn(&req.display, req.content);
+                        let started = turn.is_some();
+                        self.conversation.set_active(turn);
+                        started
                     }
                     QueuedTurnOptions::Default => true,
                 }
@@ -1355,8 +1408,10 @@ impl TuiApp {
                 true
             }
             QueuedInput::ProcessStatus(note) if !note.text().is_empty() => {
-                self.agent = self.begin_process_status_turn(note);
-                self.agent.is_some()
+                let turn = self.begin_process_status_turn(note);
+                let started = turn.is_some();
+                self.conversation.set_active(turn);
+                started
             }
             QueuedInput::ProcessStatus(_) => true,
         };
@@ -1368,31 +1423,35 @@ impl TuiApp {
     }
 
     pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
-        if self.prompt_input_is_busy() || self.queued_inputs.is_empty() {
+        if self.prompt_input_is_busy() || self.prompt.queue_is_empty() {
             return false;
         }
-        let Some((stage, queued)) = self.queued_inputs.pop_next_for_turn_with_stage() else {
+        let Some((stage, queued)) = self.prompt.pop_next_for_turn() else {
             return false;
         };
         let was_animating = self.working.is_animating();
         if let Err(queued) = self.start_queued_input(queued) {
-            self.queued_inputs.push_front(stage, queued);
+            self.prompt.queue_front(stage, queued);
         }
-        if was_animating && self.agent.is_none() {
+        if was_animating && !self.conversation.is_active() {
             self.working.finish(smelt_core::working::TurnOutcome::Done);
         }
         true
     }
 
     pub(crate) fn apply_context_window_update(&mut self, update: ContextWindowUpdate) {
-        if !self.context_window.accepts(&update) {
+        if !self.platform.accept_context_window_update(&update) {
             return;
         }
-        self.context_window.observed_revision = update.revision;
         if self.core.config.context_window != update.value {
             self.core.config.revision = self.core.config.revision.wrapping_add(1);
             self.core.config.context_window = update.value;
         }
+    }
+
+    #[cfg(test)]
+    fn prepare_context_window_for_test(&mut self, target: ContextWindowTarget) -> Option<u64> {
+        self.platform.prepare_context_window_for_test(target)
     }
 
     pub(crate) fn model_status_snapshot(&self) -> ModelStatusSnapshot {
@@ -1445,11 +1504,7 @@ impl TuiApp {
                 observed_revision: auto_observed,
                 error: auto_error,
             },
-            context_window: ControllerRevisionStatus {
-                desired_revision: self.context_window.desired_revision,
-                observed_revision: self.context_window.observed_revision,
-                error: None,
-            },
+            context_window: self.platform.context_window_status(),
         }
     }
 
@@ -1470,36 +1525,30 @@ impl TuiApp {
             startup_auth_error,
             app_events,
             managed_models,
+            skills,
+            mcp,
+            prompt_inputs,
             session_persistence,
         } = options;
-        let (app_event_tx, app_event_rx) = app_events
-            .map(|(tx, rx)| (tx, Some(rx)))
-            .unwrap_or_else(|| {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                (tx, Some(rx))
-            });
         let managed_models = managed_models.unwrap_or_else(smelt_core::ManagedModels::empty);
         let command_catalog = Arc::new(smelt_core::commands::CommandCatalog::new(
             lua.command_names_handle(),
         ));
-        let input = PromptState::new();
+        let input = PromptState::new_for_runtime(env.cwd(), env.xdg_runtime().to_path_buf());
         let vim_enabled = config.settings.vim;
 
         let cwd = env.cwd().to_string_lossy().into_owned();
-        let cwd_context = Self::cwd_status_context(
-            std::path::Path::new(&cwd),
+        let workspace = crate::app::cwd::WorkspaceState::new(
+            cwd.clone(),
+            env.home().clone(),
             std::path::Path::new(&config.settings.worktree_root),
         );
-        let cwd_worktree_path = Self::worktree_display_path(&cwd_context);
-        let cwd_project = cwd_context.project_name;
-        let cwd_branch = cwd_context.branch;
-        let cwd_worktree = cwd_context.worktree_name.unwrap_or_default();
-        let cwd_managed_worktree = cwd_context.managed_worktree;
 
         let runtime_state = config;
 
         let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
-        let prompt_placeholder_display = Arc::new(Mutex::new(None));
+        let placeholder_state = PlaceholderState::default();
+        let prompt_placeholder_display = placeholder_state.prompt_display();
         let (ui, well_known) = {
             let mut ui = crate::smelt_edit::Ui::new();
             ui.set_terminal_size(term_w, term_h);
@@ -1626,11 +1675,17 @@ impl TuiApp {
         resume_preview_cache.set_inline_options(inline_options);
 
         let working_clock = Arc::clone(&clock);
-        let next_managed_auth_check = clock.instant_now() + Duration::from_secs(2);
+        let managed_models =
+            crate::app::managed_models::ManagedModelState::new(managed_models, clock.instant_now());
         let initial_agent_mode = runtime_state.mode.clone();
         let initial_reasoning_effort = runtime_state.reasoning_effort;
         let auto_reload_enabled = runtime_state.settings.auto_reload;
-        let core = smelt_core::Core::new(
+        let mut session = smelt_core::session::Session::new(env.pid(), env.cwd());
+        session.fast_mode = Some(runtime_state.settings.fast_mode);
+        let prompt_history = History::load_from_state_root(env.xdg_state().join("smelt"));
+        let prompt_inputs =
+            prompt_inputs.unwrap_or_else(|| crate::prompt_inputs::PromptInputs::for_runtime(&env));
+        let mut core = smelt_core::Core::new(
             runtime_state,
             startup_overrides,
             engine,
@@ -1639,15 +1694,23 @@ impl TuiApp {
             clock,
             env,
         );
+        core.skills = skills;
+        core.mcp = mcp;
+        let sessions = core.sessions.clone();
         let (process_completion_tx, process_completion_rx) = tokio::sync::mpsc::unbounded_channel();
         core.processes.set_completion_sender(process_completion_tx);
-        let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx.clone());
+        let platform = crate::app::platform_runtime::PlatformRuntime::new(
+            &core.env,
+            sessions.clone(),
+            process_completion_rx,
+            app_events,
+        );
         let lua = crate::lua::LuaGeneration::initial(
             lua,
             Some(std::path::Path::new(&cwd)),
             project_trust.clone(),
         );
+        let lua = crate::app::lua_handlers::LuaRuntimeController::new(lua);
         let watch_paths = crate::auto_reload::WatchPaths::from_manifest(
             lua.manifest.roots.clone(),
             lua.manifest.target_cwd.as_deref(),
@@ -1656,89 +1719,42 @@ impl TuiApp {
             crate::auto_reload::AutoReloadController::new(auto_reload_enabled, watch_paths);
         Self {
             core,
+            conversation: crate::app::conversation::ConversationRuntime::new(
+                session,
+                transcript,
+                resume_preview_cache,
+                shared_session,
+                crate::app::agent::TurnLifecycle::new(initial_agent_mode, initial_reasoning_effort),
+                sessions,
+                session_persistence,
+            ),
             lua,
             command_catalog,
-            session_document: TuiSessionDocument::new(transcript),
-            committed_transcript_view: None,
             document_render_cache: crate::app::document::DocumentRenderCache::new(),
-            parser: smelt_core::content::stream_parser::StreamParser::new(),
-            draft_tools: crate::app::drafts::ToolDraftController::default(),
-            resume_preview_cache,
-            input_history: History::load(),
-            input,
-            exec: None,
-            shell_panel: None,
-            lua_wakeup_tx,
-            lua_wakeup_rx,
-            queued_inputs: InputQueues::default(),
-            cwd,
-            cwd_project,
-            cwd_branch,
-            cwd_worktree,
-            cwd_worktree_path,
-            cwd_managed_worktree,
-            shared_session,
+            prompt: crate::app::prompt_runtime::PromptRuntime::new(
+                prompt_history,
+                input,
+                placeholder_state,
+            ),
+            overlays: crate::app::overlay_runtime::OverlayRuntime::default(),
+            workspace,
             task_label: None,
-            pending_dialog: false,
             pending_quit: false,
-            notification: None,
-            suspended_notification: None,
-            cmdline: crate::app::cmdline::CmdlineState::default(),
-            search: crate::app::search::SearchState::default(),
-            picker_state: HashMap::new(),
             paint_registry: crate::lua::paint::PaintRegistry::default(),
-            term_focused: true,
             working: smelt_core::working::WorkingState::new(working_clock),
             layout: crate::content::layout::LayoutState::default(),
-            agent: None,
-            inspect_server: Arc::new(Mutex::new(None)),
-            sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
-            persistence: None,
-            persistence_epoch: crate::persist::SessionEpoch::ZERO,
-            observed_persistence_status: None,
-            session_access: SessionAccess::Owned,
-            session_persistence,
+            platform,
             transient_render_requested: false,
             last_width: term_w,
             last_height: term_h,
-            next_turn_id: 1,
-            last_terminal_turn_id: None,
-            next_continuation_token: 1,
-            pending_continuation_token: None,
-            pending_turn_meta: None,
-            pending_history_appends: Vec::new(),
-            process_completion_rx,
-            app_event_tx,
-            app_event_rx,
             managed_models,
-            managed_model_refresh_notifications: HashMap::new(),
-            next_managed_auth_check,
-            managed_auth_check_in_flight: false,
-            context_tokens_updated_this_turn: false,
-            applied_agent_mode: initial_agent_mode,
-            applied_reasoning_effort: initial_reasoning_effort,
-            cancel_generation: 0,
-            dispatching_turn_id: None,
-            dispatching_turn_permissions: None,
             busy_stack: BusyStack::default(),
             api_base_normalization_warnings: HashSet::new(),
             startup_auth_error,
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
-            last_prompt_text: String::new(),
-            prompt_input_rows: 1,
-            prompt_input_rows_override: None,
-            prompt_resize_drag: None,
-            prompt_resize_last_click: None,
-            prompt_placeholder_display,
-            placeholders: HashMap::new(),
-            prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
+            prompt_inputs,
             auto_reload,
-            pending_cwd_change: None,
-            pending_runtime_reconcile: false,
-            pending_lua_reload: false,
-            pending_lua_reload_refresh_agent_inputs: false,
-            lua_reload_failure: None,
             ui,
             well_known,
             timers: Timers {
@@ -1748,23 +1764,6 @@ impl TuiApp {
                 pending_transcript_fold_chord: None,
                 pending_chord: None,
             },
-            pending_dialogs: VecDeque::new(),
-            terminal: None,
-            public_status: match smelt_core::public_status::StatusPublisher::new() {
-                Ok(publisher) => Some(publisher),
-                Err(err) => {
-                    engine::log::entry(
-                        engine::log::Level::Warn,
-                        "public_status_init_failed",
-                        &serde_json::json!({ "error": err.to_string() }),
-                    );
-                    None
-                }
-            },
-            http_client: None,
-            context_window_tx: None,
-            context_window: ContextWindowController::default(),
-            placeholder_opts: HashMap::new(),
         }
     }
 
@@ -1792,7 +1791,7 @@ impl TuiApp {
 
     pub(crate) fn stop_background_processes(&mut self) {
         self.core.processes.clear();
-        while self.process_completion_rx.try_recv().is_ok() {}
+        let _ = self.platform.drain_process_completions();
     }
 
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
@@ -1801,15 +1800,15 @@ impl TuiApp {
         if due.is_empty() {
             return;
         }
-        let _guard = crate::lua::install_app_ptr(self);
-        for func in due {
-            let _perf = smelt_perf::perf::begin("lua:timer");
-            if let Err(e) = func.call::<()>(()) {
-                crate::lua::try_with_app(|app| {
-                    app.lua.record_error(format!("timer: {e}"));
-                });
+        let lua = self.lua.execution();
+        crate::lua::scope_app(self, move || {
+            for func in due {
+                let _perf = smelt_perf::perf::begin("lua:timer");
+                if let Err(e) = func.call::<()>(()) {
+                    lua.record_error(format!("timer: {e}"));
+                }
             }
-        }
+        });
     }
 
     fn keymap_pending_cell_value(&self) -> String {
@@ -1879,19 +1878,20 @@ impl TuiApp {
 
         self.core
             .signals
-            .publish_if_changed("cwd_project", self.cwd_project.clone());
+            .publish_if_changed("cwd_project", self.workspace.project().to_owned());
         self.core
             .signals
-            .publish_if_changed("cwd_branch", self.cwd_branch.clone());
+            .publish_if_changed("cwd_branch", self.workspace.branch().to_owned());
         self.core
             .signals
-            .publish_if_changed("cwd_worktree", self.cwd_worktree.clone());
+            .publish_if_changed("cwd_worktree", self.workspace.worktree().to_owned());
+        self.core.signals.publish_if_changed(
+            "cwd_worktree_path",
+            self.workspace.worktree_path().to_owned(),
+        );
         self.core
             .signals
-            .publish_if_changed("cwd_worktree_path", self.cwd_worktree_path.clone());
-        self.core
-            .signals
-            .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
+            .publish_if_changed("cwd_managed_worktree", self.workspace.is_managed_worktree());
 
         let task_label = self.task_label.clone().unwrap_or_default();
         self.core
@@ -1899,11 +1899,15 @@ impl TuiApp {
             .publish_if_changed("task_label", task_label);
         self.core.signals.publish_if_changed(
             "session_title",
-            self.core.session.title.clone().unwrap_or_default(),
+            self.conversation
+                .session()
+                .title
+                .clone()
+                .unwrap_or_default(),
         );
         self.core.signals.publish_if_changed(
             "session_slug",
-            self.core.session.slug.clone().unwrap_or_default(),
+            self.conversation.session().slug.clone().unwrap_or_default(),
         );
         self.core.signals.publish_if_changed(
             "settings_terminal_title",
@@ -1915,14 +1919,15 @@ impl TuiApp {
             .signals
             .publish_if_changed("running_procs", running_procs);
 
-        let permission_pending = self.pending_dialog;
+        let permission_pending = self.overlays.has_deferred_dialog();
         self.core
             .signals
             .publish_if_changed("permission_pending", permission_pending);
 
-        self.core
-            .signals
-            .publish_if_changed("notification_visible", self.notification.is_some());
+        self.core.signals.publish_if_changed(
+            "notification_visible",
+            self.overlays.notification_is_visible(),
+        );
         self.publish_prompt_resize_state();
 
         let cursor = self.focused_cursor_pos();
@@ -1935,16 +1940,14 @@ impl TuiApp {
         self.publish_work_signals();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_prompt_resize_drag(&mut self, drag: Option<PromptResizeDrag>) {
-        self.prompt_resize_drag = drag;
+        self.prompt.set_resize_drag_for_harness(drag);
         self.publish_prompt_resize_state();
     }
 
     pub(crate) fn publish_prompt_resize_state(&mut self) {
-        let active_chrome = self
-            .prompt_resize_drag
-            .map(|drag| drag.chrome)
-            .unwrap_or_default();
+        let active_chrome = self.prompt.active_resize_chrome();
         self.core
             .signals
             .publish_if_changed("prompt_resize_active", !active_chrome.is_empty());
@@ -2118,7 +2121,7 @@ impl TuiApp {
             Some(PublicReason::Permission)
         } else if self.modal_blocks_agent() {
             Some(PublicReason::Question)
-        } else if self.pending_dialog {
+        } else if self.overlays.has_deferred_dialog() {
             Some(PublicReason::Permission)
         } else {
             None
@@ -2143,7 +2146,7 @@ impl TuiApp {
             WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
                 (PublicState::Busy, None)
             }
-            WorkState::Done if !self.term_focused => (
+            WorkState::Done if !self.platform.terminal_is_focused() => (
                 PublicState::NeedsAttention,
                 Some(PublicReason::TurnComplete),
             ),
@@ -2161,33 +2164,21 @@ impl TuiApp {
     fn publish_public_status(&mut self) {
         use smelt_core::public_status::{FocusState, StatusUpdate};
 
-        let focus = if self.term_focused {
+        let focus = if self.platform.terminal_is_focused() {
             FocusState::Focused
         } else {
             FocusState::Unfocused
         };
-
         let (state, reason) = self.public_status_state_reason();
-
-        let Some(publisher) = self.public_status.as_mut() else {
-            return;
-        };
-        if let Err(err) = publisher.publish(StatusUpdate {
+        self.platform.publish_status(StatusUpdate {
             state,
             reason,
             focus,
-            cwd: Some(self.cwd.clone()),
-            session_id: Some(self.core.session.id.clone()),
-            mode: self.core.session.mode.clone(),
+            cwd: Some(self.workspace.cwd().to_owned()),
+            session_id: Some(self.conversation.session().id.clone()),
+            mode: self.conversation.session().mode.clone(),
             headless: false,
-        }) {
-            engine::log::entry(
-                engine::log::Level::Warn,
-                "public_status_publish_failed",
-                &serde_json::json!({ "error": err.to_string() }),
-            );
-            self.public_status = None;
-        }
+        });
     }
 
     /// Drain pending signal notifications and invoke subscribers.
@@ -2220,38 +2211,34 @@ impl TuiApp {
                 ));
             }
         }
-        let _guard = crate::lua::install_app_ptr(self);
-        for (name, value, prev, func, is_glob) in calls {
-            let _perf = smelt_perf::perf::begin("lua:cell_cb");
-            let result = if is_glob {
-                func.call::<()>((name.clone(), value, prev))
-            } else {
-                func.call::<()>((value, prev))
-            };
-            if let Err(e) = result {
-                crate::lua::try_with_app(|app| {
-                    app.lua.record_error(format!("cell `{name}`: {e}"));
-                });
+        let lua = self.lua.execution();
+        crate::lua::scope_app(self, move || {
+            for (name, value, prev, func, is_glob) in calls {
+                let _perf = smelt_perf::perf::begin("lua:cell_cb");
+                let result = if is_glob {
+                    func.call::<()>((name.clone(), value, prev))
+                } else {
+                    func.call::<()>((value, prev))
+                };
+                if let Err(e) = result {
+                    lua.record_error(format!("cell `{name}`: {e}"));
+                }
             }
-        }
+        });
     }
 
-    fn sync_prompt_placeholder_display(&mut self) {
-        let text = self.placeholders.get(&crate::app::PROMPT_WIN).cloned();
-        let mut guard = self.prompt_placeholder_display.lock().unwrap();
-        if *guard == text {
-            return;
-        }
-        *guard = text;
-        if let Some(buf) = self.ui.buf_mut(crate::app::PROMPT_EDIT_BUF) {
-            buf.invalidate_render_cache();
+    pub(crate) fn sync_prompt_placeholder_display(&mut self) {
+        if self.prompt.sync_prompt_placeholder_display() {
+            if let Some(buf) = self.ui.buf_mut(crate::app::PROMPT_EDIT_BUF) {
+                buf.invalidate_render_cache();
+            }
         }
     }
 
     /// Returns the current placeholder text on `win`, if any.
     pub(crate) fn placeholder_text(&mut self, win: crate::smelt_edit::WinId) -> Option<String> {
-        if let Some(text) = self.placeholders.get(&win) {
-            return Some(text.clone());
+        if let Some(text) = self.prompt.placeholder_text(win) {
+            return Some(text.to_string());
         }
         let buf = self.ui.win_buf_mut(win)?;
         crate::content::prompt_buf::placeholder_text(buf)
@@ -2264,29 +2251,36 @@ impl TuiApp {
             return;
         }
         if win == crate::app::PROMPT_WIN {
-            self.placeholders.insert(win, text);
+            self.prompt.set_placeholder_text(win, text);
             self.sync_prompt_placeholder_display();
             return;
         }
         if self.ui.win(win).is_none() {
             return;
         }
-        self.placeholders.insert(win, text.clone());
+        self.prompt.set_placeholder_text(win, text.clone());
         if let Some(buf) = self.ui.win_buf_mut(win) {
             crate::content::prompt_buf::set_placeholder_extmark(buf, Some(text));
         }
     }
 
+    pub(crate) fn set_placeholder_options(
+        &mut self,
+        win: crate::smelt_edit::WinId,
+        options: PlaceholderOpts,
+    ) {
+        self.prompt.set_placeholder_options(win, options);
+    }
+
     /// Clear the placeholder on `win` (text + opts). Idempotent.
     pub fn clear_placeholder(&mut self, win: crate::smelt_edit::WinId) {
-        self.placeholders.remove(&win);
+        self.prompt.clear_placeholder(win);
         if win == crate::app::PROMPT_WIN {
             self.sync_prompt_placeholder_display();
         }
         if let Some(buf) = self.ui.win_buf_mut(win) {
             crate::content::prompt_buf::set_placeholder_extmark(buf, None);
         }
-        self.placeholder_opts.remove(&win);
     }
 
     /// Match a key against the placeholder dispatch policy for `win`.
@@ -2305,7 +2299,7 @@ impl TuiApp {
         mods: crossterm::event::KeyModifiers,
     ) -> Option<EventOutcome> {
         let text = self.placeholder_text(win)?;
-        let opts = self.placeholder_opts.get(&win)?.clone();
+        let opts = self.prompt.placeholder_options(win)?.clone();
         let buf_empty = self
             .ui
             .win_buf_mut(win)
@@ -2319,7 +2313,7 @@ impl TuiApp {
             self.clear_placeholder(win);
             if win == self.well_known.prompt {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.input.replace_text(&mut pctx, text.clone());
+                self.prompt.replace_text(&mut pctx, text.clone());
             }
             self.fire_placeholder_event(
                 win,
@@ -2440,52 +2434,17 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_persist_reports(&mut self) {
-        let Some(persistence) = self.persistence.as_ref() else {
+        let Some(report) = self.conversation.drain_persistence_report() else {
             return;
         };
-        if !persistence.drain_status_wake() && !persistence.is_finished() {
-            return;
+        if let Some(session_id) = report.acknowledged_session_id {
+            self.dismiss_session_save_failure_notification(&session_id);
         }
-        let status = persistence.take_status();
-        if self.observed_persistence_status.as_ref() == Some(&status) {
-            return;
+        if let Some((session_id, message)) = report.failure {
+            self.notify_session_save_failure(&session_id, &message);
         }
-        self.observed_persistence_status = Some(status.clone());
-        if let Some(acknowledgement) = status.acknowledgement.as_ref() {
-            let history_len = self.session_history_len();
-            if self.session_document.acknowledge_convergence(
-                status.epoch,
-                acknowledgement,
-                &self.core.session.id,
-                history_len,
-                self.core.session.checkpoint.as_ref(),
-            ) {
-                persistence.confirm_acknowledgement(acknowledgement);
-                self.dismiss_session_save_failure_notification(&acknowledgement.receipt.session_id);
-            }
-        }
-        match &status.state {
-            crate::persist::PersistenceState::Blocked { cause, .. } => {
-                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
-            }
-            crate::persist::PersistenceState::OwnershipLost { cause, .. } => {
-                self.session_access = SessionAccess::ReadOnly {
-                    reason: cause.message.clone(),
-                };
-                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
-            }
-            crate::persist::PersistenceState::Stopped {
-                cause: Some(cause), ..
-            } => {
-                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
-            }
-            crate::persist::PersistenceState::Idle { .. }
-            | crate::persist::PersistenceState::Saving { .. }
-            | crate::persist::PersistenceState::Durable { .. }
-            | crate::persist::PersistenceState::Stopped { cause: None, .. } => {}
-        }
-        if let Some(warning) = status.latest_audit_warning {
-            self.notify_warn(warning.message);
+        if let Some(warning) = report.audit_warning {
+            self.notify_warn(warning);
         }
     }
 
@@ -2641,7 +2600,7 @@ impl TuiApp {
         lifetime: NotificationLifetime,
         owner: Option<NotificationOwner>,
     ) {
-        if let Some(notification) = self.notification.take() {
+        if let Some(notification) = self.overlays.take_notification() {
             self.close_overlay_leaf(notification.win);
         }
 
@@ -2654,12 +2613,13 @@ impl TuiApp {
                 }
                 NotificationLifetime::Sticky => SuspendedNotificationLifetime::Sticky,
             };
-            self.suspended_notification = Some(SuspendedNotification {
-                lifetime,
-                kind,
-                summary: summary.to_string(),
-                owner,
-            });
+            self.overlays
+                .install_suspended_notification(SuspendedNotification {
+                    lifetime,
+                    kind,
+                    summary: summary.to_string(),
+                    owner,
+                });
             return;
         }
 
@@ -2700,7 +2660,7 @@ impl TuiApp {
                 // never obscures a modal asking for input.
                 .with_z(40),
         );
-        self.notification = Some(Notification {
+        self.overlays.install_notification(Notification {
             win,
             lifetime,
             kind,
@@ -2781,8 +2741,8 @@ impl TuiApp {
     }
 
     pub(crate) fn dismiss_notification(&mut self) {
-        self.suspended_notification = None;
-        if let Some(notification) = self.notification.take() {
+        self.overlays.clear_suspended_notification();
+        if let Some(notification) = self.overlays.take_notification() {
             self.close_overlay_leaf(notification.win);
         }
     }
@@ -2796,12 +2756,12 @@ impl TuiApp {
             )
         };
         let active_failure = self
-            .notification
-            .as_ref()
+            .overlays
+            .notification()
             .is_some_and(|notification| belongs_to_session(notification.owner.as_ref()));
         let suspended_failure = self
-            .suspended_notification
-            .as_ref()
+            .overlays
+            .suspended_notification()
             .is_some_and(|notification| belongs_to_session(notification.owner.as_ref()));
         if active_failure || suspended_failure {
             self.dismiss_notification();
@@ -2811,8 +2771,8 @@ impl TuiApp {
     pub(crate) fn dismiss_expired_notification(&mut self) -> bool {
         let now = self.core.clock.instant_now();
         if self
-            .notification
-            .as_ref()
+            .overlays
+            .notification()
             .is_some_and(|notification| notification.lifetime.is_expired(now))
         {
             self.dismiss_notification();
@@ -2823,16 +2783,12 @@ impl TuiApp {
 
     pub(crate) fn notification_expiry_delay(&self) -> Option<Duration> {
         let now = self.core.clock.instant_now();
-        self.notification
-            .as_ref()
-            .and_then(|notification| notification.lifetime.expiry_delay(now))
+        self.overlays.notification_expiry_delay(now)
     }
 
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn notification_win(&self) -> Option<crate::smelt_edit::WinId> {
-        self.notification
-            .as_ref()
-            .map(|notification| notification.win)
+        self.overlays.notification_win()
     }
 
     pub(crate) fn set_task_label(&mut self, label: String) {
@@ -2862,10 +2818,7 @@ impl TuiApp {
     }
 
     fn warmup_workspace_files(&mut self) {
-        let _ = self
-            .core
-            .workspace_files
-            .warmup(std::path::Path::new(&self.cwd));
+        let _ = self.core.workspace_files.warmup(self.workspace.cwd_path());
     }
 
     fn render_normal_after_startup_work(&mut self, workspace_warmup_pending: &mut bool) {
@@ -2876,9 +2829,8 @@ impl TuiApp {
     }
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
-        let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<ContextWindowUpdate>();
-        self.install_http_client(http_client);
-        self.context_window_tx = Some(ctx_tx);
+        self.platform.start(http_client);
+        self.submit_managed_model_refreshes();
         self.refresh_context_window();
         crate::theme::detect_background(self.ui.theme_mut());
         // Install the baked default theme so the first frame renders with
@@ -2887,15 +2839,12 @@ impl TuiApp {
         let is_light = self.ui.theme().is_light();
         let baked = crate::theme::default_baked_with_background(is_light);
         self.install_theme(baked);
-        // RAII guard for the terminal envelope: raw mode + alt screen + mouse +
-        // bracketed paste + focus + DECAWM-off + hidden cursor. Lives as long
-        // as `run()`; `Drop` restores cooked mode and the normal screen, even
-        // on panic. Shell-outs go through `self.terminal.as_mut().suspended()`.
-        self.terminal = crate::term_setup::TuiTerminal::claim().ok();
+        // PlatformRuntime owns the terminal envelope and restores it on normal
+        // shutdown, early return, or panic.
 
         if !self.session_is_empty() {
             self.restore_screen();
-            if let Some(ref slug) = self.core.session.slug {
+            if let Some(ref slug) = self.conversation.session().slug {
                 self.set_task_label(slug.clone());
             }
             self.finish_transcript_turn();
@@ -2906,14 +2855,11 @@ impl TuiApp {
         }
         self.warn_if_api_base_normalized();
 
-        {
-            let _guard = crate::lua::install_app_ptr(self);
-            self.core.signals.set_dyn(
-                "session_started",
-                std::rc::Rc::new(self.core.session.id.clone()),
-            );
-            self.drain_signals_pending();
-        }
+        self.core.signals.set_dyn(
+            "session_started",
+            std::rc::Rc::new(self.conversation.session().id.clone()),
+        );
+        self.drain_signals_pending();
         if let Some(state) = self.project_trust.take() {
             if matches!(state, smelt_core::trust::TrustState::Untrusted { .. }) {
                 self.notify(
@@ -2928,7 +2874,8 @@ impl TuiApp {
             Ok(input) => input,
             Err(e) => {
                 self.notify_error(format!("terminal input: {e}"));
-                self.terminal = None;
+                self.platform.claim_failed_terminal();
+                self.platform.shutdown();
                 return;
             }
         };
@@ -2944,13 +2891,13 @@ impl TuiApp {
         // uses. `main` already ran a pre-TUI plugin pass to extract
         // engine config - that pass couldn't touch `smelt.win`,
         // `smelt.overlay`, `smelt.paint`, `smelt.signal.subscribe(...)`, etc.
-        // because the host pointer wasn't installed yet. Re-running
-        // here inside `install_app_ptr` makes the host live for module
+        // because no frontend host was lent to Lua yet. Re-running
+        // here inside a scoped frontend entry makes the host live for module
         // bodies on every Lua-context init (cold start AND `/reload`),
         // so plain `if persist().is_open then open() end` at module
         // top works in both. `lifecycle.on("ready")` hooks drain at
         // the end with `ctx.kind = "launch"`.
-        let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch", true));
+        let load_err = self.bring_up_lua("launch", true);
         if let Some(err) = load_err {
             self.notify_error_sticky(format!("lua init: {err}"));
         }
@@ -2964,7 +2911,7 @@ impl TuiApp {
             let trimmed = msg.trim();
             if let Some(cmd) = trimmed.strip_prefix('!') {
                 if let Some(handle) = self.start_shell_escape(cmd) {
-                    self.exec = Some(handle);
+                    self.overlays.install_execution(handle);
                 }
             } else if let Some(name) = smelt_core::commands::command_name(trimmed)
                 .filter(|name| self.lua.has_command(name))
@@ -2986,10 +2933,10 @@ impl TuiApp {
                     .filter(|manager| !manager.controller_status().is_ready())
                     .cloned();
                 if let Some(manager) = pending_mcp {
-                    self.queued_inputs
-                        .push_front(QueueStage::Turn, QueuedInput::request(msg, content));
+                    self.prompt
+                        .queue_front(QueueStage::Turn, QueuedInput::request(msg, content));
                     let busy_token = self.busy_stack.push("connecting MCP tools".into());
-                    let app_event_tx = self.app_event_tx.clone();
+                    let app_event_tx = self.platform.app_event_sender();
                     tokio::spawn(async move {
                         let readiness = manager
                             .wait_until_ready(smelt_core::mcp::STARTUP_DISCOVERY_WAIT)
@@ -3000,18 +2947,15 @@ impl TuiApp {
                         });
                     });
                 } else {
-                    self.agent = self.begin_agent_turn(&msg, content);
+                    let turn = self.begin_agent_turn(&msg, content);
+                    self.conversation.set_active(turn);
                 }
             }
         }
 
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-        let mut public_status_heartbeat =
-            tokio::time::interval(smelt_core::public_status::StatusPublisher::heartbeat_interval());
-        public_status_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         'main: loop {
-            let _app_guard = crate::lua::install_app_ptr(self);
             if self.pending_quit {
                 self.discard_turn(TurnEnd::Cancelled);
                 break 'main;
@@ -3031,7 +2975,7 @@ impl TuiApp {
             self.pump_lua();
             self.dispatch_ui_window_events(true);
 
-            while let Ok(update) = ctx_rx.try_recv() {
+            for update in self.platform.drain_context_window_updates() {
                 self.apply_context_window_update(update);
             }
 
@@ -3042,7 +2986,7 @@ impl TuiApp {
 
             self.drain_ready_engine_outputs_for_frame();
 
-            while let Ok(completion) = self.process_completion_rx.try_recv() {
+            for completion in self.platform.drain_process_completions() {
                 self.handle_process_completed(completion.id, completion.exit_code);
             }
 
@@ -3053,13 +2997,12 @@ impl TuiApp {
 
             self.start_next_queued_input_if_idle();
 
-            if self.agent.is_none() && !self.pending_dialogs.is_empty() {
-                self.pending_dialogs.clear();
-                self.pending_dialog = false;
+            if !self.conversation.is_active() && self.overlays.has_deferred_dialog() {
+                self.overlays.clear_deferred_dialogs();
             }
-            if !self.pending_dialogs.is_empty()
+            if self.overlays.has_deferred_dialog()
                 && !self.modal_blocks_agent()
-                && self.agent.is_some()
+                && self.conversation.is_active()
             {
                 let idle = self
                     .timers
@@ -3067,20 +3010,20 @@ impl TuiApp {
                     .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
                     .unwrap_or(true);
                 while idle
-                    && !self.pending_dialogs.is_empty()
+                    && self.overlays.has_deferred_dialog()
                     && !self.modal_blocks_agent()
-                    && self.agent.is_some()
+                    && self.conversation.is_active()
                 {
-                    let deferred = self.pending_dialogs.pop_front().unwrap();
+                    let deferred = self
+                        .overlays
+                        .pop_deferred_dialog()
+                        .expect("pending deferred dialog");
                     let ctrl = match deferred {
                         DeferredDialog::Confirm(req) => SessionControl::NeedsConfirm(req),
                     };
-                    let mut turn = self
-                        .agent
-                        .take()
+                    let end = self
+                        .with_dispatched_turn(|app, turn| app.dispatch_control(ctrl, turn))
                         .expect("deferred dialog requires active turn");
-                    let end = self.dispatch_control(ctrl, &mut turn);
-                    self.agent = Some(turn);
                     match end {
                         SessionControl::Continue | SessionControl::NeedsConfirm(_) => {}
                         SessionControl::Done => {
@@ -3091,7 +3034,6 @@ impl TuiApp {
                         }
                     }
                 }
-                self.pending_dialog = !self.pending_dialogs.is_empty();
             }
 
             self.render_normal_after_startup_work(&mut workspace_warmup_pending);
@@ -3218,26 +3160,30 @@ impl TuiApp {
                     self.render_normal();
                 }
 
-                Some(completion) = self.process_completion_rx.recv() => {
-                    self.handle_process_completed(completion.id, completion.exit_code);
-                }
-
-                Some(event) = async {
-                    match self.app_event_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
+                event = self.platform.receive() => {
+                    match event {
+                        crate::app::platform_runtime::PlatformEvent::App(event) => {
+                            self.handle_app_event(event);
+                            self.render_normal();
+                        }
+                        crate::app::platform_runtime::PlatformEvent::ContextWindow(update) => {
+                            self.apply_context_window_update(*update);
+                        }
+                        crate::app::platform_runtime::PlatformEvent::ProcessCompleted(completion) => {
+                            self.handle_process_completed(completion.id, completion.exit_code);
+                        }
+                        crate::app::platform_runtime::PlatformEvent::PublicStatusHeartbeat => {
+                            self.publish_public_status();
+                        }
                     }
-                } => {
-                    self.handle_app_event(event);
-                    self.render_normal();
                 }
 
                 Some(output) = self.core.engine.recv_output() => {
                     self.dispatch_engine_output_in_render_loop(output);
                 }
 
-                Some(_) = self.lua_wakeup_rx.recv() => {
-                    while self.lua_wakeup_rx.try_recv().is_ok() {}
+                Some(_) = self.lua.receive_wakeup() => {
+                    self.lua.drain_wakeups();
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
                     self.render_normal();
@@ -3276,13 +3222,8 @@ impl TuiApp {
                     self.render_normal();
                 }
 
-                Some(ev) = async {
-                    match self.exec.as_mut() {
-                        Some(handle) => handle.rx.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    let sink = self.exec.as_ref().map(|handle| handle.sink);
+                Some(ev) = self.overlays.next_execution_event() => {
+                    let sink = self.overlays.execution_sink();
                     match ev {
                         crate::commands::ExecEvent::Output(line) => {
                             if let Some(sink) = sink {
@@ -3293,13 +3234,9 @@ impl TuiApp {
                             if let Some(sink) = sink {
                                 self.finish_shell_output(code, sink);
                             }
-                            self.exec = None;
+                            self.overlays.finish_execution();
                         }
                     }
-                }
-
-                _ = public_status_heartbeat.tick() => {
-                    self.publish_public_status();
                 }
 
                 _ = tokio::time::sleep({
@@ -3338,36 +3275,34 @@ impl TuiApp {
             }
         }
 
-        let persistence_error = crate::lua::with_app_ptr(self, |app| {
-            if app.agent.is_some() {
-                app.finish_turn(crate::app::TurnEnd::Cancelled);
-            }
-            app.core
-                .signals
-                .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
-            app.drain_signals_pending();
-            app.stop_background_processes();
-            app.save_session_and_flush();
-            let unflushed = app.session_document_has_unflushed_work().then(|| {
-                format!(
-                    "session {} still has unflushed changes",
-                    app.core.session.id
-                )
-            });
-            let shutdown = app.shutdown_persist().err();
-            match (unflushed, shutdown) {
-                (Some(unflushed), Some(shutdown)) => Some(format!("{unflushed}; {shutdown}")),
-                (Some(error), None) | (None, Some(error)) => Some(error),
-                (None, None) => None,
-            }
+        if self.conversation.is_active() {
+            self.finish_turn(crate::app::TurnEnd::Cancelled);
+        }
+        self.core
+            .signals
+            .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
+        self.drain_signals_pending();
+        self.stop_background_processes();
+        self.save_session_and_flush();
+        let unflushed = self.session_document_has_unflushed_work().then(|| {
+            format!(
+                "session {} still has unflushed changes",
+                self.conversation.session().id
+            )
         });
+        let shutdown = self.shutdown_persist().err();
+        let persistence_error = match (unflushed, shutdown) {
+            (Some(unflushed), Some(shutdown)) => Some(format!("{unflushed}; {shutdown}")),
+            (Some(error), None) | (None, Some(error)) => Some(error),
+            (None, None) => None,
+        };
 
         // Stop the stdin reader before releasing terminal modes so no background
         // thread can keep consuming bytes after the TUI gives the terminal back.
         drop(term_events);
 
-        // Drop the terminal guard last so any rendering above stays in TUI mode.
-        self.terminal = None;
+        // Release platform resources last so shutdown rendering stays in TUI mode.
+        self.platform.shutdown();
         if let Some(error) = persistence_error {
             eprintln!("smelt: persistence shutdown incomplete: {error}");
         }
@@ -3377,21 +3312,6 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn worktree_display_path_is_relative_to_project_root() {
-        let ctx = smelt_core::worktree::ProjectContext {
-            project_name: "smelt".into(),
-            active_root: std::path::PathBuf::from("/home/dev/dev/smelt/.worktrees/test"),
-            branch: "test".into(),
-            managed_worktree: true,
-            worktree_name: Some("test".into()),
-            base_path: Some(std::path::PathBuf::from("/home/dev/dev/smelt")),
-            allowed_roots: Vec::new(),
-        };
-
-        assert_eq!(TuiApp::worktree_display_path(&ctx), ".worktrees/test");
-    }
 
     fn set_active_model(app: &mut TuiApp, model: &str, api_base: &str, provider_type: &str) {
         let active = app.core.config.active_model_mut().unwrap();
@@ -3405,6 +3325,27 @@ mod tests {
     }
 
     #[test]
+    fn busy_token_releases_without_a_lua_host_scope() {
+        let mut stack = BusyStack::default();
+        let token = stack.push_token("indexing".to_owned());
+
+        assert!(stack.is_busy());
+        assert!(token.release());
+        assert!(!stack.is_busy());
+    }
+
+    #[test]
+    fn busy_token_is_invalid_after_its_owner_is_replaced() {
+        let mut stack = BusyStack::default();
+        let token = stack.push_token("old runtime".to_owned());
+
+        stack = BusyStack::default();
+
+        assert!(!token.release());
+        assert!(!stack.is_busy());
+    }
+
+    #[test]
     fn stale_context_window_update_does_not_overwrite_current_generation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
@@ -3412,12 +3353,13 @@ mod tests {
         let target = active_context_target(&app.app);
         let stale_revision = app
             .app
-            .context_window
-            .prepare(Some(target.clone()))
+            .prepare_context_window_for_test(target.clone())
             .unwrap();
         let mut newer_target = target.clone();
         newer_target.config.max_tokens = Some(16_384);
-        app.app.context_window.prepare(Some(newer_target)).unwrap();
+        app.app
+            .prepare_context_window_for_test(newer_target)
+            .unwrap();
 
         app.app.apply_context_window_update(ContextWindowUpdate {
             revision: stale_revision,
@@ -3441,8 +3383,7 @@ mod tests {
         let target = active_context_target(&app.app);
         let revision = app
             .app
-            .context_window
-            .prepare(Some(target.clone()))
+            .prepare_context_window_for_test(target.clone())
             .unwrap();
 
         app.app.apply_context_window_update(ContextWindowUpdate {
@@ -3462,8 +3403,7 @@ mod tests {
         let desired = active_context_target(&app.app);
         let revision = app
             .app
-            .context_window
-            .prepare(Some(desired.clone()))
+            .prepare_context_window_for_test(desired.clone())
             .unwrap();
         let mut stale = desired;
         stale.model_key = "other/Qwen3.6-27B".into();
@@ -3486,12 +3426,10 @@ mod tests {
         let target = active_context_target(&app.app);
         let revision = app
             .app
-            .context_window
-            .prepare(Some(target.clone()))
+            .prepare_context_window_for_test(target.clone())
             .unwrap();
 
-        assert!(app.app.context_window.prepare(Some(target)).is_none());
-        assert_eq!(app.app.context_window.desired_revision, revision);
+        assert!(app.app.prepare_context_window_for_test(target).is_none());
         assert_eq!(
             app.app.runtime_controller_status().context_window,
             ControllerRevisionStatus {

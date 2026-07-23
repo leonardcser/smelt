@@ -11,15 +11,15 @@ use crate::blob_staging::recover_blob_staging;
 use crate::blob_staging::{stage_session_blobs, SessionBlob, BLOB_STAGING_DIR};
 use crate::db::SessionDb;
 use crate::{
-    CompatibilityExportSnapshot, DescriptorIndex, FullSession, HistoryIndex, HistoryLen,
-    HistorySuffix, ObjectMeta, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
-    RequestAuditStats, RequestAuditSummary, Result, SaveReceipt, SessionCommit,
-    SessionCommitFailure, SessionIdentity, SessionMeta, SessionMetadata, SideTableSuffixes,
-    StartupRecoveryReceipt, StoreError, StoreHead, StoredObject, StoredSession, StoredTurn,
-    SubmitTurn, SubmitTurnReceipt, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
-    TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
-    TranscriptDescriptorSuffix, TranscriptSearchCandidate, TranscriptSearchDirection, TurnId,
-    TurnTransition, TurnTransitionReceipt, WriterOwner,
+    FullSession, HistoryIndex, HistoryLen, HistorySuffix, ObjectMeta, RequestAuditPayloadMode,
+    RequestAuditPayloads, RequestAuditQuery, RequestAuditStats, RequestAuditSummary, Result,
+    SaveReceipt, SessionCommit, SessionCommitFailure, SessionIdentity, SessionMeta,
+    SessionMetadata, SideTableSuffixes, StartupRecoveryReceipt, StoreError, StoreHead,
+    StoredObject, StoredSession, StoredTranscriptBlock, StoredTurn, SubmitTurn, SubmitTurnReceipt,
+    TranscriptBlockMetadataRecord, TranscriptRecordIndex, TranscriptRecordOffset,
+    TranscriptRecordRange, TranscriptRecordSlice, TranscriptRecordSuffix,
+    TranscriptSearchCandidate, TranscriptSearchDirection, TurnId, TurnTransition,
+    TurnTransitionReceipt, WriterOwner,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,20 +107,15 @@ impl SessionReader {
 
     pub fn load_session_resume_snapshot(
         &self,
-        descriptor_width: u16,
-        descriptor_target_rows: u16,
+        record_width: u16,
+        record_target_rows: u16,
     ) -> Result<Option<crate::SessionResumeSnapshot>> {
         self.db
-            .load_session_resume_snapshot(descriptor_width, descriptor_target_rows)
+            .load_session_resume_snapshot(record_width, record_target_rows)
     }
 
     pub fn session_meta(&self) -> Result<Option<SessionMeta>> {
         self.db.session_meta()
-    }
-
-    // COMPAT(session-derived-sidecar-exports): pin metadata and content to one revision.
-    pub fn compatibility_export_snapshot(&self) -> Result<Option<CompatibilityExportSnapshot<'_>>> {
-        self.db.compatibility_export_snapshot()
     }
 
     pub fn object(&self, hash: &str) -> Result<Option<StoredObject>> {
@@ -169,102 +164,97 @@ impl SessionReader {
         Ok(session)
     }
 
-    pub fn transcript_descriptor_count(&self) -> Result<usize> {
-        self.db.transcript_descriptor_count()
+    pub fn transcript_record_count(&self) -> Result<usize> {
+        self.db.transcript_record_count()
     }
 
-    pub fn transcript_descriptor_dense_extent(&self) -> Result<usize> {
-        self.db.transcript_descriptor_dense_extent()
+    pub fn transcript_record_dense_extent(&self) -> Result<usize> {
+        self.db.transcript_record_dense_extent()
     }
 
-    pub fn transcript_descriptor_index_for_block_idx(
+    pub fn transcript_record_index_for_block_idx(
         &self,
         block_idx: u64,
-    ) -> Result<Option<TranscriptDescriptorIndex>> {
-        self.db.transcript_descriptor_index_for_block_idx(block_idx)
+    ) -> Result<Option<TranscriptRecordOffset>> {
+        self.db.transcript_record_index_for_block_idx(block_idx)
     }
 
-    pub fn transcript_descriptor_estimated_rows(
+    pub fn transcript_record_estimated_rows(
         &self,
-        range: TranscriptDescriptorRange,
+        range: TranscriptRecordRange,
         width: u16,
     ) -> Result<u64> {
-        self.db.transcript_descriptor_estimated_rows(range, width)
+        self.db.transcript_record_estimated_rows(range, width)
     }
 
-    pub fn read_all_transcript_descriptor_records(
-        &self,
-    ) -> Result<Vec<TranscriptDescriptorRecord>> {
-        self.db.read_all_transcript_descriptor_records()
+    pub fn read_all_transcript_records(&self) -> Result<Vec<StoredTranscriptBlock>> {
+        self.db.read_all_transcript_records()
     }
 
-    pub fn read_transcript_descriptor_slice(
+    pub fn read_transcript_record_slice(
         &self,
-        range: TranscriptDescriptorRange,
-    ) -> Result<TranscriptDescriptorSlice> {
-        self.db.read_transcript_descriptor_slice(range)
+        range: TranscriptRecordRange,
+    ) -> Result<TranscriptRecordSlice> {
+        self.db.read_transcript_record_slice(range)
     }
 
-    pub fn read_transcript_descriptor_slice_with_total(
+    pub fn read_transcript_record_slice_with_total(
         &self,
-        range: TranscriptDescriptorRange,
+        range: TranscriptRecordRange,
         total_count: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
+    ) -> Result<TranscriptRecordSlice> {
         self.db
-            .read_transcript_descriptor_slice_with_total(range, total_count)
+            .read_transcript_record_slice_with_total(range, total_count)
     }
 
-    pub fn read_transcript_descriptor_tail_slice(
-        &self,
-        count: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
-        self.db.read_transcript_descriptor_tail_slice(count)
+    pub fn read_transcript_record_tail_slice(&self, count: usize) -> Result<TranscriptRecordSlice> {
+        self.db.read_transcript_record_tail_slice(count)
     }
 
-    pub fn read_transcript_descriptor_tail_slice_with_total(
+    pub fn read_transcript_record_tail_slice_with_total(
         &self,
         total_count: usize,
         count: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
+    ) -> Result<TranscriptRecordSlice> {
         self.db
-            .read_transcript_descriptor_tail_slice_with_total(total_count, count)
+            .read_transcript_record_tail_slice_with_total(total_count, count)
     }
 
-    pub fn read_transcript_descriptor_tail_for_rows(
+    pub fn read_transcript_record_tail_for_rows(
         &self,
         width: u16,
         target_rows: u16,
-    ) -> Result<TranscriptDescriptorSlice> {
+    ) -> Result<TranscriptRecordSlice> {
         self.db
-            .read_transcript_descriptor_tail_for_rows(width, target_rows)
+            .read_transcript_record_tail_for_rows(width, target_rows)
     }
 
-    pub fn read_transcript_descriptor_centered_slice(
+    pub fn read_transcript_record_centered_slice(
         &self,
-        center_descriptor_idx: u64,
+        center_record_idx: u64,
         before: usize,
         after: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
+    ) -> Result<TranscriptRecordSlice> {
         self.db
-            .read_transcript_descriptor_centered_slice(center_descriptor_idx, before, after)
+            .read_transcript_record_centered_slice(center_record_idx, before, after)
     }
 
-    pub fn read_transcript_descriptor_before_kind_at_index(
+    pub fn read_transcript_record_before_kind_at_index(
         &self,
         kind: &str,
-        before_or_at_descriptor_index: u64,
-    ) -> Result<Option<TranscriptDescriptorRecord>> {
+        before_or_at_record_index: u64,
+    ) -> Result<Option<StoredTranscriptBlock>> {
         self.db
-            .read_transcript_descriptor_before_kind_at_index(kind, before_or_at_descriptor_index)
+            .read_transcript_record_before_kind_at_index(kind, before_or_at_record_index)
     }
 
-    pub fn read_transcript_descriptor_after_kind_at_index(
+    pub fn read_transcript_record_after_kind_at_index(
         &self,
         kind: &str,
-        after_or_at_descriptor_index: u64,
-    ) -> Result<Option<TranscriptDescriptorRecord>> {
+        after_or_at_record_index: u64,
+    ) -> Result<Option<StoredTranscriptBlock>> {
         self.db
-            .read_transcript_descriptor_after_kind_at_index(kind, after_or_at_descriptor_index)
+            .read_transcript_record_after_kind_at_index(kind, after_or_at_record_index)
     }
 
     pub fn search_transcript_candidates(
@@ -315,12 +305,12 @@ impl SessionReader {
         self.db.transcript_block_count()
     }
 
-    pub fn transcript_missing_descriptor_count(&self) -> Result<usize> {
-        self.db.transcript_missing_descriptor_count()
+    pub fn transcript_missing_block_count(&self) -> Result<usize> {
+        self.db.transcript_missing_block_count()
     }
 
-    pub fn transcript_descriptor_max_history_idx(&self) -> Result<Option<usize>> {
-        self.db.transcript_descriptor_max_history_idx()
+    pub fn transcript_record_max_history_idx(&self) -> Result<Option<usize>> {
+        self.db.transcript_record_max_history_idx()
     }
 
     pub fn transcript_max_block_idx(&self) -> Result<Option<u64>> {
@@ -776,8 +766,8 @@ impl OwnedSessionWriter {
         self.db()?.last_session_commit()
     }
 
-    pub fn transcript_descriptor_count(&self) -> Result<usize> {
-        self.db()?.transcript_descriptor_count()
+    pub fn transcript_record_count(&self) -> Result<usize> {
+        self.db()?.transcript_record_count()
     }
 
     pub fn invalidate_connection(&mut self) {
@@ -1143,7 +1133,7 @@ impl SessionMaintenance {
         apply_maintenance_commit(&mut self.writer, &command)
     }
 
-    // COMPAT(transcript-descriptor-history-link-mismatch): repair descriptors written by
+    // COMPAT(transcript-record-history-link-mismatch): repair records written by
     // early sparse transcript builds while those sessions remain supported.
     pub fn repair_transcript_history_links(&mut self) -> Result<usize> {
         let mut session = self
@@ -1152,13 +1142,13 @@ impl SessionMaintenance {
             .load_full_session()?
             .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
         let mut repaired = 0;
-        for record in &mut session.descriptors {
+        for record in &mut session.transcript_records {
             let matches_history = record
                 .history_idx
                 .and_then(|index| usize::try_from(index).ok())
                 .and_then(|index| session.history.get(index))
                 .is_some_and(|item| {
-                    protocol::transcript_descriptor_kind_matches_history_item(&record.kind, item)
+                    protocol::transcript_block_kind_matches_history_item(&record.kind, item)
                 });
             if record.history_idx.is_some() && !matches_history {
                 record.history_idx = None;
@@ -1169,12 +1159,12 @@ impl SessionMaintenance {
         if repaired == 0 {
             return Ok(0);
         }
-        let command = metadata_and_descriptor_commit(
+        let command = metadata_and_record_commit(
             &session,
             session.session.metadata.clone(),
-            Some(TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
-                records: session.descriptors.clone(),
+            Some(TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
+                records: session.transcript_records.clone(),
             }),
         )?;
         apply_maintenance_commit(&mut self.writer, &command)?;
@@ -1195,29 +1185,26 @@ impl SessionMaintenance {
         Ok(1)
     }
 
-    pub fn replace_transcript_descriptors(
-        &mut self,
-        records: &[TranscriptDescriptorRecord],
-    ) -> Result<()> {
-        self.replace_transcript_descriptor_suffix(0, records)
+    pub fn replace_transcript_records(&mut self, records: &[StoredTranscriptBlock]) -> Result<()> {
+        self.replace_transcript_record_suffix(0, records)
     }
 
-    pub fn replace_transcript_descriptor_suffix(
+    pub fn replace_transcript_record_suffix(
         &mut self,
-        start_descriptor_idx: usize,
-        records: &[TranscriptDescriptorRecord],
+        start_record_idx: usize,
+        records: &[StoredTranscriptBlock],
     ) -> Result<()> {
         let session = self
             .writer
             .db()?
             .load_full_session()?
             .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
-        let start = DescriptorIndex::try_from(start_descriptor_idx)
-            .map_err(|_| StoreError::Integrity("descriptor start exceeds u64".into()))?;
-        let command = metadata_and_descriptor_commit(
+        let start = TranscriptRecordIndex::try_from(start_record_idx)
+            .map_err(|_| StoreError::Integrity("record start exceeds u64".into()))?;
+        let command = metadata_and_record_commit(
             &session,
             session.session.metadata.clone(),
-            Some(TranscriptDescriptorSuffix {
+            Some(TranscriptRecordSuffix {
                 start,
                 records: records.to_vec(),
             }),
@@ -1326,17 +1313,17 @@ fn full_session_commit(
             metadata_snapshots: side_table_rows(&session.metadata_snapshots),
             context_snapshots: side_table_rows(&session.context_snapshots),
         },
-        descriptors: Some(TranscriptDescriptorSuffix {
-            start: DescriptorIndex::ZERO,
-            records: session.descriptors.clone(),
+        transcript_records: Some(TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
+            records: session.transcript_records.clone(),
         }),
     })
 }
 
-fn metadata_and_descriptor_commit(
+fn metadata_and_record_commit(
     session: &FullSession,
     metadata: SessionMetadata,
-    descriptors: Option<TranscriptDescriptorSuffix>,
+    records: Option<TranscriptRecordSuffix>,
 ) -> Result<SessionCommit> {
     let history_len = session.session.head.history_len;
     let boundary = history_len.get();
@@ -1356,7 +1343,7 @@ fn metadata_and_descriptor_commit(
             metadata_snapshots: side_table_rows_from(&session.metadata_snapshots, boundary),
             context_snapshots: side_table_rows_from(&session.context_snapshots, boundary),
         },
-        descriptors,
+        transcript_records: records,
     })
 }
 
@@ -1910,7 +1897,7 @@ mod tests {
             expected: StoreHead {
                 revision: crate::Revision::new(base_revision),
                 history_len: crate::HistoryLen::ZERO,
-                descriptor_len: crate::DescriptorLen::ZERO,
+                transcript_record_count: crate::TranscriptRecordCount::ZERO,
             },
             identity: SessionIdentity {
                 id: session_id.into(),
@@ -1940,7 +1927,7 @@ mod tests {
                 items: Vec::new(),
             },
             side_tables: crate::SideTableSuffixes::default(),
-            descriptors: None,
+            transcript_records: None,
         }
     }
 
@@ -1949,8 +1936,8 @@ mod tests {
         history_idx: u64,
         kind: &str,
         text: &str,
-    ) -> TranscriptDescriptorRecord {
-        TranscriptDescriptorRecord {
+    ) -> StoredTranscriptBlock {
+        StoredTranscriptBlock {
             block_idx,
             history_idx: Some(history_idx),
             kind: kind.into(),
@@ -1960,7 +1947,7 @@ mod tests {
             estimated_text_bytes: text.len() as u64,
             preview_text: text.into(),
             indexed_text: text.into(),
-            descriptor_json: serde_json::json!({ "kind": kind, "text": text }).to_string(),
+            block_json: serde_json::json!({ "kind": kind, "text": text }).to_string(),
             origin_json: Some(serde_json::json!({ "History": history_idx }).to_string()),
             tool_state_json: None,
         }
@@ -2462,8 +2449,8 @@ mod tests {
             protocol::HistoryItem::user(summary_history),
             protocol::HistoryItem::note(protocol::HistoryNote::context("cwd changed")),
         ];
-        command.descriptors = Some(TranscriptDescriptorSuffix {
-            start: DescriptorIndex::ZERO,
+        command.transcript_records = Some(TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
             records: vec![valid_process.clone(), valid_compacted.clone(), bad],
         });
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
@@ -2492,7 +2479,7 @@ mod tests {
 
         let rows = SessionReader::open_existing(root.path().join(SESSION_ID))
             .unwrap()
-            .read_all_transcript_descriptor_records()
+            .read_all_transcript_records()
             .unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0], valid_process);

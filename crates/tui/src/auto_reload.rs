@@ -140,18 +140,6 @@ pub struct WatchPaths {
 }
 
 impl WatchPaths {
-    /// Resolve every watchable root for the running session. Paths that
-    /// don't exist on disk are still included - `notify` errors are
-    /// logged and skipped per-path so a missing optional root never
-    /// disables the entire watcher.
-    pub fn discover(cwd: &Path) -> Self {
-        let project_config = cwd.join(".smelt");
-        Self::from_manifest(
-            vec![smelt_core::config::config_dir(), project_config.clone()],
-            Some(cwd),
-        )
-    }
-
     pub fn from_manifest(mut roots: Vec<PathBuf>, target_cwd: Option<&Path>) -> Self {
         let project_config = target_cwd.map(|cwd| cwd.join(".smelt"));
         if let Some(project_config) = project_config.as_ref() {

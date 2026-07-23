@@ -58,6 +58,7 @@ mod trust;
 
 use mlua::prelude::*;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Convert a Lua table to a `serde_json::Value`. Tables with contiguous
@@ -134,6 +135,8 @@ pub fn register_host_api(
     smelt: &mlua::Table,
     _smelt_keymap: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
+    state_root: &Path,
+    cache_root: &Path,
 ) -> LuaResult<()> {
     crate::lua::reg::register_class_doc();
     agent::register(lua, smelt)?;
@@ -151,10 +154,10 @@ pub fn register_host_api(
     fuzzy::register(lua, smelt)?;
     grep::register(lua, smelt, shared)?;
     html::register(lua, smelt)?;
-    http::register(lua, smelt, shared)?;
+    http::register(lua, smelt, shared, cache_root)?;
     image::register(lua, smelt, shared)?;
     json::register(lua, smelt)?;
-    layout::register(lua, smelt)?;
+    layout::register(lua, smelt, shared)?;
     lifecycle::register(lua, smelt, shared)?;
     log::register(lua, smelt, shared)?;
     lsp::register(lua, smelt, shared)?;
@@ -175,11 +178,11 @@ pub fn register_host_api(
     signal::register(lua, smelt, shared)?;
     skills::register(lua, smelt, shared)?;
     spawn::register(lua, smelt, shared)?;
-    state::register(lua, smelt)?;
+    state::register(lua, smelt, state_root)?;
     task::register(lua, smelt, shared)?;
     timer::register(lua, smelt, shared)?;
     tools::register(lua, smelt, shared)?;
     transcript::register(lua, smelt, shared)?;
-    trust::register(lua, smelt, shared)?;
+    trust::register(lua, smelt, shared, state_root)?;
     Ok(())
 }

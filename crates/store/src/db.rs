@@ -9,8 +9,8 @@ use rusqlite::{
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
 use crate::history::{
-    self, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex, TranscriptDescriptorRange,
-    TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptSearchCandidate,
+    self, StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptRecordOffset,
+    TranscriptRecordRange, TranscriptRecordSlice, TranscriptSearchCandidate,
 };
 use crate::jsonl_export;
 use crate::meta::{self, SessionIdentity, SessionMeta, SessionMetadata, WriterOwner};
@@ -20,10 +20,10 @@ use crate::request_audit::{
 };
 use crate::schema;
 use crate::session_commit::{
-    DescriptorIndex, DescriptorLen, HistoryIndex, HistoryIndexBound, HistoryLen, NewTurn, Revision,
-    SaveReceipt, SessionCommit, SessionCommitFailure, StartupRecoveryReceipt, StoreHead,
-    StoredTurn, SubmitTurn, SubmitTurnReceipt, TurnId, TurnKind, TurnState, TurnTransition,
-    TurnTransitionReceipt,
+    HistoryIndex, HistoryIndexBound, HistoryLen, NewTurn, Revision, SaveReceipt, SessionCommit,
+    SessionCommitFailure, StartupRecoveryReceipt, StoreHead, StoredTurn, SubmitTurn,
+    SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex, TurnId, TurnKind, TurnState,
+    TurnTransition, TurnTransitionReceipt,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,7 +77,7 @@ pub struct StorageStats {
     pub wal_bytes: u64,
     pub shm_bytes: u64,
     pub history_rows: u64,
-    pub descriptor_rows: u64,
+    pub transcript_record_rows: u64,
     pub object_rows: u64,
     pub object_raw_bytes: u64,
     pub object_stored_bytes: u64,
@@ -98,7 +98,7 @@ pub struct FullSession {
     pub turn_metas: Vec<(u64, serde_json::Value)>,
     pub metadata_snapshots: Vec<(u64, serde_json::Value)>,
     pub context_snapshots: Vec<(u64, serde_json::Value)>,
-    pub descriptors: Vec<TranscriptDescriptorRecord>,
+    pub transcript_records: Vec<StoredTranscriptBlock>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,7 +107,7 @@ pub struct SessionResumeSnapshot {
     pub retained_history_len: usize,
     pub history_text_bytes: u64,
     pub missing_object_references: Vec<String>,
-    pub descriptor_tail: TranscriptDescriptorSlice,
+    pub transcript_record_tail: TranscriptRecordSlice,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -123,32 +123,6 @@ pub struct SessionDb {
     conn: Connection,
     path: PathBuf,
     object_compression: ObjectCompression,
-}
-
-// COMPAT(session-derived-sidecar-exports): one revision-pinned read for both exports.
-#[derive(Debug)]
-pub struct CompatibilityExportSnapshot<'a> {
-    transaction: Transaction<'a>,
-    metadata: SessionMeta,
-}
-
-impl CompatibilityExportSnapshot<'_> {
-    pub fn metadata(&self) -> &SessionMeta {
-        &self.metadata
-    }
-
-    pub fn write_search_blob_cancellable(
-        &self,
-        writer: &mut impl Write,
-        should_cancel: impl FnMut() -> bool,
-    ) -> Result<bool> {
-        history::write_search_blob_cancellable(&self.transaction, writer, should_cancel)
-    }
-
-    pub fn finish(self) -> Result<()> {
-        self.transaction.commit()?;
-        Ok(())
-    }
 }
 
 impl SessionDb {
@@ -329,8 +303,8 @@ impl SessionDb {
                 .query_row("SELECT COUNT(*) FROM history_items", [], |row| {
                     row.get::<_, i64>(0)
                 })?;
-        let descriptor_rows = self.conn.query_row(
-            "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+        let transcript_record_rows = self.conn.query_row(
+            "SELECT COUNT(*) FROM transcript_blocks WHERE block_json IS NOT NULL",
             [],
             |row| row.get::<_, i64>(0),
         )?;
@@ -352,7 +326,8 @@ impl SessionDb {
                     row.get::<_, i64>(0)
                 })?;
         let history_rows = nonnegative_sql_value(history_rows, "history_rows")?;
-        let descriptor_rows = nonnegative_sql_value(descriptor_rows, "descriptor_rows")?;
+        let transcript_record_rows =
+            nonnegative_sql_value(transcript_record_rows, "transcript_record_rows")?;
         let object_rows = nonnegative_sql_value(object_rows, "object_rows")?;
         let object_raw_bytes = nonnegative_sql_value(object_raw_bytes, "object_raw_bytes")?;
         let object_stored_bytes =
@@ -363,7 +338,7 @@ impl SessionDb {
             wal_bytes,
             shm_bytes,
             history_rows,
-            descriptor_rows,
+            transcript_record_rows,
             object_rows,
             object_raw_bytes,
             object_stored_bytes,
@@ -430,9 +405,9 @@ impl SessionDb {
             }
             None => {}
         }
-        let (descriptor_count, descriptor_min, descriptor_max) = self.conn.query_row(
-            "SELECT COUNT(*), MIN(descriptor_idx), MAX(descriptor_idx)
-             FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+        let (record_count, record_min, record_max) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(record_idx), MAX(record_idx)
+             FROM transcript_blocks WHERE block_json IS NOT NULL",
             [],
             |row| {
                 Ok((
@@ -442,11 +417,11 @@ impl SessionDb {
                 ))
             },
         )?;
-        let descriptor_count = nonnegative_sql_value(descriptor_count, "descriptor_count")?;
-        if descriptor_count != 0
-            && (descriptor_min != Some(0) || descriptor_max != Some(descriptor_count as i64 - 1))
+        let record_count = nonnegative_sql_value(record_count, "record_count")?;
+        if record_count != 0
+            && (record_min != Some(0) || record_max != Some(record_count as i64 - 1))
         {
-            issues.push("transcript descriptor indices are not dense from zero".into());
+            issues.push("transcript record indices are not dense from zero".into());
         }
         for reference in self.missing_object_references()? {
             issues.push(format!("missing object {reference}"));
@@ -575,7 +550,10 @@ impl SessionDb {
         smelt_perf::perf::record_value("store:size:wal_bytes", stats.wal_bytes);
         smelt_perf::perf::record_value("store:size:shm_bytes", stats.shm_bytes);
         smelt_perf::perf::record_value("store:size:history_rows", stats.history_rows);
-        smelt_perf::perf::record_value("store:size:descriptor_rows", stats.descriptor_rows);
+        smelt_perf::perf::record_value(
+            "store:size:transcript_record_rows",
+            stats.transcript_record_rows,
+        );
         smelt_perf::perf::record_value("store:size:object_rows", stats.object_rows);
         smelt_perf::perf::record_value("store:size:object_raw_bytes", stats.object_raw_bytes);
         smelt_perf::perf::record_value("store:size:object_stored_bytes", stats.object_stored_bytes);
@@ -625,15 +603,15 @@ impl SessionDb {
         let Some(session) = meta::stored_session(&self.conn)? else {
             return Ok(None);
         };
-        let descriptor_len = u64::try_from(history::transcript_descriptor_count(&self.conn)?)
-            .map_err(|_| StoreError::Integrity("descriptor length exceeds u64".into()))?;
+        let transcript_record_count = u64::try_from(history::transcript_record_count(&self.conn)?)
+            .map_err(|_| StoreError::Integrity("record length exceeds u64".into()))?;
         Ok(Some(StoredSession {
             identity: session.identity,
             metadata: session.metadata,
             head: StoreHead {
                 revision: session.revision.into(),
                 history_len: session.history_len.into(),
-                descriptor_len: descriptor_len.into(),
+                transcript_record_count: transcript_record_count.into(),
             },
         }))
     }
@@ -648,23 +626,10 @@ impl SessionDb {
         meta::session_meta(&self.conn)
     }
 
-    // COMPAT(session-derived-sidecar-exports): pin metadata and content to one revision.
-    pub fn compatibility_export_snapshot(&self) -> Result<Option<CompatibilityExportSnapshot<'_>>> {
-        let transaction = self.conn.unchecked_transaction()?;
-        let Some(metadata) = meta::session_meta(&transaction)? else {
-            transaction.commit()?;
-            return Ok(None);
-        };
-        Ok(Some(CompatibilityExportSnapshot {
-            transaction,
-            metadata,
-        }))
-    }
-
     pub fn load_session_resume_snapshot(
         &self,
-        descriptor_width: u16,
-        descriptor_target_rows: u16,
+        record_width: u16,
+        record_target_rows: u16,
     ) -> Result<Option<SessionResumeSnapshot>> {
         let tx = self.conn.unchecked_transaction()?;
         let Some(stored) = meta::stored_session(&tx)? else {
@@ -674,22 +639,22 @@ impl SessionDb {
         let retained_history_len = history::history_item_count(&tx)?;
         let history_text_bytes = history::history_text_bytes(&tx)?;
         let missing_object_references = missing_object_references(&tx)?;
-        let descriptor_len = history::transcript_descriptor_count(&tx)?;
-        let descriptor_tail = read_descriptor_tail_for_rows(
+        let transcript_record_count = history::transcript_record_count(&tx)?;
+        let transcript_record_tail = read_transcript_record_tail_for_rows(
             &tx,
-            descriptor_len,
-            descriptor_width,
-            descriptor_target_rows,
+            transcript_record_count,
+            record_width,
+            record_target_rows,
         )?;
-        let descriptor_len = u64::try_from(descriptor_len)
-            .map_err(|_| StoreError::Integrity("transcript descriptor count exceeds u64".into()))?;
+        let transcript_record_count = u64::try_from(transcript_record_count)
+            .map_err(|_| StoreError::Integrity("transcript record count exceeds u64".into()))?;
         let session = StoredSession {
             identity: stored.identity,
             metadata: stored.metadata,
             head: StoreHead {
                 revision: stored.revision.into(),
                 history_len: stored.history_len.into(),
-                descriptor_len: descriptor_len.into(),
+                transcript_record_count: transcript_record_count.into(),
             },
         };
         tx.commit()?;
@@ -698,7 +663,7 @@ impl SessionDb {
             retained_history_len,
             history_text_bytes,
             missing_object_references,
-            descriptor_tail,
+            transcript_record_tail,
         }))
     }
 
@@ -824,18 +789,18 @@ impl SessionDb {
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub fn apply_transcript_descriptor_fixture(
+    pub fn apply_transcript_record_fixture(
         &mut self,
-        records: &[TranscriptDescriptorRecord],
+        records: &[StoredTranscriptBlock],
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-        self.apply_transcript_descriptor_suffix_fixture(0, records)
+        self.apply_transcript_record_suffix_fixture(0, records)
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub fn apply_transcript_descriptor_suffix_fixture(
+    pub fn apply_transcript_record_suffix_fixture(
         &mut self,
         start: usize,
-        records: &[TranscriptDescriptorRecord],
+        records: &[StoredTranscriptBlock],
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         let full = self
             .load_full_session()
@@ -897,10 +862,11 @@ impl SessionDb {
                 crate::SideTableSuffixes::default(),
             )
         };
-        let start =
-            DescriptorIndex::try_from(start).map_err(|_| SessionCommitFailure::Integrity {
-                message: "descriptor fixture start exceeds u64".into(),
-            })?;
+        let start = TranscriptRecordIndex::try_from(start).map_err(|_| {
+            SessionCommitFailure::Integrity {
+                message: "record fixture start exceeds u64".into(),
+            }
+        })?;
         let command = SessionCommit {
             session_id: identity.id.clone(),
             expected: head,
@@ -912,7 +878,7 @@ impl SessionDb {
                 items: Vec::new(),
             },
             side_tables,
-            descriptors: Some(crate::TranscriptDescriptorSuffix {
+            transcript_records: Some(crate::TranscriptRecordSuffix {
                 start,
                 records: records.to_vec(),
             }),
@@ -1078,13 +1044,20 @@ impl SessionDb {
                 "persist:submit_turn:history_rows",
                 command.session.history.items.len() as u64,
             );
-            let descriptor_rows = command
+            let transcript_record_rows = command
                 .session
-                .descriptors
+                .transcript_records
                 .as_ref()
-                .map_or(0, |suffix| suffix.records.len()) as u64;
-            smelt_perf::perf::record_value("persist:submit_turn:descriptor_rows", descriptor_rows);
-            smelt_perf::perf::record_value("persist:submit_turn:index_rows", descriptor_rows);
+                .map_or(0, |suffix| suffix.records.len())
+                as u64;
+            smelt_perf::perf::record_value(
+                "persist:submit_turn:transcript_record_rows",
+                transcript_record_rows,
+            );
+            smelt_perf::perf::record_value(
+                "persist:submit_turn:index_rows",
+                transcript_record_rows,
+            );
         }
         result
     }
@@ -1283,7 +1256,7 @@ impl SessionDb {
         }
         let history_len_u64 = u64::try_from(history_len)
             .map_err(|_| StoreError::Integrity("fork history length exceeds u64".into()))?;
-        let descriptor_block_end = tx.query_row(
+        let record_block_end = tx.query_row(
             "SELECT COALESCE(
                  MIN(block_idx),
                  (SELECT COALESCE(MAX(block_idx) + 1, 0) FROM transcript_blocks)
@@ -1296,7 +1269,7 @@ impl SessionDb {
             )?],
             |row| row.get::<_, i64>(0),
         )?;
-        let descriptor_block_end = u64::try_from(descriptor_block_end)
+        let record_block_end = u64::try_from(record_block_end)
             .map_err(|_| StoreError::Integrity("negative transcript block index".into()))?;
         full.history.truncate(history_len);
         full.turn_metas
@@ -1305,15 +1278,15 @@ impl SessionDb {
             .retain(|(index, _)| *index <= history_len_u64);
         full.context_snapshots
             .retain(|(index, _)| *index <= history_len_u64);
-        full.descriptors.retain(|record| {
-            record.block_idx < descriptor_block_end
+        full.transcript_records.retain(|record| {
+            record.block_idx < record_block_end
                 && record
                     .history_idx
                     .is_none_or(|index| index < history_len_u64)
         });
         full.session.head.history_len = history_len_u64.into();
-        full.session.head.descriptor_len = u64::try_from(full.descriptors.len())
-            .map_err(|_| StoreError::Integrity("descriptor length exceeds u64".into()))?
+        full.session.head.transcript_record_count = u64::try_from(full.transcript_records.len())
+            .map_err(|_| StoreError::Integrity("record length exceeds u64".into()))?
             .into();
         tx.commit()?;
         Ok(Some(full))
@@ -1325,8 +1298,8 @@ impl SessionDb {
         let Some((stored, metadata)) = meta::repaired_checkpoint_metadata(&self.conn)? else {
             return Ok(None);
         };
-        let descriptor_len = u64::try_from(history::transcript_descriptor_count(&self.conn)?)
-            .map_err(|_| StoreError::Integrity("descriptor length exceeds u64".into()))?;
+        let transcript_record_count = u64::try_from(history::transcript_record_count(&self.conn)?)
+            .map_err(|_| StoreError::Integrity("record length exceeds u64".into()))?;
         Ok(Some((
             StoredSession {
                 identity: stored.identity,
@@ -1334,121 +1307,111 @@ impl SessionDb {
                 head: StoreHead {
                     revision: stored.revision.into(),
                     history_len: stored.history_len.into(),
-                    descriptor_len: descriptor_len.into(),
+                    transcript_record_count: transcript_record_count.into(),
                 },
             },
             metadata,
         )))
     }
 
-    pub fn transcript_descriptor_count(&self) -> Result<usize> {
-        history::transcript_descriptor_count(&self.conn)
+    pub fn transcript_record_count(&self) -> Result<usize> {
+        history::transcript_record_count(&self.conn)
     }
 
-    /// Fast descriptor extent using the stored descriptor ordinal.
-    /// This is equivalent to the descriptor count for current stores.
-    pub fn transcript_descriptor_dense_extent(&self) -> Result<usize> {
-        history::transcript_descriptor_dense_extent(&self.conn)
+    /// Fast record extent using the stored record ordinal.
+    /// This is equivalent to the record count for current stores.
+    pub fn transcript_record_dense_extent(&self) -> Result<usize> {
+        history::transcript_record_dense_extent(&self.conn)
     }
 
-    pub fn transcript_descriptor_index_for_block_idx(
+    pub fn transcript_record_index_for_block_idx(
         &self,
         block_idx: u64,
-    ) -> Result<Option<TranscriptDescriptorIndex>> {
-        history::transcript_descriptor_index_for_block_idx(&self.conn, block_idx)
+    ) -> Result<Option<TranscriptRecordOffset>> {
+        history::transcript_record_index_for_block_idx(&self.conn, block_idx)
     }
 
-    pub fn transcript_descriptor_estimated_rows(
+    pub fn transcript_record_estimated_rows(
         &self,
-        range: TranscriptDescriptorRange,
+        range: TranscriptRecordRange,
         width: u16,
     ) -> Result<u64> {
-        history::transcript_descriptor_estimated_rows(&self.conn, range, width)
+        history::transcript_record_estimated_rows(&self.conn, range, width)
     }
 
-    pub fn read_all_transcript_descriptor_records(
-        &self,
-    ) -> Result<Vec<TranscriptDescriptorRecord>> {
-        history::read_transcript_descriptor_records(&self.conn)
+    pub fn read_all_transcript_records(&self) -> Result<Vec<StoredTranscriptBlock>> {
+        history::read_transcript_records(&self.conn)
     }
 
-    pub fn read_transcript_descriptor_slice(
+    pub fn read_transcript_record_slice(
         &self,
-        range: TranscriptDescriptorRange,
-    ) -> Result<TranscriptDescriptorSlice> {
-        history::read_transcript_descriptor_slice(&self.conn, range)
+        range: TranscriptRecordRange,
+    ) -> Result<TranscriptRecordSlice> {
+        history::read_transcript_record_slice(&self.conn, range)
     }
 
-    pub fn read_transcript_descriptor_slice_with_total(
+    pub fn read_transcript_record_slice_with_total(
         &self,
-        range: TranscriptDescriptorRange,
+        range: TranscriptRecordRange,
         total_count: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
-        history::read_transcript_descriptor_slice_with_total(&self.conn, range, total_count)
+    ) -> Result<TranscriptRecordSlice> {
+        history::read_transcript_record_slice_with_total(&self.conn, range, total_count)
     }
 
-    pub fn read_transcript_descriptor_tail_slice(
-        &self,
-        count: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
-        history::read_transcript_descriptor_tail_slice(&self.conn, count)
+    pub fn read_transcript_record_tail_slice(&self, count: usize) -> Result<TranscriptRecordSlice> {
+        history::read_transcript_record_tail_slice(&self.conn, count)
     }
 
-    pub fn read_transcript_descriptor_tail_slice_with_total(
+    pub fn read_transcript_record_tail_slice_with_total(
         &self,
         total_count: usize,
         count: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
-        history::read_transcript_descriptor_tail_slice_with_total(&self.conn, total_count, count)
+    ) -> Result<TranscriptRecordSlice> {
+        history::read_transcript_record_tail_slice_with_total(&self.conn, total_count, count)
     }
 
-    pub fn read_transcript_descriptor_tail_for_rows(
+    pub fn read_transcript_record_tail_for_rows(
         &self,
         width: u16,
         target_rows: u16,
-    ) -> Result<TranscriptDescriptorSlice> {
+    ) -> Result<TranscriptRecordSlice> {
         let tx = self.conn.unchecked_transaction()?;
-        let total_count = history::transcript_descriptor_count(&tx)?;
-        let slice = read_descriptor_tail_for_rows(&tx, total_count, width, target_rows)?;
+        let total_count = history::transcript_record_count(&tx)?;
+        let slice = read_transcript_record_tail_for_rows(&tx, total_count, width, target_rows)?;
         tx.commit()?;
         Ok(slice)
     }
 
-    pub fn read_transcript_descriptor_centered_slice(
+    pub fn read_transcript_record_centered_slice(
         &self,
-        center_descriptor_idx: u64,
+        center_record_idx: u64,
         before: usize,
         after: usize,
-    ) -> Result<TranscriptDescriptorSlice> {
-        history::read_transcript_descriptor_centered_slice(
+    ) -> Result<TranscriptRecordSlice> {
+        history::read_transcript_record_centered_slice(&self.conn, center_record_idx, before, after)
+    }
+
+    pub fn read_transcript_record_before_kind_at_index(
+        &self,
+        kind: &str,
+        before_or_at_record_index: u64,
+    ) -> Result<Option<StoredTranscriptBlock>> {
+        history::read_transcript_record_before_kind_at_index(
             &self.conn,
-            center_descriptor_idx,
-            before,
-            after,
+            kind,
+            before_or_at_record_index,
         )
     }
 
-    pub fn read_transcript_descriptor_before_kind_at_index(
+    pub fn read_transcript_record_after_kind_at_index(
         &self,
         kind: &str,
-        before_or_at_descriptor_index: u64,
-    ) -> Result<Option<TranscriptDescriptorRecord>> {
-        history::read_transcript_descriptor_before_kind_at_index(
+        after_or_at_record_index: u64,
+    ) -> Result<Option<StoredTranscriptBlock>> {
+        history::read_transcript_record_after_kind_at_index(
             &self.conn,
             kind,
-            before_or_at_descriptor_index,
-        )
-    }
-
-    pub fn read_transcript_descriptor_after_kind_at_index(
-        &self,
-        kind: &str,
-        after_or_at_descriptor_index: u64,
-    ) -> Result<Option<TranscriptDescriptorRecord>> {
-        history::read_transcript_descriptor_after_kind_at_index(
-            &self.conn,
-            kind,
-            after_or_at_descriptor_index,
+            after_or_at_record_index,
         )
     }
 
@@ -1494,12 +1457,12 @@ impl SessionDb {
         history::transcript_block_count(&self.conn)
     }
 
-    pub fn transcript_missing_descriptor_count(&self) -> Result<usize> {
-        history::transcript_missing_descriptor_count(&self.conn)
+    pub fn transcript_missing_block_count(&self) -> Result<usize> {
+        history::transcript_missing_block_count(&self.conn)
     }
 
-    pub fn transcript_descriptor_max_history_idx(&self) -> Result<Option<usize>> {
-        history::transcript_descriptor_max_history_idx(&self.conn)
+    pub fn transcript_record_max_history_idx(&self) -> Result<Option<usize>> {
+        history::transcript_record_max_history_idx(&self.conn)
     }
 
     pub fn transcript_max_block_idx(&self) -> Result<Option<u64>> {
@@ -1537,9 +1500,9 @@ fn load_full_session_from(conn: &Connection) -> Result<Option<FullSession>> {
     let Some(stored) = meta::stored_session(conn)? else {
         return Ok(None);
     };
-    let descriptor_len = history::transcript_descriptor_count(conn)?;
-    let descriptor_len = u64::try_from(descriptor_len)
-        .map_err(|_| StoreError::Integrity("descriptor length exceeds u64".into()))?;
+    let transcript_record_count = history::transcript_record_count(conn)?;
+    let transcript_record_count = u64::try_from(transcript_record_count)
+        .map_err(|_| StoreError::Integrity("record length exceeds u64".into()))?;
     Ok(Some(FullSession {
         session: StoredSession {
             identity: stored.identity,
@@ -1547,14 +1510,14 @@ fn load_full_session_from(conn: &Connection) -> Result<Option<FullSession>> {
             head: StoreHead {
                 revision: stored.revision.into(),
                 history_len: stored.history_len.into(),
-                descriptor_len: descriptor_len.into(),
+                transcript_record_count: transcript_record_count.into(),
             },
         },
         history: history::read_history_items(conn)?,
         turn_metas: read_side_table_rows(conn, SideTable::TurnMetas)?,
         metadata_snapshots: read_side_table_rows(conn, SideTable::MetadataSnapshots)?,
         context_snapshots: read_side_table_rows(conn, SideTable::ContextSnapshots)?,
-        descriptors: history::read_transcript_descriptor_records(conn)?,
+        transcript_records: history::read_transcript_records(conn)?,
     }))
 }
 
@@ -1779,14 +1742,14 @@ fn missing_object_references(conn: &Connection) -> Result<Vec<String>> {
         .map_err(Into::into)
 }
 
-fn read_descriptor_tail_for_rows(
+fn read_transcript_record_tail_for_rows(
     conn: &Connection,
     total_count: usize,
     width: u16,
     target_rows: u16,
-) -> Result<TranscriptDescriptorSlice> {
+) -> Result<TranscriptRecordSlice> {
     if total_count == 0 {
-        return history::read_transcript_descriptor_tail_slice_with_total(conn, 0, 0);
+        return history::read_transcript_record_tail_slice_with_total(conn, 0, 0);
     }
 
     let target_rows = u64::from(target_rows.max(1));
@@ -1799,8 +1762,10 @@ fn read_descriptor_tail_for_rows(
         probes = probes.saturating_add(1);
         smelt_perf::perf::record_value("transcript:resume_tail:tail_probe_count", count as u64);
         let slice =
-            history::read_transcript_descriptor_tail_slice_with_total(conn, total_count, count)?;
-        if estimated_descriptor_rows(&slice.records, width) >= target_rows || count == total_count {
+            history::read_transcript_record_tail_slice_with_total(conn, total_count, count)?;
+        if estimated_transcript_record_rows(&slice.records, width) >= target_rows
+            || count == total_count
+        {
             smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes);
             return Ok(slice);
         }
@@ -1808,7 +1773,7 @@ fn read_descriptor_tail_for_rows(
     }
 }
 
-fn estimated_descriptor_rows(records: &[TranscriptDescriptorRecord], width: u16) -> u64 {
+fn estimated_transcript_record_rows(records: &[StoredTranscriptBlock], width: u16) -> u64 {
     let width = u64::from(width.max(1));
     records
         .iter()
@@ -1877,9 +1842,9 @@ struct PreparedSessionCommit {
     history_hashes: Vec<String>,
     #[cfg(debug_assertions)]
     history_object_hashes: Vec<Vec<String>>,
-    descriptor_start: Option<usize>,
+    record_start: Option<usize>,
     #[cfg(debug_assertions)]
-    descriptor_object_hashes: Vec<String>,
+    record_object_hashes: Vec<String>,
     side_tables: PreparedSideTables,
 }
 
@@ -1898,8 +1863,8 @@ fn prepare_canonical_update(
         "expected history length",
     )?;
     validate_sql_coordinate(
-        command.expected.descriptor_len.get(),
-        "expected descriptor length",
+        command.expected.transcript_record_count.get(),
+        "expected record length",
     )?;
     validate_sql_coordinate(command.history.start.get(), "history start")?;
     validate_sql_coordinate(command.history.final_len.get(), "history final length")?;
@@ -1927,38 +1892,37 @@ fn prepare_canonical_update(
     validate_side_table_suffixes(command)?;
     let side_tables = PreparedSideTables::new(&command.side_tables)
         .map_err(session_commit_failure_from_store_error)?;
-    let descriptor_start = command
-        .descriptors
+    let record_start = command
+        .transcript_records
         .as_ref()
-        .map(|suffix| descriptor_index_usize(suffix.start))
+        .map(|suffix| record_index_usize(suffix.start))
         .transpose()?;
-    if let Some(descriptors) = &command.descriptors {
-        validate_sql_coordinate(descriptors.start.get(), "descriptor start")?;
-        let final_len = descriptors
+    if let Some(transcript_records) = &command.transcript_records {
+        validate_sql_coordinate(transcript_records.start.get(), "record start")?;
+        let final_len = transcript_records
             .start
             .get()
-            .checked_add(u64::try_from(descriptors.records.len()).map_err(|_| {
-                SessionCommitFailure::Integrity {
-                    message: "descriptor item count exceeds u64".into(),
-                }
-            })?)
+            .checked_add(
+                u64::try_from(transcript_records.records.len()).map_err(|_| {
+                    SessionCommitFailure::Integrity {
+                        message: "record item count exceeds u64".into(),
+                    }
+                })?,
+            )
             .ok_or_else(|| SessionCommitFailure::Integrity {
-                message: "descriptor suffix length overflows u64".into(),
+                message: "record suffix length overflows u64".into(),
             })?;
-        validate_sql_coordinate(final_len, "descriptor final length")?;
+        validate_sql_coordinate(final_len, "record final length")?;
         usize::try_from(final_len).map_err(|_| SessionCommitFailure::Integrity {
-            message: "descriptor final length exceeds platform limits".into(),
+            message: "record final length exceeds platform limits".into(),
         })?;
-        for record in &descriptors.records {
-            validate_sql_coordinate(record.block_idx, "descriptor block index")?;
+        for record in &transcript_records.records {
+            validate_sql_coordinate(record.block_idx, "record block index")?;
             if let Some(history_idx) = record.history_idx {
-                validate_sql_coordinate(history_idx, "descriptor history index")?;
+                validate_sql_coordinate(history_idx, "record history index")?;
             }
-            validate_sql_coordinate(
-                record.estimated_text_bytes,
-                "descriptor estimated text bytes",
-            )?;
-            serde_json::from_str::<serde_json::Value>(&record.descriptor_json)
+            validate_sql_coordinate(record.estimated_text_bytes, "record estimated text bytes")?;
+            serde_json::from_str::<serde_json::Value>(&record.block_json)
                 .map_err(StoreError::from)
                 .map_err(session_commit_failure_from_store_error)?;
             if let Some(tool_state_json) = &record.tool_state_json {
@@ -1977,10 +1941,10 @@ fn prepare_canonical_update(
         .collect::<Result<Vec<_>>>()
         .map_err(session_commit_failure_from_store_error)?;
     #[cfg(debug_assertions)]
-    let descriptor_object_hashes = history::incoming_object_hashes(
+    let record_object_hashes = history::incoming_object_hashes(
         &[],
         command
-            .descriptors
+            .transcript_records
             .as_ref()
             .map(|suffix| suffix.records.as_slice()),
     )
@@ -1991,9 +1955,9 @@ fn prepare_canonical_update(
         history_hashes,
         #[cfg(debug_assertions)]
         history_object_hashes,
-        descriptor_start,
+        record_start,
         #[cfg(debug_assertions)]
-        descriptor_object_hashes,
+        record_object_hashes,
         side_tables,
     })
 }
@@ -2037,21 +2001,25 @@ fn apply_canonical_update_in_transaction(
             item_count: u64::try_from(command.history.items.len()).unwrap_or(u64::MAX),
         });
     }
-    if let Some(start) = prepared.descriptor_start {
+    if let Some(start) = prepared.record_start {
         if start
             > current
-                .descriptor_len
+                .transcript_record_count
                 .as_usize()
-                .expect("SQLite descriptor length fits usize")
+                .expect("SQLite record length fits usize")
         {
-            return Err(SessionCommitFailure::InvalidDescriptorSuffix {
-                start: command.descriptors.as_ref().expect("prepared suffix").start,
-                current_len: current.descriptor_len,
+            return Err(SessionCommitFailure::InvalidTranscriptRecordSuffix {
+                start: command
+                    .transcript_records
+                    .as_ref()
+                    .expect("prepared suffix")
+                    .start,
+                current_len: current.transcript_record_count,
             });
         }
     }
-    if let Some(descriptors) = &command.descriptors {
-        validate_descriptor_suffix_history_links(conn, &command.history, descriptors)
+    if let Some(transcript_records) = &command.transcript_records {
+        validate_record_suffix_history_links(conn, &command.history, transcript_records)
             .map_err(session_commit_failure_from_store_error)?;
     }
 
@@ -2074,11 +2042,11 @@ fn apply_canonical_update_in_transaction(
         .side_tables
         .changes(conn)
         .map_err(session_commit_failure_from_store_error)?;
-    let descriptors_changed = match (&command.descriptors, prepared.descriptor_start) {
-        (Some(descriptors), Some(start)) => !history::transcript_descriptor_suffix_matches(
+    let transcript_records_changed = match (&command.transcript_records, prepared.record_start) {
+        (Some(transcript_records), Some(start)) => !history::transcript_record_suffix_matches(
             conn,
             start,
-            &descriptors.records,
+            &transcript_records.records,
             compression,
         )
         .map_err(session_commit_failure_from_store_error)?,
@@ -2089,7 +2057,7 @@ fn apply_canonical_update_in_transaction(
         || metadata_changed
         || history_changed
         || side_table_changes.any()
-        || descriptors_changed;
+        || transcript_records_changed;
     let revision = if changed {
         current
             .revision
@@ -2112,8 +2080,8 @@ fn apply_canonical_update_in_transaction(
                     .cloned(),
             );
         }
-        if descriptors_changed {
-            hashes.extend(prepared.descriptor_object_hashes.iter().cloned());
+        if transcript_records_changed {
+            hashes.extend(prepared.record_object_hashes.iter().cloned());
         }
         hashes
     };
@@ -2131,26 +2099,26 @@ fn apply_canonical_update_in_transaction(
         .side_tables
         .apply_changes(conn, side_table_changes)
         .map_err(session_commit_failure_from_store_error)?;
-    if descriptors_changed {
-        let descriptors = command.descriptors.as_ref().expect("changed suffix");
-        history::replace_transcript_descriptor_suffix_in_transaction(
+    if transcript_records_changed {
+        let transcript_records = command.transcript_records.as_ref().expect("changed suffix");
+        history::replace_transcript_record_suffix_in_transaction(
             conn,
-            prepared.descriptor_start.expect("changed suffix start"),
-            &descriptors.records,
+            prepared.record_start.expect("changed suffix start"),
+            &transcript_records.records,
             compression,
         )
         .map_err(session_commit_failure_from_store_error)?;
     }
-    let descriptor_len = match &command.descriptors {
-        Some(descriptors) => descriptors
+    let transcript_record_count = match &command.transcript_records {
+        Some(transcript_records) => transcript_records
             .start
             .get()
-            .checked_add(descriptors.records.len() as u64)
-            .map(DescriptorLen::new)
+            .checked_add(transcript_records.records.len() as u64)
+            .map(TranscriptRecordCount::new)
             .ok_or_else(|| SessionCommitFailure::Integrity {
-                message: "descriptor length exceeds u64".into(),
+                message: "record length exceeds u64".into(),
             })?,
-        None => current.descriptor_len,
+        None => current.transcript_record_count,
     };
     meta::write_session(
         conn,
@@ -2158,7 +2126,7 @@ fn apply_canonical_update_in_transaction(
         &command.metadata,
         revision.get(),
         command.history.final_len.get(),
-        descriptor_len.get(),
+        transcript_record_count.get(),
     )
     .map_err(session_commit_failure_from_store_error)?;
 
@@ -2173,7 +2141,7 @@ fn apply_canonical_update_in_transaction(
     let current = StoreHead {
         revision,
         history_len: command.history.final_len,
-        descriptor_len,
+        transcript_record_count,
     };
     let receipt = SaveReceipt {
         session_id: command.session_id.clone(),
@@ -2266,7 +2234,7 @@ fn encode_session_commit(
     encode_side_table_rows(encoder, &side_tables.turn_metas)?;
     encode_side_table_rows(encoder, &side_tables.metadata_snapshots)?;
     encode_side_table_rows(encoder, &side_tables.context_snapshots)?;
-    match &command.descriptors {
+    match &command.transcript_records {
         Some(suffix) => {
             encoder.bool(true);
             encoder.u64(suffix.start.get());
@@ -2281,7 +2249,7 @@ fn encode_session_commit(
                 encoder.u64(record.estimated_text_bytes);
                 encoder.string(&record.preview_text);
                 encoder.string(&record.indexed_text);
-                encoder.json_text(&record.descriptor_json)?;
+                encoder.json_text(&record.block_json)?;
                 encoder.optional_json_text(record.origin_json.as_deref())?;
                 encoder.optional_json_text(record.tool_state_json.as_deref())?;
             }
@@ -2294,7 +2262,7 @@ fn encode_session_commit(
 fn encode_store_head(encoder: &mut CanonicalEncoder, head: StoreHead) {
     encoder.u64(head.revision.get());
     encoder.u64(head.history_len.get());
-    encoder.u64(head.descriptor_len.get());
+    encoder.u64(head.transcript_record_count.get());
 }
 
 fn encode_session_metadata(
@@ -2511,12 +2479,12 @@ fn current_store_head_from(
     conn: &Connection,
     session: Option<&meta::PersistedSession>,
 ) -> Result<StoreHead> {
-    let descriptor_len = u64::try_from(history::transcript_descriptor_count(conn)?)
-        .map_err(|_| StoreError::Integrity("descriptor length exceeds u64".into()))?;
+    let transcript_record_count = u64::try_from(history::transcript_record_count(conn)?)
+        .map_err(|_| StoreError::Integrity("record length exceeds u64".into()))?;
     Ok(StoreHead {
         revision: session.map_or(0, |session| session.revision).into(),
         history_len: session.map_or(0, |session| session.history_len).into(),
-        descriptor_len: descriptor_len.into(),
+        transcript_record_count: transcript_record_count.into(),
     })
 }
 
@@ -3182,13 +3150,13 @@ fn history_len_usize(value: HistoryLen) -> std::result::Result<usize, SessionCom
         })
 }
 
-fn descriptor_index_usize(
-    value: DescriptorIndex,
+fn record_index_usize(
+    value: TranscriptRecordIndex,
 ) -> std::result::Result<usize, SessionCommitFailure> {
     value
         .as_usize()
         .ok_or_else(|| SessionCommitFailure::Integrity {
-            message: format!("descriptor index {} does not fit usize", value.get()),
+            message: format!("record index {} does not fit usize", value.get()),
         })
 }
 
@@ -3208,8 +3176,8 @@ fn validate_session_commit_invariants(conn: &Connection) -> Result<()> {
     }
     meta::validate_session_checkpoint(&session.metadata, history_count)?;
     validate_history_indices_dense(conn, history_count)?;
-    validate_transcript_descriptor_indices_dense(conn)?;
-    validate_transcript_descriptor_history_bounds(conn, history_count)?;
+    validate_transcript_record_indices_dense(conn)?;
+    validate_transcript_record_history_bounds(conn, history_count)?;
     validate_side_table_history_bounds(conn, history_count)?;
     validate_history_object_refs(conn, history_count)?;
     Ok(())
@@ -3232,12 +3200,12 @@ fn validate_history_indices_dense(conn: &Connection, history_count: u64) -> Resu
 }
 
 #[cfg(debug_assertions)]
-fn validate_transcript_descriptor_indices_dense(conn: &Connection) -> Result<()> {
+fn validate_transcript_record_indices_dense(conn: &Connection) -> Result<()> {
     let (count, max_idx): (i64, Option<i64>) = conn
         .query_row(
-            "SELECT COUNT(*), MAX(descriptor_idx)
+            "SELECT COUNT(*), MAX(record_idx)
              FROM transcript_blocks
-             WHERE descriptor_json IS NOT NULL",
+             WHERE block_json IS NOT NULL",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -3245,22 +3213,19 @@ fn validate_transcript_descriptor_indices_dense(conn: &Connection) -> Result<()>
     let expected_max = (count > 0).then_some(count - 1);
     if max_idx != expected_max {
         return Err(StoreError::Integrity(format!(
-            "transcript descriptor indices are not dense: count {count}, max_idx {max_idx:?}"
+            "transcript record indices are not dense: count {count}, max_idx {max_idx:?}"
         )));
     }
     Ok(())
 }
 
 #[cfg(debug_assertions)]
-fn validate_transcript_descriptor_history_bounds(
-    conn: &Connection,
-    history_count: u64,
-) -> Result<()> {
+fn validate_transcript_record_history_bounds(conn: &Connection, history_count: u64) -> Result<()> {
     let invalid: i64 = conn
         .query_row(
             "SELECT COUNT(*)
              FROM transcript_blocks
-             WHERE descriptor_json IS NOT NULL
+             WHERE block_json IS NOT NULL
                AND history_idx IS NOT NULL
                AND history_idx >= ?1",
             [history_count as i64],
@@ -3269,7 +3234,7 @@ fn validate_transcript_descriptor_history_bounds(
         .map_err(StoreError::from)?;
     if invalid != 0 {
         return Err(StoreError::Integrity(format!(
-            "transcript descriptors point past history length: invalid {invalid}, history_len {history_count}"
+            "transcript transcript_records point past history length: invalid {invalid}, history_len {history_count}"
         )));
     }
     Ok(())
@@ -3356,26 +3321,26 @@ fn validate_object_payload_hashes(
     Ok(())
 }
 
-fn validate_descriptor_suffix_history_links(
+fn validate_record_suffix_history_links(
     conn: &Connection,
     history: &crate::HistorySuffix,
-    descriptors: &crate::TranscriptDescriptorSuffix,
+    transcript_records: &crate::TranscriptRecordSuffix,
 ) -> Result<()> {
     let start = history.start.get();
     let end = history.final_len.get();
-    for history_idx in descriptors
+    for history_idx in transcript_records
         .records
         .iter()
         .filter_map(|record| record.history_idx)
     {
         if history_idx >= end {
             return Err(StoreError::Integrity(format!(
-                "transcript descriptor history link past saved history: history_idx {history_idx}, history_len {end}"
+                "transcript record history link past saved history: history_idx {history_idx}, history_len {end}"
             )));
         }
     }
 
-    let mut persisted_indices = descriptors
+    let mut persisted_indices = transcript_records
         .records
         .iter()
         .filter_map(|record| record.history_idx)
@@ -3385,27 +3350,27 @@ fn validate_descriptor_suffix_history_links(
     persisted_indices.dedup();
     let persisted_history = history::read_history_items_at_indices(conn, &persisted_indices)?;
 
-    for record in &descriptors.records {
+    for record in &transcript_records.records {
         let Some(history_idx) = record.history_idx else {
             continue;
         };
         let item = if history_idx < start {
             persisted_history.get(&history_idx).ok_or_else(|| {
                 StoreError::Integrity(format!(
-                    "transcript descriptor history link missing from stored prefix: history_idx {history_idx}, suffix {start}..{end}"
+                    "transcript record history link missing from stored prefix: history_idx {history_idx}, suffix {start}..{end}"
                 ))
             })?
         } else {
             let suffix_offset = (history_idx - start) as usize;
             history.items.get(suffix_offset).ok_or_else(|| {
                 StoreError::Integrity(format!(
-                    "transcript descriptor history link missing from saved suffix: history_idx {history_idx}, suffix {start}..{end}"
+                    "transcript record history link missing from saved suffix: history_idx {history_idx}, suffix {start}..{end}"
                 ))
             })?
         };
-        if !protocol::transcript_descriptor_kind_matches_history_item(&record.kind, item) {
+        if !protocol::transcript_block_kind_matches_history_item(&record.kind, item) {
             return Err(StoreError::Integrity(format!(
-                "transcript descriptor history link kind mismatch: descriptor kind {}, history_idx {history_idx}",
+                "transcript record history link kind mismatch: record kind {}, history_idx {history_idx}",
                 record.kind
             )));
         }
@@ -3570,7 +3535,7 @@ mod tests {
     use super::*;
     use crate::{
         benchmark_zstd_compression, HistorySuffix, ObjectCodec, RequestAuditOrder,
-        RequestAuditPayloadMode, Revision, SideTableSuffixes, TranscriptDescriptorSuffix,
+        RequestAuditPayloadMode, Revision, SideTableSuffixes, TranscriptRecordSuffix,
         DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
     };
 
@@ -3617,25 +3582,25 @@ mod tests {
             &mut self,
             fixture: &TestSessionFixture,
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
-        fn apply_test_fixture_with_descriptors(
+        fn apply_test_fixture_with_transcript_records(
             &mut self,
             fixture: &TestSessionFixture,
             start: usize,
-            records: &[TranscriptDescriptorRecord],
+            records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
         fn apply_test_state(
             &mut self,
             state: &TestSessionModel,
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
         fn test_session_model(&self) -> Result<Option<TestSessionModel>>;
-        fn apply_test_descriptors(
+        fn apply_test_transcript_records(
             &mut self,
-            records: &[TranscriptDescriptorRecord],
+            records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
-        fn apply_test_descriptor_suffix(
+        fn apply_test_record_suffix(
             &mut self,
             start: usize,
-            records: &[TranscriptDescriptorRecord],
+            records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
         fn repair_test_checkpoint(&mut self) -> std::result::Result<usize, SessionCommitFailure>;
         fn apply_test_prefix_to(
@@ -3658,24 +3623,24 @@ mod tests {
             self.apply_session_commit(&command)
         }
 
-        fn apply_test_fixture_with_descriptors(
+        fn apply_test_fixture_with_transcript_records(
             &mut self,
             fixture: &TestSessionFixture,
             start: usize,
-            records: &[TranscriptDescriptorRecord],
+            records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
             let expected = self
                 .store_head()
                 .map_err(session_commit_failure_from_store_error)?;
-            let descriptors = TranscriptDescriptorSuffix {
-                start: DescriptorIndex::try_from(start).map_err(|_| {
+            let transcript_records = TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::try_from(start).map_err(|_| {
                     SessionCommitFailure::Integrity {
-                        message: "descriptor start exceeds u64".into(),
+                        message: "record start exceeds u64".into(),
                     }
                 })?,
                 records: records.to_vec(),
             };
-            let command = test_fixture_command(expected, fixture, Some(descriptors))?;
+            let command = test_fixture_command(expected, fixture, Some(transcript_records))?;
             self.apply_session_commit(&command)
         }
 
@@ -3712,19 +3677,19 @@ mod tests {
                 .transpose()
         }
 
-        fn apply_test_descriptors(
+        fn apply_test_transcript_records(
             &mut self,
-            records: &[TranscriptDescriptorRecord],
+            records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-            self.apply_test_descriptor_suffix(0, records)
+            self.apply_test_record_suffix(0, records)
         }
 
-        fn apply_test_descriptor_suffix(
+        fn apply_test_record_suffix(
             &mut self,
             start: usize,
-            records: &[TranscriptDescriptorRecord],
+            records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-            self.apply_transcript_descriptor_suffix_fixture(start, records)
+            self.apply_transcript_record_suffix_fixture(start, records)
         }
 
         fn repair_test_checkpoint(&mut self) -> std::result::Result<usize, SessionCommitFailure> {
@@ -3777,7 +3742,7 @@ mod tests {
     fn test_fixture_command(
         expected: StoreHead,
         fixture: &TestSessionFixture,
-        descriptors: Option<TranscriptDescriptorSuffix>,
+        transcript_records: Option<TranscriptRecordSuffix>,
     ) -> std::result::Result<SessionCommit, SessionCommitFailure> {
         let start = u64::try_from(fixture.history_start_idx).map_err(|_| {
             SessionCommitFailure::Integrity {
@@ -3805,7 +3770,7 @@ mod tests {
                 metadata_snapshots: test_side_table_rows(&fixture.metadata_snapshots),
                 context_snapshots: test_side_table_rows(&fixture.context_snapshots),
             },
-            descriptors,
+            transcript_records,
         })
     }
 
@@ -3835,9 +3800,9 @@ mod tests {
                 metadata_snapshots: test_side_table_rows(&full.metadata_snapshots),
                 context_snapshots: test_side_table_rows(&full.context_snapshots),
             },
-            descriptors: Some(TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
-                records: full.descriptors.clone(),
+            transcript_records: Some(TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
+                records: full.transcript_records.clone(),
             }),
         })
     }
@@ -3919,11 +3884,11 @@ mod tests {
         test_metadata_from_model(&test_session_state("unused", 0)).unwrap()
     }
 
-    fn test_store_head(revision: u64, history_len: u64, descriptor_len: u64) -> StoreHead {
+    fn test_store_head(revision: u64, history_len: u64, transcript_record_count: u64) -> StoreHead {
         StoreHead {
             revision: revision.into(),
             history_len: history_len.into(),
-            descriptor_len: descriptor_len.into(),
+            transcript_record_count: transcript_record_count.into(),
         }
     }
 
@@ -3942,7 +3907,7 @@ mod tests {
                 start: HistoryIndex::new(expected.history_len.get()),
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         }
     }
 
@@ -3954,7 +3919,7 @@ mod tests {
     ) -> SubmitTurn {
         let expected = db.store_head().unwrap();
         let history_idx = expected.history_len.get();
-        let descriptor_idx = expected.descriptor_len.get();
+        let record_idx = expected.transcript_record_count.get();
         SubmitTurn {
             session: SessionCommit {
                 session_id: id.into(),
@@ -3970,10 +3935,10 @@ mod tests {
                     start: HistoryIndex::new(history_idx),
                     ..SideTableSuffixes::default()
                 },
-                descriptors: Some(TranscriptDescriptorSuffix {
-                    start: DescriptorIndex::new(descriptor_idx),
+                transcript_records: Some(TranscriptRecordSuffix {
+                    start: TranscriptRecordIndex::new(record_idx),
                     records: vec![transcript_user_record_with_history(
-                        descriptor_idx,
+                        record_idx,
                         history_idx,
                         text,
                         text,
@@ -4162,7 +4127,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_snapshot_reads_one_complete_store_head_and_descriptor_tail() {
+    fn resume_snapshot_reads_one_complete_store_head_and_transcript_record_tail() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let history = (0..4)
@@ -4178,10 +4143,11 @@ mod tests {
             context_snapshots: Vec::new(),
         })
         .unwrap();
-        let descriptors = (0..4)
-            .map(|idx| transcript_record(idx, "text", &format!("descriptor {idx}")))
+        let transcript_records = (0..4)
+            .map(|idx| transcript_record(idx, "text", &format!("record {idx}")))
             .collect::<Vec<_>>();
-        db.apply_test_descriptors(&descriptors).unwrap();
+        db.apply_test_transcript_records(&transcript_records)
+            .unwrap();
         drop(db);
         let db = SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
 
@@ -4194,17 +4160,17 @@ mod tests {
         assert_eq!(snapshot.session.head.revision, crate::Revision::new(2));
         assert_eq!(snapshot.session.head.history_len, HistoryLen::new(4));
         assert_eq!(
-            snapshot.session.head.descriptor_len,
-            crate::DescriptorLen::new(4)
+            snapshot.session.head.transcript_record_count,
+            crate::TranscriptRecordCount::new(4)
         );
         assert_eq!(snapshot.retained_history_len, 4);
         assert!(snapshot.history_text_bytes > 0);
         assert!(snapshot.missing_object_references.is_empty());
-        assert_eq!(snapshot.descriptor_tail.total_count, 4);
-        assert_eq!(snapshot.descriptor_tail.start.get(), 2);
+        assert_eq!(snapshot.transcript_record_tail.total_count, 4);
+        assert_eq!(snapshot.transcript_record_tail.start.get(), 2);
         assert_eq!(
-            snapshot.descriptor_tail.records,
-            descriptors[2..]
+            snapshot.transcript_record_tail.records,
+            transcript_records[2..]
                 .iter()
                 .cloned()
                 .map(without_indexed_text)
@@ -4263,8 +4229,8 @@ mod tests {
         db.connection()
             .execute_batch(
                 "INSERT INTO transcript_blocks (
-                    block_idx, descriptor_idx, kind, content_hash, estimated_text_bytes,
-                    descriptor_json
+                    block_idx, record_idx, kind, content_hash, estimated_text_bytes,
+                    block_json
                  ) VALUES (0, 0, 'user', 'content', 5, '{}');
                  INSERT INTO transcript_search (block_idx, indexed_text) VALUES (0, 'hello');
                  INSERT INTO transcript_search_fts(
@@ -4400,7 +4366,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_descriptor_suffix_preserves_prefix_and_replaces_tail() {
+    fn transcript_record_suffix_preserves_prefix_and_replaces_tail() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial = vec![
@@ -4408,15 +4374,15 @@ mod tests {
             transcript_record(1, "one", "old one"),
             transcript_record(2, "two", "old two"),
         ];
-        db.apply_test_descriptors(&initial).unwrap();
+        db.apply_test_transcript_records(&initial).unwrap();
 
         let replacement = vec![
             transcript_record(1, "one-new", "updated one"),
             transcript_record(2, "two-new", "updated two"),
         ];
-        db.apply_test_descriptor_suffix(1, &replacement).unwrap();
+        db.apply_test_record_suffix(1, &replacement).unwrap();
 
-        let records = db.read_all_transcript_descriptor_records().unwrap();
+        let records = db.read_all_transcript_records().unwrap();
         assert_eq!(records.len(), 3);
         assert_eq!(records[0], initial[0]);
         assert_eq!(records[1], replacement[0]);
@@ -4430,8 +4396,8 @@ mod tests {
             }]
         );
 
-        db.apply_test_descriptor_suffix(2, &[]).unwrap();
-        let records = db.read_all_transcript_descriptor_records().unwrap();
+        db.apply_test_record_suffix(2, &[]).unwrap();
+        let records = db.read_all_transcript_records().unwrap();
         assert_eq!(records, vec![initial[0].clone(), replacement[0].clone()]);
         assert_eq!(
             db.search_transcript_candidates("updated two").unwrap(),
@@ -4440,50 +4406,50 @@ mod tests {
     }
 
     #[test]
-    fn transcript_descriptor_suffix_compacts_sparse_existing_descriptor_indices() {
+    fn transcript_record_suffix_compacts_sparse_existing_record_indices() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = transcript_record(0, "zero", "zero");
         let sparse = transcript_record(302, "sparse", "sparse");
-        db.apply_test_descriptors(&[first.clone(), sparse.clone()])
+        db.apply_test_transcript_records(&[first.clone(), sparse.clone()])
             .unwrap();
         db.connection()
             .execute(
-                "UPDATE transcript_blocks SET descriptor_idx = 302 WHERE block_idx = 302",
+                "UPDATE transcript_blocks SET record_idx = 302 WHERE block_idx = 302",
                 [],
             )
             .unwrap();
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
-        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 303);
+        assert_eq!(db.transcript_record_count().unwrap(), 2);
+        assert_eq!(db.transcript_record_dense_extent().unwrap(), 303);
 
         let appended = transcript_record(303, "appended", "appended");
-        db.apply_test_descriptor_suffix(2, std::slice::from_ref(&appended))
+        db.apply_test_record_suffix(2, std::slice::from_ref(&appended))
             .unwrap();
 
-        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 3);
+        assert_eq!(db.transcript_record_dense_extent().unwrap(), 3);
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
+            db.read_all_transcript_records().unwrap(),
             vec![first, sparse, appended]
         );
     }
 
     #[test]
-    fn transcript_descriptor_suffix_rejects_start_past_dense_end() {
+    fn transcript_record_suffix_rejects_start_past_dense_end() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.apply_test_descriptors(&[transcript_record(0, "zero", "zero")])
+        db.apply_test_transcript_records(&[transcript_record(0, "zero", "zero")])
             .unwrap();
 
         let err = db
-            .apply_test_descriptor_suffix(2, &[transcript_record(2, "stale", "stale")])
+            .apply_test_record_suffix(2, &[transcript_record(2, "stale", "stale")])
             .unwrap_err();
         assert!(matches!(
             err,
-            SessionCommitFailure::InvalidDescriptorSuffix { .. }
+            SessionCommitFailure::InvalidTranscriptRecordSuffix { .. }
         ));
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+        assert_eq!(db.transcript_record_count().unwrap(), 1);
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
+            db.read_all_transcript_records().unwrap(),
             vec![transcript_record(0, "zero", "zero")]
         );
     }
@@ -4520,8 +4486,8 @@ mod tests {
                 items: vec![history],
             },
             side_tables: SideTableSuffixes::default(),
-            descriptors: Some(crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
+            transcript_records: Some(crate::TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
                 records: vec![transcript_user_record_with_history(0, 0, "user", "hello")],
             }),
         };
@@ -4541,9 +4507,12 @@ mod tests {
         assert_eq!(receipt.previous.revision, crate::Revision::ZERO);
         assert_eq!(receipt.current.revision, crate::Revision::new(1));
         assert_eq!(receipt.current.history_len, HistoryLen::new(1));
-        assert_eq!(receipt.current.descriptor_len, crate::DescriptorLen::new(1));
+        assert_eq!(
+            receipt.current.transcript_record_count,
+            crate::TranscriptRecordCount::new(1)
+        );
         assert_eq!(db.history_item_count().unwrap(), 1);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+        assert_eq!(db.transcript_record_count().unwrap(), 1);
     }
 
     #[test]
@@ -4574,7 +4543,7 @@ mod tests {
                 .unwrap();
             let table = match role.as_str() {
                 "after-history" => "history_items",
-                "after-descriptor" => "transcript_blocks",
+                "after-record" => "transcript_blocks",
                 "after-search" => "transcript_search",
                 "after-ready-turn" => "turns",
                 other => panic!("unknown submit crash role {other}"),
@@ -4595,7 +4564,7 @@ mod tests {
         for role in [
             "before-transaction",
             "after-history",
-            "after-descriptor",
+            "after-record",
             "after-search",
             "after-ready-turn",
             "after-commit",
@@ -4644,7 +4613,7 @@ mod tests {
             } else {
                 assert_eq!(reopened.store_head().unwrap(), StoreHead::default());
                 assert_eq!(reopened.history_item_count().unwrap(), 0);
-                assert_eq!(reopened.transcript_descriptor_count().unwrap(), 0);
+                assert_eq!(reopened.transcript_record_count().unwrap(), 0);
                 assert!(reopened.turns().unwrap().is_empty());
                 assert!(reopened
                     .search_transcript_candidates("needle")
@@ -4655,7 +4624,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_turn_commits_history_descriptor_search_and_ready_state_together() {
+    fn submit_turn_commits_history_record_search_and_ready_state_together() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = test_submit_user_command(&db, "submit-atomic", "canonical needle", 100);
@@ -4688,8 +4657,8 @@ mod tests {
             command.session.history.items
         );
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            command.session.descriptors.unwrap().records
+            db.read_all_transcript_records().unwrap(),
+            command.session.transcript_records.unwrap().records
         );
         assert_eq!(
             db.search_transcript_candidates("needle").unwrap(),
@@ -4760,79 +4729,12 @@ mod tests {
         ));
         assert_eq!(db.store_head().unwrap(), StoreHead::default());
         assert_eq!(db.history_item_count().unwrap(), 0);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert_eq!(db.transcript_record_count().unwrap(), 0);
         assert!(db.turns().unwrap().is_empty());
         assert!(db
             .search_transcript_candidates("not committed")
             .unwrap()
             .is_empty());
-    }
-
-    #[test]
-    // COMPAT(session-derived-sidecar-exports): metadata and content share one read revision.
-    fn compatibility_export_snapshot_is_revision_pinned() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.db");
-        let mut writer = SessionDb::open(&path).unwrap();
-        let first = test_submit_user_command(&writer, "export-snapshot", "old prompt", 100);
-        let first = writer.submit_turn(&first).unwrap();
-        let reader = SessionDb::open_read_only(&path).unwrap();
-        let snapshot = reader.compatibility_export_snapshot().unwrap().unwrap();
-        assert_eq!(
-            snapshot.metadata().revision,
-            first.session.current.revision.get()
-        );
-
-        let second = test_submit_user_command(&writer, "export-snapshot", "new prompt", 200);
-        writer.submit_turn(&second).unwrap();
-        let mut content = Vec::new();
-        assert!(snapshot
-            .write_search_blob_cancellable(&mut content, || false)
-            .unwrap());
-        snapshot.finish().unwrap();
-
-        assert_eq!(content, b"old prompt\n");
-    }
-
-    #[test]
-    // COMPAT(session-derived-sidecar-exports): one large row is streamed in bounded chunks.
-    fn compatibility_export_streams_large_rows_in_bounded_chunks() {
-        struct BoundedWriter {
-            bytes: usize,
-            max_write: usize,
-        }
-
-        impl std::io::Write for BoundedWriter {
-            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-                self.bytes = self.bytes.saturating_add(buffer.len());
-                self.max_write = self.max_write.max(buffer.len());
-                Ok(buffer.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.db");
-        let mut db = SessionDb::open(&path).unwrap();
-        let text = "x".repeat(256 * 1024);
-        let command = test_submit_user_command(&db, "streamed-export", &text, 100);
-        db.submit_turn(&command).unwrap();
-        let snapshot = db.compatibility_export_snapshot().unwrap().unwrap();
-        let mut writer = BoundedWriter {
-            bytes: 0,
-            max_write: 0,
-        };
-
-        assert!(snapshot
-            .write_search_blob_cancellable(&mut writer, || false)
-            .unwrap());
-        snapshot.finish().unwrap();
-
-        assert_eq!(writer.bytes, text.len() + 1);
-        assert!(writer.max_write <= 64 * 1024);
     }
 
     #[test]
@@ -4851,7 +4753,7 @@ mod tests {
                 ],
             },
             side_tables: SideTableSuffixes::default(),
-            descriptors: None,
+            transcript_records: None,
         };
         let baseline = SubmitTurn {
             session: session.clone(),
@@ -4918,7 +4820,7 @@ mod tests {
         assert!(matches!(error, SessionCommitFailure::Sqlite { .. }));
         assert_eq!(db.store_head().unwrap(), StoreHead::default());
         assert_eq!(db.history_item_count().unwrap(), 0);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert_eq!(db.transcript_record_count().unwrap(), 0);
         assert!(db.turns().unwrap().is_empty());
         assert_eq!(db.next_turn_id().unwrap(), None);
         assert!(db
@@ -4967,7 +4869,7 @@ mod tests {
         );
         assert_eq!(db.store_head().unwrap(), StoreHead::default());
         assert_eq!(db.history_item_count().unwrap(), 0);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert_eq!(db.transcript_record_count().unwrap(), 0);
         assert!(db.turns().unwrap().is_empty());
         assert!(db
             .search_transcript_candidates("unlikely")
@@ -4997,7 +4899,7 @@ mod tests {
         ));
         assert_eq!(db.store_head().unwrap(), initial.current);
         assert_eq!(db.history_item_count().unwrap(), 0);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert_eq!(db.transcript_record_count().unwrap(), 0);
         assert!(db.turns().unwrap().is_empty());
         assert_eq!(
             db.next_turn_id().unwrap(),
@@ -5338,8 +5240,8 @@ mod tests {
             turn_metas: vec![(HistoryIndex::new(1), serde_json::json!({"done": true}))],
             ..SideTableSuffixes::default()
         };
-        session.descriptors = Some(TranscriptDescriptorSuffix {
-            start: DescriptorIndex::new(1),
+        session.transcript_records = Some(TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::new(1),
             records: vec![transcript_record_with_history(
                 1,
                 1,
@@ -5506,47 +5408,47 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_append_replacement_and_truncation_each_advance_once() {
+    fn record_append_replacement_and_truncation_each_advance_once() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial = db
-            .apply_session_commit(&test_empty_commit(
-                "descriptor-revisions",
-                StoreHead::default(),
-            ))
+            .apply_session_commit(&test_empty_commit("record-revisions", StoreHead::default()))
             .unwrap();
 
-        let mut append = test_empty_commit("descriptor-revisions", initial.current);
-        append.descriptors = Some(crate::TranscriptDescriptorSuffix {
-            start: DescriptorIndex::ZERO,
+        let mut append = test_empty_commit("record-revisions", initial.current);
+        append.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
             records: vec![transcript_record(0, "first", "first")],
         });
         let append = db.apply_session_commit(&append).unwrap();
         assert_eq!(append.current.revision, Revision::new(2));
-        assert_eq!(append.current.descriptor_len, crate::DescriptorLen::new(1));
+        assert_eq!(
+            append.current.transcript_record_count,
+            crate::TranscriptRecordCount::new(1)
+        );
 
-        let mut replacement = test_empty_commit("descriptor-revisions", append.current);
-        replacement.descriptors = Some(crate::TranscriptDescriptorSuffix {
-            start: DescriptorIndex::ZERO,
+        let mut replacement = test_empty_commit("record-revisions", append.current);
+        replacement.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
             records: vec![transcript_record(0, "replacement", "replacement")],
         });
         let replacement = db.apply_session_commit(&replacement).unwrap();
         assert_eq!(replacement.current.revision, Revision::new(3));
         assert_eq!(
-            replacement.current.descriptor_len,
-            crate::DescriptorLen::new(1)
+            replacement.current.transcript_record_count,
+            crate::TranscriptRecordCount::new(1)
         );
 
-        let mut truncation = test_empty_commit("descriptor-revisions", replacement.current);
-        truncation.descriptors = Some(crate::TranscriptDescriptorSuffix {
-            start: DescriptorIndex::ZERO,
+        let mut truncation = test_empty_commit("record-revisions", replacement.current);
+        truncation.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
             records: Vec::new(),
         });
         let truncation = db.apply_session_commit(&truncation).unwrap();
         assert_eq!(truncation.current.revision, Revision::new(4));
         assert_eq!(
-            truncation.current.descriptor_len,
-            crate::DescriptorLen::ZERO
+            truncation.current.transcript_record_count,
+            crate::TranscriptRecordCount::ZERO
         );
     }
 
@@ -5619,7 +5521,7 @@ mod tests {
         command.expected.history_len = HistoryLen::new(oversized);
         commands.push(command);
         let mut command = baseline.clone();
-        command.expected.descriptor_len = crate::DescriptorLen::new(oversized);
+        command.expected.transcript_record_count = crate::TranscriptRecordCount::new(oversized);
         commands.push(command);
         let mut command = baseline.clone();
         command.history.start = HistoryIndex::new(oversized);
@@ -5653,8 +5555,8 @@ mod tests {
             commands.push(command);
         }
         let mut command = baseline.clone();
-        command.descriptors = Some(crate::TranscriptDescriptorSuffix {
-            start: DescriptorIndex::new(oversized),
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::new(oversized),
             records: Vec::new(),
         });
         commands.push(command);
@@ -5666,8 +5568,8 @@ mod tests {
                 _ => record.estimated_text_bytes = oversized,
             }
             let mut command = baseline.clone();
-            command.descriptors = Some(crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
+            command.transcript_records = Some(crate::TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
                 records: vec![record],
             });
             commands.push(command);
@@ -5679,19 +5581,19 @@ mod tests {
             assert!(db.apply_session_commit(&command).is_err());
             assert!(db.stored_session().unwrap().is_none());
             assert_eq!(db.history_item_count().unwrap(), 0);
-            assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+            assert_eq!(db.transcript_record_count().unwrap(), 0);
         }
     }
 
     #[test]
-    fn identical_descriptor_replacement_is_an_exact_no_op() {
+    fn identical_record_replacement_is_an_exact_no_op() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let descriptor = transcript_user_record_with_history(0, 0, "user", "hello");
+        let record = transcript_user_record_with_history(0, 0, "user", "hello");
         let first = SessionCommit {
-            session_id: "descriptor-no-op".into(),
+            session_id: "record-no-op".into(),
             expected: StoreHead::default(),
-            identity: test_identity("descriptor-no-op"),
+            identity: test_identity("record-no-op"),
             metadata: test_metadata(),
             history: crate::HistorySuffix {
                 start: HistoryIndex::ZERO,
@@ -5701,9 +5603,9 @@ mod tests {
                 ))],
             },
             side_tables: SideTableSuffixes::default(),
-            descriptors: Some(crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
-                records: vec![descriptor.clone()],
+            transcript_records: Some(crate::TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
+                records: vec![record.clone()],
             }),
         };
         let first_receipt = db.apply_session_commit(&first).unwrap();
@@ -5718,9 +5620,9 @@ mod tests {
                 start: HistoryIndex::new(1),
                 ..SideTableSuffixes::default()
             },
-            descriptors: Some(crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
-                records: vec![descriptor],
+            transcript_records: Some(crate::TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
+                records: vec![record],
             }),
             ..first
         };
@@ -5729,15 +5631,15 @@ mod tests {
 
         assert_eq!(receipt.previous.revision, crate::Revision::new(1));
         assert_eq!(receipt.current.revision, crate::Revision::new(1));
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+        assert_eq!(db.transcript_record_count().unwrap(), 1);
     }
 
     #[test]
-    fn commit_session_rejects_stale_descriptor_base_before_replacement() {
+    fn commit_session_rejects_stale_record_base_before_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.apply_test_fixture(&TestSessionFixture {
-            state: test_session_state("stale-descriptor", 1),
+            state: test_session_state("stale-record", 1),
             history_start_idx: 0,
             history_len: 1,
             history: vec![protocol::HistoryItem::user(protocol::Content::text(
@@ -5748,13 +5650,15 @@ mod tests {
             context_snapshots: Vec::new(),
         })
         .unwrap();
-        db.apply_test_descriptors(&[transcript_user_record_with_history(0, 0, "user", "hello")])
-            .unwrap();
+        db.apply_test_transcript_records(&[transcript_user_record_with_history(
+            0, 0, "user", "hello",
+        )])
+        .unwrap();
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
-            session_id: "stale-descriptor".into(),
+            session_id: "stale-record".into(),
             expected: test_store_head(current_revision, 1, 303),
-            identity: test_identity("stale-descriptor"),
+            identity: test_identity("stale-record"),
             metadata: test_metadata(),
             history: crate::HistorySuffix {
                 start: HistoryIndex::new(1),
@@ -5765,8 +5669,8 @@ mod tests {
                 start: HistoryIndex::new(1),
                 ..SideTableSuffixes::default()
             },
-            descriptors: Some(crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::new(303),
+            transcript_records: Some(crate::TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::new(303),
                 records: Vec::new(),
             }),
         };
@@ -5779,16 +5683,16 @@ mod tests {
                 expected: StoreHead {
                     revision: current_revision.into(),
                     history_len: HistoryLen::new(1),
-                    descriptor_len: crate::DescriptorLen::new(303),
+                    transcript_record_count: crate::TranscriptRecordCount::new(303),
                 },
                 current: StoreHead {
                     revision: current_revision.into(),
                     history_len: HistoryLen::new(1),
-                    descriptor_len: crate::DescriptorLen::new(1),
+                    transcript_record_count: crate::TranscriptRecordCount::new(1),
                 },
             }
         );
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+        assert_eq!(db.transcript_record_count().unwrap(), 1);
     }
 
     #[test]
@@ -5821,7 +5725,7 @@ mod tests {
                 start: HistoryIndex::new(1),
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         assert!(matches!(
@@ -5861,7 +5765,7 @@ mod tests {
                 start: HistoryIndex::new(2),
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         assert_eq!(
@@ -5870,12 +5774,12 @@ mod tests {
                 expected: StoreHead {
                     revision: current_revision.into(),
                     history_len: HistoryLen::new(2),
-                    descriptor_len: crate::DescriptorLen::ZERO,
+                    transcript_record_count: crate::TranscriptRecordCount::ZERO,
                 },
                 current: StoreHead {
                     revision: current_revision.into(),
                     history_len: HistoryLen::new(1),
-                    descriptor_len: crate::DescriptorLen::ZERO,
+                    transcript_record_count: crate::TranscriptRecordCount::ZERO,
                 },
             }
         );
@@ -5897,7 +5801,7 @@ mod tests {
                 items: Vec::new(),
             },
             side_tables: SideTableSuffixes::default(),
-            descriptors: None,
+            transcript_records: None,
         };
 
         assert_eq!(
@@ -5944,7 +5848,7 @@ mod tests {
                 start: HistoryIndex::new(2),
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         let receipt = db.apply_session_commit(&command).unwrap();
@@ -5991,7 +5895,7 @@ mod tests {
                 metadata_snapshots: vec![(HistoryIndex::new(1), metadata.clone())],
                 context_snapshots: Vec::new(),
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         let receipt = db.apply_session_commit(&command).unwrap();
@@ -6023,7 +5927,7 @@ mod tests {
                 turn_metas: vec![(HistoryIndex::new(2), serde_json::json!({"turn": 2}))],
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         let err = db.apply_session_commit(&command).unwrap_err();
@@ -6059,7 +5963,7 @@ mod tests {
                 start: HistoryIndex::new(1),
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         assert_eq!(
@@ -6105,7 +6009,7 @@ mod tests {
                 metadata_snapshots: vec![(HistoryIndex::new(1), serde_json::json!({"ok": true}))],
                 context_snapshots: vec![(HistoryIndex::new(1), serde_json::json!({"tokens": 7}))],
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         let receipt = db.apply_session_commit(&command).unwrap();
@@ -6172,7 +6076,7 @@ mod tests {
                 start: HistoryIndex::new(1),
                 ..SideTableSuffixes::default()
             },
-            descriptors: None,
+            transcript_records: None,
         };
 
         let err = db.apply_session_commit(&command).unwrap_err();
@@ -6189,11 +6093,11 @@ mod tests {
     }
 
     #[test]
-    fn commit_session_rolls_back_history_when_descriptor_validation_fails() {
+    fn commit_session_rolls_back_history_when_record_validation_fails() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.apply_test_fixture(&TestSessionFixture {
-            state: test_session_state("rollback-descriptor", 1),
+            state: test_session_state("rollback-record", 1),
             history_start_idx: 0,
             history_len: 1,
             history: vec![protocol::HistoryItem::user(protocol::Content::text(
@@ -6206,9 +6110,9 @@ mod tests {
         .unwrap();
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
-            session_id: "rollback-descriptor".into(),
+            session_id: "rollback-record".into(),
             expected: test_store_head(current_revision, 1, 0),
-            identity: test_identity("rollback-descriptor"),
+            identity: test_identity("rollback-record"),
             metadata: test_metadata(),
             history: crate::HistorySuffix {
                 start: HistoryIndex::new(1),
@@ -6218,8 +6122,8 @@ mod tests {
                 ))],
             },
             side_tables: SideTableSuffixes::default(),
-            descriptors: Some(crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::ZERO,
+            transcript_records: Some(crate::TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::ZERO,
                 records: vec![transcript_record_with_history(0, 1, "assistant", "after")],
             }),
         };
@@ -6237,11 +6141,11 @@ mod tests {
             db.test_session_model().unwrap().unwrap().revision,
             current_revision
         );
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert_eq!(db.transcript_record_count().unwrap(), 0);
     }
 
     #[test]
-    fn commit_session_appends_after_sparse_descriptors_and_nondescriptor_blocks() {
+    fn commit_session_appends_after_sparse_transcript_records_and_nonrecord_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let history = (0..12)
@@ -6266,11 +6170,11 @@ mod tests {
 
         let first = transcript_user_record_with_history(0, 1, "first", "first");
         let sparse = transcript_user_record_with_history(302, 11, "sparse", "sparse");
-        db.apply_test_descriptors(&[first.clone(), sparse.clone()])
+        db.apply_test_transcript_records(&[first.clone(), sparse.clone()])
             .unwrap();
         db.connection()
             .execute(
-                "UPDATE transcript_blocks SET descriptor_idx = 302 WHERE block_idx = 302",
+                "UPDATE transcript_blocks SET record_idx = 302 WHERE block_idx = 302",
                 [],
             )
             .unwrap();
@@ -6289,37 +6193,36 @@ mod tests {
             None,
             Vec::new(),
         ));
-        let appended_descriptor =
-            transcript_record_with_history(303, 12, "appended", "new assistant");
+        let appended_record = transcript_record_with_history(303, 12, "appended", "new assistant");
         commit_current_suffix(
             &mut db,
             test_session_state("sparse-follow-up", 13),
             12,
             vec![appended_history],
             None,
-            Some((2, vec![appended_descriptor.clone()])),
+            Some((2, vec![appended_record.clone()])),
         )
         .unwrap();
 
-        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 3);
+        assert_eq!(db.transcript_record_dense_extent().unwrap(), 3);
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            vec![first, sparse, appended_descriptor]
+            db.read_all_transcript_records().unwrap(),
+            vec![first, sparse, appended_record]
         );
-        let old_nondescriptor_count: i64 = db
+        let old_nonrecord_count: i64 = db
             .connection()
             .query_row(
                 "SELECT COUNT(*) FROM transcript_blocks
-                 WHERE block_idx = 2 AND history_idx = 11 AND descriptor_json IS NULL",
+                 WHERE block_idx = 2 AND history_idx = 11 AND block_json IS NULL",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(old_nondescriptor_count, 1);
+        assert_eq!(old_nonrecord_count, 1);
     }
 
     #[test]
-    fn commit_session_keeps_transcript_descriptors_independent_from_history_suffix() {
+    fn commit_session_keeps_transcript_records_independent_from_history_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let history = (0..3)
@@ -6342,49 +6245,50 @@ mod tests {
             .execute("DELETE FROM transcript_blocks", [])
             .unwrap();
 
-        let initial_descriptors = vec![
+        let initial_transcript_records = vec![
             transcript_user_record_with_history(0, 0, "first", "first"),
             transcript_record(1, "assistant-a", "assistant a"),
             transcript_record(2, "assistant-b", "assistant b"),
         ];
-        db.apply_test_descriptors(&initial_descriptors).unwrap();
+        db.apply_test_transcript_records(&initial_transcript_records)
+            .unwrap();
 
         let appended_history = protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
             Some(protocol::Content::text("new assistant")),
             None,
             Vec::new(),
         ));
-        let appended_descriptor = transcript_record_with_history(3, 3, "appended", "new assistant");
+        let appended_record = transcript_record_with_history(3, 3, "appended", "new assistant");
         commit_current_suffix(
             &mut db,
             test_session_state("independent-transcript", 4),
             3,
             vec![appended_history],
             None,
-            Some((3, vec![appended_descriptor.clone()])),
+            Some((3, vec![appended_record.clone()])),
         )
         .unwrap();
 
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 4);
-        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 4);
+        assert_eq!(db.transcript_record_count().unwrap(), 4);
+        assert_eq!(db.transcript_record_dense_extent().unwrap(), 4);
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
+            db.read_all_transcript_records().unwrap(),
             vec![
-                initial_descriptors[0].clone(),
-                initial_descriptors[1].clone(),
-                initial_descriptors[2].clone(),
-                appended_descriptor,
+                initial_transcript_records[0].clone(),
+                initial_transcript_records[1].clone(),
+                initial_transcript_records[2].clone(),
+                appended_record,
             ]
         );
     }
 
     #[test]
-    fn commit_session_rejects_descriptor_history_kind_mismatch_in_saved_suffix() {
+    fn commit_session_rejects_record_history_kind_mismatch_in_saved_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let err = commit_current_suffix(
             &mut db,
-            test_session_state("mismatched-descriptor-origin", 1),
+            test_session_state("mismatched-record-origin", 1),
             0,
             vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
                 "cwd changed",
@@ -6405,10 +6309,10 @@ mod tests {
     }
 
     #[test]
-    fn commit_session_accepts_semantic_descriptor_links_in_saved_suffix() {
+    fn commit_session_accepts_semantic_record_links_in_saved_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let descriptors = vec![
+        let transcript_records = vec![
             transcript_record_of_kind_with_history(0, 0, "mode", "apply mode"),
             transcript_record_of_kind_with_history(1, 1, "process_status", "process finished"),
             transcript_record_of_kind_with_history(2, 2, "compacted", "retained summary"),
@@ -6416,7 +6320,7 @@ mod tests {
 
         commit_current_suffix(
             &mut db,
-            test_session_state("semantic-descriptor-origins", 3),
+            test_session_state("semantic-record-origins", 3),
             0,
             vec![
                 protocol::HistoryItem::note(protocol::HistoryNote::mode_change("apply mode")),
@@ -6428,13 +6332,13 @@ mod tests {
                 )),
             ],
             None,
-            Some((0, descriptors.clone())),
+            Some((0, transcript_records.clone())),
         )
         .unwrap();
 
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            descriptors
+            db.read_all_transcript_records().unwrap(),
+            transcript_records
         );
     }
 
@@ -6551,11 +6455,11 @@ mod tests {
     }
 
     #[test]
-    fn commit_session_allows_descriptor_links_to_persisted_history_prefix() {
+    fn commit_session_allows_record_links_to_persisted_history_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.apply_test_fixture(&TestSessionFixture {
-            state: test_session_state("prefix-descriptor-origin", 1),
+            state: test_session_state("prefix-record-origin", 1),
             history_start_idx: 0,
             history_len: 1,
             history: vec![protocol::HistoryItem::user(protocol::Content::text(
@@ -6566,21 +6470,21 @@ mod tests {
             context_snapshots: Vec::new(),
         })
         .unwrap();
-        let updated_descriptor = transcript_user_record_with_history(0, 0, "updated", "old user");
+        let updated_record = transcript_user_record_with_history(0, 0, "updated", "old user");
 
         commit_current_suffix(
             &mut db,
-            test_session_state("prefix-descriptor-origin", 1),
+            test_session_state("prefix-record-origin", 1),
             1,
             Vec::new(),
             None,
-            Some((0, vec![updated_descriptor.clone()])),
+            Some((0, vec![updated_record.clone()])),
         )
         .unwrap();
 
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            vec![updated_descriptor]
+            db.read_all_transcript_records().unwrap(),
+            vec![updated_record]
         );
     }
 
@@ -6605,7 +6509,7 @@ mod tests {
             context_snapshots: Vec::new(),
         })
         .unwrap();
-        let descriptors = vec![
+        let transcript_records = vec![
             transcript_record_of_kind_with_history(0, 0, "process_status", "process finished"),
             transcript_record_of_kind_with_history(1, 1, "compacted", "retained summary"),
         ];
@@ -6616,22 +6520,22 @@ mod tests {
             2,
             Vec::new(),
             None,
-            Some((0, descriptors.clone())),
+            Some((0, transcript_records.clone())),
         )
         .unwrap();
 
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            descriptors
+            db.read_all_transcript_records().unwrap(),
+            transcript_records
         );
     }
 
     #[test]
-    fn commit_session_rejects_descriptor_history_kind_mismatch_in_persisted_prefix() {
+    fn commit_session_rejects_record_history_kind_mismatch_in_persisted_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.apply_test_fixture(&TestSessionFixture {
-            state: test_session_state("prefix-descriptor-mismatch", 1),
+            state: test_session_state("prefix-record-mismatch", 1),
             history_start_idx: 0,
             history_len: 1,
             history: vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
@@ -6645,7 +6549,7 @@ mod tests {
 
         let err = commit_current_suffix(
             &mut db,
-            test_session_state("prefix-descriptor-mismatch", 1),
+            test_session_state("prefix-record-mismatch", 1),
             1,
             Vec::new(),
             None,
@@ -6665,14 +6569,11 @@ mod tests {
             err,
             SessionCommitFailure::Integrity { message } if message.contains("kind mismatch")
         ));
-        assert!(db
-            .read_all_transcript_descriptor_records()
-            .unwrap()
-            .is_empty());
+        assert!(db.read_all_transcript_records().unwrap().is_empty());
     }
 
     #[test]
-    fn transcript_descriptor_estimated_rows_sums_dense_descriptor_ranges() {
+    fn transcript_record_estimated_rows_sums_dense_record_ranges() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = vec![
@@ -6685,34 +6586,34 @@ mod tests {
         records[1].estimated_text_bytes = 1;
         records[2].estimated_text_bytes = 9;
         records[3].estimated_text_bytes = 10;
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
 
         assert_eq!(
-            db.transcript_descriptor_estimated_rows((0..0).into(), 5)
+            db.transcript_record_estimated_rows((0..0).into(), 5)
                 .unwrap(),
             0
         );
         let inverted_start = 3;
         let inverted_end = 1;
         assert_eq!(
-            db.transcript_descriptor_estimated_rows((inverted_start..inverted_end).into(), 5)
+            db.transcript_record_estimated_rows((inverted_start..inverted_end).into(), 5)
                 .unwrap(),
             0
         );
         assert_eq!(
-            db.transcript_descriptor_estimated_rows((0..4).into(), 5)
+            db.transcript_record_estimated_rows((0..4).into(), 5)
                 .unwrap(),
             10
         );
         assert_eq!(
-            db.transcript_descriptor_estimated_rows((1..3).into(), 5)
+            db.transcript_record_estimated_rows((1..3).into(), 5)
                 .unwrap(),
             5
         );
     }
 
     #[test]
-    fn transcript_descriptor_estimated_rows_uses_compact_tool_preview() {
+    fn transcript_record_estimated_rows_uses_compact_tool_preview() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut tool = transcript_record(0, "tool", &"x".repeat(10_000));
@@ -6720,38 +6621,39 @@ mod tests {
         tool.tool_name = Some("edit_file".into());
         tool.preview_text = "edited file".into();
         let assistant = transcript_record(1, "assistant", "abcdefghij");
-        db.apply_test_descriptors(&[tool, assistant]).unwrap();
+        db.apply_test_transcript_records(&[tool, assistant])
+            .unwrap();
 
         assert_eq!(
-            db.transcript_descriptor_estimated_rows((0..1).into(), 10)
+            db.transcript_record_estimated_rows((0..1).into(), 10)
                 .unwrap(),
             3
         );
         assert_eq!(
-            db.transcript_descriptor_estimated_rows((0..2).into(), 10)
+            db.transcript_record_estimated_rows((0..2).into(), 10)
                 .unwrap(),
             5
         );
     }
 
     #[test]
-    fn descriptor_slices_omit_indexed_text_payloads() {
+    fn record_slices_omit_indexed_text_payloads() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let huge_indexed_text = format!("needle {}", "x".repeat(10_000));
         let record = transcript_record(0, "huge", &huge_indexed_text);
-        db.apply_test_descriptors(std::slice::from_ref(&record))
+        db.apply_test_transcript_records(std::slice::from_ref(&record))
             .unwrap();
 
-        let slice = db.read_transcript_descriptor_slice((0..1).into()).unwrap();
+        let slice = db.read_transcript_record_slice((0..1).into()).unwrap();
         assert_eq!(slice.records.len(), 1);
         assert_eq!(slice.records[0].indexed_text, "");
 
-        let tail = db.read_transcript_descriptor_tail_slice(1).unwrap();
+        let tail = db.read_transcript_record_tail_slice(1).unwrap();
         assert_eq!(tail.records.len(), 1);
         assert_eq!(tail.records[0].indexed_text, "");
 
-        let full = db.read_all_transcript_descriptor_records().unwrap();
+        let full = db.read_all_transcript_records().unwrap();
         assert_eq!(full[0].indexed_text, huge_indexed_text);
         assert!(!db
             .search_transcript_candidates("needle")
@@ -6763,7 +6665,7 @@ mod tests {
     fn transcript_search_filters_exact_substring_in_sql() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.apply_test_descriptors(&[
+        db.apply_test_transcript_records(&[
             transcript_record(0, "false-positive", "aba gap bab"),
             transcript_record(1, "exact", "xx abab yy"),
         ])
@@ -6782,7 +6684,7 @@ mod tests {
     fn transcript_search_treats_fts_query_punctuation_literally() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.apply_test_descriptors(&[
+        db.apply_test_transcript_records(&[
             transcript_record(0, "underscore", "xx foo_bar yy"),
             transcript_record(1, "wildcard", "xx fooXbar yy"),
             transcript_record(2, "percent", "xx foo%bar yy"),
@@ -6814,7 +6716,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_session_appends_history_and_descriptors_transactionally() {
+    fn commit_session_appends_history_and_transcript_records_transactionally() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![
@@ -6835,26 +6737,30 @@ mod tests {
             context_snapshots: Vec::new(),
         };
         db.apply_test_fixture(&initial_snapshot).unwrap();
-        let initial_descriptors = vec![
+        let initial_transcript_records = vec![
             transcript_user_record_with_history(0, 0, "old-user", "old user"),
             transcript_record_with_history(1, 1, "old-assistant", "old assistant"),
         ];
-        db.apply_test_descriptors(&initial_descriptors).unwrap();
+        db.apply_test_transcript_records(&initial_transcript_records)
+            .unwrap();
 
         let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
-        let appended_descriptor = transcript_user_record_with_history(2, 2, "new-user", "new user");
+        let appended_record = transcript_user_record_with_history(2, 2, "new-user", "new user");
         let receipt = commit_current_suffix(
             &mut db,
             test_session_state("typed-suffix", 3),
             2,
             vec![appended.clone()],
             None,
-            Some((2, vec![appended_descriptor.clone()])),
+            Some((2, vec![appended_record.clone()])),
         )
         .unwrap();
 
         assert_eq!(receipt.current.history_len, HistoryLen::new(3));
-        assert_eq!(receipt.current.descriptor_len, crate::DescriptorLen::new(3));
+        assert_eq!(
+            receipt.current.transcript_record_count,
+            crate::TranscriptRecordCount::new(3)
+        );
         assert_eq!(
             db.read_history_items_range(0..3).unwrap(),
             vec![
@@ -6864,11 +6770,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
+            db.read_all_transcript_records().unwrap(),
             vec![
-                initial_descriptors[0].clone(),
-                initial_descriptors[1].clone(),
-                appended_descriptor,
+                initial_transcript_records[0].clone(),
+                initial_transcript_records[1].clone(),
+                appended_record,
             ]
         );
         assert_eq!(db.test_session_model().unwrap().unwrap().history_len, 3);
@@ -6901,12 +6807,13 @@ mod tests {
             context_snapshots: Vec::new(),
         })
         .unwrap();
-        let descriptors = vec![
+        let transcript_records = vec![
             transcript_user_record_with_history(0, 0, "one", "one"),
             transcript_record_with_history(1, 1, "two", "two"),
             transcript_user_record_with_history(2, 2, "three", "three"),
         ];
-        db.apply_test_descriptors(&descriptors).unwrap();
+        db.apply_test_transcript_records(&transcript_records)
+            .unwrap();
 
         let mut fork_state = test_session_state("fork", 2);
         fork_state.parent_id = Some("source".into());
@@ -6920,7 +6827,7 @@ mod tests {
             fork.read_history_items_range(0..3).unwrap(),
             history[..2].to_vec()
         );
-        assert_eq!(fork.transcript_descriptor_count().unwrap(), 2);
+        assert_eq!(fork.transcript_record_count().unwrap(), 2);
         assert_eq!(
             fork.load_full_session().unwrap().unwrap().turn_metas,
             vec![
@@ -6933,13 +6840,13 @@ mod tests {
             Vec::<TranscriptSearchCandidate>::new()
         );
         assert_eq!(
-            fork.read_all_transcript_descriptor_records().unwrap(),
-            descriptors[..2].to_vec()
+            fork.read_all_transcript_records().unwrap(),
+            transcript_records[..2].to_vec()
         );
     }
 
     #[test]
-    fn commit_session_without_descriptors_preserves_transcript_descriptors() {
+    fn commit_session_without_transcript_records_preserves_transcript_records() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![
@@ -6960,11 +6867,12 @@ mod tests {
             context_snapshots: Vec::new(),
         };
         db.apply_test_fixture(&initial_snapshot).unwrap();
-        let initial_descriptors = vec![
+        let initial_transcript_records = vec![
             transcript_user_record_with_history(0, 0, "old-user", "old user"),
             transcript_record_with_history(1, 1, "old-assistant", "old assistant"),
         ];
-        db.apply_test_descriptors(&initial_descriptors).unwrap();
+        db.apply_test_transcript_records(&initial_transcript_records)
+            .unwrap();
 
         let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
         commit_current_suffix(
@@ -6978,22 +6886,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(db.history_item_count().unwrap(), 3);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
+        assert_eq!(db.transcript_record_count().unwrap(), 2);
         assert_eq!(db.transcript_block_count().unwrap(), 3);
-        assert_eq!(db.transcript_missing_descriptor_count().unwrap(), 1);
+        assert_eq!(db.transcript_missing_block_count().unwrap(), 1);
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            initial_descriptors
+            db.read_all_transcript_records().unwrap(),
+            initial_transcript_records
         );
     }
 
     #[test]
-    fn commit_session_descriptor_suffix_replaces_only_requested_tail() {
+    fn commit_session_record_suffix_replaces_only_requested_tail() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![protocol::HistoryItem::user(protocol::Content::text("user"))];
         let initial_snapshot = TestSessionFixture {
-            state: test_session_state("delta-descriptors", initial_history.len()),
+            state: test_session_state("delta-transcript_records", initial_history.len()),
             history_start_idx: 0,
             history_len: initial_history.len(),
             history: initial_history,
@@ -7002,17 +6910,18 @@ mod tests {
             context_snapshots: Vec::new(),
         };
         db.apply_test_fixture(&initial_snapshot).unwrap();
-        let initial_descriptors = vec![
+        let initial_transcript_records = vec![
             transcript_record(0, "zero", "old zero"),
             transcript_record(1, "one", "old one"),
             transcript_record(2, "two", "old two"),
         ];
-        db.apply_test_descriptors(&initial_descriptors).unwrap();
+        db.apply_test_transcript_records(&initial_transcript_records)
+            .unwrap();
 
         let replacement = transcript_record(1, "one-new", "updated one");
         commit_current_suffix(
             &mut db,
-            test_session_state("delta-descriptors", 1),
+            test_session_state("delta-transcript_records", 1),
             1,
             Vec::new(),
             None,
@@ -7021,8 +6930,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap(),
-            vec![initial_descriptors[0].clone(), replacement]
+            db.read_all_transcript_records().unwrap(),
+            vec![initial_transcript_records[0].clone(), replacement]
         );
         assert_eq!(
             db.search_transcript_candidates("old two").unwrap(),
@@ -7089,7 +6998,7 @@ mod tests {
             transcript_record(3, "three", "delta"),
             transcript_record(4, "four", "symbol § and Ā"),
         ];
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
 
         assert_eq!(
             db.search_transcript_candidates("é").unwrap(),
@@ -7183,7 +7092,7 @@ mod tests {
             .map(|idx| transcript_record(idx, &format!("false-{idx}"), "abc false bcd"))
             .collect::<Vec<_>>();
         records.push(transcript_record(80, "true", "contains abcd exactly"));
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
 
         assert_eq!(
             db.search_transcript_candidate_page(
@@ -7201,23 +7110,20 @@ mod tests {
     }
 
     #[test]
-    fn transcript_descriptor_range_and_tail_read_bounded_rows() {
+    fn transcript_record_range_and_tail_read_bounded_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..6)
             .map(|idx| transcript_record(idx * 10, &format!("block-{idx}"), &format!("text {idx}")))
             .collect::<Vec<_>>();
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
 
-        let slice = db.read_transcript_descriptor_slice((2..5).into()).unwrap();
+        let slice = db.read_transcript_record_slice((2..5).into()).unwrap();
         assert_eq!(
-            db.transcript_descriptor_index_for_block_idx(20).unwrap(),
-            Some(TranscriptDescriptorIndex::new(2))
+            db.transcript_record_index_for_block_idx(20).unwrap(),
+            Some(TranscriptRecordOffset::new(2))
         );
-        assert_eq!(
-            db.transcript_descriptor_index_for_block_idx(25).unwrap(),
-            None
-        );
+        assert_eq!(db.transcript_record_index_for_block_idx(25).unwrap(), None);
         assert_eq!(slice.start.get(), 2);
         assert_eq!(slice.end().get(), 5);
         assert_eq!(slice.total_count, 6);
@@ -7229,17 +7135,15 @@ mod tests {
         assert_eq!(slice.records, expected_slice);
         assert_eq!(
             slice.hydration,
-            crate::TranscriptDescriptorHydration::ObjectBacked
+            crate::TranscriptRecordHydration::ObjectBacked
         );
 
-        let empty = db.read_transcript_descriptor_slice((4..4).into()).unwrap();
+        let empty = db.read_transcript_record_slice((4..4).into()).unwrap();
         assert!(empty.is_empty());
         assert_eq!(empty.start.get(), 4);
         assert_eq!(empty.total_count, 6);
 
-        let centered = db
-            .read_transcript_descriptor_centered_slice(3, 2, 1)
-            .unwrap();
+        let centered = db.read_transcript_record_centered_slice(3, 2, 1).unwrap();
         assert_eq!(centered.start.get(), 1);
         assert_eq!(centered.end().get(), 5);
         let expected_centered = records[1..5]
@@ -7249,7 +7153,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(centered.records, expected_centered);
         assert_eq!(
-            db.read_transcript_descriptor_centered_slice(0, 5, 1)
+            db.read_transcript_record_centered_slice(0, 5, 1)
                 .unwrap()
                 .records,
             records[0..2]
@@ -7259,7 +7163,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
+        let tail = db.read_transcript_record_tail_slice(2).unwrap();
         assert_eq!(tail.start.get(), 4);
         assert_eq!(tail.end().get(), 6);
         let expected_tail = records[4..6]
@@ -7268,40 +7172,35 @@ mod tests {
             .map(without_indexed_text)
             .collect::<Vec<_>>();
         assert_eq!(tail.records, expected_tail);
-        assert!(db
-            .read_transcript_descriptor_tail_slice(0)
-            .unwrap()
-            .is_empty());
+        assert!(db.read_transcript_record_tail_slice(0).unwrap().is_empty());
         let expected_all = records
             .iter()
             .cloned()
             .map(without_indexed_text)
             .collect::<Vec<_>>();
         assert_eq!(
-            db.read_transcript_descriptor_tail_slice(99)
-                .unwrap()
-                .records,
+            db.read_transcript_record_tail_slice(99).unwrap().records,
             expected_all
         );
     }
 
     #[test]
-    fn descriptor_slices_exclude_indexed_rows_without_descriptor_payloads() {
+    fn record_slices_exclude_indexed_rows_without_record_payloads() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = vec![
             transcript_record(0, "zero", "zero text"),
             transcript_record(10, "one", "one text"),
         ];
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
         db.connection()
             .execute(
-                "UPDATE transcript_blocks SET descriptor_json = NULL WHERE block_idx = 10",
+                "UPDATE transcript_blocks SET block_json = NULL WHERE block_idx = 10",
                 [],
             )
             .unwrap();
 
-        let slice = db.read_transcript_descriptor_slice((0..2).into()).unwrap();
+        let slice = db.read_transcript_record_slice((0..2).into()).unwrap();
         assert_eq!(slice.total_count, 2);
         assert_eq!(
             slice.records,
@@ -7310,14 +7209,14 @@ mod tests {
     }
 
     #[test]
-    fn transcript_block_metadata_reads_include_descriptorless_rows() {
+    fn transcript_block_metadata_reads_include_recordless_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = vec![
             transcript_record(0, "zero", "zero text"),
             transcript_record(2, "two", "two text"),
         ];
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
         db.connection()
             .execute(
                 "INSERT INTO transcript_blocks
@@ -7329,24 +7228,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(db.transcript_block_count().unwrap(), 4);
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
-        assert_eq!(db.transcript_missing_descriptor_count().unwrap(), 2);
+        assert_eq!(db.transcript_record_count().unwrap(), 2);
+        assert_eq!(db.transcript_missing_block_count().unwrap(), 2);
 
         let range = db.read_transcript_block_metadata_range(1..4).unwrap();
         assert_eq!(range.len(), 3);
         assert_eq!(range[0].block_idx, 1);
-        assert_eq!(range[0].descriptor_idx, None);
+        assert_eq!(range[0].record_idx, None);
         assert_eq!(range[0].kind, "note");
         assert_eq!(range[0].estimated_rows, Some(2));
         assert_eq!(range[0].preview_text, "gap one");
-        assert!(!range[0].has_descriptor);
+        assert!(!range[0].has_block);
         assert_eq!(range[1].block_idx, 2);
-        assert_eq!(range[1].descriptor_idx, Some(1));
-        assert!(range[1].has_descriptor);
+        assert_eq!(range[1].record_idx, Some(1));
+        assert!(range[1].has_block);
         assert_eq!(range[2].block_idx, 3);
-        assert_eq!(range[2].descriptor_idx, None);
+        assert_eq!(range[2].record_idx, None);
         assert_eq!(range[2].estimated_rows, None);
-        assert!(!range[2].has_descriptor);
+        assert!(!range[2].has_block);
 
         let tail = db.read_transcript_block_metadata_tail(2).unwrap();
         assert_eq!(
@@ -7361,7 +7260,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_descriptor_navigation_by_kind_reads_nearest_matching_indexes() {
+    fn transcript_record_navigation_by_kind_reads_nearest_matching_indexes() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..6)
@@ -7369,74 +7268,72 @@ mod tests {
             .collect::<Vec<_>>();
         records[1].kind = "user".into();
         records[4].kind = "user".into();
-        db.apply_test_descriptors(&records).unwrap();
+        db.apply_test_transcript_records(&records).unwrap();
 
         assert_eq!(
-            db.read_transcript_descriptor_before_kind_at_index("user", 5)
+            db.read_transcript_record_before_kind_at_index("user", 5)
                 .unwrap(),
             Some(without_indexed_text(records[4].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_before_kind_at_index("user", 4)
+            db.read_transcript_record_before_kind_at_index("user", 4)
                 .unwrap(),
             Some(without_indexed_text(records[4].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_before_kind_at_index("user", 3)
+            db.read_transcript_record_before_kind_at_index("user", 3)
                 .unwrap(),
             Some(without_indexed_text(records[1].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind_at_index("user", 0)
+            db.read_transcript_record_after_kind_at_index("user", 0)
                 .unwrap(),
             Some(without_indexed_text(records[1].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind_at_index("user", 1)
+            db.read_transcript_record_after_kind_at_index("user", 1)
                 .unwrap(),
             Some(without_indexed_text(records[1].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind_at_index("user", 2)
+            db.read_transcript_record_after_kind_at_index("user", 2)
                 .unwrap(),
             Some(without_indexed_text(records[4].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_before_kind_at_index("tool", 5)
+            db.read_transcript_record_before_kind_at_index("tool", 5)
                 .unwrap(),
             None
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind_at_index("tool", 0)
+            db.read_transcript_record_after_kind_at_index("tool", 0)
                 .unwrap(),
             None
         );
     }
 
     #[test]
-    fn sparse_transcript_descriptor_reads_keep_metadata_object_backed() {
+    fn sparse_transcript_record_reads_keep_metadata_object_backed() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut record = transcript_record(0, "tool", "tool text");
         let metadata_payload = "x".repeat(crate::history::METADATA_OBJECT_MIN_BYTES + 128);
-        record.descriptor_json = serde_json::json!({
+        record.block_json = serde_json::json!({
             "kind": "tool",
             "metadata": { "payload": metadata_payload },
         })
         .to_string();
-        db.apply_test_descriptors(&[record]).unwrap();
+        db.apply_test_transcript_records(&[record]).unwrap();
 
-        let full: serde_json::Value = serde_json::from_str(
-            &db.read_all_transcript_descriptor_records().unwrap()[0].descriptor_json,
-        )
-        .unwrap();
+        let full: serde_json::Value =
+            serde_json::from_str(&db.read_all_transcript_records().unwrap()[0].block_json).unwrap();
         assert_eq!(
             full["metadata"]["payload"].as_str(),
             Some(metadata_payload.as_str())
         );
 
         let tail: serde_json::Value = serde_json::from_str(
-            &db.read_transcript_descriptor_tail_slice(1).unwrap().records[0].descriptor_json,
+            &db.read_transcript_record_tail_slice(1).unwrap().records[0].block_json,
         )
         .unwrap();
         assert!(tail["metadata"]
@@ -7628,7 +7525,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_history_and_descriptor_commit_rolls_back_together() {
+    fn combined_history_and_record_commit_rolls_back_together() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
@@ -7664,43 +7561,39 @@ mod tests {
             context_snapshots: Vec::new(),
         };
 
-        db.apply_test_fixture_with_descriptors(
+        db.apply_test_fixture_with_transcript_records(
             &snapshot,
             0,
             &[transcript_user_record_with_history(
                 0,
                 0,
                 "first",
-                "first descriptor",
+                "first record",
             )],
         )
         .unwrap();
-        assert_eq!(db.search_blob().unwrap(), "first descriptor\n");
+        assert_eq!(db.search_blob().unwrap(), "first record\n");
 
         snapshot.history_start_idx = 1;
         snapshot.history = vec![second];
         snapshot.history_len = 2;
         snapshot.state.history_len = 2;
         snapshot.state.updated_at = 30;
-        let mut invalid_record =
-            transcript_record_with_history(1, 1, "second", "second descriptor");
-        invalid_record.descriptor_json = "{invalid".into();
+        let mut invalid_record = transcript_record_with_history(1, 1, "second", "second record");
+        invalid_record.block_json = "{invalid".into();
 
-        db.apply_test_fixture_with_descriptors(&snapshot, 1, &[invalid_record])
+        db.apply_test_fixture_with_transcript_records(&snapshot, 1, &[invalid_record])
             .unwrap_err();
 
         let loaded = db.load_full_session().unwrap().unwrap();
         assert_eq!(loaded.history, vec![first]);
         assert_eq!(loaded.session.head.history_len, HistoryLen::new(1));
-        assert_eq!(db.search_blob().unwrap(), "first descriptor\n");
-        assert_eq!(
-            db.read_all_transcript_descriptor_records().unwrap().len(),
-            1
-        );
+        assert_eq!(db.search_blob().unwrap(), "first record\n");
+        assert_eq!(db.read_all_transcript_records().unwrap().len(), 1);
     }
 
     #[test]
-    fn history_append_preserves_descriptor_tail_without_descriptor_delta() {
+    fn history_append_preserves_transcript_record_tail_without_record_delta() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
@@ -7737,8 +7630,8 @@ mod tests {
         };
 
         db.apply_test_fixture(&snapshot).unwrap();
-        db.apply_test_descriptors(&[
-            TranscriptDescriptorRecord {
+        db.apply_test_transcript_records(&[
+            StoredTranscriptBlock {
                 block_idx: 0,
                 history_idx: Some(0),
                 kind: "user".into(),
@@ -7748,12 +7641,11 @@ mod tests {
                 estimated_text_bytes: 14,
                 preview_text: "first detailed".into(),
                 indexed_text: "first detailed".into(),
-                descriptor_json: serde_json::json!({"Text": {"content": "first detailed"}})
-                    .to_string(),
+                block_json: serde_json::json!({"Text": {"content": "first detailed"}}).to_string(),
                 origin_json: None,
                 tool_state_json: None,
             },
-            TranscriptDescriptorRecord {
+            StoredTranscriptBlock {
                 block_idx: 1,
                 history_idx: None,
                 kind: "thinking".into(),
@@ -7763,8 +7655,7 @@ mod tests {
                 estimated_text_bytes: 14,
                 preview_text: "synthetic tail".into(),
                 indexed_text: "synthetic tail".into(),
-                descriptor_json: serde_json::json!({"Text": {"content": "synthetic tail"}})
-                    .to_string(),
+                block_json: serde_json::json!({"Text": {"content": "synthetic tail"}}).to_string(),
                 origin_json: None,
                 tool_state_json: None,
             },
@@ -7791,7 +7682,7 @@ mod tests {
     }
 
     #[test]
-    fn history_suffix_preserves_transcript_until_descriptor_delta() {
+    fn history_suffix_preserves_transcript_until_record_delta() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
@@ -7834,11 +7725,11 @@ mod tests {
         };
 
         db.apply_test_fixture(&snapshot).unwrap();
-        db.apply_test_descriptors(&[
-            transcript_user_record_with_history(0, 0, "first", "first descriptor"),
+        db.apply_test_transcript_records(&[
+            transcript_user_record_with_history(0, 0, "first", "first record"),
             transcript_record_with_history(1, 1, "thinking", "assistant thinking"),
             transcript_record_with_history(2, 1, "answer", "assistant answer"),
-            transcript_user_record_with_history(3, 2, "old-request", "old request descriptor"),
+            transcript_user_record_with_history(3, 2, "old-request", "old request record"),
         ])
         .unwrap();
 
@@ -7852,15 +7743,15 @@ mod tests {
         let search = db.search_blob().unwrap();
         assert!(search.contains("assistant answer\n"));
         assert!(search.contains("new request\n"));
-        assert!(search.contains("old request descriptor\n"));
+        assert!(search.contains("old request record\n"));
     }
 
     #[test]
-    fn transcript_descriptors_roundtrip_and_feed_search_candidates() {
+    fn transcript_records_roundtrip_and_feed_search_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.apply_test_descriptors(&[
-            TranscriptDescriptorRecord {
+        db.apply_test_transcript_records(&[
+            StoredTranscriptBlock {
                 block_idx: 0,
                 history_idx: None,
                 kind: "assistant".into(),
@@ -7870,11 +7761,11 @@ mod tests {
                 estimated_text_bytes: 5,
                 preview_text: "alpha".into(),
                 indexed_text: "alpha".into(),
-                descriptor_json: serde_json::json!({"Text": {"content": "alpha"}}).to_string(),
+                block_json: serde_json::json!({"Text": {"content": "alpha"}}).to_string(),
                 origin_json: None,
                 tool_state_json: None,
             },
-            TranscriptDescriptorRecord {
+            StoredTranscriptBlock {
                 block_idx: 1,
                 history_idx: None,
                 kind: "tool".into(),
@@ -7884,7 +7775,7 @@ mod tests {
                 estimated_text_bytes: 13,
                 preview_text: "needle output".into(),
                 indexed_text: "needle output".into(),
-                descriptor_json: serde_json::json!({
+                block_json: serde_json::json!({
                     "ToolCall": {
                         "call_id": "call-1",
                         "name": "tool_name",
@@ -7899,7 +7790,7 @@ mod tests {
         ])
         .unwrap();
 
-        let rows = db.read_all_transcript_descriptor_records().unwrap();
+        let rows = db.read_all_transcript_records().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(rows[1].estimated_text_bytes, 13);
@@ -8299,7 +8190,7 @@ mod tests {
         history_start: usize,
         history: Vec<protocol::HistoryItem>,
         side_tables: Option<SideTableSuffixes>,
-        descriptors: Option<(usize, Vec<TranscriptDescriptorRecord>)>,
+        transcript_records: Option<(usize, Vec<StoredTranscriptBlock>)>,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         let expected = db
             .store_head()
@@ -8321,9 +8212,11 @@ mod tests {
                 start: HistoryIndex::new(history_start as u64),
                 ..SideTableSuffixes::default()
             }),
-            descriptors: descriptors.map(|(start, records)| crate::TranscriptDescriptorSuffix {
-                start: DescriptorIndex::new(start as u64),
-                records,
+            transcript_records: transcript_records.map(|(start, records)| {
+                crate::TranscriptRecordSuffix {
+                    start: TranscriptRecordIndex::new(start as u64),
+                    records,
+                }
             }),
         })
     }
@@ -8333,11 +8226,11 @@ mod tests {
         history_idx: u64,
         label: &str,
         indexed_text: &str,
-    ) -> TranscriptDescriptorRecord {
+    ) -> StoredTranscriptBlock {
         let mut record =
             transcript_record_with_history(block_idx, history_idx, label, indexed_text);
         record.kind = "user".to_string();
-        record.descriptor_json = serde_json::json!({
+        record.block_json = serde_json::json!({
             "kind": "user",
             "label": label,
             "text": indexed_text,
@@ -8351,10 +8244,10 @@ mod tests {
         history_idx: u64,
         kind: &str,
         indexed_text: &str,
-    ) -> TranscriptDescriptorRecord {
+    ) -> StoredTranscriptBlock {
         let mut record = transcript_record_with_history(block_idx, history_idx, kind, indexed_text);
         record.kind = kind.to_string();
-        record.descriptor_json = serde_json::json!({
+        record.block_json = serde_json::json!({
             "kind": kind,
             "text": indexed_text,
         })
@@ -8362,17 +8255,13 @@ mod tests {
         record
     }
 
-    fn without_indexed_text(mut record: TranscriptDescriptorRecord) -> TranscriptDescriptorRecord {
+    fn without_indexed_text(mut record: StoredTranscriptBlock) -> StoredTranscriptBlock {
         record.indexed_text.clear();
         record
     }
 
-    fn transcript_record(
-        block_idx: u64,
-        label: &str,
-        indexed_text: &str,
-    ) -> TranscriptDescriptorRecord {
-        TranscriptDescriptorRecord {
+    fn transcript_record(block_idx: u64, label: &str, indexed_text: &str) -> StoredTranscriptBlock {
+        StoredTranscriptBlock {
             block_idx,
             history_idx: None,
             kind: "assistant".to_string(),
@@ -8382,7 +8271,7 @@ mod tests {
             estimated_text_bytes: indexed_text.len() as u64,
             preview_text: indexed_text.to_string(),
             indexed_text: indexed_text.to_string(),
-            descriptor_json: serde_json::json!({
+            block_json: serde_json::json!({
                 "kind": "assistant",
                 "label": label,
                 "text": indexed_text,
@@ -8403,8 +8292,8 @@ mod tests {
         history_idx: u64,
         label: &str,
         indexed_text: &str,
-    ) -> TranscriptDescriptorRecord {
-        TranscriptDescriptorRecord {
+    ) -> StoredTranscriptBlock {
+        StoredTranscriptBlock {
             block_idx,
             history_idx: Some(history_idx),
             kind: "assistant".to_string(),
@@ -8414,7 +8303,7 @@ mod tests {
             estimated_text_bytes: indexed_text.len() as u64,
             preview_text: indexed_text.to_string(),
             indexed_text: indexed_text.to_string(),
-            descriptor_json: serde_json::json!({
+            block_json: serde_json::json!({
                 "kind": "assistant",
                 "label": label,
                 "text": indexed_text,

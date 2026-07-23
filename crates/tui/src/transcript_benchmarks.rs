@@ -1,4 +1,41 @@
-use super::*;
+use crate::app::test_harness::*;
+use crate::app::AppFocus;
+use crate::smelt_edit::VimMode;
+use crossterm::event::{KeyCode, KeyModifiers};
+
+fn benchmark_target_enabled() -> bool {
+    std::env::var("SMELT_TRANSCRIPT_BENCH_TARGET").as_deref() == Ok("1")
+}
+
+fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
+    app.app
+        .transcript_win()
+        .row_cursor()
+        .expect("row-document transcript cursor")
+        .row
+}
+
+fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
+    let win = app.app.transcript_win();
+    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    win.scroll_row_total(buf)
+}
+
+#[test]
+fn transcript_layout_projection_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
+    crate::content::transcript_buf::tests::benchmark_support::run_layout_benchmark();
+}
+
+#[test]
+fn transcript_true_resume_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
+    crate::content::transcript_buf::tests::benchmark_support::run_true_resume_benchmark();
+}
 
 #[derive(Clone, Copy, Debug)]
 struct NavSample {
@@ -92,7 +129,7 @@ fn run_navigation_sample() -> NavSample {
     app.press(KeyCode::Enter);
     app.render_silent();
     let search_ms = elapsed_ms(search_start.elapsed());
-    assert!(app.app.search.session.is_some());
+    assert!(app.app.overlays.search_session().is_some());
     assert!(transcript_row_cursor_row(&app) > rows / 2);
 
     app.type_char('g');
@@ -271,8 +308,8 @@ fn assert_no_full_search_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, l
         "store:history:read_all_rows",
         "store:session:load_full_snapshot",
         "store:session:full_snapshot_rows_read",
-        "store:transcript:read_descriptors_full",
-        "store:transcript:descriptors_full_loaded",
+        "store:transcript:read_records_full",
+        "store:transcript:records_full_loaded",
         "transcript:build_from_session:history_items",
     ] {
         let value = perf_value_max(snapshot, metric);
@@ -533,52 +570,39 @@ fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::SaveReceip
     }
 }
 
-fn wait_for_bench_derivations(app: &TestApp, label: &str, receipt: &smelt_store::SaveReceipt) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let session_id = &app.app.core.session.id;
-    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
-    let catalog_path = session_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("session directory is below the state root")
-        .join("catalog.db");
+fn wait_for_bench_catalog(app: &TestApp, label: &str, receipt: &smelt_store::SaveReceipt) {
+    let timeout = std::time::Duration::from_secs(120);
+    assert!(
+        app.app.core.sessions.wait_for_session_catalog(timeout),
+        "{label} catalog worker did not complete queued projection work"
+    );
+
+    let session_id = &app.app.conversation.session().id;
+    let catalog_path = app.app.core.sessions.state_root().join("catalog.db");
     let expected_revision = receipt.current.revision.get();
-    let expected_export = smelt_core::session::CompatibilityExportRevision::Valid {
-        source_revision: expected_revision,
-    };
-    let mut catalog_current = false;
-    loop {
-        if !catalog_current {
-            catalog_current = smelt_store::CatalogReader::open_existing(&catalog_path)
-                .ok()
-                .flatten()
-                .and_then(|catalog| catalog.session(session_id).ok().flatten())
-                .is_some_and(|session| session.source_revision == expected_revision);
-        }
-        let export_status = smelt_core::session::compatibility_export_status(&session_dir).ok();
-        let export_current = export_status.is_some_and(|status| {
-            status.metadata == expected_export && status.content == expected_export
-        });
-        if catalog_current && export_current {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{label} derived projections did not reach canonical revision {expected_revision}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let catalog_current = smelt_store::CatalogReader::open_existing(&catalog_path)
+        .ok()
+        .flatten()
+        .and_then(|catalog| catalog.session(session_id).ok().flatten())
+        .is_some_and(|session| session.source_revision == expected_revision);
+    assert!(
+        catalog_current,
+        "{label} catalog projection did not reach canonical revision {expected_revision}"
+    );
 }
 
 fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
-    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let session_dir = app
+        .app
+        .core
+        .sessions
+        .dir_for(app.app.conversation.session());
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 100, 32)
         .expect("load sparse bench transcript tail");
     app.app.clear_transcript();
     app.app
-        .session_document
-        .transcript
-        .replace_loaded_transcript(loaded);
+        .conversation
+        .replace_loaded_transcript_for_harness(loaded);
     app.app.handle_resize(100, 32);
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -595,17 +619,16 @@ fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition)
             app.type_char('g');
         }
         BurstBenchPosition::Middle => {
-            let descriptor = app
+            let record = app
                 .app
-                .session_document
-                .transcript
-                .descriptor_total_count()
-                .expect("sparse descriptor count")
+                .conversation
+                .transcript()
+                .record_total_count()
+                .expect("sparse record count")
                 / 2;
             assert!(
-                app.app
-                    .reveal_transcript_descriptor_block(descriptor, 1, true),
-                "middle descriptor reveal failed for descriptor {descriptor}"
+                app.app.reveal_transcript_record_block(record, 1, true),
+                "middle record reveal failed for record {record}"
             );
         }
         BurstBenchPosition::Bottom => {
@@ -675,13 +698,11 @@ fn measure_transcript_burst_operation(
         .max(1);
     let before_scroll = app.app.transcript_win().scroll_top();
     app.app
-        .session_document
-        .transcript
-        .set_scroll_trace_timings_enabled(true);
+        .conversation
+        .set_transcript_scroll_trace_timings_for_harness(true);
     app.app
-        .session_document
-        .transcript
-        .take_scroll_trace_frames();
+        .conversation
+        .take_transcript_scroll_trace_frames_for_harness();
     smelt_perf::perf::clear();
     let start = std::time::Instant::now();
     for _ in 0..BURST_EVENTS {
@@ -696,9 +717,8 @@ fn measure_transcript_burst_operation(
     let ms = elapsed_ms(start.elapsed());
     let frames = app
         .app
-        .session_document
-        .transcript
-        .take_scroll_trace_frames();
+        .conversation
+        .take_transcript_scroll_trace_frames_for_harness();
     let max_input_rows = key.max_rows_per_event(viewport_rows);
     let max_projection_delta = max_input_rows
         .saturating_mul(BURST_EVENTS as crate::smelt_edit::RowIndex)
@@ -731,9 +751,8 @@ fn measure_transcript_burst_operation_without_trace(
     prepare_burst_bench_position(app, position);
     let before_scroll = app.app.transcript_win().scroll_top();
     app.app
-        .session_document
-        .transcript
-        .set_scroll_trace_enabled(false);
+        .conversation
+        .set_transcript_scroll_trace_for_harness(false);
     smelt_perf::perf::clear();
     let start = std::time::Instant::now();
     for _ in 0..BURST_EVENTS {
@@ -810,9 +829,8 @@ fn measure_transcript_copy_operation(
 
 fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f64, f64, f64) {
     app.app
-        .session_document
-        .transcript
-        .set_scroll_trace_enabled(false);
+        .conversation
+        .set_transcript_scroll_trace_for_harness(false);
     smelt_perf::perf::clear();
     let rare_start = std::time::Instant::now();
     app.app.submit_search(
@@ -874,19 +892,17 @@ fn run_resumed_wheel_scroll_bench_sample(
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
     let receipt = save_bench_fixture(&mut app, "resumed wheel");
-    wait_for_bench_derivations(&app, "resumed wheel", &receipt);
+    wait_for_bench_catalog(&app, "resumed wheel", &receipt);
 
     install_sparse_resume_bench_transcript(&mut app);
     app.type_char('G');
     app.render_silent();
     app.app
-        .session_document
-        .transcript
-        .set_scroll_trace_timings_enabled(true);
+        .conversation
+        .set_transcript_scroll_trace_timings_for_harness(true);
     app.app
-        .session_document
-        .transcript
-        .take_scroll_trace_frames();
+        .conversation
+        .take_transcript_scroll_trace_frames_for_harness();
 
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
@@ -902,43 +918,44 @@ fn run_resumed_wheel_scroll_bench_sample(
     smelt_perf::perf::set_enabled(false);
     let trace_frames = app
         .app
-        .session_document
-        .transcript
-        .take_scroll_trace_frames();
-    let descriptor_loads = perf_duration_count(&snapshot, "store:transcript:read_descriptor_slice");
-    let descriptor_load_us = duration_total_us(&snapshot, "store:transcript:read_descriptor_slice");
+        .conversation
+        .take_transcript_scroll_trace_frames_for_harness();
+    let record_loads = perf_duration_count(&snapshot, "store:transcript:read_record_slice");
+    let record_load_us = duration_total_us(&snapshot, "store:transcript:read_record_slice");
     let row_rebuilds = perf_duration_count(&snapshot, "transcript:prepare_row_index:rebuild_index");
     let row_rebuild_us = duration_total_us(&snapshot, "transcript:prepare_row_index:rebuild_index");
     search_perf_snapshot("resumed_wheel_scroll", &snapshot);
     eprintln!(
-        "TRANSCRIPT_RESUMED_WHEEL_SAMPLE bytes={} frames={} ticks_per_frame={} trace_frames={} wall_ms={:.3} descriptor_loads={} descriptor_load_ms={:.3} row_rebuilds={} row_rebuild_ms={:.3}",
+        "TRANSCRIPT_RESUMED_WHEEL_SAMPLE bytes={} frames={} ticks_per_frame={} trace_frames={} wall_ms={:.3} record_loads={} record_load_ms={:.3} row_rebuilds={} row_rebuild_ms={:.3}",
         bytes,
         frames,
         ticks_per_frame,
         trace_frames.len(),
         ms,
-        descriptor_loads,
-        descriptor_load_us as f64 / 1000.0,
+        record_loads,
+        record_load_us as f64 / 1000.0,
         row_rebuilds,
         row_rebuild_us as f64 / 1000.0,
     );
     eprintln!(
-        "TRANSCRIPT_RESUMED_WHEEL_JSON {{\"type\":\"resumed_wheel_summary\",\"bytes\":{},\"frames\":{},\"ticks_per_frame\":{},\"trace_frames\":{},\"wall_ms\":{:.3},\"descriptor_loads\":{},\"descriptor_load_ms\":{:.3},\"row_rebuilds\":{},\"row_rebuild_ms\":{:.3}}}",
+        "TRANSCRIPT_RESUMED_WHEEL_JSON {{\"type\":\"resumed_wheel_summary\",\"bytes\":{},\"frames\":{},\"ticks_per_frame\":{},\"trace_frames\":{},\"wall_ms\":{:.3},\"record_loads\":{},\"record_load_ms\":{:.3},\"row_rebuilds\":{},\"row_rebuild_ms\":{:.3}}}",
         bytes,
         frames,
         ticks_per_frame,
         trace_frames.len(),
         ms,
-        descriptor_loads,
-        descriptor_load_us as f64 / 1000.0,
+        record_loads,
+        record_load_us as f64 / 1000.0,
         row_rebuilds,
         row_rebuild_us as f64 / 1000.0,
     );
 }
 
 #[test]
-#[ignore = "manual sparse resumed-session wheel-scroll benchmark; run via `cargo xtask bench-transcript-layout --resumed-wheel`"]
 fn transcript_resumed_wheel_scroll_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
     run_resumed_wheel_scroll_bench_sample(
         resumed_wheel_bench_bytes(),
         resumed_wheel_bench_frames(),
@@ -954,7 +971,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
     let receipt = save_bench_fixture(&mut app, "search");
-    wait_for_bench_derivations(&app, "search", &receipt);
+    wait_for_bench_catalog(&app, "search", &receipt);
     smelt_perf::perf::clear();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -1324,67 +1341,6 @@ fn resume_bench_preview_bytes() -> usize {
     env_positive_usize("SMELT_RESUME_BENCH_PREVIEW_BYTES", 5 * 1024 * 1024)
 }
 
-// COMPAT(session-derived-sidecar-exports): wait only for stale/missing export fixtures.
-fn wait_for_resume_compatibility_exports(id: &str) -> std::path::PathBuf {
-    let session_dir = smelt_core::session::dir_for_id(id);
-    let revision = smelt_store::SessionReader::open_existing(&session_dir)
-        .unwrap()
-        .store_head()
-        .unwrap()
-        .revision
-        .get();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let metadata_revision = std::fs::read(session_dir.join("meta.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value["source_revision"].as_u64());
-        let mut header = String::new();
-        let content_revision = std::fs::File::open(session_dir.join("content.txt"))
-            .map(std::io::BufReader::new)
-            .and_then(|mut reader| {
-                std::io::BufRead::read_line(&mut reader, &mut header).map(|_| ())
-            })
-            .ok()
-            .and_then(|()| header.trim_end().strip_prefix("# smelt-revision:"))
-            .and_then(|value| value.parse::<u64>().ok());
-        if metadata_revision == Some(revision) && content_revision == Some(revision) {
-            return session_dir;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "resume benchmark exports did not reach revision {revision}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-// COMPAT(session-derived-sidecar-exports): stale exports must not affect catalog listing.
-fn stale_resume_meta(id: &str) {
-    let session_dir = wait_for_resume_compatibility_exports(id);
-    let meta_path = session_dir.join("meta.json");
-    let mut meta_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&meta_path).expect("read resume bench meta"))
-            .expect("parse resume bench meta");
-    let object = meta_json.as_object_mut().expect("resume bench meta object");
-    object.remove("history_len");
-    object.remove("checkpoint");
-    object.remove("text_bytes");
-    let temporary = session_dir.join(".resume-bench-meta.tmp");
-    std::fs::write(
-        &temporary,
-        serde_json::to_vec(&meta_json).expect("encode stale resume bench meta"),
-    )
-    .expect("write stale resume bench meta");
-    std::fs::rename(temporary, meta_path).expect("replace stale resume bench meta");
-}
-
-// COMPAT(session-derived-sidecar-exports): missing exports must not affect catalog listing.
-fn remove_resume_meta(id: &str) {
-    let session_dir = wait_for_resume_compatibility_exports(id);
-    std::fs::remove_file(session_dir.join("meta.json")).expect("remove resume bench meta");
-}
-
 fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: usize, cwd: &str) {
     let mut session = smelt_core::session::Session::new(4242, std::path::PathBuf::from(cwd));
     session.id = id.clone();
@@ -1417,7 +1373,6 @@ fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: 
         turn += 1;
     }
     smelt_core::session::save(&session);
-    remove_resume_meta(&id);
 }
 
 fn seed_resume_bench_sessions(count: usize) {
@@ -1429,7 +1384,7 @@ fn seed_resume_bench_sessions(count: usize) {
 }
 
 fn seed_resume_bench_preview_session(
-    guard: &std::sync::MutexGuard<'static, ()>,
+    guard: &smelt_test_support::ProcessEnvironmentGuard,
     preview_bytes: usize,
 ) -> (String, usize) {
     let mut app = TestApp::builder()
@@ -1439,20 +1394,25 @@ fn seed_resume_bench_preview_session(
     let bytes = push_search_bench_transcript(&mut app, preview_bytes);
     app.render_silent();
     let receipt = save_bench_fixture(&mut app, "resume preview");
-    wait_for_bench_derivations(&app, "resume preview", &receipt);
-    let id = app.app.core.session.id.clone();
+    wait_for_bench_catalog(&app, "resume preview", &receipt);
+    let id = app.app.conversation.session().id.clone();
     assert!(
-        crate::app::history::load_transcript_tail_from_sqlite_id(&id, 80, 12).is_some(),
-        "resume bench preview session should have sparse transcript descriptors"
+        crate::app::history::load_transcript_tail_from_sqlite_id(
+            &app.app.core.sessions,
+            &id,
+            80,
+            12,
+        )
+        .is_some(),
+        "resume bench preview session should have sparse transcript records"
     );
-    stale_resume_meta(&id);
     (id, bytes)
 }
 
 fn run_resume_command_to_dialog(app: &mut TestApp) -> f64 {
     let start = std::time::Instant::now();
     assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
-    drive_lua_tasks(app);
+    app.settle_lua();
     app.render_silent();
     elapsed_ms(start.elapsed())
 }
@@ -1461,7 +1421,7 @@ fn run_resume_preview_timer(app: &mut TestApp) -> f64 {
     let start = std::time::Instant::now();
     app.feed_one(SourceEvent::Tick(50));
     app.app.tick_timers();
-    drive_lua_tasks(app);
+    app.settle_lua();
     app.render_silent();
     elapsed_ms(start.elapsed())
 }
@@ -1500,8 +1460,10 @@ fn print_resume_perf(label: &str, snapshot: &smelt_perf::perf::Snapshot) {
 }
 
 #[test]
-#[ignore = "manual resume dialog benchmark; run with SMELT_RESUME_BENCH=1"]
 fn resume_dialog_open_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
     if std::env::var("SMELT_RESUME_BENCH").ok().as_deref() != Some("1") {
         eprintln!("RESUME_DIALOG_BENCH_SKIPPED");
         return;
@@ -1577,8 +1539,10 @@ fn resume_dialog_open_benchmark_suite() {
 }
 
 #[test]
-#[ignore = "manual large transcript search benchmark; run via `cargo xtask bench-transcript-layout --search`"]
 fn transcript_layout_search_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
     if std::env::var("SMELT_TRANSCRIPT_BENCH_SEARCH")
         .ok()
         .as_deref()
@@ -1658,8 +1622,10 @@ fn transcript_layout_search_benchmark_suite() {
 }
 
 #[test]
-#[ignore = "manual transcript navigation/search benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
 fn transcript_layout_navigation_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
     if std::env::var("SMELT_TRANSCRIPT_BENCH_SKIP_NAV")
         .ok()
         .as_deref()
@@ -1757,9 +1723,9 @@ struct HotPathCounters {
     history_suffix_rows: u64,
     history_inserted: u64,
     history_deleted: u64,
-    descriptor_suffix_rows: u64,
-    descriptor_inserted: u64,
-    descriptor_deleted: u64,
+    record_suffix_rows: u64,
+    record_inserted: u64,
+    record_deleted: u64,
     read_range_rows: u64,
     cached_read_write_db: u64,
     invariant_history_rows: u64,
@@ -1776,18 +1742,12 @@ impl HotPathCounters {
             history_suffix_rows: perf_value_max(snapshot, "store:history:dirty_suffix_rows"),
             history_inserted: perf_value_max(snapshot, "store:session:history_rows_inserted"),
             history_deleted: perf_value_max(snapshot, "store:session:history_rows_deleted"),
-            descriptor_suffix_rows: perf_value_max(
+            record_suffix_rows: perf_value_max(
                 snapshot,
-                "store:transcript:dirty_descriptor_suffix_rows",
+                "store:transcript:dirty_record_suffix_rows",
             ),
-            descriptor_inserted: perf_value_max(
-                snapshot,
-                "store:transcript:descriptor_db_rows_inserted",
-            ),
-            descriptor_deleted: perf_value_max(
-                snapshot,
-                "store:transcript:descriptor_db_rows_deleted",
-            ),
+            record_inserted: perf_value_max(snapshot, "store:transcript:record_db_rows_inserted"),
+            record_deleted: perf_value_max(snapshot, "store:transcript:record_db_rows_deleted"),
             read_range_rows: perf_value_max(snapshot, "store:history:read_range_rows"),
             cached_read_write_db: perf_value_max(snapshot, "store:db:cached_read_write"),
             invariant_history_rows: perf_value_max(
@@ -1923,7 +1883,7 @@ fn saved_hot_path_app(
     app.app.load_session(session);
     app.app.restore_screen();
     let receipt = save_bench_fixture(&mut app, "hot path");
-    wait_for_bench_derivations(&app, "hot path", &receipt);
+    wait_for_bench_catalog(&app, "hot path", &receipt);
     app
 }
 
@@ -1931,7 +1891,7 @@ fn assert_no_full_store_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, op
     for metric in [
         "store:history:read_all",
         "store:session:load_full_snapshot",
-        "store:transcript:read_descriptors_full",
+        "store:transcript:read_records_full",
     ] {
         let count = perf_duration_count(snapshot, metric);
         assert_eq!(
@@ -1942,7 +1902,7 @@ fn assert_no_full_store_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, op
     for metric in [
         "store:history:read_all_rows",
         "store:session:full_snapshot_rows_read",
-        "store:transcript:descriptors_full_loaded",
+        "store:transcript:records_full_loaded",
         "transcript:build_from_session:history_items",
     ] {
         let value = perf_value_max(snapshot, metric);
@@ -2083,7 +2043,7 @@ fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::per
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:transcript:dirty_descriptor_suffix_rows",
+        "store:transcript:dirty_record_suffix_rows",
         0,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
@@ -2121,13 +2081,13 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:transcript:dirty_descriptor_suffix_rows",
+        "store:transcript:dirty_record_suffix_rows",
         1,
     );
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:transcript:descriptor_db_rows_inserted",
+        "store:transcript:record_db_rows_inserted",
         1,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
@@ -2222,7 +2182,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         16,
     );
     assert!(
-        app.app.session_document.has_session_work(),
+        app.app.conversation.has_document_work(),
         "{} did not defer completion metadata for the next save point",
         sample.operation
     );
@@ -2280,7 +2240,11 @@ fn run_provider_history_hot_path(
     let first_live = history_len.saturating_sub(32);
     let app = saved_hot_path_app("provider-history", history_len, Some(first_live));
     let source = app.app.model_history_source();
-    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let session_dir = app
+        .app
+        .core
+        .sessions
+        .dir_for(app.app.conversation.session());
     let (sample, snapshot) = capture_hot_path_sample("provider_history_read", history_len, || {
         let history = read_provider_history_source(source, &session_dir);
         assert_eq!(history.len(), history_len - first_live + 1);
@@ -2306,7 +2270,11 @@ fn run_uncheckpointed_provider_history_hot_path(
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let app = saved_hot_path_app("provider-history-uncheckpointed", history_len, None);
     let source = app.app.model_history_source();
-    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let session_dir = app
+        .app
+        .core
+        .sessions
+        .dir_for(app.app.conversation.session());
     let (sample, snapshot) =
         capture_hot_path_sample("provider_history_uncheckpointed_read", history_len, || {
             let history = read_provider_history_source(source, &session_dir);
@@ -2333,7 +2301,11 @@ fn run_engine_request_materialization_hot_path(
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let app = saved_hot_path_app("engine-request-materialization", history_len, None);
     let source = app.app.model_history_source();
-    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let session_dir = app
+        .app
+        .core
+        .sessions
+        .dir_for(app.app.conversation.session());
     let (sample, snapshot) =
         capture_hot_path_sample("engine_request_materialization", history_len, || {
             let history = read_provider_history_source(source, &session_dir);
@@ -2412,7 +2384,7 @@ fn run_submit_hot_paths(history_len: usize) -> Vec<(HotPathSample, smelt_perf::p
     assert_hot_path_at_most(
         &submit_snapshot,
         submit.operation,
-        "store:transcript:dirty_descriptor_suffix_rows",
+        "store:transcript:dirty_record_suffix_rows",
         1,
     );
     assert_eq!(
@@ -2429,7 +2401,7 @@ fn run_submit_hot_paths(history_len: usize) -> Vec<(HotPathSample, smelt_perf::p
     assert_hot_path_at_most(
         &submit_snapshot,
         submit.operation,
-        "transcript:descriptor_record_index:entries_scanned",
+        "transcript:record_record_index:entries_scanned",
         2,
     );
     assert_cached_persist_db(&submit_snapshot, submit.operation);
@@ -2492,7 +2464,7 @@ fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
 fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
     let c = sample.counters;
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} history_item_bytes={} ms={:.3} thread_allocs={} thread_bytes_allocated={} process_bytes_allocated={} process_bytes_deallocated={} process_current_bytes_before={} process_current_bytes_after={} process_retained_bytes={} history_suffix_rows={} history_inserted={} history_deleted={} descriptor_suffix_rows={} descriptor_inserted={} descriptor_deleted={} read_range_rows={} cached_read_write_db={} invariant_history_rows={} search_blob_rows={} search_blob_bytes={} user_turn_blocks_scanned={} user_turns_cloned={} user_turn_text_bytes_cloned={}",
+        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} history_item_bytes={} ms={:.3} thread_allocs={} thread_bytes_allocated={} process_bytes_allocated={} process_bytes_deallocated={} process_current_bytes_before={} process_current_bytes_after={} process_retained_bytes={} history_suffix_rows={} history_inserted={} history_deleted={} record_suffix_rows={} record_inserted={} record_deleted={} read_range_rows={} cached_read_write_db={} invariant_history_rows={} search_blob_rows={} search_blob_bytes={} user_turn_blocks_scanned={} user_turns_cloned={} user_turn_text_bytes_cloned={}",
         run,
         sample.operation,
         sample.history_len,
@@ -2508,9 +2480,9 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.history_suffix_rows,
         c.history_inserted,
         c.history_deleted,
-        c.descriptor_suffix_rows,
-        c.descriptor_inserted,
-        c.descriptor_deleted,
+        c.record_suffix_rows,
+        c.record_inserted,
+        c.record_deleted,
         c.read_range_rows,
         c.cached_read_write_db,
         c.invariant_history_rows,
@@ -2521,7 +2493,7 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.user_turn_text_bytes_cloned,
     );
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"history_item_bytes\":{},\"ms\":{:.3},\"thread_allocs\":{},\"thread_bytes_allocated\":{},\"process_bytes_allocated\":{},\"process_bytes_deallocated\":{},\"process_current_bytes_before\":{},\"process_current_bytes_after\":{},\"process_retained_bytes\":{},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"descriptor_suffix_rows\":{},\"descriptor_inserted\":{},\"descriptor_deleted\":{},\"read_range_rows\":{},\"cached_read_write_db\":{},\"invariant_history_rows\":{},\"search_blob_rows\":{},\"search_blob_bytes\":{},\"user_turn_blocks_scanned\":{},\"user_turns_cloned\":{},\"user_turn_text_bytes_cloned\":{}}}",
+        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"history_item_bytes\":{},\"ms\":{:.3},\"thread_allocs\":{},\"thread_bytes_allocated\":{},\"process_bytes_allocated\":{},\"process_bytes_deallocated\":{},\"process_current_bytes_before\":{},\"process_current_bytes_after\":{},\"process_retained_bytes\":{},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"record_suffix_rows\":{},\"record_inserted\":{},\"record_deleted\":{},\"read_range_rows\":{},\"cached_read_write_db\":{},\"invariant_history_rows\":{},\"search_blob_rows\":{},\"search_blob_bytes\":{},\"user_turn_blocks_scanned\":{},\"user_turns_cloned\":{},\"user_turn_text_bytes_cloned\":{}}}",
         run,
         sample.operation,
         sample.history_len,
@@ -2537,9 +2509,9 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.history_suffix_rows,
         c.history_inserted,
         c.history_deleted,
-        c.descriptor_suffix_rows,
-        c.descriptor_inserted,
-        c.descriptor_deleted,
+        c.record_suffix_rows,
+        c.record_inserted,
+        c.record_deleted,
         c.read_range_rows,
         c.cached_read_write_db,
         c.invariant_history_rows,
@@ -2552,8 +2524,10 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
 }
 
 #[test]
-#[ignore = "manual transcript submit/save/request hot-path benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
 fn transcript_layout_hot_path_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
     if !hot_path_enabled() {
         eprintln!("TRANSCRIPT_HOT_PATH_BENCH_SKIPPED set SMELT_TRANSCRIPT_HOT_PATH=1 to run");
         return;
@@ -2637,8 +2611,10 @@ fn linux_memory_bytes(field: &str) -> Option<u64> {
 }
 
 #[test]
-#[ignore = "manual active transcript retained-memory benchmark; run via `cargo xtask bench-transcript-layout --active-memory`"]
 fn transcript_active_memory_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
     const BLOCK_BYTES: usize = 32 * 1024;
     const SAVE_BATCH_BLOCKS: usize = 256;
     const SEARCH_TARGET: &str = "active-memory-unique-search-target";
@@ -2673,16 +2649,19 @@ fn transcript_active_memory_benchmark_suite() {
             block_count += 1;
         }
         let receipt = save_bench_fixture(&mut app, "active memory");
-        while app.app.session_document.transcript.drain_compaction_slice() {}
+        while app.app.conversation.drain_transcript_compaction_slice() {}
         batch_count += 1;
         if generated_bytes >= target_bytes {
-            wait_for_bench_derivations(&app, "active memory", &receipt);
+            wait_for_bench_catalog(&app, "active memory", &receipt);
             break;
         }
     }
     assert!(marker_written);
     let seeded_ms = elapsed_ms(started_at.elapsed());
-    let after_compaction = app.app.session_document.transcript.memory_snapshot();
+    let after_compaction = app
+        .app
+        .conversation
+        .transcript_memory_snapshot_for_harness();
     assert_eq!(after_compaction.live_blocks, 0);
     assert_eq!(after_compaction.stored_blocks, block_count);
     assert_eq!(after_compaction.hydrated_blocks, 0);
@@ -2724,8 +2703,8 @@ fn transcript_active_memory_benchmark_suite() {
 
     let churn_ids = app
         .app
-        .session_document
-        .transcript
+        .conversation
+        .transcript()
         .history()
         .order
         .iter()
@@ -2736,34 +2715,35 @@ fn transcript_active_memory_benchmark_suite() {
     for id in &churn_ids {
         assert!(app
             .app
-            .session_document
-            .transcript
-            .ensure_hydrated_ids(&[*id]));
+            .conversation
+            .ensure_transcript_blocks_hydrated_for_harness(&[*id]));
     }
     let hydration_churn_ms = elapsed_ms(churn_started_at.elapsed());
     let reads_before_reuse = app
         .app
-        .session_document
-        .transcript
+        .conversation
+        .transcript()
         .memory_snapshot()
         .hydration_reads;
     if let Some(id) = churn_ids.last() {
         assert!(app
             .app
-            .session_document
-            .transcript
-            .ensure_hydrated_ids(&[*id]));
+            .conversation
+            .ensure_transcript_blocks_hydrated_for_harness(&[*id]));
     }
     let working_set_rereads = app
         .app
-        .session_document
-        .transcript
+        .conversation
+        .transcript()
         .memory_snapshot()
         .hydration_reads
         .saturating_sub(reads_before_reuse);
     assert_eq!(working_set_rereads, 0);
 
-    let memory = app.app.session_document.transcript.memory_snapshot();
+    let memory = app
+        .app
+        .conversation
+        .transcript_memory_snapshot_for_harness();
     let process_end = smelt_perf::alloc::snapshot();
     let process_delta = smelt_perf::alloc::delta(process_start, process_end);
     let hydrated_bytes = memory
@@ -2787,11 +2767,11 @@ fn transcript_active_memory_benchmark_suite() {
         "hydrated cache exceeded budget plus pins and oversize debt: {memory:?}"
     );
     assert!(
-        memory.descriptor_window_bytes
+        memory.record_window_bytes
             <= memory
-                .descriptor_budget_bytes
-                .saturating_add(memory.descriptor_oversize_debt_bytes),
-        "descriptor cache exceeded its measured bound: {memory:?}"
+                .record_budget_bytes
+                .saturating_add(memory.record_oversize_debt_bytes),
+        "record cache exceeded its measured bound: {memory:?}"
     );
     assert!(
         rendered_bytes
@@ -2839,7 +2819,7 @@ fn transcript_active_memory_benchmark_suite() {
         },
         "budgets": {
             "hydrated": memory.hydrated_budget_bytes,
-            "descriptor_windows": memory.descriptor_budget_bytes,
+            "record_windows": memory.record_budget_bytes,
             "rendered": memory.rendered_budget_bytes,
         },
         "retained_bytes": {
@@ -2847,10 +2827,10 @@ fn transcript_active_memory_benchmark_suite() {
             "live_tool_states": memory.live_tool_state_bytes,
             "hydrated_blocks": memory.hydrated_block_bytes,
             "hydrated_tool_states": memory.hydrated_tool_state_bytes,
-            "compact_descriptors": memory.compact_descriptor_bytes,
-            "descriptor_windows": memory.descriptor_window_bytes,
+            "compact_records": memory.compact_record_bytes,
+            "record_windows": memory.record_window_bytes,
             "tool_state_metadata": memory.tool_state_metadata_bytes,
-            "origin_hash": memory.origin_hash_bytes,
+            "block_metadata": memory.block_metadata_bytes,
             "layouts": memory.layout_bytes,
             "source_views": memory.source_view_bytes,
             "active_height_index": memory.height_index_bytes,
@@ -2865,7 +2845,7 @@ fn transcript_active_memory_benchmark_suite() {
         },
         "oversize_debt_bytes": {
             "hydrated": memory.hydrated_oversize_debt_bytes,
-            "descriptor_windows": memory.descriptor_oversize_debt_bytes,
+            "record_windows": memory.record_oversize_debt_bytes,
             "rendered": memory.rendered_oversize_debt_bytes,
         },
         "hydration": {

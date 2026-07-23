@@ -1,23 +1,6 @@
 use std::process::Command;
 
-struct StateHomeGuard(Option<std::ffi::OsString>);
-
-impl StateHomeGuard {
-    fn install(path: &std::path::Path) -> Self {
-        let previous = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", path);
-        Self(previous)
-    }
-}
-
-impl Drop for StateHomeGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
-    }
-}
+use smelt_test_support::ProcessEnvironmentGuard;
 
 fn smelt(state_home: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_smelt"))
@@ -28,9 +11,10 @@ fn smelt(state_home: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn session_storage_commands_doctor_backup_rebuild_gc_and_vacuum() {
+fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     let state = tempfile::tempdir().unwrap();
-    let _guard = StateHomeGuard::install(state.path());
+    let guard = ProcessEnvironmentGuard::capture();
+    guard.set_var("XDG_STATE_HOME", state.path());
     let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
     session
         .history
@@ -70,12 +54,7 @@ fn session_storage_commands_doctor_backup_rebuild_gc_and_vacuum() {
         session.id
     );
 
-    // COMPAT(session-derived-sidecar-exports): seed and exercise explicit alpha exports.
-    smelt_core::session::rebuild_compatibility_exports(&session_dir).unwrap();
-    std::fs::remove_file(session_dir.join("meta.json")).unwrap();
-    std::fs::remove_file(session_dir.join("content.txt")).unwrap();
     for args in [
-        vec!["session", "rebuild-derived", session.id.as_str()],
         vec!["session", "gc", session.id.as_str()],
         vec!["session", "vacuum", session.id.as_str()],
     ] {
@@ -86,9 +65,6 @@ fn session_storage_commands_doctor_backup_rebuild_gc_and_vacuum() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    assert!(session_dir.join("meta.json").is_file());
-    assert!(session_dir.join("content.txt").is_file());
-
     let repeated_backup = smelt(
         state.path(),
         &["session", "backup", &session.id, backup.to_str().unwrap()],
@@ -140,28 +116,11 @@ fn session_storage_commands_doctor_backup_rebuild_gc_and_vacuum() {
         recovery["catalog"]["state"].as_str(),
         Some("lagging" | "missing")
     ));
-    assert_eq!(recovery["compatibility_metadata"]["state"], "lagging");
-    assert_eq!(recovery["compatibility_content"]["state"], "lagging");
-
     let plain = smelt(state.path(), &["session", "doctor", &session.id]);
     assert!(plain.status.success());
     let plain = String::from_utf8(plain.stdout).unwrap();
     assert!(plain.contains("nonterminal_turn: id=1 state=ready"));
     assert!(plain.contains("catalog: state="));
-    assert!(plain.contains("compatibility_metadata: state=lagging"));
-    assert!(plain.contains("compatibility_content: state=lagging"));
-
-    std::fs::write(
-        session_dir.join("content.txt"),
-        "# smelt-revision:999999\nahead compatibility export\n",
-    )
-    .unwrap();
-    let ahead = smelt(state.path(), &["session", "doctor", &session.id, "--json"]);
-    assert!(ahead.status.success());
-    let ahead: serde_json::Value = serde_json::from_slice(&ahead.stdout).unwrap();
-    let content = &ahead[0]["recovery"]["compatibility_content"];
-    assert_eq!(content["state"], "ahead");
-    assert_eq!(content["revision_lag"], serde_json::Value::Null);
 
     let reader = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
     assert_eq!(

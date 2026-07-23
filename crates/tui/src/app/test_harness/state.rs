@@ -15,19 +15,21 @@ impl TestApp {
     /// reach by submitting a prompt, without going through the full
     /// HTTP/auth-bearing `begin_agent_turn` flow.
     pub fn start_turn(&mut self, turn_id: u64) {
-        if self.app.agent.is_some() {
+        if self.app.conversation.is_active() {
             return;
         }
-        self.app.context_tokens_updated_this_turn = false;
-        self.app.agent = Some(crate::app::TurnState {
-            turn_id,
-            canonical: false,
-            pending: Vec::new(),
-            permissions: self.app.core.permissions.snapshot(),
-            rewind_block_idx: None,
-            assistant_output_started: false,
-            _perf: smelt_perf::perf::begin("test_harness:turn"),
-        });
+        self.app.conversation.begin_turn();
+        self.app
+            .conversation
+            .set_active(Some(crate::app::TurnState {
+                turn_id,
+                canonical: false,
+                pending: Vec::new(),
+                permissions: self.app.core.permissions.snapshot(),
+                rewind_block_idx: None,
+                assistant_output_started: false,
+                _perf: smelt_perf::perf::begin("test_harness:turn"),
+            }));
         // Production `dispatch_prepared_turn` flips `working` into `Working`
         // and publishes `turn_start` before yielding an active turn. The
         // harness short-circuits the HTTP-bearing dispatch path; mirror those
@@ -47,7 +49,20 @@ impl TestApp {
             .app
             .begin_agent_turn(text, protocol::Content::text(text))
             .expect("test app has a usable model");
-        self.app.agent = Some(turn);
+        self.app.conversation.set_active(Some(turn));
+    }
+
+    /// Complete the active synthetic turn through the normal engine-event path.
+    pub fn finish_turn(&mut self) -> bool {
+        let Some(turn_id) = self.current_turn_id() else {
+            return false;
+        };
+        self.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        }));
+        true
     }
 
     /// Whether an agent turn is currently active.
@@ -61,8 +76,8 @@ impl TestApp {
     /// (e.g. asserting a `ToolFinished` actually cleared its entry).
     pub fn pending_tool_call_ids(&self) -> Vec<String> {
         self.app
-            .agent
-            .as_ref()
+            .conversation
+            .active()
             .map(|ag| ag.pending.iter().map(|pt| pt.call_id.clone()).collect())
             .unwrap_or_default()
     }
@@ -71,10 +86,11 @@ impl TestApp {
     /// uncommitted content. Used by post-event invariants that assert a
     /// specific event flushed the relevant buffer.
     pub fn streaming_state(&self) -> StreamingState {
+        let (text, thinking, exec) = self.app.conversation.streaming_state();
         StreamingState {
-            text: self.app.parser.has_active_text(),
-            thinking: self.app.parser.has_active_thinking(),
-            exec: self.app.parser.has_active_exec(),
+            text,
+            thinking,
+            exec,
         }
     }
 
@@ -88,7 +104,12 @@ impl TestApp {
     /// persistence state machines compare this against independent suffix and
     /// append models after every transition.
     pub fn session_history(&self) -> &[protocol::HistoryItem] {
-        &self.app.core.session.history
+        &self.app.conversation.session().history
+    }
+
+    /// Read-only copy of current session state for integration assertions.
+    pub fn session_snapshot(&self) -> smelt_core::session::Session {
+        self.app.conversation.session().clone()
     }
 
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
@@ -101,15 +122,15 @@ impl TestApp {
     /// Number of messages already promoted into the active turn's request
     /// queue. Used by `Steered` invariants that assert ack drain semantics.
     pub fn queued_message_count(&self) -> usize {
-        self.app.queued_inputs.request_len()
+        self.app.prompt.queued_request_len()
     }
 
     /// Whether completing the active turn would immediately start a queued
     /// input with non-empty display text.
     pub fn next_queued_input_starts_turn(&self) -> bool {
         self.app
-            .queued_inputs
-            .display_texts()
+            .prompt
+            .queued_texts()
             .first()
             .is_some_and(|text| !text.is_empty())
     }
@@ -127,8 +148,8 @@ impl TestApp {
         if let Some(first_live_index) = self.checkpoint_first_live_index() {
             return !self
                 .app
-                .core
-                .session
+                .conversation
+                .session()
                 .history
                 .iter()
                 .take(first_live_index)
@@ -148,8 +169,8 @@ impl TestApp {
     /// drop-on-overflow behavior instead of unbounded growth.
     pub fn push_queued_message(&mut self, text: String) {
         self.app
-            .queued_inputs
-            .try_push_turn(crate::app::QueuedInput::request_from_text(
+            .prompt
+            .try_queue_turn(crate::app::QueuedInput::request_from_text(
                 text.clone(),
                 text,
             ));
@@ -158,7 +179,7 @@ impl TestApp {
     /// Side-channel: seed prompt history without submitting through the engine.
     /// Storybook uses this to open reverse-history UI deterministically.
     pub fn push_history_entry(&mut self, text: String) {
-        self.app.input_history.push(text);
+        self.app.prompt.push_history(text);
     }
 
     /// Snapshot of the working-status bar's live state. Used by fuzz
@@ -174,13 +195,13 @@ impl TestApp {
     /// Accumulated session cost in USD. Used by `TokenUsage` invariants
     /// asserting cost is monotonically non-decreasing.
     pub fn session_cost_usd(&self) -> f64 {
-        self.app.core.session.session_cost_usd
+        self.app.conversation.session().session_cost_usd
     }
 
     /// Current authoritative context-token snapshot for the live history, when
     /// a non-background usage report has set one.
     pub fn context_tokens(&self) -> Option<u32> {
-        self.app.core.session.current_context_tokens()
+        self.app.conversation.session().current_context_tokens()
     }
 
     /// Active context checkpoint prefix length, if compaction installed one.
@@ -188,8 +209,8 @@ impl TestApp {
     /// history after it.
     pub fn checkpoint_first_live_index(&self) -> Option<usize> {
         self.app
-            .core
-            .session
+            .conversation
+            .session()
             .checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.first_live_index)
@@ -198,7 +219,7 @@ impl TestApp {
     /// Number of deferred model-history notes that will be committed when the
     /// active turn finishes successfully.
     pub fn pending_history_append_count(&self) -> usize {
-        self.app.pending_history_appends.len()
+        self.app.conversation.pending_history_append_count()
     }
 
     /// Set the configured context window size used by the prompt bar's
@@ -207,10 +228,77 @@ impl TestApp {
         self.app.core.config.context_window = context_window;
     }
 
+    /// Restrict tool permissions to the app's injected workspace.
+    pub fn restrict_permissions_to_cwd(&mut self) {
+        let mut permissions = self.app.core.permissions.snapshot().as_ref().clone();
+        permissions.set_workspace(std::path::PathBuf::from(self.app.workspace.cwd()));
+        permissions.set_restrict_to_workspace(true);
+        self.app.core.permissions.replace(permissions);
+    }
+
+    pub(crate) fn replace_permissions_for_harness(
+        &mut self,
+        permissions: smelt_core::permissions::Permissions,
+    ) {
+        self.app.core.permissions.replace(permissions);
+    }
+
+    /// Add one session-scoped blanket tool approval.
+    pub fn approve_tool_for_session(&self, tool: &str) {
+        self.app
+            .core
+            .permissions
+            .approvals()
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .add_session_tool(tool, Vec::new());
+    }
+
+    /// Replace model-picker candidates without selecting a model.
+    pub fn set_available_models(&mut self, models: Vec<smelt_core::config::ResolvedModel>) {
+        self.app.core.config.available_models = models;
+    }
+
+    /// Install and select one synthetic model for model-backed scenarios.
+    pub fn use_model(&mut self, model: smelt_core::config::ResolvedModel) {
+        self.app.core.config.available_models = vec![model.clone()];
+        self.app.core.config.model_selection = smelt_core::ModelSelectionState {
+            requested_key: Some(model.key.clone()),
+            requested_by: smelt_core::ModelSelectionSource::FirstAvailable,
+            active: Some(smelt_core::ActiveModel::from_resolved(&model)),
+        };
+    }
+
+    pub(crate) fn set_model_selection_for_harness(
+        &mut self,
+        selection: smelt_core::ModelSelectionState,
+    ) {
+        self.app.core.config.model_selection = selection;
+    }
+
+    pub(crate) fn replace_active_model_for_harness(&mut self, model: smelt_core::ActiveModel) {
+        self.app.core.config.model_selection.active = Some(model);
+    }
+
+    pub(crate) fn set_request_audit_for_harness(&mut self, mode: protocol::RequestAuditMode) {
+        self.app.core.config.request_audit = mode;
+    }
+
+    pub(crate) fn set_configured_agent_mode_for_harness(&mut self, mode: protocol::AgentMode) {
+        self.app.core.config.mode = mode;
+    }
+
+    pub(crate) fn install_skill_loader_for_harness(
+        &mut self,
+        loader: std::sync::Arc<engine::SkillLoader>,
+    ) {
+        self.app.core.skills = Some(loader);
+    }
+
     /// Number of transcript blocks. Used by event invariants that assert
     /// a block was pushed (e.g. `ProcessCompleted`).
     pub fn transcript_block_count(&self) -> usize {
-        self.app.session_document.transcript.history().len()
+        self.app.conversation.transcript().history().len()
     }
 
     /// Number of confirm dialogs currently registered with the core. Used
@@ -230,7 +318,7 @@ impl TestApp {
     /// They get replayed on the next idle tick. Used to confirm the
     /// `should_queue` branch in `dispatch_control` was actually hit.
     pub fn pending_deferred_dialog_count(&self) -> usize {
-        self.app.pending_dialogs.len()
+        self.app.overlays.deferred_dialog_count()
     }
 
     /// Slice of `Action`s appended since `idx`. PostChecks use this to
@@ -262,7 +350,6 @@ impl TestApp {
             smelt_core::transcript_model::ConfirmChoice::No
         };
         {
-            let _guard = crate::lua::install_app_ptr(&mut self.app);
             let cancel = self.app.resolve_confirm(
                 (choice, message),
                 &req.call_id,
@@ -291,7 +378,107 @@ impl TestApp {
     /// match this value into catalog metadata so the resume dialog's
     /// workspace filter keeps the seeded entries.
     pub fn cwd_str(&self) -> &str {
-        &self.app.cwd
+        self.app.workspace.cwd()
+    }
+
+    pub fn runtime_home(&self) -> &std::path::Path {
+        self.app.core.env.home()
+    }
+
+    pub fn runtime_dir(&self) -> &std::path::Path {
+        self.app.core.env.xdg_runtime()
+    }
+
+    pub fn runtime_cache_root(&self) -> std::path::PathBuf {
+        self.app.core.env.xdg_cache().join("smelt")
+    }
+
+    pub fn shell_effect_paths(&self, command: &str) -> Vec<std::path::PathBuf> {
+        let args = std::collections::HashMap::from([(
+            "command".to_string(),
+            serde_json::Value::String(command.to_string()),
+        )]);
+        self.app
+            .core
+            .permissions
+            .snapshot()
+            .effects_for_tool(smelt_core::permissions::ToolOrigin::Lua, "bash", &args)
+            .into_iter()
+            .flat_map(|effect| match effect {
+                smelt_core::permissions::ToolEffect::Shell { paths, .. } => paths,
+                _ => Vec::new(),
+            })
+            .map(|effect| effect.resolution.path().to_path_buf())
+            .collect()
+    }
+
+    pub fn publish_public_status(&mut self) {
+        self.app.publish_public_status();
+    }
+
+    pub fn public_status_path(&self) -> Option<&std::path::Path> {
+        self.app.platform.public_status_path()
+    }
+
+    pub fn session_storage_root(&self) -> &std::path::Path {
+        self.app.core.sessions.state_root()
+    }
+
+    pub fn session_dir(&self) -> std::path::PathBuf {
+        self.app.current_session_dir()
+    }
+
+    pub fn session_dir_for_id(&self, id: &str) -> std::path::PathBuf {
+        self.app.core.sessions.dir_for_id(id)
+    }
+
+    /// Resume a canonical session through the app's normal storage path.
+    pub fn resume_session(&mut self, id: &str) {
+        self.app.load_session_by_id(id);
+    }
+
+    pub fn publish_session_catalog_commit(
+        &self,
+        command: &smelt_store::SessionCommit,
+        receipt: &smelt_store::SaveReceipt,
+    ) {
+        self.app
+            .core
+            .sessions
+            .publish_session_catalog_commit(command, receipt, true);
+    }
+
+    pub fn reconcile_session_catalog(&self) -> Result<(), String> {
+        self.app
+            .core
+            .sessions
+            .request_session_catalog_reconciliation();
+        if self
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5))
+        {
+            return Ok(());
+        }
+
+        let page = self
+            .app
+            .core
+            .sessions
+            .list_session_page_result(smelt_core::session::SessionListQuery {
+                limit: 1_000,
+                ..smelt_core::session::SessionListQuery::default()
+            })
+            .map_err(|err| err.to_string())?;
+        Err(format!(
+            "session catalog did not reconcile: {:?}",
+            page.catalog.last_error
+        ))
+    }
+
+    pub fn mark_project_trusted(&self, cwd: &std::path::Path) -> Result<String, String> {
+        self.app.lua.mark_project_trusted(cwd)
     }
 
     /// Prompt cursor byte offset in source space.
@@ -301,6 +488,101 @@ impl TestApp {
             .win(crate::app::PROMPT_WIN)
             .map(|w| w.cpos())
             .unwrap_or(0)
+    }
+
+    pub fn prompt_endpoint(&self) -> usize {
+        self.app.prompt_win().effective_endpoint()
+    }
+
+    pub fn prompt_source(&self) -> String {
+        self.app
+            .ui
+            .buf(crate::app::PROMPT_EDIT_BUF)
+            .map(|buf| buf.source().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn prompt_attachment_count(&self) -> usize {
+        self.app
+            .ui
+            .buf(crate::app::PROMPT_EDIT_BUF)
+            .map_or(0, |buf| buf.attachment_ids.len())
+    }
+
+    pub(crate) fn configure_prompt_inputs_for_harness(
+        &mut self,
+        system_prompt_override: Option<String>,
+        instructions: Option<String>,
+        skill_section: Option<String>,
+    ) {
+        self.app.prompt_inputs.system_prompt_override = system_prompt_override;
+        self.app.prompt_inputs.instructions = instructions;
+        self.app.prompt_inputs.skill_section = skill_section;
+    }
+
+    pub(crate) fn task_label(&self) -> Option<&str> {
+        self.app.task_label.as_deref()
+    }
+
+    /// Snapshot one well-known window without exposing the mutable UI tree.
+    pub fn window_snapshot(&self, id: WinId) -> Option<WindowSnapshot> {
+        let win = self.app.ui.win(id)?;
+        let source_len = self.app.ui.buf(win.buf).map_or(0, |buf| buf.source().len());
+        Some(WindowSnapshot {
+            cpos: win.cpos(),
+            source_len,
+            vim_mode: win.vim_mode(),
+            selection_anchor: win.selection_anchor(),
+            viewport: win.viewport,
+            gutter_pad_left: win.config.gutters.pad_left,
+        })
+    }
+
+    pub(crate) fn paint_rect(
+        &self,
+        id: crate::smelt_edit::PaintId,
+    ) -> Option<crate::smelt_edit::Rect> {
+        self.app.ui.paint_rect(id)
+    }
+
+    pub(crate) fn split_rect(&self, win: WinId) -> Option<crate::smelt_edit::Rect> {
+        self.app.ui.split_rect(win)
+    }
+
+    /// Effective prompt selection after Vim visual-mode normalization.
+    pub fn prompt_selection_range(&self) -> Option<(usize, usize)> {
+        let buf = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF)?;
+        let win = self.app.ui.win(crate::app::PROMPT_WIN)?;
+        let endpoint = win.effective_endpoint();
+        if win.vim_enabled() {
+            if let Some(range) = crate::smelt_edit::vim::visual_range(
+                win.vim_state(),
+                buf.source(),
+                endpoint,
+                win.vim_mode(),
+            ) {
+                return Some(range);
+            }
+        }
+        win.selection_range_at(endpoint, buf.source())
+    }
+
+    /// Whether paste should target prompt insertion or replace its active selection.
+    pub fn prompt_paste_target_ready(&self, selection_range: Option<(usize, usize)>) -> bool {
+        if self.prompt_text_input_ready() {
+            return true;
+        }
+        if selection_range.is_none() || self.app.ui.any_drag_active() {
+            return false;
+        }
+        let state = self.state();
+        matches!(state.app_focus, AppFocus::Prompt)
+            && !state.agent_running
+            && !state.cmdline_open
+            && state.focused_overlay.is_none()
+            && state.active_modal.is_none()
+            && state.picker_count == 0
+            && state.term_focused
     }
 
     fn prompt_input_ready_base(&self, allow_pending_chord: bool) -> bool {
@@ -340,7 +622,7 @@ impl TestApp {
         self.prompt_input_ready_base(false)
     }
 
-    pub(super) fn prompt_text_input_ready_for_turn_probe(&self) -> bool {
+    pub(crate) fn prompt_text_input_ready_for_turn_probe(&self) -> bool {
         // The turn-end probe intentionally preserves a stale Lua chord prefix,
         // such as the first Esc of the global Esc-Esc binding. The next
         // ordinary text key must decay that prefix and still edit the prompt,
@@ -354,13 +636,517 @@ impl TestApp {
         self.prompt_input_ready_base(false)
             && !self
                 .app
-                .placeholder_opts
-                .contains_key(&crate::app::PROMPT_WIN)
+                .prompt
+                .has_placeholder_options(crate::app::PROMPT_WIN)
     }
 
     pub fn prompt_plain_char_has_lua_keymap(&self, ch: char) -> bool {
         let chord = ch.to_string();
         let mode = self.app.current_vim_mode_label();
         self.app.lua.chord_has_binding(&chord, mode.as_deref())
+    }
+
+    pub fn model_history(&self) -> Vec<protocol::HistoryItem> {
+        self.app.model_history()
+    }
+
+    pub fn assemble_system_prompt(&self) -> String {
+        self.app.assemble_system_prompt()
+    }
+
+    pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
+        self.app.discard_turn(end);
+    }
+
+    pub fn save_session_and_flush(&mut self) {
+        self.app.save_session_and_flush();
+    }
+
+    pub(crate) fn save_session(&mut self) {
+        self.app.save_session();
+    }
+
+    pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
+        self.app.flush_persist()
+    }
+
+    pub(crate) fn session_document_has_unflushed_work(&self) -> bool {
+        self.app.session_document_has_unflushed_work()
+    }
+
+    pub(crate) fn session_is_read_only(&self) -> bool {
+        self.app.session_is_read_only()
+    }
+
+    pub(crate) fn load_session(&mut self, session: smelt_core::session::Session) {
+        self.app.load_session(session);
+    }
+
+    pub(crate) fn load_store_backed_session(
+        &mut self,
+        document: crate::app::session_document::StoreBackedSessionDocument,
+    ) {
+        self.app.load_store_backed_session(document);
+    }
+
+    pub(crate) fn load_session_by_id(&mut self, id: &str) {
+        self.resume_session(id);
+    }
+
+    pub(crate) fn fork_session(&mut self) {
+        self.app.fork_session();
+    }
+
+    pub(crate) fn reset_session(&mut self) {
+        self.app.reset_session();
+    }
+
+    pub(crate) fn restore_screen(&mut self) {
+        self.app.restore_screen();
+    }
+
+    pub(crate) fn set_settings_for_harness(
+        &mut self,
+        settings: smelt_core::config::ResolvedSettings,
+    ) {
+        self.app.set_settings_for_harness(settings);
+    }
+
+    pub(crate) fn set_startup_setting_override_for_harness(
+        &mut self,
+        key: String,
+        value: smelt_core::config::SettingValue,
+    ) {
+        self.app.core.startup_overrides.settings.insert(key, value);
+    }
+
+    pub(crate) fn commit_request_history_item(
+        &mut self,
+        item: protocol::HistoryItem,
+        block: Option<smelt_core::transcript_model::Block>,
+    ) -> protocol::ModelHistorySource {
+        self.app.commit_request_history_item(item, block)
+    }
+
+    pub(crate) fn history_note_to_block(
+        &self,
+        note: &protocol::HistoryNote,
+    ) -> Option<smelt_core::transcript_model::Block> {
+        crate::app::history::history_note_to_block(&self.app.lua, note)
+    }
+
+    pub(crate) fn session_append_history(&mut self, item: protocol::HistoryItem) {
+        self.app.session_append_history(item);
+    }
+
+    pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
+        self.app.handle_process_completed(id, exit_code);
+    }
+
+    pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
+        self.app.record_visible_token_usage(usage);
+    }
+
+    pub(crate) fn active_permissions(
+        &self,
+    ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
+        self.app.active_permissions()
+    }
+
+    pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
+        self.app.session_path_grants()
+    }
+
+    pub(crate) fn focus_transcript(&mut self) {
+        self.app.app_focus = AppFocus::Content;
+        self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    }
+
+    pub(crate) fn focus_prompt(&mut self) {
+        self.app.app_focus = AppFocus::Prompt;
+        self.app.ui.set_focus(crate::app::PROMPT_WIN);
+    }
+
+    pub(crate) fn active_docked_dialog(&self) -> Option<crate::smelt_edit::ContainerId> {
+        self.app.active_docked_dialog()
+    }
+
+    pub(crate) fn notification_win(&self) -> Option<WinId> {
+        self.app.overlays.notification_win()
+    }
+
+    pub(crate) fn notify_error(&mut self, message: String) {
+        self.app.notify_error(message);
+    }
+
+    pub(crate) fn notify_error_sticky(&mut self, message: String) {
+        self.app.notify_error_sticky(message);
+    }
+
+    pub(crate) fn dismiss_expired_notification(&mut self) -> bool {
+        self.app.dismiss_expired_notification()
+    }
+
+    pub(crate) fn resolve_open_confirm_for_current_mode(&mut self, handle_id: u64) -> bool {
+        self.app.resolve_open_confirm_for_current_mode(handle_id)
+    }
+
+    pub(crate) fn mode_pending(&self) -> bool {
+        self.app.mode_pending()
+    }
+
+    pub(crate) fn sync_agent_mode_applied(&mut self) {
+        self.app.sync_agent_mode_applied();
+    }
+
+    pub(crate) fn public_status_state_reason(
+        &self,
+    ) -> (
+        smelt_core::public_status::PublicState,
+        Option<smelt_core::public_status::PublicReason>,
+    ) {
+        self.app.public_status_state_reason()
+    }
+
+    pub(crate) fn set_terminal_focus_for_harness(&mut self, focused: bool) {
+        self.app.set_terminal_focus_for_harness(focused);
+    }
+
+    pub(crate) fn apply_model(&mut self, key: &str, record: bool) {
+        self.app.apply_model(key, record);
+    }
+
+    pub(crate) fn fast_mode(&self) -> bool {
+        self.app.fast_mode()
+    }
+
+    pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
+        self.app.set_fast_mode(enabled);
+    }
+
+    pub(crate) fn warn_if_api_base_normalized(&mut self) {
+        self.app.warn_if_api_base_normalized();
+    }
+
+    pub(crate) fn handle_managed_auth_checked(
+        &mut self,
+        snapshots: Vec<(
+            engine::auth::AuthProvider,
+            Option<u64>,
+            Vec<protocol::ModelMetadata>,
+        )>,
+    ) {
+        self.app.handle_managed_auth_checked(snapshots);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_http_client(&mut self, client: engine::HttpClient) {
+        self.app.install_http_client(client);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_context_window_twice_for_harness(&mut self, api_key_env: &str) {
+        self.app
+            .core
+            .config
+            .active_model_mut()
+            .expect("test app has an active model")
+            .api_key_env = api_key_env.into();
+        self.app
+            .platform
+            .enable_context_window_refresh_for_harness();
+        self.app.refresh_context_window();
+        self.app.refresh_context_window();
+    }
+
+    pub(crate) fn active_context_token_identity(
+        &self,
+    ) -> smelt_core::session::ContextTokenIdentity {
+        self.app.active_context_token_identity()
+    }
+
+    pub(crate) fn rewind_to(
+        &mut self,
+        block_idx: usize,
+    ) -> Option<(String, Vec<(String, String)>)> {
+        self.app.rewind_to(block_idx)
+    }
+
+    pub(crate) fn rewind_to_start(&mut self) {
+        self.app.rewind_to_start();
+    }
+
+    pub(crate) fn publish_shared_session_state(&self) {
+        self.app.publish_shared_session_state();
+    }
+
+    pub(crate) fn publish_history_delta(&mut self, kind: &str) {
+        self.app.publish_history_delta(kind);
+    }
+
+    pub(crate) fn bump_epoch(&mut self, name: &str) {
+        self.app.bump_epoch(name);
+    }
+
+    pub(crate) fn publish_input_submit(&mut self, text: &str) {
+        self.app
+            .core
+            .signals
+            .emit_dyn("input_submit", std::rc::Rc::new(text.to_string()));
+        self.app.pump_lua();
+    }
+
+    pub(crate) fn configure_active_model_fast_mode(
+        &mut self,
+        provider_type: &str,
+        supported: bool,
+    ) {
+        let model = self
+            .app
+            .core
+            .config
+            .active_model_mut()
+            .expect("test app has an active model");
+        model.provider_type = provider_type.to_string();
+        model.config.supports_fast_mode = Some(supported);
+    }
+
+    pub(crate) fn set_active_model_fast_mode_support(&mut self, supported: bool) {
+        self.app
+            .core
+            .config
+            .active_model_mut()
+            .expect("test app has an active model")
+            .config
+            .supports_fast_mode = Some(supported);
+    }
+
+    pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
+        self.app.model_history_messages()
+    }
+
+    pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
+        self.app.start_next_queued_input_if_idle()
+    }
+
+    pub(crate) fn placeholder_text(&mut self, win: WinId) -> Option<String> {
+        self.app.placeholder_text(win)
+    }
+
+    pub(crate) fn clear_transcript(&mut self) {
+        self.app.clear_transcript();
+    }
+
+    pub(crate) fn shutdown_context(&self) -> crate::app::ShutdownContext {
+        self.app.conversation.shutdown_context()
+    }
+
+    pub(crate) fn grant_session_path(
+        &mut self,
+        mode: Option<protocol::AgentMode>,
+        tool: String,
+        access: smelt_core::permissions::PathAccess,
+        dir: std::path::PathBuf,
+    ) {
+        self.app.grant_session_path(mode, tool, access, dir);
+    }
+
+    pub(crate) fn set_session_title(
+        &mut self,
+        title: String,
+        slug: String,
+        target_history_len: Option<usize>,
+    ) {
+        self.app.set_session_title(title, slug, target_history_len);
+    }
+
+    pub(crate) fn notify_session_save_failure(&mut self, session_id: &str, message: &str) {
+        self.app.notify_session_save_failure(session_id, message);
+    }
+
+    pub(crate) fn dismiss_session_save_failure_notification(&mut self, session_id: &str) {
+        self.app
+            .dismiss_session_save_failure_notification(session_id);
+    }
+
+    pub(crate) fn session_history_range(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> Vec<protocol::HistoryItem> {
+        self.app.session_history_range(range)
+    }
+
+    pub(crate) fn apply_history_append_to_history(
+        &mut self,
+        append: &protocol::HistoryAppend,
+    ) -> protocol::HistoryAppendResult {
+        self.app.apply_history_append_to_history(append)
+    }
+
+    pub(crate) fn rewind_history_for_harness(
+        &mut self,
+        index: usize,
+        truncate: bool,
+        identity: smelt_core::session::ContextTokenIdentity,
+    ) {
+        self.app
+            .conversation
+            .rewind_history(index, truncate, identity);
+    }
+
+    pub(crate) fn push_cmdline_history(
+        &mut self,
+        kind: crate::app::cmdline_history::CommandHistoryKind,
+        command: String,
+    ) {
+        self.app.overlays.push_cmdline_history(kind, command);
+    }
+
+    pub(crate) fn session_set_checkpoint(
+        &mut self,
+        checkpoint: Option<smelt_core::ContextCheckpoint>,
+    ) {
+        self.app.session_set_checkpoint(checkpoint);
+    }
+
+    pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
+        self.app.rewind_to_block(block_idx, restore_vim_insert);
+    }
+
+    pub(crate) fn set_prompt_placeholder_text(&mut self, text: String) {
+        self.app.set_placeholder(crate::app::PROMPT_WIN, text);
+    }
+
+    pub(crate) fn managed_model_status(
+        &self,
+        provider: engine::auth::AuthProvider,
+    ) -> smelt_core::ManagedModelsStatus {
+        self.app.managed_model_catalog().provider(provider).status
+    }
+
+    pub(crate) fn begin_managed_model_refreshes(&mut self) -> Vec<smelt_core::RefreshToken> {
+        self.app.begin_managed_model_refreshes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_managed_model_refresh(
+        &mut self,
+        token: smelt_core::RefreshToken,
+        outcome: engine::auth::ManagedModelsRefreshOutcome,
+    ) {
+        self.app.handle_managed_models_refresh(token, outcome);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activate_managed_model_retry_for_harness(
+        &mut self,
+        token: smelt_core::RefreshToken,
+    ) -> bool {
+        self.app.activate_managed_model_retry_for_harness(token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_managed_models_for_harness(
+        &mut self,
+        config: &smelt_core::config::Config,
+        revision: u64,
+    ) -> bool {
+        self.app.sync_managed_models_for_harness(config, revision)
+    }
+
+    pub(crate) fn handle_app_event(&mut self, event: crate::app::AppEvent) {
+        self.app.handle_app_event(event);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_context_token_baseline_for_harness(&mut self, tokens: Option<u32>) {
+        self.app
+            .conversation
+            .set_context_token_baseline_for_harness(tokens);
+    }
+
+    pub(crate) fn replace_history_for_harness(&mut self, history: Vec<protocol::HistoryItem>) {
+        self.app.conversation.replace_history_for_harness(history);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_id_for_harness(&mut self, id: String) {
+        self.app.conversation.set_session_id_for_harness(id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_live_session_for_harness(
+        &mut self,
+        live_session: smelt_core::session_runtime::LiveSession,
+    ) {
+        self.app
+            .conversation
+            .install_live_session_for_harness(live_session);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_history_resave_from_for_harness(&mut self, history_index: usize) {
+        self.app
+            .conversation
+            .set_history_resave_from_for_harness(history_index);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::SessionCommitFailure) {
+        self.app.conversation.inject_commit_failure(failure);
+    }
+
+    pub(crate) fn set_applied_mode(&mut self, mode: protocol::AgentMode) {
+        self.app.conversation.set_applied_mode(mode);
+    }
+
+    // Focused white-box probes are read-only and domain-scoped. Integration
+    // actions stay on TestApp so tests cannot mutate the whole application.
+    pub(crate) fn ui_probe(&self) -> &crate::smelt_edit::Ui {
+        &self.app.ui
+    }
+
+    pub(crate) fn conversation_probe(&self) -> &crate::app::conversation::ConversationRuntime {
+        &self.app.conversation
+    }
+
+    pub(crate) fn core_probe(&self) -> &smelt_core::Core {
+        &self.app.core
+    }
+
+    pub(crate) fn lua_probe(&self) -> &crate::app::lua_handlers::LuaRuntimeController {
+        &self.app.lua
+    }
+
+    pub(crate) fn overlays_probe(&self) -> &crate::app::overlay_runtime::OverlayRuntime {
+        &self.app.overlays
+    }
+
+    pub(crate) fn workspace_probe(&self) -> &crate::app::cwd::WorkspaceState {
+        &self.app.workspace
+    }
+
+    pub(crate) fn prompt_probe(&self) -> &crate::app::prompt_runtime::PromptRuntime {
+        &self.app.prompt
+    }
+
+    pub(crate) fn working_probe(&self) -> &smelt_core::working::WorkingState {
+        &self.app.working
+    }
+
+    pub(crate) fn timers_probe(&self) -> &crate::app::Timers {
+        &self.app.timers
+    }
+
+    pub(crate) fn well_known_probe(&self) -> &crate::app::WellKnown {
+        &self.app.well_known
+    }
+
+    pub(crate) fn auto_reload_probe(&self) -> &crate::auto_reload::AutoReloadController {
+        &self.app.auto_reload
+    }
+
+    pub(crate) fn paint_registry_probe(&self) -> &crate::lua::paint::PaintRegistry {
+        &self.app.paint_registry
     }
 }

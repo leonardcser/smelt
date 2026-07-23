@@ -90,14 +90,18 @@ impl FromLua for LuaColor {
 impl LuaColor {
     fn resolve_fg(&self) -> Option<smelt_core::style::Color> {
         match self {
-            LuaColor::Group(name) => crate::lua::with_app(|app| app.ui.theme().get(name).fg),
+            LuaColor::Group(name) => {
+                crate::lua::with_runtime_host(|host| host.theme_group(name).fg)
+            }
             LuaColor::Direct(c) => Some(*c),
         }
     }
 
     fn resolve_bg(&self) -> Option<smelt_core::style::Color> {
         match self {
-            LuaColor::Group(name) => crate::lua::with_app(|app| app.ui.theme().get(name).bg),
+            LuaColor::Group(name) => {
+                crate::lua::with_runtime_host(|host| host.theme_group(name).bg)
+            }
             LuaColor::Direct(c) => Some(*c),
         }
     }
@@ -231,11 +235,6 @@ pub struct LuaBuf {
     pub(crate) id: crate::smelt_edit::BufId,
 }
 
-fn replace_builtin_prompt_source(app: &mut crate::app::TuiApp, text: String) {
-    let mut pctx = crate::input::prompt_ctx_mut(&mut app.ui);
-    app.input.replace_text(&mut pctx, text);
-}
-
 impl LuaType for LuaBuf {
     fn lua_type() -> String {
         "smelt.buf.Buf".into()
@@ -268,18 +267,24 @@ impl mlua::UserData for LuaBuf {
                 let this = *this_ud.borrow::<LuaBuf>()?;
                 match s {
                     Some(text) => {
-                        crate::lua::with_app(|app| {
-                            if this.id == crate::app::PROMPT_EDIT_BUF {
-                                replace_builtin_prompt_source(app, text);
-                            } else if let Some(buf) = app.ui.buf_mut(this.id) {
-                                buf.set_source(text);
-                            }
-                        });
+                        if this.id == crate::app::PROMPT_EDIT_BUF {
+                            crate::lua::with_conversation_host(|host| {
+                                host.replace_prompt_text(text);
+                            });
+                        } else {
+                            crate::lua::with_ui_host(|host| {
+                                host.with_ui(|ui| {
+                                    if let Some(buf) = ui.buf_mut(this.id) {
+                                        buf.set_source(text);
+                                    }
+                                });
+                            });
+                        }
                         Ok(mlua::Value::UserData(this_ud))
                     }
                     None => {
-                        let out = crate::lua::try_with_app(|app| {
-                            app.ui.buf(this.id).map(|b| b.source().to_string())
+                        let out = crate::lua::try_with_ui_host(|host| {
+                            host.with_ui(|ui| ui.buf(this.id).map(|buf| buf.source().to_string()))
                         })
                         .flatten();
                         Ok(match out {
@@ -300,20 +305,28 @@ impl mlua::UserData for LuaBuf {
                 let this = *this_ud.borrow::<LuaBuf>()?;
                 match arr {
                     Some(lines) => {
-                        crate::lua::with_app(|app| {
-                            if this.id == crate::app::PROMPT_EDIT_BUF {
-                                replace_builtin_prompt_source(app, lines.join("\n"));
-                            } else if let Some(buf) = app.ui.buf_mut(this.id) {
-                                buf.set_all_lines(lines);
-                            }
-                        });
+                        if this.id == crate::app::PROMPT_EDIT_BUF {
+                            crate::lua::with_conversation_host(|host| {
+                                host.replace_prompt_text(lines.join("\n"));
+                            });
+                        } else {
+                            crate::lua::with_ui_host(|host| {
+                                host.with_ui(|ui| {
+                                    if let Some(buf) = ui.buf_mut(this.id) {
+                                        buf.set_all_lines(lines);
+                                    }
+                                });
+                            });
+                        }
                         Ok(mlua::Value::UserData(this_ud))
                     }
                     None => {
-                        let out: Option<Vec<String>> = crate::lua::try_with_app(|app| {
-                            app.ui
-                                .buf(this.id)
-                                .map(|b| b.lines().iter().map(|l| l.to_string()).collect())
+                        let out: Option<Vec<String>> = crate::lua::try_with_ui_host(|host| {
+                            host.with_ui(|ui| {
+                                ui.buf(this.id).map(|buf| {
+                                    buf.lines().iter().map(|line| line.to_string()).collect()
+                                })
+                            })
                         })
                         .flatten();
                         match out {
@@ -337,10 +350,11 @@ impl mlua::UserData for LuaBuf {
                 Some(n) => n as usize,
                 None => return Ok(None),
             };
-            Ok(crate::lua::try_with_app(|app| {
-                app.ui
-                    .buf(this.id)
-                    .and_then(|b| b.get_line(line0).map(|s| s.to_string()))
+            Ok(crate::lua::try_with_ui_host(|host| {
+                host.with_ui(|ui| {
+                    ui.buf(this.id)
+                        .and_then(|buf| buf.get_line(line0).map(|line| line.to_string()))
+                })
             })
             .flatten())
         });
@@ -364,18 +378,21 @@ impl mlua::UserData for LuaBuf {
                 let this = *this_ud.borrow::<LuaBuf>()?;
                 match val {
                     Some(ro) => {
-                        crate::lua::with_app(|app| {
-                            if let Some(buf) = app.ui.buf_mut(this.id) {
-                                buf.readonly = ro;
-                            }
+                        crate::lua::with_ui_host(|host| {
+                            host.with_ui(|ui| {
+                                if let Some(buf) = ui.buf_mut(this.id) {
+                                    buf.readonly = ro;
+                                }
+                            });
                         });
                         Ok(mlua::Value::UserData(this_ud))
                     }
                     None => {
-                        let out =
-                            crate::lua::try_with_app(|app| app.ui.buf(this.id).map(|b| b.readonly))
-                                .flatten()
-                                .unwrap_or(false);
+                        let out = crate::lua::try_with_ui_host(|host| {
+                            host.with_ui(|ui| ui.buf(this.id).map(|buf| buf.readonly))
+                        })
+                        .flatten()
+                        .unwrap_or(false);
                         Ok(mlua::Value::Boolean(out))
                     }
                 }
@@ -407,10 +424,12 @@ impl mlua::UserData for LuaBuf {
                     Some(n) if n > 0 => n as usize,
                     _ => usize::MAX,
                 };
-                crate::lua::with_app(|app| {
-                    if let Some(buf) = app.ui.buf_mut(this.id) {
-                        buf.clear_namespace(NsId(ns), start_line, end_line);
-                    }
+                crate::lua::with_ui_host(|host| {
+                    host.with_ui(|ui| {
+                        if let Some(buf) = ui.buf_mut(this.id) {
+                            buf.clear_namespace(NsId(ns), start_line, end_line);
+                        }
+                    });
                 });
                 Ok(this_ud)
             },
@@ -519,53 +538,55 @@ pub(super) fn create_or_open(
         .and_then(|t| t.get::<Option<String>>("name").ok())
         .flatten();
 
-    // `try_with_app` (rather than `with_app`) lets bootstrap chunks call
-    // `smelt.buf.new` before an app pointer is installed (the initial
-    // autoload pass). The buffer is created for real on the second pass,
-    // when `bring_up_lua("launch")` reloads with the app available.
-    let result_id = crate::lua::try_with_app(|app| -> crate::smelt_edit::BufId {
-        // Named buffer that already exists - refresh mutable opts.
-        if let Some(ref n) = name {
-            if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
-                buf.readonly = readonly;
-                if let Some(fmt) = format {
-                    buf.set_parser(fmt.into_parser());
-                }
-                return bid;
-            }
-        }
-        let id = shared
-            .next_buf_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match app.ui.buf_create_with_id(
-            crate::smelt_edit::BufId(id),
-            crate::smelt_edit::BufCreateOpts::default(),
-        ) {
-            Ok(bid) => {
-                if let Some(buf) = app.ui.buf_mut(bid) {
-                    buf.readonly = readonly;
-                    if let Some(fmt) = format {
-                        buf.set_parser(fmt.into_parser());
+    // Optional access lets bootstrap chunks call `smelt.buf.new` before the
+    // frontend host is in scope. The buffer is created on the launch reload.
+    let (buffer_id, clash) = crate::lua::try_with_ui_host(|host| {
+        host.with_ui(|ui| {
+            // Named buffer that already exists - refresh mutable opts.
+            if let Some(ref name) = name {
+                if let Some((buffer_id, buffer)) = ui.lookup_named_buf_mut(name) {
+                    buffer.readonly = readonly;
+                    if let Some(format) = format {
+                        buffer.set_parser(format.into_parser());
                     }
-                    if editable {
-                        let limit = undo_limit.or(Some(100));
-                        buf.history = crate::smelt_edit::UndoHistory::new(limit);
+                    return (buffer_id, None);
+                }
+            }
+            let id = shared
+                .next_buf_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match ui.buf_create_with_id(
+                crate::smelt_edit::BufId(id),
+                crate::smelt_edit::BufCreateOpts::default(),
+            ) {
+                Ok(buffer_id) => {
+                    if let Some(buffer) = ui.buf_mut(buffer_id) {
+                        buffer.readonly = readonly;
+                        if let Some(format) = format {
+                            buffer.set_parser(format.into_parser());
+                        }
+                        if editable {
+                            let limit = undo_limit.or(Some(100));
+                            buffer.history = crate::smelt_edit::UndoHistory::new(limit);
+                        }
                     }
+                    if let Some(ref name) = name {
+                        ui.name_buf(name.clone(), buffer_id);
+                    }
+                    (buffer_id, None)
                 }
-                if let Some(ref n) = name {
-                    app.ui.name_buf(n.clone(), bid);
-                }
-                bid
+                Err(clash) => (crate::smelt_edit::BufId(0), Some(clash)),
             }
-            Err(clash) => {
-                app.notify_error(format!("buf: id {} already in use", clash.0));
-                crate::smelt_edit::BufId(0)
-            }
-        }
+        })
     })
-    .unwrap_or(crate::smelt_edit::BufId(0));
+    .unwrap_or((crate::smelt_edit::BufId(0), None));
+    if let Some(clash) = clash {
+        crate::lua::with_runtime_host(|host| {
+            host.notify_error(format!("buf: id {} already in use", clash.0));
+        });
+    }
 
-    Ok(result_id)
+    Ok(buffer_id)
 }
 
 /// `buf:styled(spans)` - set a styled line list. Same semantics as the
@@ -644,46 +665,48 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
         decoded.push(spans);
     }
 
-    crate::lua::with_app(|app| {
-        let theme_snap = app.ui.theme().clone();
-        let width = crate::content::term_width() as u16;
-        let Some(buf) = app.ui.buf_mut(id) else {
-            return;
-        };
-        buf.set_all_lines(Vec::new());
-        render_into_buffer(buf, width, &theme_snap, |sink| {
-            for spans in &decoded {
-                for span in spans {
-                    let group = span.style.hl.as_deref().map(intern);
-                    let mut style = Style::new();
-                    style.dim = span.style.dim;
-                    style.bold = span.style.bold;
-                    style.italic = span.style.italic;
-                    style.reverse = span.style.reverse;
-                    if let Some(c) = &span.style.fg {
-                        style.fg = match c {
-                            LuaColor::Group(name) => sink.theme().get(name).fg,
-                            LuaColor::Direct(color) => Some(*color),
-                        };
+    crate::lua::with_ui_host(|host| {
+        host.with_ui(|ui| {
+            let theme_snap = ui.theme().clone();
+            let width = crate::content::term_width() as u16;
+            let Some(buf) = ui.buf_mut(id) else {
+                return;
+            };
+            buf.set_all_lines(Vec::new());
+            render_into_buffer(buf, width, &theme_snap, |sink| {
+                for spans in &decoded {
+                    for span in spans {
+                        let group = span.style.hl.as_deref().map(intern);
+                        let mut style = Style::new();
+                        style.dim = span.style.dim;
+                        style.bold = span.style.bold;
+                        style.italic = span.style.italic;
+                        style.reverse = span.style.reverse;
+                        if let Some(c) = &span.style.fg {
+                            style.fg = match c {
+                                LuaColor::Group(name) => sink.theme().get(name).fg,
+                                LuaColor::Direct(color) => Some(*color),
+                            };
+                        }
+                        if let Some(c) = &span.style.bg {
+                            style.bg = match c {
+                                LuaColor::Group(name) => sink.theme().get(name).bg,
+                                LuaColor::Direct(color) => Some(*color),
+                            };
+                        }
+                        sink.push(group, style);
+                        if let Some(lang) = &span.syntax {
+                            let mut hi = InlineSyntax::new(lang);
+                            hi.print_line(sink, &span.text);
+                        } else {
+                            sink.print(&span.text);
+                        }
+                        sink.pop_style();
                     }
-                    if let Some(c) = &span.style.bg {
-                        style.bg = match c {
-                            LuaColor::Group(name) => sink.theme().get(name).bg,
-                            LuaColor::Direct(color) => Some(*color),
-                        };
-                    }
-                    sink.push(group, style);
-                    if let Some(lang) = &span.syntax {
-                        let mut hi = InlineSyntax::new(lang);
-                        hi.print_line(sink, &span.text);
-                    } else {
-                        sink.print(&span.text);
-                    }
-                    sink.pop_style();
+                    sink.newline();
                 }
-                sink.newline();
-            }
-        });
+            });
+        })
     });
     Ok(())
 }
@@ -716,15 +739,16 @@ fn set_extmark(
     // Underlying extmarks store display-cell columns. Convert byte
     // offsets → cells using the current line content. Snaps off-boundary
     // bytes and clamps overshoot to the end of the line.
-    let (col0, end_col) = crate::lua::with_app(|app| {
-        let line = app
-            .ui
-            .buf(id)
-            .and_then(|b| b.get_line(row0).map(String::from))
-            .unwrap_or_default();
-        let s = smelt_buffer::text::byte_to_cell(&line, byte_col);
-        let e = end_byte_col.map(|b| smelt_buffer::text::byte_to_cell(&line, b));
-        (s, e)
+    let (col0, end_col) = crate::lua::with_ui_host(|host| {
+        host.with_ui(|ui| {
+            let line = ui
+                .buf(id)
+                .and_then(|b| b.get_line(row0).map(String::from))
+                .unwrap_or_default();
+            let s = smelt_buffer::text::byte_to_cell(&line, byte_col);
+            let e = end_byte_col.map(|b| smelt_buffer::text::byte_to_cell(&line, b));
+            (s, e)
+        })
     });
 
     let mut payload_opts = if let Some(text) = opts.virt_text.clone() {
@@ -762,10 +786,11 @@ fn set_extmark(
     payload_opts.end_right_gravity = opts.end_right_gravity.unwrap_or(false);
     payload_opts.id = mark_id;
 
-    crate::lua::with_app(|app| {
-        app.ui
-            .buf_mut(id)
-            .map(|buf| buf.set_extmark(NsId(ns), row0, col0, payload_opts))
+    crate::lua::with_ui_host(|host| {
+        host.with_ui(|ui| {
+            ui.buf_mut(id)
+                .map(|buf| buf.set_extmark(NsId(ns), row0, col0, payload_opts))
+        })
     })
     .map(|eid: ExtmarkId| eid.0 as u64)
     .unwrap_or(0)
@@ -783,7 +808,7 @@ fn build_virt_text_hl(opts: &LuaMarkOpts) -> Option<String> {
     }
 
     let mut style = match opts.virt_text_hl.as_deref() {
-        Some(name) => crate::lua::with_app(|app| app.ui.theme().get(name)),
+        Some(name) => crate::lua::with_runtime_host(|host| host.theme_group(name)),
         None => smelt_core::style::Style::default(),
     };
     if let Some(c) = &opts.fg {
@@ -813,7 +838,7 @@ fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_edit::SpanStyle {
     use smelt_core::style::Style;
 
     let mut style = match opts.hl_group.as_deref() {
-        Some(name) => crate::lua::with_app(|app| app.ui.theme().get(name)),
+        Some(name) => crate::lua::with_runtime_host(|host| host.theme_group(name)),
         None => Style::default(),
     };
     if let Some(c) = &opts.fg {

@@ -1,10 +1,10 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::transcript_scroll_trace::{
-    TranscriptDescriptorTraceRange, TranscriptInteractionTraceEvent,
-    TranscriptProjectionTargetTrace, TranscriptScrollIntent, TranscriptScrollTrace,
-    TranscriptScrollTraceFrame, TranscriptScrollTraceFrameStart, TranscriptScrollTraceRenderInput,
-    TranscriptTraceAnchor, TranscriptVisibleContentAnchor,
+    TranscriptInteractionTraceEvent, TranscriptProjectionTargetTrace, TranscriptRecordTraceRange,
+    TranscriptScrollIntent, TranscriptScrollTrace, TranscriptScrollTraceFrame,
+    TranscriptScrollTraceFrameStart, TranscriptScrollTraceRenderInput, TranscriptTraceAnchor,
+    TranscriptVisibleContentAnchor,
 };
 use crate::app::TuiApp;
 use crate::content::prompt_parser::{
@@ -33,22 +33,22 @@ use std::time::{Duration, Instant};
 
 const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
 const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
-const TRANSCRIPT_ACTIVE_DESCRIPTOR_WINDOW_MAX_MULTIPLIER: usize = 3;
-const TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS: usize = 512;
-const TRANSCRIPT_DESCRIPTOR_PAGE_SIZE: usize = 128;
-const TRANSCRIPT_DESCRIPTOR_CACHE_GUARD_PAGES: usize = 2;
+const TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER: usize = 3;
+const TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS: usize = 512;
+const TRANSCRIPT_RECORD_PAGE_SIZE: usize = 128;
+const TRANSCRIPT_RECORD_CACHE_GUARD_PAGES: usize = 2;
 const TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS: RowIndex = 2;
-const TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE: usize = 4096;
+const TRANSCRIPT_RECORD_PREFIX_STRIDE: usize = 4096;
 const TRANSCRIPT_IDLE_COMPACTION_BLOCKS: usize = 64;
 const TRANSCRIPT_IDLE_COMPACTION_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_HYDRATED_BLOCK_BUDGET: usize = 32 * 1024 * 1024;
-const DEFAULT_DESCRIPTOR_WINDOW_BUDGET: usize = 16 * 1024 * 1024;
+const DEFAULT_RECORD_WINDOW_BUDGET: usize = 16 * 1024 * 1024;
 const DEFAULT_RENDERED_PAYLOAD_BUDGET: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptMemoryBudget {
     pub(crate) hydrated_blocks: usize,
-    pub(crate) descriptor_windows: usize,
+    pub(crate) record_windows: usize,
     pub(crate) rendered_rows: usize,
 }
 
@@ -56,7 +56,7 @@ impl Default for TranscriptMemoryBudget {
     fn default() -> Self {
         Self {
             hydrated_blocks: DEFAULT_HYDRATED_BLOCK_BUDGET,
-            descriptor_windows: DEFAULT_DESCRIPTOR_WINDOW_BUDGET,
+            record_windows: DEFAULT_RECORD_WINDOW_BUDGET,
             rendered_rows: DEFAULT_RENDERED_PAYLOAD_BUDGET,
         }
     }
@@ -68,16 +68,16 @@ pub(crate) struct TranscriptMemorySnapshot {
     pub(crate) stored_blocks: usize,
     pub(crate) hydrated_blocks: usize,
     pub(crate) hydrated_budget_bytes: usize,
-    pub(crate) descriptor_budget_bytes: usize,
+    pub(crate) record_budget_bytes: usize,
     pub(crate) rendered_budget_bytes: usize,
     pub(crate) live_block_bytes: usize,
     pub(crate) live_tool_state_bytes: usize,
     pub(crate) hydrated_block_bytes: usize,
     pub(crate) hydrated_tool_state_bytes: usize,
-    pub(crate) compact_descriptor_bytes: usize,
-    pub(crate) descriptor_window_bytes: usize,
+    pub(crate) compact_record_bytes: usize,
+    pub(crate) record_window_bytes: usize,
     pub(crate) tool_state_metadata_bytes: usize,
-    pub(crate) origin_hash_bytes: usize,
+    pub(crate) block_metadata_bytes: usize,
     pub(crate) layout_bytes: usize,
     pub(crate) source_view_bytes: usize,
     pub(crate) height_index_bytes: usize,
@@ -87,7 +87,7 @@ pub(crate) struct TranscriptMemorySnapshot {
     pub(crate) pinned_hydrated_bytes: usize,
     pub(crate) pinned_rendered_bytes: usize,
     pub(crate) hydrated_oversize_debt_bytes: usize,
-    pub(crate) descriptor_oversize_debt_bytes: usize,
+    pub(crate) record_oversize_debt_bytes: usize,
     pub(crate) rendered_oversize_debt_bytes: usize,
     pub(crate) hydration_reads: u64,
     pub(crate) hydration_ranges: u64,
@@ -155,26 +155,26 @@ impl TranscriptHydrationState {
 
 #[derive(Clone, Copy, Debug)]
 struct PendingTranscriptCompaction {
-    descriptor_len: usize,
+    record_len: usize,
     next_order_index: usize,
-    next_descriptor_index: usize,
+    next_record_index: usize,
 }
 
-pub(crate) struct LoadedDescriptorWindow {
-    pub(crate) start: smelt_store::TranscriptDescriptorIndex,
+pub(crate) struct LoadedRecordWindow {
+    pub(crate) start: smelt_store::TranscriptRecordOffset,
     pub(crate) total_count: usize,
-    pub(crate) hydration: smelt_store::TranscriptDescriptorHydration,
+    pub(crate) hydration: smelt_store::TranscriptRecordHydration,
     pub(crate) records: Vec<StoredBlockWithId>,
 }
 
-impl LoadedDescriptorWindow {
-    pub(crate) fn end(&self) -> smelt_store::TranscriptDescriptorIndex {
-        smelt_store::TranscriptDescriptorIndex::new(
+impl LoadedRecordWindow {
+    pub(crate) fn end(&self) -> smelt_store::TranscriptRecordOffset {
+        smelt_store::TranscriptRecordOffset::new(
             self.start.get().saturating_add(self.records.len()),
         )
     }
 
-    fn from_slice(slice: smelt_store::TranscriptDescriptorSlice) -> Option<Self> {
+    fn from_slice(slice: smelt_store::TranscriptRecordSlice) -> Option<Self> {
         if slice.is_empty() {
             return None;
         }
@@ -183,14 +183,14 @@ impl LoadedDescriptorWindow {
             start,
             total_count: slice.total_count,
             hydration: slice.hydration,
-            records: compact_descriptor_rows(start, slice.into_records())?,
+            records: compact_record_rows(start, slice.into_records())?,
         })
     }
 }
 
 pub(crate) struct LoadedTranscript {
     pub(crate) transcript: Transcript,
-    pub(crate) descriptor_window: Option<LoadedDescriptorWindow>,
+    pub(crate) record_window: Option<LoadedRecordWindow>,
     pub(crate) session_dir: Option<PathBuf>,
 }
 
@@ -198,7 +198,7 @@ impl LoadedTranscript {
     pub(crate) fn full(transcript: Transcript) -> Self {
         Self {
             transcript,
-            descriptor_window: None,
+            record_window: None,
             session_dir: None,
         }
     }
@@ -206,7 +206,7 @@ impl LoadedTranscript {
     pub(crate) fn empty_store(session_dir: PathBuf) -> Self {
         Self {
             transcript: Transcript::new(),
-            descriptor_window: None,
+            record_window: None,
             session_dir: Some(session_dir),
         }
     }
@@ -220,48 +220,42 @@ impl LoadedTranscript {
             let _perf = smelt_perf::perf::begin("transcript:resume_tail:open_store");
             SqliteTranscriptStore::open_read_only(&session_dir).ok()?
         };
-        let target_rows = descriptor_tail_target_rows(viewport_rows);
+        let target_rows = record_tail_target_rows(viewport_rows);
         let slice = {
             let _perf = smelt_perf::perf::begin("transcript:resume_tail:read_tail_slice");
             store
-                .read_tail_descriptor_slice_for_rows(width, target_rows)
+                .read_tail_record_slice_for_rows(width, target_rows)
                 .ok()?
         };
-        smelt_perf::perf::record_value(
-            "transcript:sqlite:descriptor_total",
-            slice.total_count as u64,
-        );
-        smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
+        smelt_perf::perf::record_value("transcript:sqlite:record_total", slice.total_count as u64);
+        smelt_perf::perf::record_value("transcript:sqlite:record_loaded", slice.len() as u64);
         let _perf = smelt_perf::perf::begin("transcript:resume_tail:build_loaded");
-        Self::from_descriptor_slice(slice, session_dir)
+        Self::from_record_slice(slice, session_dir)
     }
 
-    pub(crate) fn from_descriptor_slice(
-        slice: smelt_store::TranscriptDescriptorSlice,
+    pub(crate) fn from_record_slice(
+        slice: smelt_store::TranscriptRecordSlice,
         session_dir: PathBuf,
     ) -> Option<Self> {
-        let descriptor_window = LoadedDescriptorWindow::from_slice(slice)?;
+        let record_window = LoadedRecordWindow::from_slice(slice)?;
         Some(Self {
             transcript: Transcript::new(),
-            descriptor_window: Some(descriptor_window),
+            record_window: Some(record_window),
             session_dir: Some(session_dir),
         })
     }
 }
 
-fn compact_descriptor_rows(
-    start: smelt_store::TranscriptDescriptorIndex,
-    rows: Vec<smelt_store::TranscriptDescriptorRecord>,
+fn compact_record_rows(
+    start: smelt_store::TranscriptRecordOffset,
+    rows: Vec<smelt_store::StoredTranscriptBlock>,
 ) -> Option<Vec<StoredBlockWithId>> {
     if rows.is_empty() {
         return None;
     }
-    let _perf = smelt_perf::perf::begin("transcript:descriptor_window:compact_records");
-    smelt_perf::perf::record_value(
-        "transcript:descriptor_window:decode_rows",
-        rows.len() as u64,
-    );
-    smelt_core::transcript_model::compact_descriptor_rows(start.get(), rows).ok()
+    let _perf = smelt_perf::perf::begin("transcript:record_window:compact_records");
+    smelt_perf::perf::record_value("transcript:record_window:decode_rows", rows.len() as u64);
+    smelt_core::transcript_model::compact_block_rows(start.get(), rows).ok()
 }
 
 struct SqliteTranscriptStore {
@@ -275,32 +269,32 @@ impl SqliteTranscriptStore {
         Ok(Self { db })
     }
 
-    fn read_tail_descriptor_slice_for_rows(
+    fn read_tail_record_slice_for_rows(
         &self,
         width: u16,
         target_rows: u16,
-    ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
+    ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
         self.db
-            .read_transcript_descriptor_tail_for_rows(width, target_rows)
+            .read_transcript_record_tail_for_rows(width, target_rows)
     }
 
-    fn read_descriptor_slice(
+    fn read_record_slice(
         &self,
-        range: smelt_store::TranscriptDescriptorRange,
+        range: smelt_store::TranscriptRecordRange,
         total_count: usize,
-    ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
+    ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
         self.db
-            .read_transcript_descriptor_slice_with_total(range, total_count)
+            .read_transcript_record_slice_with_total(range, total_count)
     }
 
     fn read_hydration_records(
         &self,
-        range: smelt_store::TranscriptDescriptorRange,
+        range: smelt_store::TranscriptRecordRange,
         total_count: usize,
     ) -> Option<Vec<TranscriptBlockRecordWithId>> {
         let slice = self
             .db
-            .read_transcript_descriptor_slice_with_total(range, total_count)
+            .read_transcript_record_slice_with_total(range, total_count)
             .ok()?;
         slice
             .into_records()
@@ -310,13 +304,9 @@ impl SqliteTranscriptStore {
             .ok()
     }
 
-    fn estimated_descriptor_rows(
-        &self,
-        width: u16,
-        range: Range<usize>,
-    ) -> smelt_store::Result<u64> {
+    fn estimated_record_rows(&self, width: u16, range: Range<usize>) -> smelt_store::Result<u64> {
         self.db
-            .transcript_descriptor_estimated_rows(range.into(), width)
+            .transcript_record_estimated_rows(range.into(), width)
     }
 }
 
@@ -342,21 +332,21 @@ impl TranscriptStoreCache {
         self.store.as_ref().map(|(_, store)| store)
     }
 
-    fn read_descriptor_slice(
+    fn read_record_slice(
         &mut self,
         session_dir: Option<&PathBuf>,
-        range: smelt_store::TranscriptDescriptorRange,
+        range: smelt_store::TranscriptRecordRange,
         total_count: usize,
-    ) -> Option<smelt_store::TranscriptDescriptorSlice> {
+    ) -> Option<smelt_store::TranscriptRecordSlice> {
         self.store_for_session(session_dir)?
-            .read_descriptor_slice(range, total_count)
+            .read_record_slice(range, total_count)
             .ok()
     }
 
     fn read_hydration_records(
         &mut self,
         session_dir: Option<&PathBuf>,
-        range: smelt_store::TranscriptDescriptorRange,
+        range: smelt_store::TranscriptRecordRange,
         total_count: usize,
     ) -> Option<Vec<TranscriptBlockRecordWithId>> {
         self.store_for_session(session_dir)?
@@ -364,68 +354,59 @@ impl TranscriptStoreCache {
     }
 }
 
-pub(crate) fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
+pub(crate) fn record_tail_target_rows(viewport_rows: u16) -> u16 {
     viewport_rows
         .max(1)
         .saturating_mul(DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS.saturating_add(1))
         .max(DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS)
 }
 
-fn descriptor_window_payload_bytes(records: &[StoredBlockWithId]) -> u64 {
+fn record_window_payload_bytes(records: &[StoredBlockWithId]) -> u64 {
     records
         .iter()
         .map(|record| record.stored.retained_bytes() as u64)
         .sum()
 }
 
-fn record_descriptor_window_metrics(window: &LoadedDescriptorWindow) {
+fn record_record_window_metrics(window: &LoadedRecordWindow) {
+    smelt_perf::perf::record_value("transcript:record_window:start", window.start.get() as u64);
+    smelt_perf::perf::record_value("transcript:record_window:end", window.end().get() as u64);
+    smelt_perf::perf::record_value("transcript:record_window:total", window.total_count as u64);
     smelt_perf::perf::record_value(
-        "transcript:descriptor_window:start",
-        window.start.get() as u64,
-    );
-    smelt_perf::perf::record_value(
-        "transcript:descriptor_window:end",
-        window.end().get() as u64,
-    );
-    smelt_perf::perf::record_value(
-        "transcript:descriptor_window:total",
-        window.total_count as u64,
-    );
-    smelt_perf::perf::record_value(
-        "transcript:descriptor_window:loaded",
+        "transcript:record_window:loaded",
         window.records.len() as u64,
     );
     smelt_perf::perf::record_value(
-        "transcript:descriptor_window:payload_bytes",
-        descriptor_window_payload_bytes(&window.records),
+        "transcript:record_window:payload_bytes",
+        record_window_payload_bytes(&window.records),
     );
     smelt_perf::perf::record_value(
-        "transcript:descriptor_window:object_backed",
+        "transcript:record_window:object_backed",
         u64::from(matches!(
             window.hydration,
-            smelt_store::TranscriptDescriptorHydration::ObjectBacked
+            smelt_store::TranscriptRecordHydration::ObjectBacked
         )),
     );
 }
 
 #[derive(Default)]
-struct SparseTranscriptDescriptors {
+struct SparseTranscriptRecords {
     total_count: Option<usize>,
-    loaded_ranges: Vec<Range<smelt_store::TranscriptDescriptorIndex>>,
-    records: BTreeMap<smelt_store::TranscriptDescriptorIndex, StoredBlockWithId>,
-    lru: VecDeque<smelt_store::TranscriptDescriptorIndex>,
+    loaded_ranges: Vec<Range<smelt_store::TranscriptRecordOffset>>,
+    records: BTreeMap<smelt_store::TranscriptRecordOffset, StoredBlockWithId>,
+    lru: VecDeque<smelt_store::TranscriptRecordOffset>,
 }
 
-impl SparseTranscriptDescriptors {
-    fn from_loaded(loaded: Option<&LoadedDescriptorWindow>) -> Self {
-        let mut descriptors = Self::default();
+impl SparseTranscriptRecords {
+    fn from_loaded(loaded: Option<&LoadedRecordWindow>) -> Self {
+        let mut records = Self::default();
         if let Some(loaded) = loaded {
-            descriptors.merge(loaded);
+            records.merge(loaded);
         }
-        descriptors
+        records
     }
 
-    fn merge(&mut self, loaded: &LoadedDescriptorWindow) -> bool {
+    fn merge(&mut self, loaded: &LoadedRecordWindow) -> bool {
         let start = loaded.start;
         let end = loaded.end();
         if start >= end {
@@ -438,7 +419,7 @@ impl SparseTranscriptDescriptors {
         self.lru.retain(|index| *index < start || *index >= end);
         for (offset, record) in loaded.records.iter().cloned().enumerate() {
             let index =
-                smelt_store::TranscriptDescriptorIndex::new(start.get().saturating_add(offset));
+                smelt_store::TranscriptRecordOffset::new(start.get().saturating_add(offset));
             self.records.insert(index, record);
             self.lru.push_back(index);
         }
@@ -446,13 +427,13 @@ impl SparseTranscriptDescriptors {
         true
     }
 
-    fn add_loaded_range(&mut self, range: Range<smelt_store::TranscriptDescriptorIndex>) {
+    fn add_loaded_range(&mut self, range: Range<smelt_store::TranscriptRecordOffset>) {
         if range.start >= range.end {
             return;
         }
         self.loaded_ranges.push(range);
         self.loaded_ranges.sort_by_key(|range| range.start);
-        let mut merged: Vec<Range<smelt_store::TranscriptDescriptorIndex>> =
+        let mut merged: Vec<Range<smelt_store::TranscriptRecordOffset>> =
             Vec::with_capacity(self.loaded_ranges.len());
         for range in self.loaded_ranges.drain(..) {
             if let Some(last) = merged.last_mut() {
@@ -468,7 +449,7 @@ impl SparseTranscriptDescriptors {
 
     fn records_for_range(
         &self,
-        range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
     ) -> Vec<StoredBlockWithId> {
         match range {
             Some(range) => self
@@ -484,13 +465,13 @@ impl SparseTranscriptDescriptors {
         self.total_count
     }
 
-    fn loaded_descriptor_count(&self) -> usize {
+    fn loaded_record_count(&self) -> usize {
         self.records.len()
     }
 
     fn missing_prefix_count_for_range(
         &self,
-        range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
     ) -> usize {
         range
             .map(|range| range.start.get())
@@ -500,7 +481,7 @@ impl SparseTranscriptDescriptors {
 
     fn missing_suffix_count_for_range(
         &self,
-        range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
     ) -> usize {
         self.total_count
             .map(|total| {
@@ -513,7 +494,7 @@ impl SparseTranscriptDescriptors {
             .unwrap_or_default()
     }
 
-    fn range_is_loaded(&self, range: &Range<smelt_store::TranscriptDescriptorIndex>) -> bool {
+    fn range_is_loaded(&self, range: &Range<smelt_store::TranscriptRecordOffset>) -> bool {
         range.start >= range.end
             || self
                 .loaded_ranges
@@ -523,8 +504,8 @@ impl SparseTranscriptDescriptors {
 
     fn missing_ranges(
         &self,
-        range: &Range<smelt_store::TranscriptDescriptorIndex>,
-    ) -> Vec<Range<smelt_store::TranscriptDescriptorIndex>> {
+        range: &Range<smelt_store::TranscriptRecordOffset>,
+    ) -> Vec<Range<smelt_store::TranscriptRecordOffset>> {
         if range.start >= range.end {
             return Vec::new();
         }
@@ -553,28 +534,27 @@ impl SparseTranscriptDescriptors {
 
     fn cache_range_around(
         &self,
-        range: &Range<smelt_store::TranscriptDescriptorIndex>,
-    ) -> Range<smelt_store::TranscriptDescriptorIndex> {
+        range: &Range<smelt_store::TranscriptRecordOffset>,
+    ) -> Range<smelt_store::TranscriptRecordOffset> {
         let Some(total) = self.total_count else {
             return range.clone();
         };
-        let guard =
-            TRANSCRIPT_DESCRIPTOR_PAGE_SIZE.saturating_mul(TRANSCRIPT_DESCRIPTOR_CACHE_GUARD_PAGES);
+        let guard = TRANSCRIPT_RECORD_PAGE_SIZE.saturating_mul(TRANSCRIPT_RECORD_CACHE_GUARD_PAGES);
         let mut start = range.start.get().saturating_sub(guard);
         let mut end = range.end.get().saturating_add(guard).min(total);
-        if end.saturating_sub(start) >= TRANSCRIPT_DESCRIPTOR_PAGE_SIZE {
-            start = start / TRANSCRIPT_DESCRIPTOR_PAGE_SIZE * TRANSCRIPT_DESCRIPTOR_PAGE_SIZE;
+        if end.saturating_sub(start) >= TRANSCRIPT_RECORD_PAGE_SIZE {
+            start = start / TRANSCRIPT_RECORD_PAGE_SIZE * TRANSCRIPT_RECORD_PAGE_SIZE;
             end = end
-                .saturating_add(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE - 1)
-                .saturating_div(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
-                .saturating_mul(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .saturating_add(TRANSCRIPT_RECORD_PAGE_SIZE - 1)
+                .saturating_div(TRANSCRIPT_RECORD_PAGE_SIZE)
+                .saturating_mul(TRANSCRIPT_RECORD_PAGE_SIZE)
                 .min(total);
         }
-        smelt_store::TranscriptDescriptorIndex::new(start)
-            ..smelt_store::TranscriptDescriptorIndex::new(end)
+        smelt_store::TranscriptRecordOffset::new(start)
+            ..smelt_store::TranscriptRecordOffset::new(end)
     }
 
-    fn touch_range(&mut self, range: &Range<smelt_store::TranscriptDescriptorIndex>) {
+    fn touch_range(&mut self, range: &Range<smelt_store::TranscriptRecordOffset>) {
         self.lru
             .retain(|index| !(range.start <= *index && *index < range.end));
         self.lru
@@ -590,7 +570,7 @@ impl SparseTranscriptDescriptors {
 
     fn enforce_byte_budget(
         &mut self,
-        pinned: &Range<smelt_store::TranscriptDescriptorIndex>,
+        pinned: &Range<smelt_store::TranscriptRecordOffset>,
         budget: usize,
     ) {
         let mut retained = self.retained_bytes();
@@ -611,43 +591,37 @@ impl SparseTranscriptDescriptors {
         }
         self.lru.retain(|index| self.records.contains_key(index));
         self.rebuild_loaded_ranges();
+        smelt_perf::perf::record_value("transcript:record_cache:retained_bytes", retained as u64);
         smelt_perf::perf::record_value(
-            "transcript:descriptor_cache:retained_bytes",
-            retained as u64,
-        );
-        smelt_perf::perf::record_value(
-            "transcript:descriptor_cache:oversize_debt_bytes",
+            "transcript:record_cache:oversize_debt_bytes",
             retained.saturating_sub(budget) as u64,
         );
     }
 
     fn rebuild_loaded_ranges(&mut self) {
-        let mut ranges: Vec<Range<smelt_store::TranscriptDescriptorIndex>> = Vec::new();
+        let mut ranges: Vec<Range<smelt_store::TranscriptRecordOffset>> = Vec::new();
         for index in self.records.keys().copied() {
             match ranges.last_mut() {
                 Some(range) if range.end.get() == index.get() => {
                     range.end =
-                        smelt_store::TranscriptDescriptorIndex::new(index.get().saturating_add(1));
+                        smelt_store::TranscriptRecordOffset::new(index.get().saturating_add(1));
                 }
                 _ => ranges.push(
-                    index
-                        ..smelt_store::TranscriptDescriptorIndex::new(
-                            index.get().saturating_add(1),
-                        ),
+                    index..smelt_store::TranscriptRecordOffset::new(index.get().saturating_add(1)),
                 ),
             }
         }
         self.loaded_ranges = ranges;
     }
 
-    fn record(&self, index: smelt_store::TranscriptDescriptorIndex) -> Option<&StoredBlockWithId> {
+    fn record(&self, index: smelt_store::TranscriptRecordOffset) -> Option<&StoredBlockWithId> {
         self.records.get(&index)
     }
 
-    fn descriptor_index_for_block_id(
+    fn record_index_for_block_id(
         &self,
         block_id: BlockId,
-    ) -> Option<smelt_store::TranscriptDescriptorIndex> {
+    ) -> Option<smelt_store::TranscriptRecordOffset> {
         self.records
             .iter()
             .find_map(|(index, record)| (record.block_id == block_id).then_some(*index))
@@ -656,7 +630,7 @@ impl SparseTranscriptDescriptors {
     fn navigation_record(
         &self,
         role: &str,
-        anchor: smelt_store::TranscriptDescriptorIndex,
+        anchor: smelt_store::TranscriptRecordOffset,
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, StoredBlockWithId)> {
         match direction {
@@ -670,7 +644,7 @@ impl SparseTranscriptDescriptors {
             }
             TranscriptNavigationDirection::Next => {
                 let after_anchor =
-                    smelt_store::TranscriptDescriptorIndex::new(anchor.get().saturating_add(1));
+                    smelt_store::TranscriptRecordOffset::new(anchor.get().saturating_add(1));
                 self.records
                     .range(after_anchor..)
                     .find_map(|(index, record)| {
@@ -681,55 +655,55 @@ impl SparseTranscriptDescriptors {
     }
 
     #[cfg(test)]
-    fn loaded_ranges(&self) -> &[Range<smelt_store::TranscriptDescriptorIndex>] {
+    fn loaded_ranges(&self) -> &[Range<smelt_store::TranscriptRecordOffset>] {
         &self.loaded_ranges
     }
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DescriptorRangeState {
+enum RecordRangeState {
     Unavailable,
     Loaded,
     Missing,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct DescriptorRowsEstimateKey {
+struct RecordRowsEstimateKey {
     width: u16,
     start: usize,
     end: usize,
 }
 
-struct TranscriptDescriptorExtentModel<'a> {
-    descriptors: &'a SparseTranscriptDescriptors,
+struct TranscriptRecordExtentModel<'a> {
+    records: &'a SparseTranscriptRecords,
     store: Option<&'a SqliteTranscriptStore>,
     width: u16,
     active_range: Option<Range<usize>>,
     total_count: Option<usize>,
-    fallback_rows_per_descriptor: RowIndex,
+    fallback_rows_per_record: RowIndex,
 }
 
-fn persisted_descriptor_rows_to_transcript_rows(
-    estimated_descriptor_rows: RowIndex,
-    descriptor_count: usize,
+fn persisted_record_rows_to_transcript_rows(
+    estimated_record_rows: RowIndex,
+    record_count: usize,
 ) -> RowIndex {
-    estimated_descriptor_rows.saturating_sub(RowIndex::from(descriptor_count > 0))
+    estimated_record_rows.saturating_sub(RowIndex::from(record_count > 0))
 }
 
 #[derive(Clone, Debug)]
-struct DescriptorPrefixEstimateIndex {
+struct RecordPrefixEstimateIndex {
     width: u16,
     total_count: usize,
     stride: usize,
     prefix_rows: Vec<RowIndex>,
 }
 
-impl DescriptorPrefixEstimateIndex {
+impl RecordPrefixEstimateIndex {
     fn matches(&self, width: u16, total_count: usize) -> bool {
         self.width == width.max(1)
             && self.total_count == total_count
-            && self.stride == TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE
+            && self.stride == TRANSCRIPT_RECORD_PREFIX_STRIDE
     }
 
     fn total_rows(&self) -> RowIndex {
@@ -761,8 +735,8 @@ impl DescriptorPrefixEstimateIndex {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct ExactDescriptorRowsKey {
-    descriptor_index: usize,
+struct ExactRecordRowsKey {
+    record_index: usize,
     width: u16,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
@@ -772,89 +746,81 @@ struct ExactDescriptorRowsKey {
 
 #[derive(Default)]
 struct TranscriptExtentIndex {
-    descriptor_rows_estimate_cache: HashMap<DescriptorRowsEstimateKey, RowIndex>,
-    descriptor_prefix_estimate: Option<DescriptorPrefixEstimateIndex>,
-    exact_descriptor_rows: HashMap<ExactDescriptorRowsKey, RowIndex>,
-    latest_exact_descriptor_rows: BTreeMap<(u16, usize), ExactDescriptorRowsKey>,
+    record_rows_estimate_cache: HashMap<RecordRowsEstimateKey, RowIndex>,
+    record_prefix_estimate: Option<RecordPrefixEstimateIndex>,
+    exact_record_rows: HashMap<ExactRecordRowsKey, RowIndex>,
+    latest_exact_record_rows: BTreeMap<(u16, usize), ExactRecordRowsKey>,
 }
 
 impl TranscriptExtentIndex {
-    fn clear_exact_local_descriptor_rows(&mut self) {
-        self.exact_descriptor_rows.clear();
-        self.latest_exact_descriptor_rows.clear();
+    fn clear_exact_local_record_rows(&mut self) {
+        self.exact_record_rows.clear();
+        self.latest_exact_record_rows.clear();
     }
 
-    fn clear_persisted_descriptor_estimates(&mut self) {
-        self.descriptor_rows_estimate_cache.clear();
-        self.descriptor_prefix_estimate = None;
+    fn clear_persisted_record_estimates(&mut self) {
+        self.record_rows_estimate_cache.clear();
+        self.record_prefix_estimate = None;
     }
 
     fn exact_observation_count(&self) -> usize {
-        self.exact_descriptor_rows.len()
+        self.exact_record_rows.len()
     }
 
-    fn exact_local_rows_for_descriptor(
-        &self,
-        descriptor_index: usize,
-        width: u16,
-    ) -> Option<RowIndex> {
+    fn exact_local_rows_for_record(&self, record_index: usize, width: u16) -> Option<RowIndex> {
         let width = width.max(1);
-        let key = self
-            .latest_exact_descriptor_rows
-            .get(&(width, descriptor_index))?;
-        self.exact_descriptor_rows.get(key).copied()
+        let key = self.latest_exact_record_rows.get(&(width, record_index))?;
+        self.exact_record_rows.get(key).copied()
     }
 
-    fn observe_exact_loaded_descriptor_rows(
+    fn observe_exact_loaded_record_rows(
         &mut self,
-        descriptors: &SparseTranscriptDescriptors,
+        records: &SparseTranscriptRecords,
         snapshot: crate::content::transcript_buf::TranscriptExactHeightSnapshot,
     ) {
         if snapshot.observations.is_empty() {
             return;
         }
-        let descriptor_by_block: HashMap<BlockId, usize> = descriptors
+        let record_by_block: HashMap<BlockId, usize> = records
             .records
             .iter()
             .map(|(index, record)| (record.block_id, index.get()))
             .collect();
         for observation in snapshot.observations {
-            let Some(descriptor_index) = descriptor_by_block.get(&observation.block_id).copied()
-            else {
+            let Some(record_index) = record_by_block.get(&observation.block_id).copied() else {
                 continue;
             };
-            let key = ExactDescriptorRowsKey {
-                descriptor_index,
+            let key = ExactRecordRowsKey {
+                record_index,
                 width: snapshot.width.max(1),
                 renderer_generation: snapshot.renderer_generation,
                 renderer_cache_key: snapshot.renderer_cache_key,
                 presentation_generation: snapshot.presentation_generation,
                 node_key: observation.key,
             };
-            let latest_key = (key.width, descriptor_index);
-            self.exact_descriptor_rows
-                .insert(key.clone(), observation.rows);
+            let latest_key = (key.width, record_index);
+            self.exact_record_rows.insert(key.clone(), observation.rows);
             if let Some(previous_key) = self
-                .latest_exact_descriptor_rows
+                .latest_exact_record_rows
                 .insert(latest_key, key.clone())
             {
                 if previous_key != key {
-                    self.exact_descriptor_rows.remove(&previous_key);
+                    self.exact_record_rows.remove(&previous_key);
                 }
             }
         }
     }
 
-    fn local_rows_for_loaded_descriptors(
+    fn local_rows_for_loaded_records(
         &self,
-        descriptors: &SparseTranscriptDescriptors,
+        records: &SparseTranscriptRecords,
         width: u16,
     ) -> RowIndex {
-        descriptors
+        records
             .records
             .iter()
             .map(|(index, record)| {
-                self.exact_local_rows_for_descriptor(index.get(), width)
+                self.exact_local_rows_for_record(index.get(), width)
                     .unwrap_or_else(|| {
                         record
                             .stored
@@ -867,26 +833,26 @@ impl TranscriptExtentIndex {
             .sum()
     }
 
-    fn loaded_descriptor_count(&self, descriptors: &SparseTranscriptDescriptors) -> usize {
-        descriptors.loaded_descriptor_count()
+    fn loaded_record_count(&self, records: &SparseTranscriptRecords) -> usize {
+        records.loaded_record_count()
     }
 
-    fn fallback_average_rows_per_loaded_descriptor(
+    fn fallback_average_rows_per_loaded_record(
         &self,
-        descriptors: &SparseTranscriptDescriptors,
+        records: &SparseTranscriptRecords,
         width: u16,
     ) -> RowIndex {
-        let loaded = self.loaded_descriptor_count(descriptors) as RowIndex;
+        let loaded = self.loaded_record_count(records) as RowIndex;
         if loaded == 0 {
             return 2;
         }
-        self.local_rows_for_loaded_descriptors(descriptors, width)
+        self.local_rows_for_loaded_records(records, width)
             .saturating_add(loaded.saturating_sub(1))
             .saturating_div(loaded)
             .max(1)
     }
 
-    fn approximate_rows_for_unloaded_descriptor_range(
+    fn approximate_rows_for_unloaded_record_range(
         &mut self,
         store: Option<&SqliteTranscriptStore>,
         width: u16,
@@ -896,7 +862,7 @@ impl TranscriptExtentIndex {
             return Some(0);
         }
         let width = width.max(1);
-        let stride = TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE;
+        let stride = TRANSCRIPT_RECORD_PREFIX_STRIDE;
         let mut cursor = range.start;
         let mut rows: RowIndex = 0;
         let first_boundary = cursor
@@ -905,7 +871,7 @@ impl TranscriptExtentIndex {
             .saturating_mul(stride)
             .min(range.end);
         if cursor < first_boundary {
-            rows = rows.saturating_add(self.cached_descriptor_rows(
+            rows = rows.saturating_add(self.cached_record_rows(
                 store,
                 width,
                 cursor..first_boundary,
@@ -914,132 +880,127 @@ impl TranscriptExtentIndex {
         }
         while cursor.saturating_add(stride) <= range.end {
             let end = cursor + stride;
-            rows = rows.saturating_add(self.cached_descriptor_rows(store, width, cursor..end)?);
+            rows = rows.saturating_add(self.cached_record_rows(store, width, cursor..end)?);
             cursor = end;
         }
         if cursor < range.end {
-            rows = rows.saturating_add(self.cached_descriptor_rows(
-                store,
-                width,
-                cursor..range.end,
-            )?);
+            rows = rows.saturating_add(self.cached_record_rows(store, width, cursor..range.end)?);
         }
         Some(rows)
     }
 
-    fn cached_descriptor_rows(
+    fn cached_record_rows(
         &mut self,
         store: Option<&SqliteTranscriptStore>,
         width: u16,
         range: Range<usize>,
     ) -> Option<RowIndex> {
-        let key = DescriptorRowsEstimateKey {
+        let key = RecordRowsEstimateKey {
             width,
             start: range.start,
             end: range.end,
         };
-        if let Some(rows) = self.descriptor_rows_estimate_cache.get(&key).copied() {
+        if let Some(rows) = self.record_rows_estimate_cache.get(&key).copied() {
             return Some(rows);
         }
-        let rows = store?.estimated_descriptor_rows(width, range).ok()? as RowIndex;
-        self.descriptor_rows_estimate_cache.insert(key, rows);
+        let rows = store?.estimated_record_rows(width, range).ok()? as RowIndex;
+        self.record_rows_estimate_cache.insert(key, rows);
         Some(rows)
     }
 
-    fn descriptor_extent_model<'a>(
+    fn record_extent_model<'a>(
         &self,
-        descriptors: &'a SparseTranscriptDescriptors,
-        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        records: &'a SparseTranscriptRecords,
+        active_record_range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
         store: Option<&'a SqliteTranscriptStore>,
         width: u16,
-    ) -> TranscriptDescriptorExtentModel<'a> {
+    ) -> TranscriptRecordExtentModel<'a> {
         let width = width.max(1);
-        TranscriptDescriptorExtentModel {
-            descriptors,
+        TranscriptRecordExtentModel {
+            records,
             store,
             width,
-            active_range: active_descriptor_range.map(|range| range.start.get()..range.end.get()),
-            total_count: descriptors.total_count(),
-            fallback_rows_per_descriptor: self
-                .fallback_average_rows_per_loaded_descriptor(descriptors, width),
+            active_range: active_record_range.map(|range| range.start.get()..range.end.get()),
+            total_count: records.total_count(),
+            fallback_rows_per_record: self.fallback_average_rows_per_loaded_record(records, width),
         }
     }
 
-    fn estimated_rows_for_missing_descriptor_range(
+    fn estimated_rows_for_missing_record_range(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
         range: Range<usize>,
     ) -> RowIndex {
         let count = range.end.saturating_sub(range.start) as RowIndex;
-        self.approximate_rows_for_unloaded_descriptor_range(model.store, model.width, range)
-            .unwrap_or_else(|| count.saturating_mul(model.fallback_rows_per_descriptor))
+        self.approximate_rows_for_unloaded_record_range(model.store, model.width, range)
+            .unwrap_or_else(|| count.saturating_mul(model.fallback_rows_per_record))
     }
 
-    fn estimated_rows_for_descriptor_range(
+    fn estimated_rows_for_record_range(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
         range: Range<usize>,
     ) -> RowIndex {
         if range.start >= range.end {
             return 0;
         }
-        self.estimated_rows_for_missing_descriptor_range(model, range)
+        self.estimated_rows_for_missing_record_range(model, range)
     }
 
-    fn estimated_rows_before_descriptor(
+    fn estimated_rows_before_record(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
-        descriptor_index: usize,
+        model: &TranscriptRecordExtentModel<'_>,
+        record_index: usize,
     ) -> RowIndex {
-        self.estimated_rows_for_descriptor_range(model, 0..descriptor_index)
+        self.estimated_rows_for_record_range(model, 0..record_index)
     }
 
-    fn estimated_total_descriptor_rows(
+    fn estimated_total_record_rows(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
     ) -> Option<RowIndex> {
         let total = model.total_count?;
-        let rows = self.estimated_rows_for_descriptor_range(model, 0..total);
-        Some(persisted_descriptor_rows_to_transcript_rows(rows, total))
+        let rows = self.estimated_rows_for_record_range(model, 0..total);
+        Some(persisted_record_rows_to_transcript_rows(rows, total))
     }
 
-    fn ensure_descriptor_prefix_estimate(
+    fn ensure_record_prefix_estimate(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
-    ) -> Option<&DescriptorPrefixEstimateIndex> {
+        model: &TranscriptRecordExtentModel<'_>,
+    ) -> Option<&RecordPrefixEstimateIndex> {
         let total = model.total_count?;
         let width = model.width.max(1);
         if self
-            .descriptor_prefix_estimate
+            .record_prefix_estimate
             .as_ref()
             .is_some_and(|index| index.matches(width, total))
         {
-            return self.descriptor_prefix_estimate.as_ref();
+            return self.record_prefix_estimate.as_ref();
         }
 
-        let stride = TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE;
+        let stride = TRANSCRIPT_RECORD_PREFIX_STRIDE;
         let mut prefix_rows = Vec::with_capacity(total.saturating_add(stride - 1) / stride + 1);
         prefix_rows.push(0);
         let mut rows: RowIndex = 0;
         let mut start = 0;
         while start < total {
             let end = start.saturating_add(stride).min(total);
-            rows = rows.saturating_add(self.estimated_rows_for_descriptor_range(model, start..end));
+            rows = rows.saturating_add(self.estimated_rows_for_record_range(model, start..end));
             prefix_rows.push(rows);
             start = end;
         }
-        self.descriptor_prefix_estimate = Some(DescriptorPrefixEstimateIndex {
+        self.record_prefix_estimate = Some(RecordPrefixEstimateIndex {
             width,
             total_count: total,
             stride,
             prefix_rows,
         });
-        self.descriptor_prefix_estimate.as_ref()
+        self.record_prefix_estimate.as_ref()
     }
 
-    fn estimated_descriptor_for_row(
+    fn estimated_record_for_row(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
         row: RowIndex,
     ) -> Option<(usize, RowIndex)> {
         let total = model.total_count?;
@@ -1047,7 +1008,7 @@ impl TranscriptExtentIndex {
             return None;
         }
         let (chunk_start, chunk_end, chunk_base_rows) = self
-            .ensure_descriptor_prefix_estimate(model)?
+            .ensure_record_prefix_estimate(model)?
             .chunk_for_row(row)?;
         if chunk_start >= chunk_end {
             return None;
@@ -1058,55 +1019,55 @@ impl TranscriptExtentIndex {
         let mut hi = chunk_end;
         while lo + 1 < hi {
             let mid = lo + (hi - lo) / 2;
-            let before_mid = self.estimated_rows_for_descriptor_range(model, chunk_start..mid);
+            let before_mid = self.estimated_rows_for_record_range(model, chunk_start..mid);
             if before_mid <= target_in_chunk {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        let before_descriptor = self.estimated_rows_for_descriptor_range(model, chunk_start..lo);
-        let descriptor_start = chunk_base_rows.saturating_add(before_descriptor);
+        let before_record = self.estimated_rows_for_record_range(model, chunk_start..lo);
+        let record_start = chunk_base_rows.saturating_add(before_record);
         Some((
             lo.min(total.saturating_sub(1)),
-            row.saturating_sub(descriptor_start),
+            row.saturating_sub(record_start),
         ))
     }
 
     fn estimated_sparse_prefix_rows(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
     ) -> RowIndex {
         let end = model
             .active_range
             .as_ref()
             .map(|range| range.start)
-            .unwrap_or_else(|| model.descriptors.missing_prefix_count_for_range(None));
-        self.estimated_rows_before_descriptor(model, end)
+            .unwrap_or_else(|| model.records.missing_prefix_count_for_range(None));
+        self.estimated_rows_before_record(model, end)
     }
 
     fn estimated_sparse_suffix_rows(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
     ) -> RowIndex {
         let Some(total) = model.total_count else {
-            let count = model.descriptors.missing_suffix_count_for_range(None);
-            return (count as RowIndex).saturating_mul(model.fallback_rows_per_descriptor);
+            let count = model.records.missing_suffix_count_for_range(None);
+            return (count as RowIndex).saturating_mul(model.fallback_rows_per_record);
         };
         let start = model
             .active_range
             .as_ref()
             .map(|range| range.end)
             .unwrap_or(total);
-        self.estimated_rows_for_descriptor_range(model, start..total)
+        self.estimated_rows_for_record_range(model, start..total)
     }
 
     fn mixed_scrollbar_total_rows(
         &mut self,
-        model: &TranscriptDescriptorExtentModel<'_>,
+        model: &TranscriptRecordExtentModel<'_>,
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
-        if let Some(estimated_total) = self.estimated_total_descriptor_rows(model) {
+        if let Some(estimated_total) = self.estimated_total_record_rows(model) {
             return estimated_total;
         }
 
@@ -1117,38 +1078,35 @@ impl TranscriptExtentIndex {
 
     fn approximate_sparse_prefix_rows(
         &mut self,
-        descriptors: &SparseTranscriptDescriptors,
-        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        records: &SparseTranscriptRecords,
+        active_record_range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
         store: Option<&SqliteTranscriptStore>,
         width: u16,
     ) -> RowIndex {
-        let model =
-            self.descriptor_extent_model(descriptors, active_descriptor_range, store, width);
+        let model = self.record_extent_model(records, active_record_range, store, width);
         self.estimated_sparse_prefix_rows(&model)
     }
 
     fn approximate_sparse_suffix_rows(
         &mut self,
-        descriptors: &SparseTranscriptDescriptors,
-        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        records: &SparseTranscriptRecords,
+        active_record_range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
         store: Option<&SqliteTranscriptStore>,
         width: u16,
     ) -> RowIndex {
-        let model =
-            self.descriptor_extent_model(descriptors, active_descriptor_range, store, width);
+        let model = self.record_extent_model(records, active_record_range, store, width);
         self.estimated_sparse_suffix_rows(&model)
     }
 
     fn approximate_mixed_scrollbar_total_rows(
         &mut self,
-        descriptors: &SparseTranscriptDescriptors,
-        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        records: &SparseTranscriptRecords,
+        active_record_range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
         store: Option<&SqliteTranscriptStore>,
         width: u16,
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
-        let model =
-            self.descriptor_extent_model(descriptors, active_descriptor_range, store, width);
+        let model = self.record_extent_model(records, active_record_range, store, width);
         self.mixed_scrollbar_total_rows(&model, exact_loaded_rows)
     }
 }
@@ -1162,7 +1120,7 @@ pub(crate) struct ReasoningSummarySnapshot {
 
 pub(crate) struct TranscriptDocument {
     content: TranscriptContentState,
-    descriptors: TranscriptDescriptorState,
+    records: TranscriptRecordState,
     store_cache: TranscriptStoreCache,
     extent_index: TranscriptExtentIndex,
     viewport: TranscriptViewportRuntime,
@@ -1170,7 +1128,7 @@ pub(crate) struct TranscriptDocument {
     hydration: TranscriptHydrationState,
     pending_compaction: Option<PendingTranscriptCompaction>,
     compaction_order_index: usize,
-    compacted_descriptor_len: usize,
+    compacted_record_len: usize,
 }
 
 struct TranscriptContentState {
@@ -1179,25 +1137,25 @@ struct TranscriptContentState {
     compaction_preview_id: Option<BlockId>,
 }
 
-struct TranscriptDescriptorState {
-    sparse: SparseTranscriptDescriptors,
-    active_range: Option<Range<smelt_store::TranscriptDescriptorIndex>>,
+struct TranscriptRecordState {
+    sparse: SparseTranscriptRecords,
+    active_range: Option<Range<smelt_store::TranscriptRecordOffset>>,
     session_dir: Option<PathBuf>,
 }
 
-impl TranscriptDescriptorState {
+impl TranscriptRecordState {
     fn from_loaded(loaded: &LoadedTranscript) -> Self {
         Self {
-            sparse: SparseTranscriptDescriptors::from_loaded(loaded.descriptor_window.as_ref()),
+            sparse: SparseTranscriptRecords::from_loaded(loaded.record_window.as_ref()),
             active_range: loaded
-                .descriptor_window
+                .record_window
                 .as_ref()
                 .map(|window| window.start..window.end()),
             session_dir: loaded.session_dir.clone(),
         }
     }
 
-    fn active_range(&self) -> Option<&Range<smelt_store::TranscriptDescriptorIndex>> {
+    fn active_range(&self) -> Option<&Range<smelt_store::TranscriptRecordOffset>> {
         self.active_range.as_ref()
     }
 
@@ -1220,11 +1178,11 @@ struct TranscriptViewportRuntime {
     trace: Option<TranscriptScrollTrace>,
 }
 
-pub(crate) enum TranscriptDescriptorSaveSuffix {
+pub(crate) enum TranscriptRecordSaveSuffix {
     Unchanged,
     Suffix {
-        descriptor_start_idx: usize,
-        descriptor_records: Vec<smelt_core::TranscriptBlockRecordWithId>,
+        record_start_idx: usize,
+        records: Vec<smelt_core::TranscriptBlockRecordWithId>,
     },
 }
 
@@ -1256,7 +1214,7 @@ enum TranscriptAnchorBias {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TranscriptContentAnchor {
-    descriptor_index: usize,
+    record_index: usize,
     block_id: BlockId,
     intra_block_row: RowIndex,
     bias: TranscriptAnchorBias,
@@ -1269,7 +1227,7 @@ struct TranscriptContentAnchor {
 // content anchor; far-seek gaps clear it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptSemanticAnchor {
-    pub(crate) descriptor_index: usize,
+    pub(crate) record_index: usize,
     pub(crate) block_id: BlockId,
     pub(crate) row_offset: RowIndex,
 }
@@ -1277,7 +1235,7 @@ pub(crate) struct TranscriptSemanticAnchor {
 impl From<TranscriptContentAnchor> for TranscriptSemanticAnchor {
     fn from(anchor: TranscriptContentAnchor) -> Self {
         Self {
-            descriptor_index: anchor.descriptor_index,
+            record_index: anchor.record_index,
             block_id: anchor.block_id,
             row_offset: anchor.intra_block_row,
         }
@@ -1403,7 +1361,7 @@ pub(crate) struct TranscriptViewportProjectionInput {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TranscriptSearchAnchor {
     Content {
-        descriptor_index: usize,
+        record_index: usize,
         block_id: BlockId,
         node_index: usize,
         row_anchor: TranscriptRowAnchor,
@@ -1415,13 +1373,13 @@ impl TranscriptSearchAnchor {
     pub(crate) fn position_key(self, byte_col: usize) -> TranscriptSearchPositionKey {
         match self {
             Self::Content {
-                descriptor_index,
+                record_index,
                 node_index,
                 row_anchor,
                 ..
             } => TranscriptSearchPositionKey {
                 kind: 0,
-                major: descriptor_index as u64,
+                major: record_index as u64,
                 node_index: node_index as u64,
                 row_offset: row_anchor.row_offset,
                 byte_col,
@@ -1440,21 +1398,21 @@ impl TranscriptSearchAnchor {
         match (self, other) {
             (
                 Self::Content {
-                    descriptor_index: left_descriptor,
+                    record_index: left_record,
                     block_id: left_block,
                     node_index: left_node,
                     row_anchor: left_anchor,
                     ..
                 },
                 Self::Content {
-                    descriptor_index: right_descriptor,
+                    record_index: right_record,
                     block_id: right_block,
                     node_index: right_node,
                     row_anchor: right_anchor,
                     ..
                 },
             ) => {
-                left_descriptor == right_descriptor
+                left_record == right_record
                     && left_block == right_block
                     && left_node == right_node
                     && left_anchor == right_anchor
@@ -1649,17 +1607,17 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn from_loaded_transcript(loaded: LoadedTranscript) -> Self {
-        if let Some(window) = loaded.descriptor_window.as_ref() {
-            record_descriptor_window_metrics(window);
+        if let Some(window) = loaded.record_window.as_ref() {
+            record_record_window_metrics(window);
         }
-        let descriptors = TranscriptDescriptorState::from_loaded(&loaded);
+        let records = TranscriptRecordState::from_loaded(&loaded);
         let mut document = Self {
             content: TranscriptContentState {
                 transcript: loaded.transcript,
                 projection: crate::content::transcript_buf::TranscriptProjection::new(),
                 compaction_preview_id: None,
             },
-            descriptors,
+            records,
             store_cache: TranscriptStoreCache::default(),
             extent_index: TranscriptExtentIndex::default(),
             viewport: TranscriptViewportRuntime::default(),
@@ -1667,18 +1625,18 @@ impl TranscriptDocument {
             hydration: TranscriptHydrationState::default(),
             pending_compaction: None,
             compaction_order_index: 0,
-            compacted_descriptor_len: 0,
+            compacted_record_len: 0,
         };
         document
             .content
             .projection
             .set_memory_budget(document.memory_budget.rendered_rows);
-        if let Some(active_range) = document.descriptors.active_range().cloned() {
+        if let Some(active_range) = document.records.active_range().cloned() {
             document
-                .descriptors
+                .records
                 .sparse
-                .enforce_byte_budget(&active_range, document.memory_budget.descriptor_windows);
-            document.install_active_descriptor_projection();
+                .enforce_byte_budget(&active_range, document.memory_budget.record_windows);
+            document.install_active_record_projection();
         }
         document
     }
@@ -1702,24 +1660,24 @@ impl TranscriptDocument {
         self.content
             .projection
             .set_memory_budget(budget.rendered_rows);
-        if let Some(active) = self.descriptors.active_range().cloned() {
-            self.descriptors.sparse.touch_range(&active);
-            self.descriptors
+        if let Some(active) = self.records.active_range().cloned() {
+            self.records.sparse.touch_range(&active);
+            self.records
                 .sparse
-                .enforce_byte_budget(&active, budget.descriptor_windows);
+                .enforce_byte_budget(&active, budget.record_windows);
         }
         self.enforce_hydrated_budget();
     }
 
     pub(crate) fn set_session_dir(&mut self, session_dir: PathBuf) {
-        if self.descriptors.session_dir.as_ref() != Some(&session_dir) {
-            self.descriptors.session_dir = Some(session_dir);
+        if self.records.session_dir.as_ref() != Some(&session_dir) {
+            self.records.session_dir = Some(session_dir);
             self.store_cache = TranscriptStoreCache::default();
         }
     }
 
     pub(crate) fn session_dir(&self) -> Option<&std::path::Path> {
-        self.descriptors.session_dir.as_deref()
+        self.records.session_dir.as_deref()
     }
 
     fn touch_hydrated(&mut self, ids: &[BlockId]) {
@@ -1741,11 +1699,11 @@ impl TranscriptDocument {
                     history
                         .stored_ref(id)
                         .cloned()
-                        .map(|stored| (stored.descriptor_index, id, stored))
+                        .map(|stored| (stored.record_index, id, stored))
                 })?
             })
             .collect::<Vec<_>>();
-        requested.sort_unstable_by_key(|(descriptor_index, _, _)| *descriptor_index);
+        requested.sort_unstable_by_key(|(record_index, _, _)| *record_index);
         requested.dedup_by_key(|(_, id, _)| *id);
         if requested.is_empty() {
             self.touch_hydrated(ids);
@@ -1756,34 +1714,34 @@ impl TranscriptDocument {
         }
 
         let mut ranges = Vec::<Range<usize>>::new();
-        for (descriptor_index, _, _) in &requested {
+        for (record_index, _, _) in &requested {
             match ranges.last_mut() {
-                Some(range) if range.end == *descriptor_index => {
+                Some(range) if range.end == *record_index => {
                     range.end = range.end.saturating_add(1);
                 }
-                Some(range) if range.end > *descriptor_index => {}
-                _ => ranges.push(*descriptor_index..descriptor_index.saturating_add(1)),
+                Some(range) if range.end > *record_index => {}
+                _ => ranges.push(*record_index..record_index.saturating_add(1)),
             }
         }
         let requested_by_id = requested
             .into_iter()
             .map(|(_, id, stored)| (id, stored))
             .collect::<HashMap<_, _>>();
-        let total_count = self.descriptors.total_count().unwrap_or_else(|| {
-            self.compacted_descriptor_len
-                .max(self.content.transcript.history.persisted_descriptor_count())
+        let total_count = self.records.total_count().unwrap_or_else(|| {
+            self.compacted_record_len
+                .max(self.content.transcript.history.persisted_block_count())
         });
         if total_count == 0 {
             return false;
         }
-        let session_dir = self.descriptors.session_dir.clone();
+        let session_dir = self.records.session_dir.clone();
         let hydration_started_at = Instant::now();
         let mut hydrated = 0_u64;
         let mut hydrated_bytes = 0_u64;
         for range in ranges {
             let Some(records) = self.store_cache.read_hydration_records(
                 session_dir.as_ref(),
-                smelt_store::TranscriptDescriptorRange::from(range),
+                smelt_store::TranscriptRecordRange::from(range),
                 total_count,
             ) else {
                 smelt_perf::perf::record_value("transcript:block_cache:hydration_failures", 1);
@@ -1897,8 +1855,8 @@ impl TranscriptDocument {
         summary
     }
 
-    pub(crate) fn pin_descriptor_suffix_for_save(&mut self) -> Result<Vec<BlockId>, String> {
-        let Some(start) = self.content.transcript.history.descriptor_dirty_from() else {
+    pub(crate) fn pin_record_suffix_for_save(&mut self) -> Result<Vec<BlockId>, String> {
+        let Some(start) = self.content.transcript.history.record_dirty_from() else {
             return Ok(Vec::new());
         };
         let ids = self
@@ -1914,7 +1872,7 @@ impl TranscriptDocument {
         if self.pin_operation_blocks(&ids) {
             Ok(ids)
         } else {
-            Err("hydrate canonical transcript descriptor suffix".to_string())
+            Err("hydrate canonical transcript record suffix".to_string())
         }
     }
 
@@ -1972,20 +1930,20 @@ impl TranscriptDocument {
 
     pub(crate) fn memory_snapshot(&self) -> TranscriptMemorySnapshot {
         let history = &self.content.transcript.history;
-        let mut descriptor_window_bytes = 0;
+        let mut record_window_bytes = 0;
         let mut seen = HashSet::new();
-        for record in self.descriptors.sparse.records.values() {
+        for record in self.records.sparse.records.values() {
             if seen.insert(Arc::as_ptr(&record.stored) as usize) {
-                descriptor_window_bytes += record.stored.retained_bytes();
+                record_window_bytes += record.stored.retained_bytes();
             }
         }
-        let mut compact_descriptor_bytes = 0;
+        let mut compact_record_bytes = 0;
         for id in &history.order {
             let Some(stored) = history.stored_ref(*id) else {
                 continue;
             };
             if seen.insert(Arc::as_ptr(stored) as usize) {
-                compact_descriptor_bytes += stored.retained_bytes();
+                compact_record_bytes += stored.retained_bytes();
             }
         }
         let pinned_hydrated_bytes = history
@@ -2002,16 +1960,16 @@ impl TranscriptDocument {
             stored_blocks: history.stored_block_count(),
             hydrated_blocks: history.hydrated_block_count(),
             hydrated_budget_bytes: self.memory_budget.hydrated_blocks,
-            descriptor_budget_bytes: self.memory_budget.descriptor_windows,
+            record_budget_bytes: self.memory_budget.record_windows,
             rendered_budget_bytes: self.memory_budget.rendered_rows,
             live_block_bytes: history.live_block_retained_bytes(),
             live_tool_state_bytes: history.live_tool_state_retained_bytes(),
             hydrated_block_bytes,
             hydrated_tool_state_bytes,
-            compact_descriptor_bytes,
-            descriptor_window_bytes,
+            compact_record_bytes,
+            record_window_bytes,
             tool_state_metadata_bytes: history.tool_state_metadata_retained_bytes(),
-            origin_hash_bytes: history.origin_hash_retained_bytes(),
+            block_metadata_bytes: history.block_metadata_retained_bytes(),
             layout_bytes: render.layout_bytes,
             source_view_bytes: render.source_view_bytes,
             height_index_bytes: render.height_index_bytes,
@@ -2025,8 +1983,8 @@ impl TranscriptDocument {
                 .saturating_add(render.visible_rows_bytes),
             hydrated_oversize_debt_bytes: hydrated_cache_bytes
                 .saturating_sub(self.memory_budget.hydrated_blocks),
-            descriptor_oversize_debt_bytes: descriptor_window_bytes
-                .saturating_sub(self.memory_budget.descriptor_windows),
+            record_oversize_debt_bytes: record_window_bytes
+                .saturating_sub(self.memory_budget.record_windows),
             rendered_oversize_debt_bytes: render.oversize_debt_bytes,
             hydration_reads: self.hydration.hydration_reads,
             hydration_ranges: self.hydration.hydration_ranges,
@@ -2068,20 +2026,20 @@ impl TranscriptDocument {
                 snapshot.hydrated_tool_state_bytes as u64,
             ),
             (
-                "transcript:memory:compact_descriptor_bytes",
-                snapshot.compact_descriptor_bytes as u64,
+                "transcript:memory:compact_record_bytes",
+                snapshot.compact_record_bytes as u64,
             ),
             (
-                "transcript:memory:descriptor_window_bytes",
-                snapshot.descriptor_window_bytes as u64,
+                "transcript:memory:record_window_bytes",
+                snapshot.record_window_bytes as u64,
             ),
             (
                 "transcript:memory:tool_state_metadata_bytes",
                 snapshot.tool_state_metadata_bytes as u64,
             ),
             (
-                "transcript:memory:origin_hash_bytes",
-                snapshot.origin_hash_bytes as u64,
+                "transcript:memory:block_metadata_bytes",
+                snapshot.block_metadata_bytes as u64,
             ),
             (
                 "transcript:memory:layout_bytes",
@@ -2120,8 +2078,8 @@ impl TranscriptDocument {
                 self.memory_budget.hydrated_blocks as u64,
             ),
             (
-                "transcript:memory:descriptor_budget_bytes",
-                self.memory_budget.descriptor_windows as u64,
+                "transcript:memory:record_budget_bytes",
+                self.memory_budget.record_windows as u64,
             ),
             (
                 "transcript:memory:rendered_budget_bytes",
@@ -2132,8 +2090,8 @@ impl TranscriptDocument {
                 snapshot.hydrated_oversize_debt_bytes as u64,
             ),
             (
-                "transcript:memory:descriptor_oversize_debt_bytes",
-                snapshot.descriptor_oversize_debt_bytes as u64,
+                "transcript:memory:record_oversize_debt_bytes",
+                snapshot.record_oversize_debt_bytes as u64,
             ),
             (
                 "transcript:memory:rendered_oversize_debt_bytes",
@@ -2175,32 +2133,32 @@ impl TranscriptDocument {
 
     pub(crate) fn schedule_durable_compaction(
         &mut self,
-        descriptor_len: usize,
+        record_len: usize,
         dirty_from: Option<usize>,
     ) {
         let mut next_order_index = self.compaction_order_index;
-        let mut next_descriptor_index = self.compacted_descriptor_len;
+        let mut next_record_index = self.compacted_record_len;
         if let Some(dirty_from) = dirty_from.filter(|dirty| *dirty < next_order_index) {
             next_order_index = dirty_from;
-            next_descriptor_index = self
+            next_record_index = self
                 .content
                 .transcript
                 .history
-                .descriptor_record_index_for_order_index(dirty_from);
+                .record_index_for_order_index(dirty_from);
         }
         match self.pending_compaction.as_mut() {
             Some(pending) => {
-                pending.descriptor_len = pending.descriptor_len.max(descriptor_len);
+                pending.record_len = pending.record_len.max(record_len);
                 if next_order_index < pending.next_order_index {
                     pending.next_order_index = next_order_index;
-                    pending.next_descriptor_index = next_descriptor_index;
+                    pending.next_record_index = next_record_index;
                 }
             }
             None => {
                 self.pending_compaction = Some(PendingTranscriptCompaction {
-                    descriptor_len,
+                    record_len,
                     next_order_index,
-                    next_descriptor_index,
+                    next_record_index,
                 });
             }
         }
@@ -2217,12 +2175,12 @@ impl TranscriptDocument {
         while visited < TRANSCRIPT_IDLE_COMPACTION_BLOCKS
             && released_bytes < TRANSCRIPT_IDLE_COMPACTION_BYTES
         {
-            if pending.next_descriptor_index >= pending.descriptor_len {
+            if pending.next_record_index >= pending.record_len {
                 break;
             }
             let history = &self.content.transcript.history;
             if history
-                .descriptor_dirty_from()
+                .record_dirty_from()
                 .is_some_and(|dirty_from| pending.next_order_index >= dirty_from)
             {
                 break;
@@ -2231,14 +2189,14 @@ impl TranscriptDocument {
                 break;
             };
             if let Some(stored) = self.content.transcript.history.stored_ref(id) {
-                pending.next_descriptor_index = stored.descriptor_index.saturating_add(1);
+                pending.next_record_index = stored.record_index.saturating_add(1);
                 pending.next_order_index = pending.next_order_index.saturating_add(1);
                 visited += 1;
                 progressed = true;
                 continue;
             }
             let temporarily_pinned = self.hydration.is_pinned(id)
-                || history.status(id) == Status::Streaming
+                || history.status(id) == Some(Status::Streaming)
                 || history.tool_call_id(id).is_some_and(|call_id| {
                     history.tool_status(call_id).is_some_and(|status| {
                         !matches!(
@@ -2256,7 +2214,7 @@ impl TranscriptDocument {
             {
                 break;
             }
-            let stored = history.stored_ref_for_materialized(id, pending.next_descriptor_index);
+            let stored = history.stored_ref_for_materialized(id, pending.next_record_index);
             let Some(stored) = stored else {
                 pending.next_order_index = pending.next_order_index.saturating_add(1);
                 visited += 1;
@@ -2272,7 +2230,7 @@ impl TranscriptDocument {
                 break;
             }
             released_bytes = released_bytes.saturating_add(released);
-            pending.next_descriptor_index = pending.next_descriptor_index.saturating_add(1);
+            pending.next_record_index = pending.next_record_index.saturating_add(1);
             pending.next_order_index = pending.next_order_index.saturating_add(1);
             visited += 1;
             progressed = true;
@@ -2284,8 +2242,8 @@ impl TranscriptDocument {
                 .saturating_add(released as u64);
         }
         self.compaction_order_index = pending.next_order_index;
-        self.compacted_descriptor_len = pending.next_descriptor_index;
-        if pending.next_descriptor_index < pending.descriptor_len {
+        self.compacted_record_len = pending.next_record_index;
+        if pending.next_record_index < pending.record_len {
             self.pending_compaction = Some(pending);
         }
         smelt_perf::perf::record_value(
@@ -2303,39 +2261,37 @@ impl TranscriptDocument {
         progressed
     }
 
-    pub(crate) fn load_descriptor_window(
+    pub(crate) fn load_record_window(
         &mut self,
-        range: smelt_store::TranscriptDescriptorRange,
-    ) -> Option<LoadedDescriptorWindow> {
-        let total_count = self.descriptors.total_count()?;
-        let slice = self.store_cache.read_descriptor_slice(
-            self.descriptors.session_dir(),
-            range,
-            total_count,
-        )?;
-        LoadedDescriptorWindow::from_slice(slice)
+        range: smelt_store::TranscriptRecordRange,
+    ) -> Option<LoadedRecordWindow> {
+        let total_count = self.records.total_count()?;
+        let slice =
+            self.store_cache
+                .read_record_slice(self.records.session_dir(), range, total_count)?;
+        LoadedRecordWindow::from_slice(slice)
     }
 
-    fn merge_descriptor_cache_window(&mut self, window: &LoadedDescriptorWindow) -> bool {
-        let previous_total = self.descriptors.total_count();
-        if !self.descriptors.sparse.merge(window) {
+    fn merge_record_cache_window(&mut self, window: &LoadedRecordWindow) -> bool {
+        let previous_total = self.records.total_count();
+        if !self.records.sparse.merge(window) {
             return false;
         }
-        if previous_total != self.descriptors.total_count() {
-            self.extent_index.clear_persisted_descriptor_estimates();
+        if previous_total != self.records.total_count() {
+            self.extent_index.clear_persisted_record_estimates();
         }
-        record_descriptor_window_metrics(window);
+        record_record_window_metrics(window);
         true
     }
 
     #[cfg(test)]
-    pub(crate) fn merge_descriptor_window(&mut self, window: LoadedDescriptorWindow) -> bool {
+    pub(crate) fn merge_record_window(&mut self, window: LoadedRecordWindow) -> bool {
         let active_range = window.start..window.end();
-        if !self.merge_descriptor_cache_window(&window) {
+        if !self.merge_record_cache_window(&window) {
             return false;
         }
-        self.descriptors.active_range = Some(active_range);
-        self.install_active_descriptor_projection();
+        self.records.active_range = Some(active_range);
+        self.install_active_record_projection();
         true
     }
 
@@ -2650,26 +2606,26 @@ impl TranscriptDocument {
     ) -> Option<TranscriptSemanticAnchor> {
         match intent {
             TranscriptScrollIntent::RevealBlock {
-                descriptor_index,
+                record_index,
                 block_id,
                 row_offset,
                 ..
             } => Some(TranscriptSemanticAnchor {
-                descriptor_index: *descriptor_index,
+                record_index: *record_index,
                 block_id: *block_id,
                 row_offset: *row_offset,
             }),
             TranscriptScrollIntent::SearchJump {
                 anchor:
                     TranscriptSearchAnchor::Content {
-                        descriptor_index,
+                        record_index,
                         block_id,
                         row_anchor,
                         ..
                     },
                 ..
             } => Some(TranscriptSemanticAnchor {
-                descriptor_index: *descriptor_index,
+                record_index: *record_index,
                 block_id: *block_id,
                 row_offset: row_anchor.row_offset,
             }),
@@ -2677,10 +2633,10 @@ impl TranscriptDocument {
         }
     }
 
-    fn trace_descriptor_range(
-        range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-    ) -> Option<TranscriptDescriptorTraceRange> {
-        range.map(TranscriptDescriptorTraceRange::from_store_range)
+    fn trace_record_range(
+        range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
+    ) -> Option<TranscriptRecordTraceRange> {
+        range.map(TranscriptRecordTraceRange::from_store_range)
     }
 
     fn trace_anchor(anchor: TranscriptScrollAnchor) -> TranscriptTraceAnchor {
@@ -2688,7 +2644,7 @@ impl TranscriptDocument {
             TranscriptScrollAnchor::Tail => TranscriptTraceAnchor::Tail,
             TranscriptScrollAnchor::Content(anchor) => TranscriptTraceAnchor::Content {
                 virtual_row: anchor.fallback_row,
-                descriptor_index: anchor.descriptor_index,
+                record_index: anchor.record_index,
                 block_id: anchor.block_id,
                 node_id: anchor.row_anchor.id,
                 row_offset: anchor.intra_block_row,
@@ -2740,8 +2696,7 @@ impl TranscriptDocument {
             )
         };
         let viewport_anchor_before = self.viewport.state.top_anchor.map(Self::trace_anchor);
-        let active_descriptor_range_before =
-            Self::trace_descriptor_range(self.descriptors.active_range());
+        let active_record_range_before = Self::trace_record_range(self.records.active_range());
         let prefix_estimate_before = self.approximate_sparse_prefix_row_offset(width);
         let suffix_estimate_before = self.approximate_sparse_suffix_rows(width);
         let exact_observation_count = self.extent_index.exact_observation_count();
@@ -2751,7 +2706,7 @@ impl TranscriptDocument {
                 input,
                 viewport_anchor_before,
                 projection_target,
-                active_descriptor_range_before,
+                active_record_range_before,
                 prefix_estimate_before,
                 suffix_estimate_before,
                 exact_observation_count,
@@ -2779,8 +2734,7 @@ impl TranscriptDocument {
             .min(rows.total_rows.saturating_sub(1));
         let last_visible_content_anchor =
             self.trace_visible_content_anchor_at_row(lua, ctx.width, last_visible_row);
-        let active_descriptor_range_after =
-            Self::trace_descriptor_range(self.descriptors.active_range());
+        let active_record_range_after = Self::trace_record_range(self.records.active_range());
         let viewport_anchor_after = self.viewport.state.top_anchor.map(Self::trace_anchor);
         let visible_record_or_block_ids = self.visible_block_ids_for_virtual_range(
             rows.clamped_scroll..rows.clamped_scroll.saturating_add(viewport_rows),
@@ -2793,7 +2747,7 @@ impl TranscriptDocument {
         let frame = trace_frame.finish(
             rows.clamped_scroll,
             viewport_anchor_after,
-            active_descriptor_range_after,
+            active_record_range_after,
             rows.materialized_range(),
             placeholder_rows_visible,
             first_visible_content_anchor,
@@ -2834,10 +2788,10 @@ impl TranscriptDocument {
             .collect()
     }
 
-    fn install_active_descriptor_projection(&mut self) {
-        let records = self.descriptors.records_for_active_range();
+    fn install_active_record_projection(&mut self) {
+        let records = self.records.records_for_active_range();
         smelt_perf::perf::record_value(
-            "transcript:descriptor_window:active_records",
+            "transcript:record_window:active_records",
             records.len() as u64,
         );
         if records.is_empty() {
@@ -2856,18 +2810,18 @@ impl TranscriptDocument {
         self.content.projection.set_inline_options(inline_options);
     }
 
-    fn approximate_average_descriptor_rows(&self, width: u16) -> RowIndex {
+    fn approximate_average_record_rows(&self, width: u16) -> RowIndex {
         self.extent_index
-            .fallback_average_rows_per_loaded_descriptor(&self.descriptors.sparse, width)
+            .fallback_average_rows_per_loaded_record(&self.records.sparse, width)
     }
 
     fn approximate_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
         let store = self
             .store_cache
-            .store_for_session(self.descriptors.session_dir());
+            .store_for_session(self.records.session_dir());
         self.extent_index.approximate_sparse_prefix_rows(
-            &self.descriptors.sparse,
-            self.descriptors.active_range(),
+            &self.records.sparse,
+            self.records.active_range(),
             store,
             width,
         )
@@ -2876,19 +2830,19 @@ impl TranscriptDocument {
     fn approximate_sparse_suffix_rows(&mut self, width: u16) -> RowIndex {
         let store = self
             .store_cache
-            .store_for_session(self.descriptors.session_dir());
+            .store_for_session(self.records.session_dir());
         self.extent_index.approximate_sparse_suffix_rows(
-            &self.descriptors.sparse,
-            self.descriptors.active_range(),
+            &self.records.sparse,
+            self.records.active_range(),
             store,
             width,
         )
     }
 
-    fn observe_exact_loaded_descriptor_rows(&mut self) {
+    fn observe_exact_loaded_record_rows(&mut self) {
         let snapshot = self.content.projection.exact_height_snapshot();
         self.extent_index
-            .observe_exact_loaded_descriptor_rows(&self.descriptors.sparse, snapshot);
+            .observe_exact_loaded_record_rows(&self.records.sparse, snapshot);
     }
 
     fn approximate_mixed_scrollbar_total_rows(
@@ -2898,10 +2852,10 @@ impl TranscriptDocument {
     ) -> RowIndex {
         let store = self
             .store_cache
-            .store_for_session(self.descriptors.session_dir());
+            .store_for_session(self.records.session_dir());
         self.extent_index.approximate_mixed_scrollbar_total_rows(
-            &self.descriptors.sparse,
-            self.descriptors.active_range(),
+            &self.records.sparse,
+            self.records.active_range(),
             store,
             width,
             exact_loaded_rows,
@@ -2929,7 +2883,7 @@ impl TranscriptDocument {
     }
 
     fn clear_transcript_layout_caches(&mut self) {
-        self.extent_index.clear_exact_local_descriptor_rows();
+        self.extent_index.clear_exact_local_record_rows();
     }
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
@@ -3006,12 +2960,12 @@ impl TranscriptDocument {
         rows: crate::smelt_edit::RowIndex,
     ) -> Option<TranscriptBlockSnapshot> {
         let history = self.history();
-        let descriptor_index = self
-            .descriptor_index_for_block_id(block_id)
-            .or_else(|| self.stored_descriptor_index_for_block_idx(block_id.get()))
+        let record_index = self
+            .record_index_for_block_id(block_id)
+            .or_else(|| self.stored_record_index_for_block_idx(block_id.get()))
             .or_else(|| history.order.iter().position(|id| *id == block_id))?;
         Some(TranscriptBlockSnapshot {
-            descriptor_index,
+            record_index,
             block_id,
             role: history.block_kind(block_id)?,
             first_row,
@@ -3059,80 +3013,67 @@ impl TranscriptDocument {
             return None;
         }
         Some(TranscriptNavigationBlock {
-            descriptor_index: index,
+            record_index: index,
             block_id: record.block_id,
             role: record.stored.kind.as_str(),
             first_line,
         })
     }
 
-    fn descriptor_index_for_block_id(&self, block_id: BlockId) -> Option<usize> {
-        if let Some(index) = self
-            .descriptors
-            .sparse
-            .descriptor_index_for_block_id(block_id)
-        {
+    fn record_index_for_block_id(&self, block_id: BlockId) -> Option<usize> {
+        if let Some(index) = self.records.sparse.record_index_for_block_id(block_id) {
             return Some(index.get());
         }
-        if self.descriptors.total_count().is_none() {
+        if self.records.total_count().is_none() {
             return self.history().order.iter().position(|id| *id == block_id);
         }
         None
     }
 
-    pub(crate) fn descriptor_matches_block_id(
-        &self,
-        descriptor_index: usize,
-        block_id: BlockId,
-    ) -> bool {
-        if self.descriptors.total_count().is_none() {
-            return self.history().order.get(descriptor_index).copied() == Some(block_id);
+    pub(crate) fn record_matches_block_id(&self, record_index: usize, block_id: BlockId) -> bool {
+        if self.records.total_count().is_none() {
+            return self.history().order.get(record_index).copied() == Some(block_id);
         }
-        if let Some(record) =
-            self.descriptors
-                .sparse
-                .record(smelt_store::TranscriptDescriptorIndex::new(
-                    descriptor_index,
-                ))
+        if let Some(record) = self
+            .records
+            .sparse
+            .record(smelt_store::TranscriptRecordOffset::new(record_index))
         {
             return record.block_id == block_id;
         }
-        self.stored_descriptor_index_for_block_idx(block_id.get()) == Some(descriptor_index)
+        self.stored_record_index_for_block_idx(block_id.get()) == Some(record_index)
     }
 
-    fn stored_descriptor_index_for_block_idx(&self, block_idx: u64) -> Option<usize> {
-        let session_dir = self.descriptors.session_dir()?.clone();
+    fn stored_record_index_for_block_idx(&self, block_idx: u64) -> Option<usize> {
+        let session_dir = self.records.session_dir()?.clone();
         let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
-        db.transcript_descriptor_index_for_block_idx(block_idx)
+        db.transcript_record_index_for_block_idx(block_idx)
             .ok()
             .flatten()
             .map(|index| index.get())
     }
 
-    pub(crate) fn activate_descriptor_window_for_block_idx(
+    pub(crate) fn activate_record_window_for_block_idx(
         &mut self,
         width: u16,
         block_idx: u64,
         viewport_rows: u16,
     ) -> bool {
-        if self.descriptors.total_count().is_none() {
+        if self.records.total_count().is_none() {
             return false;
         }
-        let descriptor_index = self
-            .descriptor_index_for_block_id(BlockId::new(block_idx))
-            .or_else(|| self.stored_descriptor_index_for_block_idx(block_idx));
-        let Some(descriptor_index) = descriptor_index else {
+        let record_index = self
+            .record_index_for_block_id(BlockId::new(block_idx))
+            .or_else(|| self.stored_record_index_for_block_idx(block_idx));
+        let Some(record_index) = record_index else {
             return false;
         };
-        let Some(range) = self.descriptor_window_range_around_center(
-            width,
-            descriptor_index,
-            viewport_rows,
-            true,
-        ) else {
+        let Some(range) =
+            self.record_window_range_around_center(width, record_index, viewport_rows, true)
+        else {
             return false;
         };
-        self.activate_descriptor_window_range(range)
+        self.activate_record_window_range(range)
     }
 
     fn content_anchor_at_row(
@@ -3144,9 +3085,9 @@ impl TranscriptDocument {
     ) -> Option<TranscriptContentAnchor> {
         let row_anchor = self.row_anchor_at_row(lua, width, row)?;
         let block_id = row_anchor.id.as_block_id()?;
-        let descriptor_index = self.descriptor_index_for_block_id(block_id)?;
+        let record_index = self.record_index_for_block_id(block_id)?;
         Some(TranscriptContentAnchor {
-            descriptor_index,
+            record_index,
             block_id,
             intra_block_row: row_anchor.row_offset,
             bias,
@@ -3172,14 +3113,14 @@ impl TranscriptDocument {
         else {
             return TranscriptSearchAnchor::EstimatedRow(row);
         };
-        let Some(descriptor_index) = self
-            .descriptor_index_for_block_id(block_id)
-            .or_else(|| self.stored_descriptor_index_for_block_idx(block_id.get()))
+        let Some(record_index) = self
+            .record_index_for_block_id(block_id)
+            .or_else(|| self.stored_record_index_for_block_idx(block_id.get()))
         else {
             return TranscriptSearchAnchor::EstimatedRow(row);
         };
         TranscriptSearchAnchor::Content {
-            descriptor_index,
+            record_index,
             block_id,
             node_index: node.index,
             row_anchor: TranscriptRowAnchor {
@@ -3196,14 +3137,14 @@ impl TranscriptDocument {
         viewport_rows: u16,
         anchor: TranscriptContentAnchor,
     ) -> Option<RowIndex> {
-        if self.descriptors.total_count().is_some() {
-            let range = self.descriptor_window_range_around_center(
+        if self.records.total_count().is_some() {
+            let range = self.record_window_range_around_center(
                 width,
-                anchor.descriptor_index,
+                anchor.record_index,
                 viewport_rows,
                 true,
             )?;
-            let _ = self.activate_descriptor_window_range(range);
+            let _ = self.activate_record_window_range(range);
         }
         self.row_for_anchor(lua, width, anchor.row_anchor)
     }
@@ -3233,7 +3174,7 @@ impl TranscriptDocument {
                 let end = first_row.saturating_add(*rows);
                 *first_row < visible_end && end > top_row
             })?;
-        let descriptor_index = self.descriptor_index_for_block_id(block_id)?;
+        let record_index = self.record_index_for_block_id(block_id)?;
         let intra_block_row = top_row
             .saturating_sub(first_row)
             .min(rows.saturating_sub(1));
@@ -3249,7 +3190,7 @@ impl TranscriptDocument {
         };
         Some((
             TranscriptContentAnchor {
-                descriptor_index,
+                record_index,
                 block_id,
                 intra_block_row,
                 bias: TranscriptAnchorBias::Top,
@@ -3270,23 +3211,21 @@ impl TranscriptDocument {
 
         if let Some(TranscriptScrollAnchor::Content(anchor)) = self.viewport.state.top_anchor {
             return Some(TranscriptSemanticAnchor {
-                descriptor_index: anchor.descriptor_index,
+                record_index: anchor.record_index,
                 block_id: anchor.block_id,
                 row_offset: anchor.intra_block_row,
             });
         }
 
-        if let Some(active) = self.descriptors.active_range() {
-            let descriptor_index = active.start.get();
-            if let Some(record) =
-                self.descriptors
-                    .sparse
-                    .record(smelt_store::TranscriptDescriptorIndex::new(
-                        descriptor_index,
-                    ))
+        if let Some(active) = self.records.active_range() {
+            let record_index = active.start.get();
+            if let Some(record) = self
+                .records
+                .sparse
+                .record(smelt_store::TranscriptRecordOffset::new(record_index))
             {
                 return Some(TranscriptSemanticAnchor {
-                    descriptor_index,
+                    record_index,
                     block_id: record.block_id,
                     row_offset: 0,
                 });
@@ -3298,7 +3237,7 @@ impl TranscriptDocument {
             .first()
             .copied()
             .map(|block_id| TranscriptSemanticAnchor {
-                descriptor_index: 0,
+                record_index: 0,
                 block_id,
                 row_offset: 0,
             })
@@ -3310,17 +3249,17 @@ impl TranscriptDocument {
         anchor_index: usize,
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, StoredBlockWithId)> {
-        let session_dir = self.descriptors.session_dir()?.clone();
+        let session_dir = self.records.session_dir()?.clone();
         let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
         let record = match direction {
             TranscriptNavigationDirection::Previous => {
                 let before = anchor_index.checked_sub(1)?;
-                db.read_transcript_descriptor_before_kind_at_index(role, before as u64)
+                db.read_transcript_record_before_kind_at_index(role, before as u64)
                     .ok()
                     .flatten()?
             }
             TranscriptNavigationDirection::Next => db
-                .read_transcript_descriptor_after_kind_at_index(
+                .read_transcript_record_after_kind_at_index(
                     role,
                     anchor_index.saturating_add(1) as u64,
                 )
@@ -3328,7 +3267,7 @@ impl TranscriptDocument {
                 .flatten()?,
         };
         let index = db
-            .transcript_descriptor_index_for_block_idx(record.block_idx)
+            .transcript_record_index_for_block_idx(record.block_idx)
             .ok()
             .flatten()?
             .get();
@@ -3373,28 +3312,28 @@ impl TranscriptDocument {
             return None;
         }
 
-        if self.descriptors.total_count().is_some() {
-            let record =
-                self.descriptors
-                    .sparse
-                    .record(smelt_store::TranscriptDescriptorIndex::new(
-                        anchor.descriptor_index,
-                    ))?;
+        if self.records.total_count().is_some() {
+            let record = self
+                .records
+                .sparse
+                .record(smelt_store::TranscriptRecordOffset::new(
+                    anchor.record_index,
+                ))?;
             if record.block_id != anchor.block_id || record.stored.kind.as_str() != role {
                 return None;
             }
-            return Self::navigation_block_from_record(anchor.descriptor_index, record);
+            return Self::navigation_block_from_record(anchor.record_index, record);
         }
 
         let history = self.history();
-        if history.order.get(anchor.descriptor_index).copied() != Some(anchor.block_id)
+        if history.order.get(anchor.record_index).copied() != Some(anchor.block_id)
             || transcript_history_role(history, anchor.block_id) != role
         {
             return None;
         }
         let first_line = transcript_raw_first_line(history, anchor.block_id);
         (!first_line.is_empty()).then_some(TranscriptNavigationBlock {
-            descriptor_index: anchor.descriptor_index,
+            record_index: anchor.record_index,
             block_id: anchor.block_id,
             role: transcript_history_role(history, anchor.block_id),
             first_line,
@@ -3414,15 +3353,13 @@ impl TranscriptDocument {
             }
         }
 
-        if self.descriptors.total_count().is_some() {
-            let descriptor_anchor =
-                smelt_store::TranscriptDescriptorIndex::new(anchor.descriptor_index);
-            let loaded =
-                self.descriptors
-                    .sparse
-                    .navigation_record(role, descriptor_anchor, direction);
-            let stored =
-                self.navigation_record_from_store(role, anchor.descriptor_index, direction);
+        if self.records.total_count().is_some() {
+            let record_anchor = smelt_store::TranscriptRecordOffset::new(anchor.record_index);
+            let loaded = self
+                .records
+                .sparse
+                .navigation_record(role, record_anchor, direction);
+            let stored = self.navigation_record_from_store(role, anchor.record_index, direction);
             let (index, record) = Self::choose_navigation_record(loaded, stored, direction)?;
             return Self::navigation_block_from_record(index, &record);
         }
@@ -3435,7 +3372,7 @@ impl TranscriptDocument {
                     .iter()
                     .copied()
                     .enumerate()
-                    .take(anchor.descriptor_index)
+                    .take(anchor.record_index)
                     .rev(),
             ),
             TranscriptNavigationDirection::Next => Box::new(
@@ -3444,7 +3381,7 @@ impl TranscriptDocument {
                     .iter()
                     .copied()
                     .enumerate()
-                    .skip(anchor.descriptor_index.saturating_add(1)),
+                    .skip(anchor.record_index.saturating_add(1)),
             ),
         };
         for (index, block_id) in iter {
@@ -3456,7 +3393,7 @@ impl TranscriptDocument {
                 continue;
             }
             return Some(TranscriptNavigationBlock {
-                descriptor_index: index,
+                record_index: index,
                 block_id,
                 role: transcript_history_role(history, block_id),
                 first_line,
@@ -3497,30 +3434,24 @@ impl TranscriptDocument {
         self.next_navigation_block_from(self.current_navigation_anchor()?, role)
     }
 
-    fn descriptor_block_target_row(
+    fn record_block_target_row(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        descriptor_index: usize,
+        record_index: usize,
         row_offset: RowIndex,
         viewport_rows: u16,
     ) -> Option<(BlockId, RowIndex)> {
-        let block_id = if self.descriptors.total_count().is_some() {
-            let range = self.descriptor_window_range_around_center(
-                width,
-                descriptor_index,
-                viewport_rows,
-                true,
-            )?;
-            let _ = self.activate_descriptor_window_range(range);
-            self.descriptors
+        let block_id = if self.records.total_count().is_some() {
+            let range =
+                self.record_window_range_around_center(width, record_index, viewport_rows, true)?;
+            let _ = self.activate_record_window_range(range);
+            self.records
                 .sparse
-                .record(smelt_store::TranscriptDescriptorIndex::new(
-                    descriptor_index,
-                ))?
+                .record(smelt_store::TranscriptRecordOffset::new(record_index))?
                 .block_id
         } else {
-            self.history().order.get(descriptor_index).copied()?
+            self.history().order.get(record_index).copied()?
         };
 
         let (_, first_row, rows) = self
@@ -3531,22 +3462,17 @@ impl TranscriptDocument {
         Some((block_id, first_row.saturating_add(row_offset)))
     }
 
-    pub(crate) fn descriptor_block_reveal_position(
+    pub(crate) fn record_block_reveal_position(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        descriptor_index: usize,
+        record_index: usize,
         row_offset: RowIndex,
         screen_padding_top: RowIndex,
         viewport_rows: u16,
     ) -> Option<TranscriptBlockRevealPosition> {
-        let (block_id, target_row) = self.descriptor_block_target_row(
-            lua,
-            width,
-            descriptor_index,
-            row_offset,
-            viewport_rows,
-        )?;
+        let (block_id, target_row) =
+            self.record_block_target_row(lua, width, record_index, row_offset, viewport_rows)?;
         Some(TranscriptBlockRevealPosition {
             block_id,
             target_row,
@@ -3634,22 +3560,22 @@ impl TranscriptDocument {
         self.content.projection.visible_block_layout()
     }
 
-    fn descriptor_window_count(&self, width: u16, viewport_rows: u16, total: usize) -> usize {
-        let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
-        let visible_descriptors =
+    fn record_window_count(&self, width: u16, viewport_rows: u16, total: usize) -> usize {
+        let avg_rows = self.approximate_average_record_rows(width).max(1);
+        let visible_records =
             (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
-        let count = visible_descriptors.saturating_mul(4).max(32);
-        let count = if total > TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS {
-            count.max(TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS)
+        let count = visible_records.saturating_mul(4).max(32);
+        let count = if total > TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS {
+            count.max(TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS)
         } else {
             count
         }
         .min(total);
-        if count >= TRANSCRIPT_DESCRIPTOR_PAGE_SIZE {
+        if count >= TRANSCRIPT_RECORD_PAGE_SIZE {
             count
-                .saturating_add(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE - 1)
-                .saturating_div(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
-                .saturating_mul(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .saturating_add(TRANSCRIPT_RECORD_PAGE_SIZE - 1)
+                .saturating_div(TRANSCRIPT_RECORD_PAGE_SIZE)
+                .saturating_mul(TRANSCRIPT_RECORD_PAGE_SIZE)
                 .min(total)
                 .max(1)
         } else {
@@ -3657,164 +3583,159 @@ impl TranscriptDocument {
         }
     }
 
-    fn descriptor_window_range_for_center(
+    fn record_window_range_for_center(
         &self,
         width: u16,
         center: usize,
         viewport_rows: u16,
         total: usize,
-    ) -> Range<smelt_store::TranscriptDescriptorIndex> {
-        let count = self.descriptor_window_count(width, viewport_rows, total);
+    ) -> Range<smelt_store::TranscriptRecordOffset> {
+        let count = self.record_window_count(width, viewport_rows, total);
         let mut start = center
             .saturating_sub(count / 2)
             .min(total.saturating_sub(count));
-        if count >= TRANSCRIPT_DESCRIPTOR_PAGE_SIZE {
-            start = start / TRANSCRIPT_DESCRIPTOR_PAGE_SIZE * TRANSCRIPT_DESCRIPTOR_PAGE_SIZE;
+        if count >= TRANSCRIPT_RECORD_PAGE_SIZE {
+            start = start / TRANSCRIPT_RECORD_PAGE_SIZE * TRANSCRIPT_RECORD_PAGE_SIZE;
             if start.saturating_add(count) > total {
                 start = total.saturating_sub(count);
             }
         }
         let end = start.saturating_add(count).min(total);
-        smelt_store::TranscriptDescriptorIndex::new(start)
-            ..smelt_store::TranscriptDescriptorIndex::new(end)
+        smelt_store::TranscriptRecordOffset::new(start)
+            ..smelt_store::TranscriptRecordOffset::new(end)
     }
 
-    fn descriptor_window_range_around_center(
+    fn record_window_range_around_center(
         &self,
         width: u16,
         center: usize,
         viewport_rows: u16,
         reuse_active: bool,
-    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let total = self.descriptors.total_count()?;
+    ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
+        let total = self.records.total_count()?;
         if total == 0 {
             return None;
         }
         let center = center.min(total.saturating_sub(1));
         if reuse_active {
-            if let Some(active) = self.descriptors.active_range() {
+            if let Some(active) = self.records.active_range() {
                 if active.start.get() <= center && center < active.end.get() {
                     return Some(active.clone());
                 }
             }
         }
-        Some(self.descriptor_window_range_for_center(width, center, viewport_rows, total))
+        Some(self.record_window_range_for_center(width, center, viewport_rows, total))
     }
 
-    fn estimated_descriptor_for_display_row(
+    fn estimated_record_for_display_row(
         &mut self,
         width: u16,
         row: RowIndex,
     ) -> Option<(usize, RowIndex)> {
         let store = self
             .store_cache
-            .store_for_session(self.descriptors.session_dir());
-        let model = self.extent_index.descriptor_extent_model(
-            &self.descriptors.sparse,
-            self.descriptors.active_range(),
+            .store_for_session(self.records.session_dir());
+        let model = self.extent_index.record_extent_model(
+            &self.records.sparse,
+            self.records.active_range(),
             store,
             width,
         );
-        self.extent_index.estimated_descriptor_for_row(&model, row)
+        self.extent_index.estimated_record_for_row(&model, row)
     }
 
-    fn descriptor_window_range_for_approximate_display_row(
+    fn record_window_range_for_approximate_display_row(
         &mut self,
         width: u16,
         row: RowIndex,
         viewport_rows: u16,
-    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let total = self.descriptors.total_count()?;
+    ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
+        let total = self.records.total_count()?;
         let center = self
-            .estimated_descriptor_for_display_row(width, row)
-            .map(|(descriptor_index, _)| descriptor_index)
+            .estimated_record_for_display_row(width, row)
+            .map(|(record_index, _)| record_index)
             .unwrap_or_else(|| {
-                let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
+                let avg_rows = self.approximate_average_record_rows(width).max(1);
                 ((row / avg_rows) as usize).min(total.saturating_sub(1))
             });
-        self.descriptor_window_range_around_center(width, center, viewport_rows, true)
+        self.record_window_range_around_center(width, center, viewport_rows, true)
     }
 
-    fn tail_descriptor_window_range(
+    fn tail_record_window_range(
         &self,
         width: u16,
         viewport_rows: u16,
-    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let total = self.descriptors.total_count()?;
-        if let Some(active) = self.descriptors.active_range() {
+    ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
+        let total = self.records.total_count()?;
+        if let Some(active) = self.records.active_range() {
             if active.end.get() == total {
                 return Some(active.clone());
             }
         }
-        self.descriptor_window_range_around_center(
-            width,
-            total.saturating_sub(1),
-            viewport_rows,
-            false,
-        )
+        self.record_window_range_around_center(width, total.saturating_sub(1), viewport_rows, false)
     }
 
-    fn activate_descriptor_window_range(
+    fn activate_record_window_range(
         &mut self,
-        range: Range<smelt_store::TranscriptDescriptorIndex>,
+        range: Range<smelt_store::TranscriptRecordOffset>,
     ) -> bool {
-        if self.descriptors.active_range() == Some(&range)
-            && self.descriptors.sparse.range_is_loaded(&range)
+        if self.records.active_range() == Some(&range)
+            && self.records.sparse.range_is_loaded(&range)
         {
             return false;
         }
         let mut projection_range = if self
-            .descriptors
+            .records
             .total_count()
-            .is_some_and(|total| total > TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS)
+            .is_some_and(|total| total > TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS)
         {
-            self.descriptors.sparse.cache_range_around(&range)
+            self.records.sparse.cache_range_around(&range)
         } else {
             range.clone()
         };
-        if self.descriptors.session_dir().is_none()
-            && !self.descriptors.sparse.range_is_loaded(&projection_range)
+        if self.records.session_dir().is_none()
+            && !self.records.sparse.range_is_loaded(&projection_range)
         {
             projection_range = range;
         }
-        let missing_ranges = self.descriptors.sparse.missing_ranges(&projection_range);
+        let missing_ranges = self.records.sparse.missing_ranges(&projection_range);
         let mut loaded_any = false;
         for missing in missing_ranges {
             let Some(window) =
-                self.load_descriptor_window((missing.start.get()..missing.end.get()).into())
+                self.load_record_window((missing.start.get()..missing.end.get()).into())
             else {
                 return false;
             };
-            loaded_any |= self.merge_descriptor_cache_window(&window);
+            loaded_any |= self.merge_record_cache_window(&window);
         }
-        if !self.descriptors.sparse.range_is_loaded(&projection_range) {
+        if !self.records.sparse.range_is_loaded(&projection_range) {
             return false;
         }
-        let active_changed = self.descriptors.active_range() != Some(&projection_range);
+        let active_changed = self.records.active_range() != Some(&projection_range);
         if !active_changed && !loaded_any {
             return false;
         }
-        self.descriptors.active_range = Some(projection_range.clone());
-        self.descriptors.sparse.touch_range(&projection_range);
-        self.descriptors
+        self.records.active_range = Some(projection_range.clone());
+        self.records.sparse.touch_range(&projection_range);
+        self.records
             .sparse
-            .enforce_byte_budget(&projection_range, self.memory_budget.descriptor_windows);
-        self.install_active_descriptor_projection();
+            .enforce_byte_budget(&projection_range, self.memory_budget.record_windows);
+        self.install_active_record_projection();
         true
     }
 
-    fn activate_descriptor_window_for_approximate_display_row(
+    fn activate_record_window_for_approximate_display_row(
         &mut self,
         width: u16,
         row: RowIndex,
         viewport_rows: u16,
     ) -> bool {
         let Some(range) =
-            self.descriptor_window_range_for_approximate_display_row(width, row, viewport_rows)
+            self.record_window_range_for_approximate_display_row(width, row, viewport_rows)
         else {
             return false;
         };
-        self.activate_descriptor_window_range(range)
+        self.activate_record_window_range(range)
     }
 
     fn active_virtual_row_span(
@@ -3827,9 +3748,9 @@ impl TranscriptDocument {
             &mut self.content.transcript.history,
             width,
         );
-        if self.descriptors.active_range().is_none() {
+        if self.records.active_range().is_none() {
             return self
-                .descriptors
+                .records
                 .sparse
                 .total_count()
                 .is_none()
@@ -3839,68 +3760,63 @@ impl TranscriptDocument {
         Some((row_offset, row_offset.saturating_add(loaded_rows)))
     }
 
-    fn descriptor_window_expanded_toward_row(
+    fn record_window_expanded_toward_row(
         &self,
         width: u16,
         viewport_rows: u16,
         row: RowIndex,
         loaded_start: RowIndex,
         loaded_end: RowIndex,
-    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let active = self.descriptors.active_range.clone()?;
-        let total = self.descriptors.total_count()?;
-        let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
+    ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
+        let active = self.records.active_range.clone()?;
+        let total = self.records.total_count()?;
+        let avg_rows = self.approximate_average_record_rows(width).max(1);
         let missing_rows = if row < loaded_start {
             loaded_start.saturating_sub(row)
         } else {
             row.saturating_sub(loaded_end).saturating_add(1)
         };
-        let missing_descriptors = missing_rows
+        let missing_records = missing_rows
             .saturating_add(avg_rows.saturating_sub(1))
             .saturating_div(avg_rows)
-            .max(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE as RowIndex)
-            as usize;
-        let max_descriptors = self
-            .descriptor_window_count(width, viewport_rows, total)
-            .saturating_mul(TRANSCRIPT_ACTIVE_DESCRIPTOR_WINDOW_MAX_MULTIPLIER)
+            .max(TRANSCRIPT_RECORD_PAGE_SIZE as RowIndex) as usize;
+        let max_records = self
+            .record_window_count(width, viewport_rows, total)
+            .saturating_mul(TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER)
             .min(total);
         let (mut start, mut end) = if row < loaded_start {
             (
-                active.start.get().saturating_sub(missing_descriptors),
+                active.start.get().saturating_sub(missing_records),
                 active.end.get(),
             )
         } else {
             (
                 active.start.get(),
-                active
-                    .end
-                    .get()
-                    .saturating_add(missing_descriptors)
-                    .min(total),
+                active.end.get().saturating_add(missing_records).min(total),
             )
         };
         if row < loaded_start {
-            start = start / TRANSCRIPT_DESCRIPTOR_PAGE_SIZE * TRANSCRIPT_DESCRIPTOR_PAGE_SIZE;
+            start = start / TRANSCRIPT_RECORD_PAGE_SIZE * TRANSCRIPT_RECORD_PAGE_SIZE;
         } else {
             end = end
-                .saturating_add(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE - 1)
-                .saturating_div(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
-                .saturating_mul(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .saturating_add(TRANSCRIPT_RECORD_PAGE_SIZE - 1)
+                .saturating_div(TRANSCRIPT_RECORD_PAGE_SIZE)
+                .saturating_mul(TRANSCRIPT_RECORD_PAGE_SIZE)
                 .min(total);
         }
-        if end.saturating_sub(start) > max_descriptors {
+        if end.saturating_sub(start) > max_records {
             if row < loaded_start {
-                end = start.saturating_add(max_descriptors).min(total);
+                end = start.saturating_add(max_records).min(total);
             } else {
-                start = end.saturating_sub(max_descriptors);
+                start = end.saturating_sub(max_records);
             }
         }
-        let range = smelt_store::TranscriptDescriptorIndex::new(start)
-            ..smelt_store::TranscriptDescriptorIndex::new(end);
-        (self.descriptors.active_range() != Some(&range)).then_some(range)
+        let range = smelt_store::TranscriptRecordOffset::new(start)
+            ..smelt_store::TranscriptRecordOffset::new(end);
+        (self.records.active_range() != Some(&range)).then_some(range)
     }
 
-    fn activate_descriptor_window_covering_approximate_display_row(
+    fn activate_record_window_covering_approximate_display_row(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -3908,15 +3824,14 @@ impl TranscriptDocument {
         viewport_rows: u16,
     ) {
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
-        let _ =
-            self.activate_descriptor_window_for_approximate_display_row(width, row, viewport_rows);
+        let _ = self.activate_record_window_for_approximate_display_row(width, row, viewport_rows);
         while let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) {
             let target_end = row.saturating_add(viewport_row_count);
             if row >= loaded_start && target_end <= loaded_end {
                 return;
             }
             let edge = if row < loaded_start { row } else { target_end };
-            let Some(range) = self.descriptor_window_expanded_toward_row(
+            let Some(range) = self.record_window_expanded_toward_row(
                 width,
                 viewport_rows,
                 edge,
@@ -3925,17 +3840,17 @@ impl TranscriptDocument {
             ) else {
                 return;
             };
-            if !self.activate_descriptor_window_range(range) {
+            if !self.activate_record_window_range(range) {
                 return;
             }
         }
     }
 
-    fn activate_tail_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
-        let Some(range) = self.tail_descriptor_window_range(width, viewport_rows) else {
+    fn activate_tail_record_window(&mut self, width: u16, viewport_rows: u16) -> bool {
+        let Some(range) = self.tail_record_window_range(width, viewport_rows) else {
             return false;
         };
-        self.activate_descriptor_window_range(range)
+        self.activate_record_window_range(range)
     }
 
     fn scroll_anchor_for_projection_target(
@@ -4017,8 +3932,8 @@ impl TranscriptDocument {
         rows: crate::smelt_edit::MaterializedRows,
         viewport_rows: u16,
     ) -> bool {
-        if let Some(total) = self.descriptors.total_count() {
-            let Some(active) = self.descriptors.active_range() else {
+        if let Some(total) = self.records.total_count() {
+            let Some(active) = self.records.active_range() else {
                 return false;
             };
             if active.end.get() < total {
@@ -4068,19 +3983,19 @@ impl TranscriptDocument {
             TranscriptTraceAnchor::Tail => None,
             TranscriptTraceAnchor::EstimatedRow(row) => Some(row),
             TranscriptTraceAnchor::Content {
-                descriptor_index,
+                record_index,
                 node_id,
                 row_offset,
                 ..
             } => {
-                if self.descriptors.total_count().is_some() {
-                    let range = self.descriptor_window_range_around_center(
+                if self.records.total_count().is_some() {
+                    let range = self.record_window_range_around_center(
                         width,
-                        descriptor_index,
+                        record_index,
                         viewport_rows,
                         true,
                     )?;
-                    let _ = self.activate_descriptor_window_range(range);
+                    let _ = self.activate_record_window_range(range);
                 }
                 self.row_for_anchor(
                     lua,
@@ -4105,18 +4020,18 @@ impl TranscriptDocument {
     ) -> Option<RowIndex> {
         match anchor {
             TranscriptSearchAnchor::Content {
-                descriptor_index,
+                record_index,
                 row_anchor,
                 ..
             } => {
-                if self.descriptors.total_count().is_some() {
-                    let range = self.descriptor_window_range_around_center(
+                if self.records.total_count().is_some() {
+                    let range = self.record_window_range_around_center(
                         width,
-                        descriptor_index,
+                        record_index,
                         viewport_rows,
                         true,
                     )?;
-                    let _ = self.activate_descriptor_window_range(range);
+                    let _ = self.activate_record_window_range(range);
                 }
                 let hinted_row = match hint {
                     Some(TranscriptProjectionHint::SearchProjectedRow {
@@ -4200,12 +4115,12 @@ impl TranscriptDocument {
             global_start.saturating_sub(loaded_start)..global_end.saturating_sub(loaded_start),
         );
         if changed {
-            self.observe_exact_loaded_descriptor_rows();
+            self.observe_exact_loaded_record_rows();
         }
         changed
     }
 
-    fn activate_descriptor_window_covering_local_delta(
+    fn activate_record_window_covering_local_delta(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -4228,7 +4143,7 @@ impl TranscriptDocument {
             } else {
                 target_end
             };
-            let Some(range) = self.descriptor_window_expanded_toward_row(
+            let Some(range) = self.record_window_expanded_toward_row(
                 width,
                 viewport_rows,
                 edge,
@@ -4237,7 +4152,7 @@ impl TranscriptDocument {
             ) else {
                 return changed;
             };
-            if !self.activate_descriptor_window_range(range) {
+            if !self.activate_record_window_range(range) {
                 return changed;
             }
             changed = true;
@@ -4260,12 +4175,8 @@ impl TranscriptDocument {
         let initial_row = Self::add_rows(base, rows);
         let mut row = initial_row;
         for _ in 0..MAX_LOCAL_DELTA_REBASES {
-            let expanded = self.activate_descriptor_window_covering_local_delta(
-                lua,
-                width,
-                viewport_rows,
-                row,
-            );
+            let expanded =
+                self.activate_record_window_covering_local_delta(lua, width, viewport_rows, row);
             let exactified =
                 self.exactify_local_delta_target_window(lua, width, viewport_rows, row);
             if !expanded && !exactified {
@@ -4354,7 +4265,7 @@ impl TranscriptDocument {
                     );
                 };
                 if matches!(*anchor, TranscriptTraceAnchor::EstimatedRow(_)) {
-                    self.activate_descriptor_window_covering_approximate_display_row(
+                    self.activate_record_window_covering_approximate_display_row(
                         lua,
                         width,
                         row,
@@ -4386,7 +4297,7 @@ impl TranscriptDocument {
                     );
                 };
                 if matches!(*anchor, TranscriptSearchAnchor::EstimatedRow(_)) {
-                    self.activate_descriptor_window_covering_approximate_display_row(
+                    self.activate_record_window_covering_approximate_display_row(
                         lua,
                         width,
                         row,
@@ -4407,15 +4318,15 @@ impl TranscriptDocument {
                 )
             }
             TranscriptScrollIntent::RevealBlock {
-                descriptor_index,
+                record_index,
                 block_id,
                 row_offset,
                 screen_padding_top,
             } => {
-                let Some(reveal) = self.descriptor_block_reveal_position(
+                let Some(reveal) = self.record_block_reveal_position(
                     lua,
                     width,
-                    *descriptor_index,
+                    *record_index,
                     *row_offset,
                     *screen_padding_top,
                     viewport_rows,
@@ -4574,7 +4485,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => {
                 if options.allow_sparse_placeholders {
-                    self.activate_descriptor_window_covering_approximate_display_row(
+                    self.activate_record_window_covering_approximate_display_row(
                         lua,
                         width,
                         row,
@@ -4588,15 +4499,15 @@ impl TranscriptDocument {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => {
-                let _ = self.activate_tail_descriptor_window(width, viewport_rows);
+                let _ = self.activate_tail_record_window(width, viewport_rows);
             }
         }
         let mut row_offset = self.approximate_sparse_prefix_row_offset(width);
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let active_range_reaches_tail = self
-            .descriptors
+            .records
             .active_range()
-            .zip(self.descriptors.sparse.total_count())
+            .zip(self.records.sparse.total_count())
             .is_some_and(|(range, total)| range.end.get() >= total);
         let requested_scroll = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
@@ -4835,7 +4746,7 @@ impl TranscriptDocument {
                 .projection
                 .project_planned(lua, buf, &mut self.content.transcript.history, theme, inner),
         };
-        self.observe_exact_loaded_descriptor_rows();
+        self.observe_exact_loaded_record_rows();
         let cursor_range =
             cursor_target.and_then(|target| self.resolve_cursor_target(lua, width, target));
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
@@ -5014,7 +4925,7 @@ impl TranscriptDocument {
             .map(|row| row.saturating_add(offset))
     }
 
-    fn position_anchor(
+    pub(super) fn position_anchor(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -5026,7 +4937,7 @@ impl TranscriptDocument {
         }
     }
 
-    fn resolve_position_anchor(
+    pub(super) fn resolve_position_anchor(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -5042,7 +4953,7 @@ impl TranscriptDocument {
         }
     }
 
-    fn search_range_anchor(
+    pub(super) fn search_range_anchor(
         &mut self,
         matched: TranscriptSearchMatch,
     ) -> TranscriptSearchRangeAnchor {
@@ -5054,7 +4965,7 @@ impl TranscriptDocument {
         }
     }
 
-    fn resolve_search_range_anchor(
+    pub(super) fn resolve_search_range_anchor(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -5211,42 +5122,42 @@ impl TranscriptDocument {
         copied
     }
 
-    pub(crate) fn descriptor_save_suffix(
+    pub(crate) fn record_save_suffix(
         &self,
-        descriptors_persisted: bool,
+        records_persisted: bool,
         dirty_history_from: Option<usize>,
-    ) -> TranscriptDescriptorSaveSuffix {
+    ) -> TranscriptRecordSaveSuffix {
         let history = self.history();
-        let descriptor_order_dirty = if descriptors_persisted {
+        let record_order_dirty = if records_persisted {
             let history_order_dirty = dirty_history_from
                 .and_then(|idx| history.first_block_index_for_history_origin_at_or_after(idx));
-            match (history.descriptor_dirty_from(), history_order_dirty) {
-                (Some(descriptor), Some(history)) => Some(descriptor.min(history)),
+            match (history.record_dirty_from(), history_order_dirty) {
+                (Some(record), Some(history)) => Some(record.min(history)),
                 (dirty, None) | (None, dirty) => dirty,
             }
         } else {
             Some(0)
         };
-        let Some(descriptor_order_start) = descriptor_order_dirty else {
-            return TranscriptDescriptorSaveSuffix::Unchanged;
+        let Some(record_order_start) = record_order_dirty else {
+            return TranscriptRecordSaveSuffix::Unchanged;
         };
-        let local_descriptor_start_idx = if descriptors_persisted {
-            history.descriptor_record_index_for_order_index(descriptor_order_start)
+        let local_record_start_idx = if records_persisted {
+            history.record_index_for_order_index(record_order_start)
         } else {
             0
         };
-        let descriptor_start_idx = if descriptors_persisted {
-            self.descriptors
+        let record_start_idx = if records_persisted {
+            self.records
                 .active_range
                 .as_ref()
-                .map(|range| range.start.get().saturating_add(local_descriptor_start_idx))
-                .unwrap_or(local_descriptor_start_idx)
+                .map(|range| range.start.get().saturating_add(local_record_start_idx))
+                .unwrap_or(local_record_start_idx)
         } else {
             0
         };
-        TranscriptDescriptorSaveSuffix::Suffix {
-            descriptor_start_idx,
-            descriptor_records: history.descriptor_records_with_ids_from(descriptor_order_start),
+        TranscriptRecordSaveSuffix::Suffix {
+            record_start_idx,
+            records: history.block_records_with_ids_from(record_order_start),
         }
     }
 
@@ -5281,105 +5192,104 @@ impl TranscriptDocument {
     pub(crate) fn is_empty(&self) -> bool {
         self.content.transcript.history.is_empty()
             && self
-                .descriptors
+                .records
                 .sparse
                 .total_count()
                 .is_none_or(|total_count| total_count == 0)
     }
 
-    pub(crate) fn descriptor_total_count(&self) -> Option<usize> {
-        self.descriptors.total_count()
+    pub(crate) fn record_total_count(&self) -> Option<usize> {
+        self.records.total_count()
     }
 
-    pub(crate) fn note_persisted_descriptor_append(&mut self, count: usize) {
+    pub(crate) fn note_persisted_record_append(&mut self, count: usize) {
         if count == 0 {
             return;
         }
         let total = self
-            .descriptors
+            .records
             .sparse
             .total_count
-            .unwrap_or_else(|| self.content.transcript.history.descriptor_records().len());
-        if let Some(active) = self.descriptors.active_range.as_mut() {
+            .unwrap_or_else(|| self.content.transcript.history.block_records().len());
+        if let Some(active) = self.records.active_range.as_mut() {
             if active.end.get() == total {
-                active.end =
-                    smelt_store::TranscriptDescriptorIndex::new(total.saturating_add(count));
+                active.end = smelt_store::TranscriptRecordOffset::new(total.saturating_add(count));
             }
         }
-        self.descriptors.sparse.total_count = Some(total.saturating_add(count));
+        self.records.sparse.total_count = Some(total.saturating_add(count));
     }
 
-    pub(crate) fn can_reconcile_dense_descriptor_count(&self, total_count: usize) -> bool {
-        self.descriptors.records_for_active_range().len() <= total_count
+    pub(crate) fn can_reconcile_dense_record_count(&self, total_count: usize) -> bool {
+        self.records.records_for_active_range().len() <= total_count
     }
 
-    pub(crate) fn reconcile_dense_descriptor_count(&mut self, total_count: usize) -> bool {
-        let active_records = self.descriptors.records_for_active_range();
+    pub(crate) fn reconcile_dense_record_count(&mut self, total_count: usize) -> bool {
+        let active_records = self.records.records_for_active_range();
         if active_records.len() > total_count {
             return false;
         }
 
         let start = total_count.saturating_sub(active_records.len());
         let end = start.saturating_add(active_records.len());
-        let mut sparse = SparseTranscriptDescriptors {
+        let mut sparse = SparseTranscriptRecords {
             total_count: Some(total_count),
             ..Default::default()
         };
         for (offset, record) in active_records.into_iter().enumerate() {
-            let index = smelt_store::TranscriptDescriptorIndex::new(start.saturating_add(offset));
+            let index = smelt_store::TranscriptRecordOffset::new(start.saturating_add(offset));
             sparse.records.insert(index, record);
             sparse.lru.push_back(index);
         }
         if start < end {
             sparse.add_loaded_range(
-                smelt_store::TranscriptDescriptorIndex::new(start)
-                    ..smelt_store::TranscriptDescriptorIndex::new(end),
+                smelt_store::TranscriptRecordOffset::new(start)
+                    ..smelt_store::TranscriptRecordOffset::new(end),
             );
-            self.descriptors.active_range = Some(
-                smelt_store::TranscriptDescriptorIndex::new(start)
-                    ..smelt_store::TranscriptDescriptorIndex::new(end),
+            self.records.active_range = Some(
+                smelt_store::TranscriptRecordOffset::new(start)
+                    ..smelt_store::TranscriptRecordOffset::new(end),
             );
         } else {
-            self.descriptors.active_range = None;
+            self.records.active_range = None;
         }
-        self.descriptors.sparse = sparse;
-        self.extent_index.clear_persisted_descriptor_estimates();
+        self.records.sparse = sparse;
+        self.extent_index.clear_persisted_record_estimates();
         self.clear_transcript_layout_caches();
         true
     }
 
     #[cfg(test)]
-    fn loaded_descriptor_count(&self) -> usize {
-        self.descriptors.sparse.loaded_descriptor_count()
+    fn loaded_record_count(&self) -> usize {
+        self.records.sparse.loaded_record_count()
     }
 
     #[cfg(test)]
-    fn loaded_descriptor_ranges(&self) -> &[Range<smelt_store::TranscriptDescriptorIndex>] {
-        self.descriptors.sparse.loaded_ranges()
+    fn loaded_record_ranges(&self) -> &[Range<smelt_store::TranscriptRecordOffset>] {
+        self.records.sparse.loaded_ranges()
     }
 
     #[cfg(test)]
-    fn descriptor_range_state(&self, range: Range<usize>) -> DescriptorRangeState {
-        let Some(total_count) = self.descriptors.total_count() else {
-            return DescriptorRangeState::Unavailable;
+    fn record_range_state(&self, range: Range<usize>) -> RecordRangeState {
+        let Some(total_count) = self.records.total_count() else {
+            return RecordRangeState::Unavailable;
         };
         let start = range.start.min(total_count);
         let end = range.end.min(total_count);
         if start >= end {
-            return DescriptorRangeState::Loaded;
+            return RecordRangeState::Loaded;
         }
-        let start = smelt_store::TranscriptDescriptorIndex::new(start);
-        let end = smelt_store::TranscriptDescriptorIndex::new(end);
+        let start = smelt_store::TranscriptRecordOffset::new(start);
+        let end = smelt_store::TranscriptRecordOffset::new(end);
         if self
-            .descriptors
+            .records
             .sparse
             .loaded_ranges()
             .iter()
             .any(|loaded| loaded.start <= start && loaded.end >= end)
         {
-            DescriptorRangeState::Loaded
+            RecordRangeState::Loaded
         } else {
-            DescriptorRangeState::Missing
+            RecordRangeState::Missing
         }
     }
 
@@ -5477,7 +5387,7 @@ impl Default for TranscriptDocument {
 mod document_tests {
     use super::*;
     use crate::app::transcript_scroll_trace::{
-        TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
+        TranscriptProjectionTargetTrace, TranscriptRecordTraceRange, TranscriptScrollIntent,
         TranscriptScrollTraceRenderInput, TranscriptTraceAnchor,
     };
     use smelt_core::transcript_model::{block_retained_bytes, ToolState, TranscriptBlockRecord};
@@ -5491,22 +5401,22 @@ mod document_tests {
             .count()
     }
 
-    fn comparable_descriptor_suffix(
-        suffix: TranscriptDescriptorSaveSuffix,
+    fn comparable_record_suffix(
+        suffix: TranscriptRecordSaveSuffix,
     ) -> Option<(usize, Vec<(u64, String)>)> {
         match suffix {
-            TranscriptDescriptorSaveSuffix::Unchanged => None,
-            TranscriptDescriptorSaveSuffix::Suffix {
-                descriptor_start_idx,
-                descriptor_records,
+            TranscriptRecordSaveSuffix::Unchanged => None,
+            TranscriptRecordSaveSuffix::Suffix {
+                record_start_idx,
+                records,
             } => Some((
-                descriptor_start_idx,
-                descriptor_records
+                record_start_idx,
+                records
                     .into_iter()
                     .map(|record| {
                         (
                             record.block_id.get(),
-                            serde_json::to_string(&record.record).expect("serialize descriptor"),
+                            serde_json::to_string(&record.record).expect("serialize record"),
                         )
                     })
                     .collect(),
@@ -5515,35 +5425,32 @@ mod document_tests {
     }
 
     #[test]
-    fn descriptor_window_lru_respects_recent_access_and_active_pins() {
+    fn record_window_lru_respects_recent_access_and_active_pins() {
         let records = transcript_records(4);
-        let first = LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(0),
+        let first = LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(0),
             total_count: 4,
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[0..2], 0),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[0..2], 0),
         };
-        let second = LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(2),
+        let second = LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(2),
             total_count: 4,
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[2..4], 2),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[2..4], 2),
         };
-        let mut cache = SparseTranscriptDescriptors::default();
+        let mut cache = SparseTranscriptRecords::default();
         assert!(cache.merge(&first));
         assert!(cache.merge(&second));
-        let zero = smelt_store::TranscriptDescriptorIndex::new(0);
-        let two = smelt_store::TranscriptDescriptorIndex::new(2);
-        cache.touch_range(&(zero..smelt_store::TranscriptDescriptorIndex::new(1)));
+        let zero = smelt_store::TranscriptRecordOffset::new(0);
+        let two = smelt_store::TranscriptRecordOffset::new(2);
+        cache.touch_range(&(zero..smelt_store::TranscriptRecordOffset::new(1)));
         let budget = cache.records[&zero]
             .stored
             .retained_bytes()
             .saturating_add(cache.records[&two].stored.retained_bytes());
 
-        cache.enforce_byte_budget(
-            &(two..smelt_store::TranscriptDescriptorIndex::new(3)),
-            budget,
-        );
+        cache.enforce_byte_budget(&(two..smelt_store::TranscriptRecordOffset::new(3)), budget);
 
         assert_eq!(cache.records.len(), 2);
         assert!(cache.records.contains_key(&zero));
@@ -5552,10 +5459,10 @@ mod document_tests {
     }
 
     #[test]
-    fn sqlite_hydration_reads_only_requested_descriptor_ranges() {
+    fn sqlite_hydration_reads_only_requested_record_ranges() {
         let records = transcript_records(4);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..4,
@@ -5587,10 +5494,10 @@ mod document_tests {
     #[test]
     fn active_full_document_hydrates_stored_block_without_sparse_extent() {
         let mut source = fixed_transcript(3);
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
-        source.history.clear_descriptor_dirty();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        source.history.clear_record_dirty();
         let first_id = source.history.order[0];
         let stored = source
             .history
@@ -5599,13 +5506,10 @@ mod document_tests {
         let mut document = TranscriptDocument::from_transcript(source);
         document.set_session_dir(dir.path().to_path_buf());
 
-        assert_eq!(document.descriptors.total_count(), None);
-        assert_eq!(document.compacted_descriptor_len, 0);
+        assert_eq!(document.records.total_count(), None);
+        assert_eq!(document.compacted_record_len, 0);
         assert!(document.history_mut().dematerialize_live(first_id, stored) > 0);
-        assert_eq!(
-            document.history().persisted_descriptor_count(),
-            records.len()
-        );
+        assert_eq!(document.history().persisted_block_count(), records.len());
         assert!(document.ensure_hydrated_ids(&[first_id]));
         assert!(
             matches!(document.history().block(first_id), Some(Block::Text { content }) if content == "block 0")
@@ -5616,14 +5520,14 @@ mod document_tests {
     fn hydrated_lru_evicts_by_bytes_and_rehydrates_exactly() {
         let records = transcript_records(3);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..3,
             Some(dir.path().to_path_buf()),
         ));
         let ids = document.history().order.clone();
-        let one_block_budget = block_retained_bytes(&records[0].descriptor.to_block());
+        let one_block_budget = block_retained_bytes(&records[0].block);
         document.set_memory_budget(TranscriptMemoryBudget {
             hydrated_blocks: one_block_budget,
             ..Default::default()
@@ -5650,7 +5554,7 @@ mod document_tests {
         let theme = Theme::default();
         let records = transcript_records(1);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..1,
@@ -5707,7 +5611,7 @@ mod document_tests {
         let lua = LuaRuntime::new();
         let records = varied_transcript_records(40);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..records.len(),
@@ -5719,7 +5623,7 @@ mod document_tests {
         });
 
         let first = document
-            .descriptor_block_reveal_position(&lua, 48, 23, 2, 3, 12)
+            .record_block_reveal_position(&lua, 48, 23, 2, 3, 12)
             .expect("first exact reveal");
         let anchor = document
             .row_anchor_at_row(&lua, 48, first.target_row)
@@ -5729,7 +5633,7 @@ mod document_tests {
         assert_eq!(first_snapshot.hydrated_blocks, 0);
 
         let second = document
-            .descriptor_block_reveal_position(&lua, 48, 23, 2, 3, 12)
+            .record_block_reveal_position(&lua, 48, 23, 2, 3, 12)
             .expect("rehydrated exact reveal");
         assert_eq!(second, first);
         assert_eq!(
@@ -5745,13 +5649,13 @@ mod document_tests {
     fn randomized_bounded_cache_matches_non_evicting_transcript_behavior() {
         let records = transcript_records(32);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             || sparse_loaded_transcript(&records, 0..records.len(), Some(dir.path().to_path_buf()));
         let mut bounded = TranscriptDocument::from_loaded_transcript(loaded());
         let mut non_evicting = TranscriptDocument::from_loaded_transcript(loaded());
         bounded.set_memory_budget(TranscriptMemoryBudget {
-            hydrated_blocks: block_retained_bytes(&records[0].descriptor.to_block()),
+            hydrated_blocks: block_retained_bytes(&records[0].block),
             ..Default::default()
         });
         non_evicting.set_memory_budget(TranscriptMemoryBudget {
@@ -5807,28 +5711,28 @@ mod document_tests {
                 non_evicting.history().navigation_generation()
             );
             assert_eq!(
-                bounded.history().descriptor_dirty_from(),
-                non_evicting.history().descriptor_dirty_from()
+                bounded.history().record_dirty_from(),
+                non_evicting.history().record_dirty_from()
             );
         }
 
-        let bounded_pins = bounded.pin_descriptor_suffix_for_save().unwrap();
-        let non_evicting_pins = non_evicting.pin_descriptor_suffix_for_save().unwrap();
+        let bounded_pins = bounded.pin_record_suffix_for_save().unwrap();
+        let non_evicting_pins = non_evicting.pin_record_suffix_for_save().unwrap();
         assert_eq!(
-            comparable_descriptor_suffix(bounded.descriptor_save_suffix(true, None)),
-            comparable_descriptor_suffix(non_evicting.descriptor_save_suffix(true, None))
+            comparable_record_suffix(bounded.record_save_suffix(true, None)),
+            comparable_record_suffix(non_evicting.record_save_suffix(true, None))
         );
         bounded.unpin_operation_blocks(&bounded_pins);
         non_evicting.unpin_operation_blocks(&non_evicting_pins);
 
-        bounded.history_mut().clear_descriptor_dirty();
-        non_evicting.history_mut().clear_descriptor_dirty();
+        bounded.history_mut().clear_record_dirty();
+        non_evicting.history_mut().clear_record_dirty();
         bounded.truncate_to(17);
         non_evicting.truncate_to(17);
         assert_eq!(bounded.history().order, non_evicting.history().order);
         assert_eq!(
-            comparable_descriptor_suffix(bounded.descriptor_save_suffix(true, None)),
-            comparable_descriptor_suffix(non_evicting.descriptor_save_suffix(true, None))
+            comparable_record_suffix(bounded.record_save_suffix(true, None)),
+            comparable_record_suffix(non_evicting.record_save_suffix(true, None))
         );
         assert!(bounded.memory_snapshot().evicted_entries > 0);
     }
@@ -5837,7 +5741,7 @@ mod document_tests {
     fn pinned_oversize_hydration_records_debt_and_converges_after_unpin() {
         let records = transcript_records(1);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..1,
@@ -5873,15 +5777,15 @@ mod document_tests {
                 content: format!("small durable block {index}"),
             });
         }
-        source.history.clear_descriptor_dirty();
-        let descriptor_len = source.history.descriptor_records().len();
+        source.history.clear_record_dirty();
+        let record_len = source.history.block_records().len();
         let mut document = TranscriptDocument::from_transcript(source);
-        document.schedule_durable_compaction(descriptor_len, None);
+        document.schedule_durable_compaction(record_len, None);
 
         assert!(document.drain_compaction_slice());
         assert_eq!(stored_count(&document), TRANSCRIPT_IDLE_COMPACTION_BLOCKS);
         assert!(document.drain_compaction_slice());
-        assert_eq!(stored_count(&document), descriptor_len);
+        assert_eq!(stored_count(&document), record_len);
 
         let mut source = Transcript::new();
         for marker in ['a', 'b', 'c'] {
@@ -5891,10 +5795,10 @@ mod document_tests {
                     .repeat(TRANSCRIPT_IDLE_COMPACTION_BYTES / 2 + 1024),
             });
         }
-        source.history.clear_descriptor_dirty();
-        let descriptor_len = source.history.descriptor_records().len();
+        source.history.clear_record_dirty();
+        let record_len = source.history.block_records().len();
         let mut document = TranscriptDocument::from_transcript(source);
-        document.schedule_durable_compaction(descriptor_len, None);
+        document.schedule_durable_compaction(record_len, None);
 
         assert!(document.drain_compaction_slice());
         assert_eq!(stored_count(&document), 1);
@@ -5924,12 +5828,12 @@ mod document_tests {
                 preview_output: None,
             },
         );
-        source.history.clear_descriptor_dirty();
+        source.history.clear_record_dirty();
         let mut document = TranscriptDocument::from_transcript(source);
         let ids = document.history().order.clone();
         let generation = document.history().generation();
         let navigation_generation = document.history().navigation_generation();
-        let descriptor_generation = document.history().descriptor_dirty_generation();
+        let record_generation = document.history().record_dirty_generation();
         document.schedule_durable_compaction(2, None);
 
         assert!(document.pin_operation_blocks(&[ids[0]]));
@@ -5947,15 +5851,15 @@ mod document_tests {
             navigation_generation
         );
         assert_eq!(
-            document.history().descriptor_dirty_generation(),
-            descriptor_generation
+            document.history().record_dirty_generation(),
+            record_generation
         );
 
         assert!(document
             .history_mut()
             .update_tool_state("pending-call", |state| state.status = ToolStatus::Ok));
-        let dirty_from = document.history().descriptor_dirty_from();
-        document.history_mut().clear_descriptor_dirty();
+        let dirty_from = document.history().record_dirty_from();
+        document.history_mut().clear_record_dirty();
         document.schedule_durable_compaction(2, dirty_from);
         assert!(document.drain_compaction_slice());
         assert!(!document.history().is_materialized(ids[1]));
@@ -5968,7 +5872,7 @@ mod document_tests {
         source.push(Block::Text {
             content: "durable".into(),
         });
-        source.history.clear_descriptor_dirty();
+        source.history.clear_record_dirty();
         let mut document = TranscriptDocument::from_transcript(source);
         let preview_id = document.history().order[0];
         let durable_id = document.history().order[1];
@@ -5982,7 +5886,7 @@ mod document_tests {
         source.push(Block::Text {
             content: "acknowledged".into(),
         });
-        source.history.clear_descriptor_dirty();
+        source.history.clear_record_dirty();
         let mut document = TranscriptDocument::from_transcript(source);
         let id = document.history().order[0];
         document.schedule_durable_compaction(1, None);
@@ -6010,7 +5914,7 @@ mod document_tests {
         source.push(Block::Text {
             content: "tail two".into(),
         });
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let loaded = loaded_transcript_with_window(&records, 8, 10, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let loaded_rows = document.content.projection.estimated_total_rows(
@@ -6036,7 +5940,7 @@ mod document_tests {
         source.push(Block::Text {
             content: "tail two".into(),
         });
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let loaded = loaded_transcript_with_window(&records, 8, 10, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let offset = document.approximate_sparse_prefix_row_offset(80);
@@ -6068,7 +5972,7 @@ mod document_tests {
         source.push(Block::Text {
             content: "trace tail".into(),
         });
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let loaded = loaded_transcript_with_window(&records, 0, 2, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         document.set_scroll_trace_enabled(true);
@@ -6105,8 +6009,8 @@ mod document_tests {
         assert_eq!(frame.resolved_scroll_top, rows.clamped_scroll);
         assert_eq!(frame.materialized_range, rows.materialized_range().into());
         assert_eq!(
-            frame.active_descriptor_range_after,
-            Some(TranscriptDescriptorTraceRange { start: 0, end: 2 })
+            frame.active_record_range_after,
+            Some(TranscriptRecordTraceRange { start: 0, end: 2 })
         );
         assert!(!frame.placeholder_rows_visible);
         assert!(matches!(
@@ -6325,7 +6229,7 @@ mod document_tests {
     }
 
     #[test]
-    fn local_delta_without_adjacent_descriptors_stays_on_exact_loaded_content() {
+    fn local_delta_without_adjacent_records_stays_on_exact_loaded_content() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
         let width = 80;
@@ -6404,7 +6308,7 @@ mod document_tests {
         let viewport_rows = 6;
         let records = transcript_records(100);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             60..80,
@@ -6443,10 +6347,10 @@ mod document_tests {
             "local deltas must load adjacent content instead of exposing sparse placeholders"
         );
         let active = document
-            .descriptors
+            .records
             .active_range
             .as_ref()
-            .expect("active adjacent descriptor window");
+            .expect("active adjacent record window");
         assert_eq!(active.end.get(), 80);
         assert!(active.start.get() < 60);
         assert!(active_history_contains(&document, "block 59"));
@@ -6466,7 +6370,7 @@ mod document_tests {
         let viewport_rows = 6;
         let records = transcript_records(100);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             20..40,
@@ -6508,10 +6412,10 @@ mod document_tests {
             "local downward deltas must load adjacent content instead of sparse placeholders"
         );
         let active = document
-            .descriptors
+            .records
             .active_range
             .as_ref()
-            .expect("active adjacent descriptor window");
+            .expect("active adjacent record window");
         assert_eq!(active.start.get(), 20);
         assert!(active.end.get() > 40);
         assert!(active_history_contains(&document, "block 39"));
@@ -6534,8 +6438,8 @@ mod document_tests {
             0..4,
             None,
         ));
-        document.extent_index.observe_exact_loaded_descriptor_rows(
-            &document.descriptors.sparse,
+        document.extent_index.observe_exact_loaded_record_rows(
+            &document.records.sparse,
             exact_height_snapshot(BlockId::new(1), width, records[1].content_hash, 17),
         );
         document.set_scroll_trace_enabled(true);
@@ -6710,7 +6614,7 @@ mod document_tests {
     }
 
     #[test]
-    fn large_sparse_prefix_uses_persisted_descriptor_estimates() {
+    fn large_sparse_prefix_uses_persisted_record_estimates() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
         for idx in 0..2048 {
@@ -6721,14 +6625,14 @@ mod document_tests {
             };
             source.push(Block::Text { content });
         }
-        let records = source.history.descriptor_records();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let records = source.history.block_records();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             2000..2040,
             Some(dir.path().to_path_buf()),
         ));
-        let coarse_rows = 2000 * document.approximate_average_descriptor_rows(20);
+        let coarse_rows = 2000 * document.approximate_average_record_rows(20);
 
         let prefix_rows = document.approximate_sparse_prefix_row_offset(20);
 
@@ -6739,7 +6643,7 @@ mod document_tests {
                 .iter()
                 .map(|record| {
                     record
-                        .descriptor
+                        .block
                         .raw_text()
                         .map(|text| crate::content::estimate_text_rows(&text, 20))
                         .unwrap_or(1)
@@ -6775,8 +6679,8 @@ mod document_tests {
         assert!(buf.lines().iter().any(|line| line.contains("block 40")));
 
         let refined_top = original_top.saturating_add(25);
-        document.extent_index.descriptor_rows_estimate_cache.insert(
-            DescriptorRowsEstimateKey {
+        document.extent_index.record_rows_estimate_cache.insert(
+            RecordRowsEstimateKey {
                 width,
                 start: 0,
                 end: 40,
@@ -6873,7 +6777,7 @@ mod document_tests {
     }
 
     fn transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
-        fixed_transcript(count).history.descriptor_records()
+        fixed_transcript(count).history.block_records()
     }
 
     fn varied_transcript(count: usize) -> Transcript {
@@ -6893,10 +6797,10 @@ mod document_tests {
     }
 
     fn varied_transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
-        varied_transcript(count).history.descriptor_records()
+        varied_transcript(count).history.block_records()
     }
 
-    fn descriptor_records_with_ids(
+    fn records_with_ids(
         records: &[TranscriptBlockRecord],
         block_id_start: usize,
     ) -> Vec<StoredBlockWithId> {
@@ -6904,16 +6808,16 @@ mod document_tests {
             .iter()
             .enumerate()
             .map(|(offset, record)| {
-                smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
+                smelt_core::transcript_model::transcript_block_row_with_block_idx(
                     block_id_start.saturating_add(offset),
                     block_id_start.saturating_add(offset) as u64,
                     record,
                 )
-                .expect("descriptor row")
+                .expect("record row")
             })
             .collect();
-        smelt_core::transcript_model::compact_descriptor_rows(block_id_start, rows)
-            .expect("compact descriptor rows")
+        smelt_core::transcript_model::compact_block_rows(block_id_start, rows)
+            .expect("compact record rows")
     }
 
     fn loaded_transcript_with_window(
@@ -6922,7 +6826,7 @@ mod document_tests {
         total_count: usize,
         session_dir: Option<PathBuf>,
     ) -> LoadedTranscript {
-        let window_records = descriptor_records_with_ids(records, start);
+        let window_records = records_with_ids(records, start);
         let mut transcript = Transcript::new();
         if session_dir.is_none() {
             for (stored, record) in window_records.iter().zip(records.iter().cloned()) {
@@ -6935,10 +6839,10 @@ mod document_tests {
         }
         LoadedTranscript {
             transcript,
-            descriptor_window: Some(LoadedDescriptorWindow {
-                start: smelt_store::TranscriptDescriptorIndex::new(start),
+            record_window: Some(LoadedRecordWindow {
+                start: smelt_store::TranscriptRecordOffset::new(start),
                 total_count,
-                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+                hydration: smelt_store::TranscriptRecordHydration::Hydrated,
                 records: window_records,
             }),
             session_dir,
@@ -6985,7 +6889,7 @@ mod document_tests {
     }
 
     #[test]
-    fn exact_loaded_descriptor_rows_override_text_estimates() {
+    fn exact_loaded_record_rows_override_text_estimates() {
         let records = transcript_records(3);
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
@@ -6996,23 +6900,23 @@ mod document_tests {
         let block_id = BlockId::new(1);
         let raw_estimate = document
             .extent_index
-            .local_rows_for_loaded_descriptors(&document.descriptors.sparse, width);
+            .local_rows_for_loaded_records(&document.records.sparse, width);
 
-        document.extent_index.observe_exact_loaded_descriptor_rows(
-            &document.descriptors.sparse,
+        document.extent_index.observe_exact_loaded_record_rows(
+            &document.records.sparse,
             exact_height_snapshot(block_id, width, records[1].content_hash, 17),
         );
 
         let refined = document
             .extent_index
-            .local_rows_for_loaded_descriptors(&document.descriptors.sparse, width);
+            .local_rows_for_loaded_records(&document.records.sparse, width);
         assert_eq!(raw_estimate, 6);
         assert_eq!(refined, 21);
-        assert_eq!(document.approximate_average_descriptor_rows(width), 7);
+        assert_eq!(document.approximate_average_record_rows(width), 7);
     }
 
     #[test]
-    fn exact_loaded_descriptor_rows_are_width_and_invalidation_scoped() {
+    fn exact_loaded_record_rows_are_width_and_invalidation_scoped() {
         let records = transcript_records(2);
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
@@ -7022,73 +6926,63 @@ mod document_tests {
         let width = 80;
         assert!(!document.invalidate_renderer_if_changed(7, Some(11)));
         let block_id = BlockId::new(0);
-        document.extent_index.observe_exact_loaded_descriptor_rows(
-            &document.descriptors.sparse,
+        document.extent_index.observe_exact_loaded_record_rows(
+            &document.records.sparse,
             exact_height_snapshot(block_id, width, records[0].content_hash, 19),
         );
 
         assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_descriptor(0, width),
+            document.extent_index.exact_local_rows_for_record(0, width),
             Some(19)
         );
         assert_eq!(
             document
                 .extent_index
-                .exact_local_rows_for_descriptor(0, width - 1),
+                .exact_local_rows_for_record(0, width - 1),
             None
         );
-        document.extent_index.observe_exact_loaded_descriptor_rows(
-            &document.descriptors.sparse,
+        document.extent_index.observe_exact_loaded_record_rows(
+            &document.records.sparse,
             exact_height_snapshot(block_id, width - 1, records[0].content_hash, 23),
         );
         assert_eq!(
             document
                 .extent_index
-                .exact_local_rows_for_descriptor(0, width - 1),
+                .exact_local_rows_for_record(0, width - 1),
             Some(23)
         );
         assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_descriptor(0, width),
+            document.extent_index.exact_local_rows_for_record(0, width),
             Some(19)
         );
 
         document.invalidate_theme();
         assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_descriptor(0, width),
+            document.extent_index.exact_local_rows_for_record(0, width),
             Some(19),
-            "theme invalidation should keep exact descriptor heights"
+            "theme invalidation should keep exact record heights"
         );
         assert_eq!(
             document
                 .extent_index
-                .exact_local_rows_for_descriptor(0, width - 1),
+                .exact_local_rows_for_record(0, width - 1),
             Some(23),
-            "theme invalidation should keep width-scoped exact descriptor heights"
+            "theme invalidation should keep width-scoped exact record heights"
         );
 
         assert!(document.invalidate_renderer_if_changed(8, Some(11)));
         assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_descriptor(0, width),
+            document.extent_index.exact_local_rows_for_record(0, width),
             None
         );
 
-        document.extent_index.observe_exact_loaded_descriptor_rows(
-            &document.descriptors.sparse,
+        document.extent_index.observe_exact_loaded_record_rows(
+            &document.records.sparse,
             exact_height_snapshot(block_id, width, records[0].content_hash, 19),
         );
         document.set_inline_options(InlineOptions::default());
         assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_descriptor(0, width),
+            document.extent_index.exact_local_rows_for_record(0, width),
             None
         );
     }
@@ -7101,18 +6995,18 @@ mod document_tests {
                 content: format!("block {idx} {}", "skewed text ".repeat(repeats)),
             });
         }
-        source.history.descriptor_records()
+        source.history.block_records()
     }
 
     #[test]
-    fn resumed_sparse_prefix_rows_use_persisted_descriptor_estimates() {
+    fn resumed_sparse_prefix_rows_use_persisted_record_estimates() {
         let width = 24;
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let expected = smelt_store::SessionReader::open_database(dir.path().join("session.db"))
             .unwrap()
-            .transcript_descriptor_estimated_rows((0..220).into(), width)
+            .transcript_record_estimated_rows((0..220).into(), width)
             .unwrap() as RowIndex;
 
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
@@ -7128,36 +7022,34 @@ mod document_tests {
     }
 
     #[test]
-    fn exact_descriptor_rows_survive_active_window_switch_without_refining_prefix_estimate() {
+    fn exact_record_rows_survive_active_window_switch_without_refining_prefix_estimate() {
         let width = 80;
         let records = transcript_records(8);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..3,
             Some(dir.path().to_path_buf()),
         ));
-        document.extent_index.observe_exact_loaded_descriptor_rows(
-            &document.descriptors.sparse,
+        document.extent_index.observe_exact_loaded_record_rows(
+            &document.records.sparse,
             exact_height_snapshot(BlockId::new(1), width, records[1].content_hash, 17),
         );
 
-        let window = LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(5),
+        let window = LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(5),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[5..8], 5),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[5..8], 5),
         };
-        assert!(document.merge_descriptor_window(window));
+        assert!(document.merge_record_window(window));
         let db = smelt_store::SessionReader::open_database(dir.path().join("session.db")).unwrap();
         let persisted_prefix = db
-            .transcript_descriptor_estimated_rows((0..5).into(), width)
+            .transcript_record_estimated_rows((0..5).into(), width)
             .unwrap() as RowIndex;
         assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_descriptor(1, width),
+            document.extent_index.exact_local_rows_for_record(1, width),
             Some(17)
         );
         assert_eq!(
@@ -7174,17 +7066,17 @@ mod document_tests {
         step: usize,
     ) {
         if let (Some(active), Some(total)) = (
-            document.descriptors.active_range(),
-            document.descriptors.total_count(),
+            document.records.active_range(),
+            document.records.total_count(),
         ) {
-            let max_descriptors = document
-                .descriptor_window_count(width, viewport_rows, total)
-                .saturating_mul(TRANSCRIPT_ACTIVE_DESCRIPTOR_WINDOW_MAX_MULTIPLIER)
+            let max_records = document
+                .record_window_count(width, viewport_rows, total)
+                .saturating_mul(TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER)
                 .min(total);
             let active_len = active.end.get().saturating_sub(active.start.get());
             assert!(
-                active_len <= max_descriptors,
-                "scroll step {step} active descriptor window grew past bound: len={active_len}, max={max_descriptors}, active={active:?}, rows={rows:?}"
+                active_len <= max_records,
+                "scroll step {step} active record window grew past bound: len={active_len}, max={max_records}, active={active:?}, rows={rows:?}"
             );
         }
 
@@ -7200,14 +7092,9 @@ mod document_tests {
             .content
             .transcript
             .history
-            .descriptor_records()
+            .block_records()
             .iter()
-            .any(|record| {
-                record
-                    .descriptor
-                    .raw_text()
-                    .is_some_and(|text| text == needle)
-            })
+            .any(|record| record.block.raw_text().is_some_and(|text| text == needle))
     }
 
     #[test]
@@ -7218,7 +7105,7 @@ mod document_tests {
         let viewport_rows = 12;
         let records = varied_transcript_records(400);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7259,7 +7146,7 @@ mod document_tests {
                 rows.row_base,
                 rows.materialized_rows,
                 rows.total_rows,
-                document.descriptors.active_range,
+                document.records.active_range,
             );
             assert!(
                 rows.row_base <= rows.clamped_scroll,
@@ -7284,7 +7171,7 @@ mod document_tests {
         let viewport_rows = 12;
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7321,12 +7208,12 @@ mod document_tests {
             assert_eq!(
                 rows.clamped_scroll, requested,
                 "scroll step {step} did not honor request: previous={previous}, rows={rows:?}, active={:?}",
-                document.descriptors.active_range,
+                document.records.active_range,
             );
             assert!(
                 buf.lines().iter().any(|line| !line.is_empty()),
                 "scroll step {step} materialized only sparse placeholders: requested={requested}, rows={rows:?}, active={:?}",
-                document.descriptors.active_range,
+                document.records.active_range,
             );
         }
     }
@@ -7389,7 +7276,7 @@ mod document_tests {
         let viewport_rows = 12;
         let records = varied_transcript_records(400);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7416,7 +7303,7 @@ mod document_tests {
                 win.scroll_top() < previous,
                 "wheel step {step} stalled or reversed: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}",
                 win.scroll_top(),
-                document.descriptors.active_range,
+                document.records.active_range,
             );
             assert!(
                 win.scroll_top() <= requested,
@@ -7439,7 +7326,7 @@ mod document_tests {
         let viewport_rows = 12;
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7469,7 +7356,7 @@ mod document_tests {
                 win.scroll_top() > previous,
                 "wheel step {step} reversed or stalled: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}",
                 win.scroll_top(),
-                document.descriptors.active_range,
+                document.records.active_range,
             );
             assert_eq!(
                 win.scroll_top(),
@@ -7486,7 +7373,7 @@ mod document_tests {
             win.scroll_top(),
             settled,
             "idle projection snapped after scroll-down settled: rows={rows:?}, active={:?}",
-            document.descriptors.active_range,
+            document.records.active_range,
         );
     }
 
@@ -7498,7 +7385,7 @@ mod document_tests {
         let viewport_rows = 12;
         let records = varied_transcript_records(400);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7542,7 +7429,7 @@ mod document_tests {
                 win.scroll_top() < previous,
                 "drag step {step} stalled or reversed: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}, state={state:?}",
                 win.scroll_top(),
-                document.descriptors.active_range,
+                document.records.active_range,
             );
             assert_eq!(
                 win.scroll_top(),
@@ -7564,7 +7451,7 @@ mod document_tests {
         let width = 32;
         let viewport_rows = 12;
         let source = fixed_transcript(240);
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let mut full_document = TranscriptDocument::from_transcript(source);
         let mut full_buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
         let full_rows = {
@@ -7579,7 +7466,7 @@ mod document_tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7614,7 +7501,7 @@ mod document_tests {
         let width = 32;
         let viewport_rows = 12;
         let source = fixed_transcript(240);
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let mut full_document = TranscriptDocument::from_transcript(source);
         let mut full_buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
         let full_rows = {
@@ -7629,7 +7516,7 @@ mod document_tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let loaded =
             LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
                 .expect("tail transcript");
@@ -7714,7 +7601,7 @@ mod document_tests {
     }
 
     #[test]
-    fn sparse_previous_navigation_block_preserves_active_descriptor_window() {
+    fn sparse_previous_navigation_block_preserves_active_record_window() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
         for idx in 0..100 {
@@ -7730,20 +7617,20 @@ mod document_tests {
                 });
             }
         }
-        let records = source.history.descriptor_records();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let records = source.history.block_records();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
             Some(dir.path().to_path_buf()),
         ));
-        assert!(document.descriptors.sparse.merge(&LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(0),
+        assert!(document.records.sparse.merge(&LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(0),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[0..1], 0),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[0..1], 0),
         }));
-        let active_before = document.descriptors.active_range.clone();
+        let active_before = document.records.active_range.clone();
         assert!(!active_history_contains(&document, "user 0"));
         assert!(!active_history_contains(&document, "user 50"));
 
@@ -7751,7 +7638,7 @@ mod document_tests {
             .previous_navigation_block(Some("user"))
             .expect("previous user block outside the active window");
 
-        assert_eq!(previous.descriptor_index, 50);
+        assert_eq!(previous.record_index, 50);
         assert_eq!(previous.block_id, BlockId::new(50));
         assert_eq!(previous.role, "user");
         assert_eq!(previous.first_line, "user 50");
@@ -7760,11 +7647,11 @@ mod document_tests {
             .next_navigation_block(Some("user"))
             .expect("next user block in the active window");
 
-        assert_eq!(next.descriptor_index, 80);
+        assert_eq!(next.record_index, 80);
         assert_eq!(next.block_id, BlockId::new(80));
         assert_eq!(next.role, "user");
         assert_eq!(next.first_line, "user 80");
-        assert_eq!(document.descriptors.active_range, active_before);
+        assert_eq!(document.records.active_range, active_before);
         assert!(!active_history_contains(&document, "user 0"));
         assert!(!active_history_contains(&document, "user 50"));
     }
@@ -7775,12 +7662,12 @@ mod document_tests {
         let theme = Theme::default();
         let width = 80;
         let viewport_rows = 6;
-        let descriptor_index = 50;
+        let record_index = 50;
         let top_padding = 2;
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
         for idx in 0..100 {
-            if idx == descriptor_index {
+            if idx == record_index {
                 source.push(Block::User {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
@@ -7792,17 +7679,17 @@ mod document_tests {
                 });
             }
         }
-        let records = source.history.descriptor_records();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let records = source.history.block_records();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             80..100,
             Some(dir.path().to_path_buf()),
         ));
-        let block_id = BlockId::new(descriptor_index as u64);
+        let block_id = BlockId::new(record_index as u64);
 
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
-            descriptor_index,
+            record_index,
             block_id,
             row_offset: 0,
             screen_padding_top: top_padding,
@@ -7823,14 +7710,7 @@ mod document_tests {
         let rows = document.project_planned(&lua, &mut buf, &theme, plan);
         let first_scroll = rows.clamped_scroll;
         let reveal = document
-            .descriptor_block_reveal_position(
-                &lua,
-                width,
-                descriptor_index,
-                0,
-                top_padding,
-                viewport_rows,
-            )
+            .record_block_reveal_position(&lua, width, record_index, 0, top_padding, viewport_rows)
             .expect("revealed block position");
         assert_eq!(reveal.block_id, block_id);
         assert_eq!(
@@ -7840,15 +7720,15 @@ mod document_tests {
         assert!(active_history_contains(&document, "user 50"));
 
         let active_start = document
-            .descriptors
+            .records
             .active_range
             .as_ref()
             .expect("active reveal window")
             .start
             .get();
         assert!(active_start > 0);
-        document.extent_index.descriptor_rows_estimate_cache.insert(
-            DescriptorRowsEstimateKey {
+        document.extent_index.record_rows_estimate_cache.insert(
+            RecordRowsEstimateKey {
                 width,
                 start: 0,
                 end: active_start,
@@ -7856,7 +7736,7 @@ mod document_tests {
             first_scroll.saturating_add(123),
         );
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
-            descriptor_index,
+            record_index,
             block_id,
             row_offset: 0,
             screen_padding_top: top_padding,
@@ -7876,14 +7756,7 @@ mod document_tests {
         let rows = document.project_planned(&lua, &mut buf, &theme, plan);
         assert_ne!(rows.clamped_scroll, first_scroll);
         let reveal = document
-            .descriptor_block_reveal_position(
-                &lua,
-                width,
-                descriptor_index,
-                0,
-                top_padding,
-                viewport_rows,
-            )
+            .record_block_reveal_position(&lua, width, record_index, 0, top_padding, viewport_rows)
             .expect("revealed block position after prefix refinement");
         assert_eq!(
             reveal.target_row.saturating_sub(rows.clamped_scroll),
@@ -7892,16 +7765,16 @@ mod document_tests {
     }
 
     #[test]
-    fn viewport_anchor_preserves_descriptor_block_across_window_replacement() {
+    fn viewport_anchor_preserves_record_block_across_window_replacement() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
         let width = 80;
         let viewport_rows = 6;
-        let descriptor_index = 50;
+        let record_index = 50;
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
         for idx in 0..100 {
-            if idx == descriptor_index {
+            if idx == record_index {
                 source.push(Block::User {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
@@ -7913,18 +7786,18 @@ mod document_tests {
                 });
             }
         }
-        let records = source.history.descriptor_records();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let records = source.history.block_records();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             80..100,
             Some(dir.path().to_path_buf()),
         ));
-        let block_id = BlockId::new(descriptor_index as u64);
+        let block_id = BlockId::new(record_index as u64);
         let mut buf = Buffer::new(crate::smelt_edit::BufId(912), Default::default());
 
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
-            descriptor_index,
+            record_index,
             block_id,
             row_offset: 0,
             screen_padding_top: 0,
@@ -7946,7 +7819,7 @@ mod document_tests {
             Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
             other => panic!("expected content viewport anchor, got {other:?}"),
         };
-        assert_eq!(anchor.descriptor_index, descriptor_index);
+        assert_eq!(anchor.record_index, record_index);
         assert_eq!(anchor.block_id, block_id);
         assert_eq!(anchor.intra_block_row, anchor.row_anchor.row_offset);
         assert_eq!(anchor.bias, TranscriptAnchorBias::Top);
@@ -7962,12 +7835,12 @@ mod document_tests {
         let position_content_anchor = position_anchor
             .anchor
             .expect("position preservation should store a content anchor");
-        assert_eq!(position_content_anchor.descriptor_index, descriptor_index);
+        assert_eq!(position_content_anchor.record_index, record_index);
         assert_eq!(position_content_anchor.block_id, block_id);
 
-        assert!(document.activate_descriptor_window_range(
-            smelt_store::TranscriptDescriptorIndex::new(80)
-                ..smelt_store::TranscriptDescriptorIndex::new(100)
+        assert!(document.activate_record_window_range(
+            smelt_store::TranscriptRecordOffset::new(80)
+                ..smelt_store::TranscriptRecordOffset::new(100)
         ));
         assert!(!active_history_contains(&document, "user 50"));
 
@@ -7989,7 +7862,7 @@ mod document_tests {
             Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
             other => panic!("expected preserved content viewport anchor, got {other:?}"),
         };
-        assert_eq!(anchor_after.descriptor_index, descriptor_index);
+        assert_eq!(anchor_after.record_index, record_index);
         assert_eq!(anchor_after.block_id, block_id);
         assert_eq!(anchor_after.intra_block_row, anchor.intra_block_row);
     }
@@ -8003,19 +7876,19 @@ mod document_tests {
             None,
         ));
 
-        assert!(document.merge_descriptor_window(LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(40),
+        assert!(document.merge_record_window(LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(40),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[40..48], 40),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[40..48], 40),
         }));
 
-        assert_eq!(document.descriptors.sparse.loaded_ranges().len(), 2);
+        assert_eq!(document.records.sparse.loaded_ranges().len(), 2);
         assert_eq!(
-            document.descriptors.active_range,
+            document.records.active_range,
             Some(
-                smelt_store::TranscriptDescriptorIndex::new(40)
-                    ..smelt_store::TranscriptDescriptorIndex::new(48)
+                smelt_store::TranscriptRecordOffset::new(40)
+                    ..smelt_store::TranscriptRecordOffset::new(48)
             )
         );
         assert_eq!(document.content.transcript.history.order.len(), 8);
@@ -8029,12 +7902,12 @@ mod document_tests {
     }
 
     #[test]
-    fn sparse_row_jump_loads_bounded_descriptor_window() {
+    fn sparse_row_jump_loads_bounded_record_window() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
         let dir = tempfile::tempdir().unwrap();
         let records = transcript_records(100);
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
@@ -8048,19 +7921,19 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(80),
             10,
         );
-        let active = document.descriptors.active_range.clone().unwrap();
+        let active = document.records.active_range.clone().unwrap();
 
         assert!(active.start.get() <= 40);
         assert!(active.end.get() > 40);
         assert!(active.start.get() > 0);
         assert!(active.end.get() < records.len());
-        assert_eq!(document.descriptors.sparse.loaded_ranges().len(), 2);
+        assert_eq!(document.records.sparse.loaded_ranges().len(), 2);
         assert!(active_history_contains(&document, "block 40"));
         assert!(!active_history_contains(&document, "block 90"));
     }
 
     #[test]
-    fn sparse_nearby_scroll_reuses_active_descriptor_window() {
+    fn sparse_nearby_scroll_reuses_active_record_window() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
         let records = transcript_records(100);
@@ -8069,7 +7942,7 @@ mod document_tests {
             40..48,
             None,
         ));
-        let active_before = document.descriptors.active_range.clone();
+        let active_before = document.records.active_range.clone();
 
         let _plan = document.plan_projection_measured(
             &lua,
@@ -8079,8 +7952,8 @@ mod document_tests {
             10,
         );
 
-        assert_eq!(document.descriptors.active_range, active_before);
-        assert_eq!(document.descriptors.sparse.loaded_ranges().len(), 1);
+        assert_eq!(document.records.active_range, active_before);
+        assert_eq!(document.records.sparse.loaded_ranges().len(), 1);
         assert!(active_history_contains(&document, "block 40"));
     }
 
@@ -8092,7 +7965,7 @@ mod document_tests {
         let viewport_rows = 10;
         let records = transcript_records(100);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
@@ -8121,7 +7994,7 @@ mod document_tests {
             Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
             other => panic!("far seek should re-anchor to loaded content, got {other:?}"),
         };
-        assert_eq!(anchor.descriptor_index, 40);
+        assert_eq!(anchor.record_index, 40);
         assert_eq!(anchor.block_id, BlockId::new(40));
         assert_eq!(
             document.viewport.state.mode,
@@ -8142,19 +8015,19 @@ mod document_tests {
             };
             source.push(Block::Text { content });
         }
-        let records = source.history.descriptor_records();
+        let records = source.history.block_records();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
             None,
         ));
-        assert!(document.merge_descriptor_window(LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(40),
+        assert!(document.merge_record_window(LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(40),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[40..48], 40),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[40..48], 40),
         }));
-        let average_before = document.approximate_average_descriptor_rows(20);
+        let average_before = document.approximate_average_record_rows(20);
 
         let _plan = document.plan_projection_measured(
             &lua,
@@ -8164,10 +8037,7 @@ mod document_tests {
             10,
         );
 
-        assert_eq!(
-            document.approximate_average_descriptor_rows(20),
-            average_before
-        );
+        assert_eq!(document.approximate_average_record_rows(20), average_before);
     }
 
     #[test]
@@ -8180,11 +8050,11 @@ mod document_tests {
             68..100,
             None,
         ));
-        assert!(document.merge_descriptor_window(LoadedDescriptorWindow {
-            start: smelt_store::TranscriptDescriptorIndex::new(40),
+        assert!(document.merge_record_window(LoadedRecordWindow {
+            start: smelt_store::TranscriptRecordOffset::new(40),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: descriptor_records_with_ids(&records[40..48], 40),
+            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
+            records: records_with_ids(&records[40..48], 40),
         }));
 
         let _plan = document.plan_projection_measured(
@@ -8196,10 +8066,10 @@ mod document_tests {
         );
 
         assert_eq!(
-            document.descriptors.active_range,
+            document.records.active_range,
             Some(
-                smelt_store::TranscriptDescriptorIndex::new(68)
-                    ..smelt_store::TranscriptDescriptorIndex::new(100)
+                smelt_store::TranscriptRecordOffset::new(68)
+                    ..smelt_store::TranscriptRecordOffset::new(100)
             )
         );
         let active_first_lines = document
@@ -8328,7 +8198,7 @@ impl ResumePreviewCache {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptBlockSnapshot {
-    pub(crate) descriptor_index: usize,
+    pub(crate) record_index: usize,
     pub(crate) block_id: BlockId,
     pub(crate) role: &'static str,
     pub(crate) first_row: crate::smelt_edit::RowIndex,
@@ -8344,7 +8214,7 @@ enum TranscriptNavigationDirection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptNavigationBlock {
-    pub(crate) descriptor_index: usize,
+    pub(crate) record_index: usize,
     pub(crate) block_id: BlockId,
     pub(crate) role: &'static str,
     pub(crate) first_line: String,
@@ -8366,13 +8236,13 @@ fn transcript_history_role(history: &BlockHistory, id: BlockId) -> &'static str 
 }
 
 #[derive(Clone, Copy)]
-struct TranscriptPositionAnchor {
+pub(super) struct TranscriptPositionAnchor {
     anchor: Option<TranscriptContentAnchor>,
     position: crate::smelt_edit::DocPosition,
 }
 
 #[derive(Clone, Copy)]
-struct TranscriptSearchRangeAnchor {
+pub(super) struct TranscriptSearchRangeAnchor {
     anchor: TranscriptSearchAnchor,
     start_byte_col: usize,
     end_byte_col: usize,
@@ -8390,57 +8260,44 @@ struct TranscriptViewAnchors {
 
 impl TuiApp {
     pub(crate) fn begin_turn(&mut self) {
-        self.context_tokens_updated_this_turn = false;
-        self.parser.begin_turn();
+        self.conversation.begin_turn();
     }
 
     pub(crate) fn push_block(&mut self, block: Block) {
-        let result = self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::AppendTranscriptBlock { block },
-        );
-        debug_assert_eq!(result.applied, result.transcript_dirty);
+        let appended = self.try_push_block(block);
+        debug_assert!(appended);
+    }
+
+    pub(super) fn try_push_block(&mut self, block: Block) -> bool {
+        self.conversation.append_block(block)
     }
 
     pub(crate) fn append_streaming_thinking(&mut self, delta: &str) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::AppendStreamingThinking {
-                delta: delta.to_string(),
-            },
-        );
+        self.conversation
+            .append_streaming_thinking(delta.to_string());
     }
 
     pub(crate) fn flush_streaming_thinking(&mut self) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FlushStreamingThinking,
-        );
+        self.conversation.flush_streaming_thinking();
     }
 
     pub(crate) fn append_streaming_text(&mut self, delta: &str) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::AppendStreamingText {
-                delta: delta.to_string(),
-            },
-        );
+        self.conversation.append_streaming_text(delta.to_string());
     }
 
     pub(crate) fn flush_streaming_text(&mut self) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FlushStreamingText,
-        );
+        self.conversation.flush_streaming_text();
     }
 
     pub(crate) fn update_compaction_preview(&mut self, summary: String) {
         let follow_tail = self.transcript_win().is_following_tail();
-        let existing = self.session_document.transcript.compaction_preview_id();
-        let result = self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::UpdateCompactionPreview { summary },
-        );
-        let Some(id) = result.block_id else {
+        let existing = self.conversation.transcript_compaction_preview_id();
+        let Some(id) = self.conversation.update_compaction_preview(summary) else {
             return;
         };
         if existing.is_none() {
             let width = self.transcript_width() as u16;
-            self.session_document.transcript.fold_node(
+            self.conversation.fold_transcript_node(
                 &self.lua,
                 width,
                 crate::content::render_plan::RenderNodeId::Block(id),
@@ -8454,9 +8311,7 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::ClearCompactionPreview,
-        );
+        self.conversation.clear_compaction_preview();
     }
 
     pub(crate) fn start_tool(
@@ -8467,74 +8322,44 @@ impl TuiApp {
         args: HashMap<String, serde_json::Value>,
     ) {
         let now = self.core.clock.instant_now();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::StartTool {
-                call_id,
-                name,
-                summary,
-                args,
-                now,
-            },
-        );
+        self.conversation
+            .start_tool(call_id, name, summary, args, now);
     }
 
     pub(crate) fn start_exec(&mut self, command: String) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::StartExec { command },
-        );
+        self.conversation.start_exec(command);
     }
 
     pub(crate) fn append_exec_output(&mut self, chunk: &str) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::AppendExecOutput {
-                chunk: chunk.to_string(),
-            },
-        );
+        self.conversation.append_exec_output(chunk.to_string());
     }
 
     pub(crate) fn finish_exec(&mut self, exit_code: Option<i32>) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FinishExec { exit_code },
-        );
+        self.conversation.finish_exec(exit_code);
     }
 
     pub(crate) fn finalize_exec(&mut self) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FinalizeExec,
-        );
+        self.conversation.finalize_exec();
     }
 
     pub(crate) fn has_active_exec(&self) -> bool {
-        self.parser.has_active_exec()
+        self.conversation.has_active_exec()
     }
 
     pub(crate) fn append_active_output(&mut self, call_id: &str, chunk: &str) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::AppendActiveToolOutput {
-                call_id: call_id.to_string(),
-                chunk: chunk.to_string(),
-            },
-        );
+        self.conversation
+            .append_tool_output(call_id.to_string(), chunk.to_string());
     }
 
     pub(crate) fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         let now = self.core.clock.instant_now();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::SetActiveToolStatus {
-                call_id: call_id.to_string(),
-                status,
-                now,
-            },
-        );
+        self.conversation
+            .set_tool_status(call_id.to_string(), status, now);
     }
 
     pub(crate) fn set_active_user_message(&mut self, call_id: &str, msg: String) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::SetActiveToolUserMessage {
-                call_id: call_id.to_string(),
-                message: msg,
-            },
-        );
+        self.conversation
+            .set_tool_user_message(call_id.to_string(), msg);
     }
 
     pub(crate) fn finish_tool(
@@ -8545,19 +8370,12 @@ impl TuiApp {
         engine_elapsed: Option<Duration>,
     ) {
         let now = self.core.clock.instant_now();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FinishTool {
-                call_id: call_id.to_string(),
-                status,
-                output,
-                engine_elapsed,
-                now,
-            },
-        );
+        self.conversation
+            .finish_tool(call_id.to_string(), status, output, engine_elapsed, now);
     }
 
     pub(crate) fn has_transcript_content(&mut self) -> bool {
-        !self.session_document.transcript.is_empty()
+        !self.conversation.transcript().is_empty()
     }
 
     /// Explicit loaded transcript materialization for APIs/tests that request the
@@ -8570,9 +8388,8 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        self.session_document
-            .transcript
-            .build_rows(&self.lua, tw, &theme)
+        self.conversation
+            .build_transcript_rows(&self.lua, tw, &theme)
     }
 
     fn capture_transcript_view_anchors(&mut self, width: u16) -> TranscriptViewAnchors {
@@ -8588,9 +8405,8 @@ impl TuiApp {
             )
         };
         let search_current = self
-            .search
-            .session
-            .as_ref()
+            .overlays
+            .search_session()
             .filter(|session| session.target == self.well_known.transcript)
             .and_then(|session| match &session.backend {
                 crate::app::search::SearchBackend::Transcript(transcript) => transcript
@@ -8598,15 +8414,11 @@ impl TuiApp {
                     .and_then(|index| transcript.matches.get(index).copied()),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
-            .map(|matched| {
-                self.session_document
-                    .transcript
-                    .search_range_anchor(matched)
-            });
+            .map(|matched| self.conversation.transcript_search_range_anchor(matched));
         TranscriptViewAnchors {
             following_tail,
             scroll_top: (!following_tail).then(|| {
-                self.session_document.transcript.position_anchor(
+                self.conversation.transcript_position_anchor(
                     &self.lua,
                     width,
                     crate::smelt_edit::DocPosition {
@@ -8616,19 +8428,16 @@ impl TuiApp {
                 )
             }),
             cursor: Some(
-                self.session_document
-                    .transcript
-                    .position_anchor(&self.lua, width, cursor),
+                self.conversation
+                    .transcript_position_anchor(&self.lua, width, cursor),
             ),
             selection_anchor: selection_anchor.map(|position| {
-                self.session_document
-                    .transcript
-                    .position_anchor(&self.lua, width, position)
+                self.conversation
+                    .transcript_position_anchor(&self.lua, width, position)
             }),
             drag_endpoint: drag_endpoint.map(|position| {
-                self.session_document
-                    .transcript
-                    .position_anchor(&self.lua, width, position)
+                self.conversation
+                    .transcript_position_anchor(&self.lua, width, position)
             }),
             search_current,
         }
@@ -8636,30 +8445,25 @@ impl TuiApp {
 
     fn restore_transcript_view_anchors(&mut self, width: u16, anchors: TranscriptViewAnchors) {
         let scroll_top = anchors.scroll_top.map(|anchor| {
-            self.session_document
-                .transcript
-                .resolve_position_anchor(&self.lua, width, anchor)
+            self.conversation
+                .resolve_transcript_position_anchor(&self.lua, width, anchor)
                 .row
         });
         let cursor = anchors.cursor.map(|anchor| {
-            self.session_document
-                .transcript
-                .resolve_position_anchor(&self.lua, width, anchor)
+            self.conversation
+                .resolve_transcript_position_anchor(&self.lua, width, anchor)
         });
         let selection_anchor = anchors.selection_anchor.map(|anchor| {
-            self.session_document
-                .transcript
-                .resolve_position_anchor(&self.lua, width, anchor)
+            self.conversation
+                .resolve_transcript_position_anchor(&self.lua, width, anchor)
         });
         let drag_endpoint = anchors.drag_endpoint.map(|anchor| {
-            self.session_document
-                .transcript
-                .resolve_position_anchor(&self.lua, width, anchor)
+            self.conversation
+                .resolve_transcript_position_anchor(&self.lua, width, anchor)
         });
         let search_current = anchors.search_current.map(|anchor| {
-            self.session_document
-                .transcript
-                .resolve_search_range_anchor(&self.lua, width, anchor)
+            self.conversation
+                .resolve_transcript_search_range_anchor(&self.lua, width, anchor)
         });
 
         if let Some(win) = self.ui.win_mut(self.well_known.transcript) {
@@ -8678,17 +8482,8 @@ impl TuiApp {
         }
 
         if let Some(matched) = search_current {
-            if let Some(session) = self.search.session.as_mut() {
-                if let crate::app::search::SearchBackend::Transcript(transcript) =
-                    &mut session.backend
-                {
-                    if let Some(index) = transcript.current {
-                        if let Some(current) = transcript.matches.get_mut(index) {
-                            *current = matched;
-                        }
-                    }
-                }
-            }
+            self.overlays
+                .replace_current_transcript_search_match(matched);
         }
     }
 
@@ -8724,9 +8519,8 @@ impl TuiApp {
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.session_document
-            .transcript
-            .node_metadata_at_row(&self.lua, width, row)
+        self.conversation
+            .transcript_node_metadata_at_row(&self.lua, width, row)
     }
 
     pub(crate) fn fold_transcript_node_at_row(
@@ -8739,9 +8533,8 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
         let changed = self
-            .session_document
-            .transcript
-            .fold_node_at_row(&self.lua, width, row, action, activation);
+            .conversation
+            .fold_transcript_node_at_row(&self.lua, width, row, action, activation);
         if changed {
             self.restore_transcript_view_anchors(width, anchors);
         }
@@ -8757,9 +8550,8 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
         let changed = self
-            .session_document
-            .transcript
-            .fold_node(&self.lua, width, id, action);
+            .conversation
+            .fold_transcript_node(&self.lua, width, id, action);
         if changed {
             self.restore_transcript_view_anchors(width, anchors);
         }
@@ -8774,9 +8566,8 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
         let changed = self
-            .session_document
-            .transcript
-            .fold_all(&self.lua, width, action);
+            .conversation
+            .fold_all_transcript_nodes(&self.lua, width, action);
         if changed {
             self.restore_transcript_view_anchors(width, anchors);
         }
@@ -8792,9 +8583,8 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
         let changed = self
-            .session_document
-            .transcript
-            .fold_block_kind(&self.lua, width, kind, action);
+            .conversation
+            .fold_transcript_block_kind(&self.lua, width, kind, action);
         if changed {
             self.restore_transcript_view_anchors(width, anchors);
         }
@@ -8824,20 +8614,19 @@ impl TuiApp {
         cpos
     }
 
-    /// Snapshot of the laid-out transcript blocks. `descriptor_index` is the
-    /// stable sparse descriptor index accepted by `transcript.reveal_block`,
+    /// Snapshot of the laid-out transcript blocks. `record_index` is the
+    /// stable sparse record index accepted by `transcript.reveal_block`,
     /// while `block_id` is the stable block identity. Returns empty when no
     /// projection has run yet.
     pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
-        self.session_document.transcript.visible_block_snapshots()
+        self.conversation.transcript().visible_block_snapshots()
     }
 
     pub(crate) fn loaded_transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.session_document
-            .transcript
-            .materialize_block_snapshots(&self.lua, width)
+        self.conversation
+            .materialize_transcript_block_snapshots(&self.lua, width)
     }
 
     pub(crate) fn loaded_transcript_block_at_row(
@@ -8853,34 +8642,34 @@ impl TuiApp {
     }
 
     #[cfg(any(test, feature = "harness"))]
-    pub(crate) fn reveal_transcript_descriptor_block(
+    pub(crate) fn reveal_transcript_record_block(
         &mut self,
-        descriptor_index: usize,
+        record_index: usize,
         top_padding: crate::smelt_edit::RowIndex,
         cursor: bool,
     ) -> bool {
-        self.reveal_transcript_block(descriptor_index, None, top_padding, cursor)
+        self.reveal_transcript_block(record_index, None, top_padding, cursor)
     }
 
     pub(crate) fn reveal_transcript_target(
         &mut self,
-        descriptor_index: usize,
+        record_index: usize,
         block_id: BlockId,
         move_cursor: bool,
     ) -> bool {
         if !self
-            .session_document
-            .transcript
-            .descriptor_matches_block_id(descriptor_index, block_id)
+            .conversation
+            .transcript()
+            .record_matches_block_id(record_index, block_id)
         {
             return false;
         }
-        self.reveal_transcript_block(descriptor_index, Some(block_id), 0, move_cursor)
+        self.reveal_transcript_block(record_index, Some(block_id), 0, move_cursor)
     }
 
     fn reveal_transcript_block(
         &mut self,
-        descriptor_index: usize,
+        record_index: usize,
         expected_block_id: Option<BlockId>,
         top_padding: crate::smelt_edit::RowIndex,
         cursor: bool,
@@ -8893,18 +8682,14 @@ impl TuiApp {
             .map(|viewport| viewport.rect.height)
             .unwrap_or(1)
             .max(1);
-        let Some(reveal) = self
-            .session_document
-            .transcript
-            .descriptor_block_reveal_position(
-                &self.lua,
-                width,
-                descriptor_index,
-                0,
-                top_padding,
-                viewport_rows,
-            )
-        else {
+        let Some(reveal) = self.conversation.transcript_record_block_reveal_position(
+            &self.lua,
+            width,
+            record_index,
+            0,
+            top_padding,
+            viewport_rows,
+        ) else {
             return false;
         };
         if expected_block_id.is_some_and(|expected| expected != reveal.block_id) {
@@ -8926,7 +8711,7 @@ impl TuiApp {
         self.record_transcript_scroll_intent(
             "reveal_block",
             TranscriptScrollIntent::RevealBlock {
-                descriptor_index,
+                record_index,
                 block_id: reveal.block_id,
                 row_offset: 0,
                 screen_padding_top: top_padding,
@@ -8938,26 +8723,20 @@ impl TuiApp {
 
     pub(crate) fn finish_transcript_turn(&mut self) {
         let _perf = smelt_perf::perf::begin("render:finish_turn");
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::FinalizeActiveTools,
-        );
+        self.conversation.finalize_tools();
     }
 
     pub(crate) fn set_agent_blocked_paused(&mut self, paused: bool) {
         let now = self.core.clock.instant_now();
         self.working.set_paused(paused);
-        self.parser.set_active_tools_paused(
-            self.session_document.transcript.history(),
-            paused,
-            now,
-        );
+        self.conversation.set_active_tools_paused(paused, now);
     }
 
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
         if self.block_read_only_mutation("update read-only session history") {
             return;
         }
-        let appends = std::mem::take(&mut self.pending_history_appends);
+        let appends = self.conversation.take_pending_history_appends();
         for append in appends {
             let mode_base = append.mode().map(|_| self.mode_append_base());
             let history_append = append.history_append(mode_base);
@@ -8970,17 +8749,12 @@ impl TuiApp {
     }
 
     pub(crate) fn commit_pending_history_append(&mut self, item: &protocol::HistoryItem) {
-        let Some(idx) = self
-            .pending_history_appends
-            .iter()
-            .position(|append| append.matches_history_item(item))
-        else {
+        let Some(append) = self.conversation.take_matching_history_append(item) else {
             return;
         };
-        let append = self.pending_history_appends.remove(idx);
         if append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
             if let Some(mode) = append.mode().and_then(protocol::AgentMode::parse) {
-                self.applied_agent_mode = mode;
+                self.conversation.set_applied_mode(mode);
             }
         }
         let result = if append.replacement_note_kind().is_some() {
@@ -9022,21 +8796,18 @@ impl TuiApp {
         if replace_note_kind != Some(protocol::HistoryNoteKind::ModeChange) {
             return false;
         }
-        let history = self.session_document.transcript.history();
+        let history = self.conversation.transcript().history();
         let Some(id) = history.order.last().copied() else {
             return false;
         };
         if !matches!(history.block(id), Some(Block::Mode { .. })) {
             return false;
         }
-        let result = self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::RewriteTranscriptBlock { id, block },
-        );
-        result.applied
+        self.conversation.rewrite_block(id, block)
     }
 
     fn remove_last_mode_block(&mut self) {
-        let history = self.session_document.transcript.history();
+        let history = self.conversation.transcript().history();
         let Some((idx, id)) = history.order.iter().copied().enumerate().next_back() else {
             return;
         };
@@ -9046,15 +8817,11 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
-        self.session_document.transcript.drain_finished_blocks()
+        self.conversation.drain_finished_transcript_blocks()
     }
 
-    /// No-op: width changes invalidate the cache implicitly on next paint.
-    pub(crate) fn invalidate_for_width(&mut self, _width: u16) {}
-
     pub(crate) fn invalidate_for_theme(&mut self) {
-        self.session_document.transcript.invalidate_theme();
-        self.resume_preview_cache.invalidate_theme();
+        self.conversation.invalidate_transcript_theme();
     }
 
     pub(crate) fn inline_options(&self) -> InlineOptions {
@@ -9063,17 +8830,14 @@ impl TuiApp {
                 self.core.config.settings.file_icons,
                 self.core.config.settings.file_icon_colors,
                 self.ui.theme().is_light(),
-                Some(std::path::PathBuf::from(&self.cwd)),
+                Some(self.workspace.cwd_path().to_owned()),
             ),
         }
     }
 
     pub(crate) fn sync_inline_options(&mut self) {
         let options = self.inline_options();
-        self.session_document
-            .transcript
-            .set_inline_options(options.clone());
-        self.resume_preview_cache.set_inline_options(options);
+        self.conversation.set_transcript_inline_options(options);
     }
 
     pub(crate) fn sync_transcript_renderer_generation(&mut self) {
@@ -9083,11 +8847,8 @@ impl TuiApp {
             &self.lua,
             &inline_options,
         );
-        self.session_document
-            .transcript
-            .invalidate_renderer_if_changed(generation, cache_key);
-        self.resume_preview_cache
-            .invalidate_renderer_if_changed(generation, cache_key);
+        self.conversation
+            .invalidate_transcript_renderer(generation, cache_key);
     }
 
     /// Install a complete theme and publish it to the process-wide active slot.
@@ -9109,28 +8870,20 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_transcript(&mut self) {
-        self.pending_history_appends.clear();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::ClearTranscript,
-        );
-        self.parser.clear();
+        self.conversation.clear_transcript();
     }
 
     pub(crate) fn last_user_block_index(&self) -> Option<usize> {
-        self.session_document.transcript.last_user_block_index()
+        self.conversation.transcript().last_user_block_index()
     }
 
     pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
-        self.session_document.transcript.user_turns()
+        self.conversation.transcript().user_turns()
     }
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::TruncateTranscriptTo {
-                block_index: block_idx,
-            },
-        );
-        self.parser.clear_tools();
+        self.conversation.truncate_transcript(block_idx);
+        self.conversation.clear_stream_tools();
     }
 
     /// Advance spinner animation. Returns `true` if the frame changed.
@@ -9150,7 +8903,7 @@ impl TuiApp {
 
     /// Per-line selection ranges (line, col_start, col_end) in display-cell units.
     /// No-op when no vim visual or selection anchor is active.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn transcript_selection_highlights(
         &mut self,
         scroll_top: crate::smelt_edit::RowIndex,
@@ -9239,7 +8992,8 @@ impl TuiApp {
         placeholder: Option<&str>,
     ) -> u16 {
         let usable = width.saturating_sub(2).min(u16::MAX as usize) as u16;
-        let store = self.input.store.lock().unwrap();
+        let attachment_store = self.prompt.attachment_store();
+        let store = attachment_store.lock().unwrap();
         let lines = build_prompt_display_lines(
             edit_buf.source(),
             &edit_buf.attachment_ids,
@@ -9329,9 +9083,8 @@ mod tests {
             "anchor cursor".into(),
         );
         let before_match = app
-            .search
-            .session
-            .as_ref()
+            .overlays
+            .search_session()
             .and_then(|session| session.current_range())
             .expect("current search match before fold");
         assert!(matches!(
@@ -9391,9 +9144,8 @@ mod tests {
             })
         );
         let after_match = app
-            .search
-            .session
-            .as_ref()
+            .overlays
+            .search_session()
             .and_then(|session| session.current_range())
             .expect("current search match after fold");
         assert!(matches!(
@@ -9419,9 +9171,9 @@ mod tests {
         assert!(app.transcript_win().is_following_tail());
     }
 
-    fn test_descriptor_record(idx: u64) -> smelt_store::TranscriptDescriptorRecord {
+    fn test_record_record(idx: u64) -> smelt_store::StoredTranscriptBlock {
         let indexed_text = format!("block {idx}");
-        smelt_store::TranscriptDescriptorRecord {
+        smelt_store::StoredTranscriptBlock {
             block_idx: idx,
             history_idx: None,
             kind: "text".into(),
@@ -9431,7 +9183,7 @@ mod tests {
             estimated_text_bytes: 8,
             preview_text: indexed_text.clone(),
             indexed_text: indexed_text.clone(),
-            descriptor_json: serde_json::to_string(&smelt_core::TranscriptBlockDescriptor::Text {
+            block_json: serde_json::to_string(&smelt_core::Block::Text {
                 content: indexed_text,
             })
             .unwrap(),
@@ -9443,20 +9195,20 @@ mod tests {
     }
 
     #[test]
-    fn transcript_document_loads_descriptor_window_from_store() {
+    fn transcript_document_loads_record_window_from_store() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        let records = (0..4).map(test_descriptor_record).collect::<Vec<_>>();
-        db.apply_transcript_descriptor_fixture(&records).unwrap();
-        let tail = db.read_transcript_descriptor_tail_slice(1).unwrap();
+        let records = (0..4).map(test_record_record).collect::<Vec<_>>();
+        db.apply_transcript_record_fixture(&records).unwrap();
+        let tail = db.read_transcript_record_tail_slice(1).unwrap();
         drop(db);
 
-        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
             .expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
 
         let window = document
-            .load_descriptor_window((1..3).into())
+            .load_record_window((1..3).into())
             .expect("loaded middle window");
         assert_eq!(window.start.get(), 1);
         assert_eq!(window.end().get(), 3);
@@ -9465,51 +9217,51 @@ mod tests {
     }
 
     #[test]
-    fn transcript_document_merges_descriptor_windows_without_discarding_tail() {
+    fn transcript_document_merges_record_windows_without_discarding_tail() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        let records = (0..6).map(test_descriptor_record).collect::<Vec<_>>();
-        db.apply_transcript_descriptor_fixture(&records).unwrap();
-        let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
+        let records = (0..6).map(test_record_record).collect::<Vec<_>>();
+        db.apply_transcript_record_fixture(&records).unwrap();
+        let tail = db.read_transcript_record_tail_slice(2).unwrap();
         drop(db);
 
-        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
             .expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
-        assert_eq!(document.descriptor_total_count(), Some(6));
-        assert_eq!(document.loaded_descriptor_count(), 2);
-        let ranges = document.loaded_descriptor_ranges();
+        assert_eq!(document.record_total_count(), Some(6));
+        assert_eq!(document.loaded_record_count(), 2);
+        let ranges = document.loaded_record_ranges();
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].start.get(), 4);
         assert_eq!(ranges[0].end.get(), 6);
         assert_eq!(
-            document.descriptor_range_state(4..6),
-            super::DescriptorRangeState::Loaded
+            document.record_range_state(4..6),
+            super::RecordRangeState::Loaded
         );
         assert_eq!(
-            document.descriptor_range_state(1..3),
-            super::DescriptorRangeState::Missing
+            document.record_range_state(1..3),
+            super::RecordRangeState::Missing
         );
 
         let middle = document
-            .load_descriptor_window((1..3).into())
+            .load_record_window((1..3).into())
             .expect("loaded middle window");
-        assert!(document.merge_descriptor_window(middle));
+        assert!(document.merge_record_window(middle));
 
-        assert_eq!(document.loaded_descriptor_count(), 4);
-        let ranges = document.loaded_descriptor_ranges();
+        assert_eq!(document.loaded_record_count(), 4);
+        let ranges = document.loaded_record_ranges();
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].start.get(), 1);
         assert_eq!(ranges[0].end.get(), 3);
         assert_eq!(ranges[1].start.get(), 4);
         assert_eq!(ranges[1].end.get(), 6);
         assert_eq!(
-            document.descriptor_range_state(1..3),
-            super::DescriptorRangeState::Loaded
+            document.record_range_state(1..3),
+            super::RecordRangeState::Loaded
         );
         assert_eq!(
-            document.descriptor_range_state(3..4),
-            super::DescriptorRangeState::Missing
+            document.record_range_state(3..4),
+            super::RecordRangeState::Missing
         );
         assert_eq!(document.history().order.len(), 2);
         assert_eq!(
@@ -9535,20 +9287,19 @@ mod tests {
     }
 
     #[test]
-    fn transcript_reconciles_stale_descriptor_extent_after_dense_compaction() {
+    fn transcript_reconciles_stale_record_extent_after_dense_compaction() {
         let dir = tempfile::tempdir().unwrap();
-        let mut record = test_descriptor_record(302);
+        let mut record = test_record_record(302);
         record.origin_json =
             Some(serde_json::to_string(&smelt_core::BlockOrigin::History(0)).unwrap());
-        let slice = smelt_store::TranscriptDescriptorSlice::new(
-            smelt_store::TranscriptDescriptorIndex::new(302),
+        let slice = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(302),
             303,
-            smelt_store::TranscriptDescriptorHydration::ObjectBacked,
+            smelt_store::TranscriptRecordHydration::ObjectBacked,
             vec![record],
         );
-        let loaded =
-            super::LoadedTranscript::from_descriptor_slice(slice, dir.path().to_path_buf())
-                .expect("loaded stale tail");
+        let loaded = super::LoadedTranscript::from_record_slice(slice, dir.path().to_path_buf())
+            .expect("loaded stale tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
         document.push_with_origin(
             smelt_core::Block::Text {
@@ -9557,28 +9308,28 @@ mod tests {
             smelt_core::BlockOrigin::History(1),
         );
 
-        let before = document.descriptor_save_suffix(true, None);
+        let before = document.record_save_suffix(true, None);
         assert!(matches!(
             before,
-            super::TranscriptDescriptorSaveSuffix::Suffix {
-                descriptor_start_idx: 303,
+            super::TranscriptRecordSaveSuffix::Suffix {
+                record_start_idx: 303,
                 ..
             }
         ));
 
-        assert!(document.reconcile_dense_descriptor_count(111));
-        let after = document.descriptor_save_suffix(true, None);
+        assert!(document.reconcile_dense_record_count(111));
+        let after = document.record_save_suffix(true, None);
         assert!(matches!(
             after,
-            super::TranscriptDescriptorSaveSuffix::Suffix {
-                descriptor_start_idx: 111,
+            super::TranscriptRecordSaveSuffix::Suffix {
+                record_start_idx: 111,
                 ..
             }
         ));
     }
 
     #[test]
-    fn descriptor_save_suffix_uses_earliest_dirty_source() {
+    fn record_save_suffix_uses_earliest_dirty_source() {
         let mut document = super::TranscriptDocument::new();
         document.push_with_origin(
             smelt_core::Block::Text {
@@ -9586,52 +9337,52 @@ mod tests {
             },
             smelt_core::BlockOrigin::History(0),
         );
-        document.history_mut().clear_descriptor_dirty();
+        document.history_mut().clear_record_dirty();
         document.push_with_origin(
             smelt_core::Block::Text {
                 content: "dirty tail".into(),
             },
             smelt_core::BlockOrigin::History(1),
         );
-        assert_eq!(document.history().descriptor_dirty_from(), Some(1));
+        assert_eq!(document.history().record_dirty_from(), Some(1));
 
-        let suffix = document.descriptor_save_suffix(true, Some(0));
-        let super::TranscriptDescriptorSaveSuffix::Suffix {
-            descriptor_start_idx,
-            descriptor_records,
+        let suffix = document.record_save_suffix(true, Some(0));
+        let super::TranscriptRecordSaveSuffix::Suffix {
+            record_start_idx,
+            records,
         } = suffix
         else {
-            panic!("dirty descriptor sources should produce a save suffix");
+            panic!("dirty record sources should produce a save suffix");
         };
-        assert_eq!(descriptor_start_idx, 0);
-        assert_eq!(descriptor_records.len(), 2);
+        assert_eq!(record_start_idx, 0);
+        assert_eq!(records.len(), 2);
     }
 
     #[test]
-    fn approximate_row_seek_uses_descriptor_prefix_estimates() {
+    fn approximate_row_seek_uses_record_prefix_estimates() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        let mut records = (0..300).map(test_descriptor_record).collect::<Vec<_>>();
+        let mut records = (0..300).map(test_record_record).collect::<Vec<_>>();
         records[0].estimated_text_bytes = 1_000;
-        db.apply_transcript_descriptor_fixture(&records).unwrap();
-        let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
+        db.apply_transcript_record_fixture(&records).unwrap();
+        let tail = db.read_transcript_record_tail_slice(2).unwrap();
         drop(db);
 
-        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
             .expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
 
         let range = document
-            .descriptor_window_range_for_approximate_display_row(10, 120, 10)
-            .expect("descriptor range");
+            .record_window_range_for_approximate_display_row(10, 120, 10)
+            .expect("record range");
 
         assert!(
             range.start.get() <= 10 && 10 < range.end.get(),
-            "seek should center near the descriptor whose cumulative estimate contains the row: {range:?}"
+            "seek should center near the record whose cumulative estimate contains the row: {range:?}"
         );
         assert!(
             range.end.get() < 60,
-            "seek must not use loaded tail average rows per descriptor: {range:?}"
+            "seek must not use loaded tail average rows per record: {range:?}"
         );
     }
 
@@ -9639,21 +9390,21 @@ mod tests {
     fn scrollbar_total_ignores_exact_loaded_height_refinements_for_sparse_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        let records = (0..16).map(test_descriptor_record).collect::<Vec<_>>();
-        db.apply_transcript_descriptor_fixture(&records).unwrap();
-        let tail = db.read_transcript_descriptor_tail_slice(4).unwrap();
+        let records = (0..16).map(test_record_record).collect::<Vec<_>>();
+        db.apply_transcript_record_fixture(&records).unwrap();
+        let tail = db.read_transcript_record_tail_slice(4).unwrap();
         drop(db);
 
-        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
             .expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
         let before = document.approximate_mixed_scrollbar_total_rows(10, 1_000);
 
-        let active_start = document.descriptors.active_range().unwrap().start.get();
+        let active_start = document.records.active_range().unwrap().start.get();
         let block_id = document
-            .descriptors
+            .records
             .sparse
-            .record(smelt_store::TranscriptDescriptorIndex::new(active_start))
+            .record(smelt_store::TranscriptRecordOffset::new(active_start))
             .unwrap()
             .block_id;
         let snapshot = crate::content::transcript_buf::TranscriptExactHeightSnapshot {
@@ -9676,7 +9427,7 @@ mod tests {
         };
         document
             .extent_index
-            .observe_exact_loaded_descriptor_rows(&document.descriptors.sparse, snapshot);
+            .observe_exact_loaded_record_rows(&document.records.sparse, snapshot);
         let after = document.approximate_mixed_scrollbar_total_rows(10, 1_000);
 
         assert_eq!(before, after);

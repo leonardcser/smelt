@@ -2,17 +2,17 @@
 
 //! File-backed state-machine fuzzing for canonical session persistence. Commands
 //! run through the public writer, reader, and maintenance APIs. An independent
-//! in-memory model checks canonical history, side tables, descriptors, revisions,
+//! in-memory model checks canonical history, side tables, transcript_records, revisions,
 //! idempotency, rollback, reopen, backup, fork, repair, and garbage collection.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use protocol::{AssistantStep, Content, HistoryItem};
 use smelt_store::{
-    DescriptorIndex, FullSession, HistoryIndex, HistoryLen, HistorySuffix, OwnedSessionWriter,
-    Revision, SaveReceipt, SessionCommit, SessionCommitFailure, SessionCostUsd, SessionIdentity,
-    SessionMaintenance, SessionMetadata, SessionReader, SideTableSuffixes, StoreHead, StoredSession,
-    TranscriptDescriptorRecord, TranscriptDescriptorSuffix,
+    FullSession, HistoryIndex, HistoryLen, HistorySuffix, OwnedSessionWriter, Revision,
+    SaveReceipt, SessionCommit, SessionCommitFailure, SessionCostUsd, SessionIdentity,
+    SessionMaintenance, SessionMetadata, SessionReader, SideTableSuffixes, StoreHead,
+    StoredSession, StoredTranscriptBlock, TranscriptRecordIndex, TranscriptRecordSuffix,
 };
 use std::path::Path;
 
@@ -75,7 +75,7 @@ struct Model {
     turn_metas: Vec<(u64, serde_json::Value)>,
     metadata_snapshots: Vec<(u64, serde_json::Value)>,
     context_snapshots: Vec<(u64, serde_json::Value)>,
-    descriptors: Vec<TranscriptDescriptorRecord>,
+    transcript_records: Vec<StoredTranscriptBlock>,
     last_commit: Option<(SessionCommit, SaveReceipt)>,
     next_sequence: u64,
     backup_id: u64,
@@ -85,9 +85,9 @@ struct Model {
 #[derive(Debug, PartialEq)]
 struct StoreObservation {
     snapshot: Option<FullSession>,
-    descriptors: Vec<TranscriptDescriptorRecord>,
+    transcript_records: Vec<StoredTranscriptBlock>,
     history_rows: u64,
-    descriptor_rows: u64,
+    transcript_record_rows: u64,
     object_rows: u64,
     request_rows: u64,
 }
@@ -121,11 +121,9 @@ fn run(input: Input) {
             Op::RepeatLast => {
                 repeat_last(writer.as_mut().expect("writer open"), &model, &session_dir)
             }
-            Op::RejectStale => reject_stale(
-                writer.as_mut().expect("writer open"),
-                &model,
-                &session_dir,
-            ),
+            Op::RejectStale => {
+                reject_stale(writer.as_mut().expect("writer open"), &model, &session_dir)
+            }
             Op::RejectInvalid { kind } => reject_invalid(
                 writer.as_mut().expect("writer open"),
                 &model,
@@ -173,7 +171,7 @@ fn commit(
             .map(history_item),
     );
     let side_tables = side_tables(history.len(), side_seed);
-    let descriptors = descriptors(&history);
+    let transcript_records = transcript_records(&history);
     let sequence = model.next_sequence;
     model.next_sequence = model.next_sequence.saturating_add(1);
     let command = SessionCommit {
@@ -187,9 +185,9 @@ fn commit(
             items: history[keep..].to_vec(),
         },
         side_tables: typed_side_tables(&side_tables),
-        descriptors: Some(TranscriptDescriptorSuffix {
-            start: DescriptorIndex::ZERO,
-            records: descriptors.clone(),
+        transcript_records: Some(TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
+            records: transcript_records.clone(),
         }),
     };
 
@@ -197,8 +195,8 @@ fn commit(
     assert_eq!(receipt.previous, model.head);
     assert_eq!(receipt.current.history_len.get(), history.len() as u64);
     assert_eq!(
-        receipt.current.descriptor_len.get(),
-        descriptors.len() as u64
+        receipt.current.transcript_record_count.get(),
+        transcript_records.len() as u64
     );
     if writer.is_staged() {
         writer.publish().unwrap();
@@ -211,7 +209,7 @@ fn commit(
     model.turn_metas = side_tables.0;
     model.metadata_snapshots = side_tables.1;
     model.context_snapshots = side_tables.2;
-    model.descriptors = descriptors;
+    model.transcript_records = transcript_records;
     model.last_commit = Some((command, receipt));
 }
 
@@ -248,12 +246,7 @@ fn reject_stale(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Pa
     );
 }
 
-fn reject_invalid(
-    writer: &mut OwnedSessionWriter,
-    model: &Model,
-    session_dir: &Path,
-    kind: u8,
-) {
+fn reject_invalid(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Path, kind: u8) {
     let before = observe_store(session_dir);
     let mut command = current_command(model);
     let expected = match kind % 4 {
@@ -265,11 +258,13 @@ fn reject_invalid(
             "history"
         }
         1 => {
-            command.descriptors = Some(TranscriptDescriptorSuffix {
-                start: DescriptorIndex::new(model.head.descriptor_len.get().saturating_add(1)),
+            command.transcript_records = Some(TranscriptRecordSuffix {
+                start: TranscriptRecordIndex::new(
+                    model.head.transcript_record_count.get().saturating_add(1),
+                ),
                 records: Vec::new(),
             });
-            "descriptor"
+            "transcript_record"
         }
         2 => {
             command.side_tables.turn_metas.push((
@@ -286,7 +281,7 @@ fn reject_invalid(
     let error = writer.commit_session(&command).unwrap_err();
     match (expected, error) {
         ("history", SessionCommitFailure::InvalidHistorySuffix { .. })
-        | ("descriptor", SessionCommitFailure::InvalidDescriptorSuffix { .. })
+        | ("transcript_record", SessionCommitFailure::InvalidTranscriptRecordSuffix { .. })
         | ("side_table", SessionCommitFailure::InvalidSideTableRow { .. })
         | ("session", SessionCommitFailure::SessionMismatch { .. }) => {}
         (expected, actual) => panic!("expected {expected} rejection, got {actual:?}"),
@@ -362,9 +357,9 @@ fn fork_prefix(root: &Path, session_dir: &Path, model: &mut Model, keep: u8) {
         "fork lost context snapshots from the retained prefix"
     );
     assert_eq!(
-        fork.read_all_transcript_descriptor_records().unwrap(),
-        model.descriptors[..prefix],
-        "fork lost transcript descriptors from the retained prefix"
+        fork.read_all_transcript_records().unwrap(),
+        model.transcript_records[..prefix],
+        "fork lost transcript records from the retained prefix"
     );
     assert_eq!(
         fork.storage_stats().unwrap().object_rows,
@@ -437,9 +432,9 @@ fn observe_store(session_dir: &Path) -> StoreObservation {
     if !session_dir.exists() {
         return StoreObservation {
             snapshot: None,
-            descriptors: Vec::new(),
+            transcript_records: Vec::new(),
             history_rows: 0,
-            descriptor_rows: 0,
+            transcript_record_rows: 0,
             object_rows: 0,
             request_rows: 0,
         };
@@ -448,9 +443,9 @@ fn observe_store(session_dir: &Path) -> StoreObservation {
     let stats = reader.storage_stats().unwrap();
     StoreObservation {
         snapshot: reader.load_full_session().unwrap(),
-        descriptors: reader.read_all_transcript_descriptor_records().unwrap(),
+        transcript_records: reader.read_all_transcript_records().unwrap(),
         history_rows: stats.history_rows,
-        descriptor_rows: stats.descriptor_rows,
+        transcript_record_rows: stats.transcript_record_rows,
         object_rows: stats.object_rows,
         request_rows: stats.request_rows,
     }
@@ -488,22 +483,22 @@ fn assert_reader(reader: &SessionReader, model: &Model) {
             assert_eq!(snapshot.turn_metas, model.turn_metas);
             assert_eq!(snapshot.metadata_snapshots, model.metadata_snapshots);
             assert_eq!(snapshot.context_snapshots, model.context_snapshots);
-            assert_eq!(snapshot.descriptors, model.descriptors);
+            assert_eq!(snapshot.transcript_records, model.transcript_records);
         }
         _ => panic!("snapshot presence diverged from model"),
     }
     assert_eq!(reader.history_item_count().unwrap(), model.history.len());
     assert_eq!(
-        reader.transcript_descriptor_count().unwrap(),
-        model.descriptors.len()
+        reader.transcript_record_count().unwrap(),
+        model.transcript_records.len()
     );
     assert_eq!(
-        reader.transcript_descriptor_dense_extent().unwrap(),
-        model.descriptors.len()
+        reader.transcript_record_dense_extent().unwrap(),
+        model.transcript_records.len()
     );
     assert_eq!(
-        reader.read_all_transcript_descriptor_records().unwrap(),
-        model.descriptors
+        reader.read_all_transcript_records().unwrap(),
+        model.transcript_records
     );
     assert!(
         reader.storage_stats().unwrap().object_rows >= attachment_object_count(&model.history),
@@ -531,7 +526,7 @@ fn current_command(model: &Model) -> SessionCommit {
             start: HistoryIndex::new(model.history.len() as u64),
             ..SideTableSuffixes::default()
         },
-        descriptors: None,
+        transcript_records: None,
     }
 }
 
@@ -562,7 +557,7 @@ fn history_item(entry: Entry) -> HistoryItem {
     }
 }
 
-fn descriptors(history: &[HistoryItem]) -> Vec<TranscriptDescriptorRecord> {
+fn transcript_records(history: &[HistoryItem]) -> Vec<StoredTranscriptBlock> {
     history
         .iter()
         .enumerate()
@@ -573,7 +568,7 @@ fn descriptors(history: &[HistoryItem]) -> Vec<TranscriptDescriptorRecord> {
                 HistoryItem::System { .. } | HistoryItem::Note(_) => "assistant",
             };
             let preview = format!("{kind}-{index}");
-            TranscriptDescriptorRecord {
+            StoredTranscriptBlock {
                 block_idx: index as u64,
                 history_idx: Some(index as u64),
                 kind: kind.to_string(),
@@ -583,7 +578,7 @@ fn descriptors(history: &[HistoryItem]) -> Vec<TranscriptDescriptorRecord> {
                 estimated_text_bytes: preview.len() as u64,
                 preview_text: preview.clone(),
                 indexed_text: preview.clone(),
-                descriptor_json: serde_json::json!({
+                block_json: serde_json::json!({
                     "kind": kind,
                     "text": preview,
                 })
@@ -690,11 +685,7 @@ fn session_identity() -> SessionIdentity {
     }
 }
 
-fn session_metadata(
-    input: &StateInput,
-    history_len: usize,
-    sequence: u64,
-) -> SessionMetadata {
+fn session_metadata(input: &StateInput, history_len: usize, sequence: u64) -> SessionMetadata {
     let first_live_index = if history_len == 0 {
         0
     } else {

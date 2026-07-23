@@ -57,11 +57,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let accept_context = Arc::clone(shared);
     files.fn_(
         "accept",
         "Record a selected file result for recent-selection ranking. Options: `{ cwd? }`. Returns `(true, nil)` or `(false, err)`.",
         &["item", "opts"],
-        |_, (item, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<(bool, Option<String>)> {
+        move |_, (item, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<(bool, Option<String>)> {
             let opts = AcceptOpts::from_lua(opts)?;
             let path = item
                 .get::<Option<String>>("path")?
@@ -71,7 +72,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 return Ok((false, Some("files.accept: item.path is required".to_string())));
             }
             let result = crate::host::try_with_core(|core| {
-                let cwd = opts.cwd.unwrap_or_else(|| core.env.cwd());
+                let cwd = opts
+                    .cwd
+                    .map(|cwd| accept_context.resolve_project_path(cwd))
+                    .unwrap_or_else(|| {
+                        if accept_context.external_effects_active() {
+                            core.env.cwd()
+                        } else {
+                            accept_context.evaluation_cwd()
+                        }
+                    });
                 core.workspace_files.accept(AcceptRequest { cwd, path })
             });
             match result {
@@ -112,17 +122,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let rescan_context = Arc::clone(shared);
     files.fn_(
         "rescan",
         "Trigger an asynchronous full rescan for the current workspace or `opts.cwd`. Returns `(true, nil)` or `(false, err)`.",
         &["opts"],
-        |_, opts: Option<mlua::Table>| -> LuaResult<(bool, Option<String>)> {
+        move |_, opts: Option<mlua::Table>| -> LuaResult<(bool, Option<String>)> {
             let cwd = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("cwd").ok().flatten())
                 .map(PathBuf::from);
             let result = crate::host::try_with_core(|core| {
-                let cwd = cwd.unwrap_or_else(|| core.env.cwd());
+                let cwd = cwd
+                    .map(|cwd| rescan_context.resolve_project_path(cwd))
+                    .unwrap_or_else(|| {
+                        if rescan_context.external_effects_active() {
+                            core.env.cwd()
+                        } else {
+                            rescan_context.evaluation_cwd()
+                        }
+                    });
                 core.workspace_files.rescan(&cwd)
             });
             match result {

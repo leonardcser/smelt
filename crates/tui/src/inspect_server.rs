@@ -286,14 +286,47 @@ pub struct Server {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(sender) = self.shutdown_tx.take() {
+            let _ = sender.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 impl Server {
-    /// Bind a loopback address on an ephemeral port and start serving.
+    /// Bind a loopback address on an ephemeral port and start serving process storage.
     pub async fn start() -> std::io::Result<Self> {
-        Self::start_on_port(None).await
+        Self::start_with_storage(smelt_core::session::SessionStorage::new(
+            smelt_core::config::state_dir(),
+        ))
+        .await
     }
 
-    /// Bind a loopback address on `port` (or an ephemeral port when `None`) and start serving.
+    /// Bind a loopback address on an ephemeral port and serve explicit runtime storage.
+    pub async fn start_with_storage(
+        sessions: smelt_core::session::SessionStorage,
+    ) -> std::io::Result<Self> {
+        Self::start_on_port_with_storage(None, sessions).await
+    }
+
+    /// Bind a loopback address on `port` (or an ephemeral port when `None`) and serve process storage.
     pub async fn start_on_port(port: Option<u16>) -> std::io::Result<Self> {
+        Self::start_on_port_with_storage(
+            port,
+            smelt_core::session::SessionStorage::new(smelt_core::config::state_dir()),
+        )
+        .await
+    }
+
+    /// Bind a loopback address and serve explicit runtime storage.
+    pub async fn start_on_port_with_storage(
+        port: Option<u16>,
+        sessions: smelt_core::session::SessionStorage,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await?;
         let local_addr = listener.local_addr()?;
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -305,7 +338,7 @@ impl Server {
                     _ = &mut shutdown_rx => break,
                     accept = listener.accept() => {
                         let Ok((stream, _)) = accept else { continue };
-                        tokio::spawn(handle_connection(stream));
+                        tokio::spawn(handle_connection(stream, sessions.clone()));
                     }
                 }
             }
@@ -334,7 +367,7 @@ impl Server {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream) {
+async fn handle_connection(mut stream: TcpStream, sessions: smelt_core::session::SessionStorage) {
     let mut reader = BufReader::new(&mut stream);
     let mut first_line = String::new();
     if reader.read_line(&mut first_line).await.is_err() {
@@ -355,7 +388,7 @@ async fn handle_connection(mut stream: TcpStream) {
 
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     let path = parts.get(1).map_or("/", |p| *p);
-    let (status, content_type, body) = route(path).await;
+    let (status, content_type, body) = route(path, &sessions).await;
 
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -364,7 +397,10 @@ async fn handle_connection(mut stream: TcpStream) {
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-async fn route(path: &str) -> (&'static str, &'static str, String) {
+async fn route(
+    path: &str,
+    sessions: &smelt_core::session::SessionStorage,
+) -> (&'static str, &'static str, String) {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
     if let Some(rest) = path.strip_prefix("/api/sessions/") {
         let mut segments = rest.split('/');
@@ -373,19 +409,21 @@ async fn route(path: &str) -> (&'static str, &'static str, String) {
             return not_found();
         }
         let suffix = segments.next();
-        match suffix {
-            None | Some("") => session_detail(id).await,
-            Some("summary") => session_summary(id).await,
-            Some("requests") => match segments.next() {
-                Some(request_id) if !request_id.is_empty() => {
-                    session_request_payload(id, request_id).await
-                }
-                _ => session_requests(id).await,
-            },
+        let resource = segments.next();
+        if segments.next().is_some() {
+            return not_found();
+        }
+        match (suffix, resource) {
+            (None | Some(""), None) => session_detail(sessions, id).await,
+            (Some("summary"), None) => session_summary(sessions, id).await,
+            (Some("requests"), None | Some("")) => session_requests(sessions, id).await,
+            (Some("requests"), Some(request_id)) => {
+                session_request_payload(sessions, id, request_id).await
+            }
             _ => not_found(),
         }
     } else if path == "/api/sessions" {
-        list_sessions(query).await
+        list_sessions(sessions, query).await
     } else if let Some(asset) = path.strip_prefix("/assets/") {
         asset_response(asset)
     } else {
@@ -413,6 +451,14 @@ fn not_found() -> (&'static str, &'static str, String) {
     )
 }
 
+fn bad_request(message: &str) -> (&'static str, &'static str, String) {
+    (
+        "400 Bad Request",
+        "application/json",
+        serde_json::json!({"error": message}).to_string(),
+    )
+}
+
 fn server_error(message: &str) -> (&'static str, &'static str, String) {
     (
         "500 Internal Server Error",
@@ -421,13 +467,21 @@ fn server_error(message: &str) -> (&'static str, &'static str, String) {
     )
 }
 
-async fn list_sessions(query: &str) -> (&'static str, &'static str, String) {
+async fn list_sessions(
+    sessions: &smelt_core::session::SessionStorage,
+    query: &str,
+) -> (&'static str, &'static str, String) {
     let query = match parse_session_list_query(query) {
         Ok(query) => query,
-        Err(error) => return server_error(&error),
+        Err(error) => return bad_request(&error),
     };
-    let page = match tokio::task::spawn_blocking(move || list_session_items(query)).await {
+    let sessions = sessions.clone();
+    let page = match tokio::task::spawn_blocking(move || list_session_items(&sessions, query)).await
+    {
         Ok(Ok(page)) => page,
+        Ok(Err(smelt_core::session::SessionStoreError::InvalidListQuery { message })) => {
+            return bad_request(&message);
+        }
         Ok(Err(error)) => return server_error(&error.to_string()),
         Err(error) => return server_error(&error.to_string()),
     };
@@ -463,6 +517,8 @@ fn parse_session_list_query(query: &str) -> Result<smelt_core::session::SessionL
     let cursor = match (cursor_updated_at, cursor_id) {
         (None, None) => None,
         (Some(updated_at_ms), Some(id)) => {
+            smelt_core::session_id::SessionId::parse(&id)
+                .map_err(|error| format!("invalid session cursor id: {error}"))?;
             Some(smelt_core::session::SessionListCursor { updated_at_ms, id })
         }
         _ => return Err("session cursor requires both update time and id".into()),
@@ -475,13 +531,16 @@ fn parse_session_list_query(query: &str) -> Result<smelt_core::session::SessionL
     })
 }
 
-async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
+async fn session_detail(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> (&'static str, &'static str, String) {
     let id = id.to_string();
+    let sessions = sessions.clone();
     let session = match tokio::task::spawn_blocking(move || {
-        crate::app::history::materialize_full_session_result(
-            &id,
-            crate::app::history::FullSessionMaterializationReason::InspectSessionDetail,
-        )
+        smelt_perf::perf::record_value("session:full_materialized", 1);
+        smelt_perf::perf::record_value("inspect:session:detail_load_full", 1);
+        sessions.load_full_result(&id)
     })
     .await
     {
@@ -501,16 +560,21 @@ async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
     }
 }
 
-async fn session_summary(id: &str) -> (&'static str, &'static str, String) {
+async fn session_summary(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> (&'static str, &'static str, String) {
     let id = id.to_string();
-    let summary = match tokio::task::spawn_blocking(move || build_session_summary(&id)).await {
-        Ok(Ok(summary)) => summary,
-        Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
-            return not_found();
-        }
-        Ok(Err(err)) => return server_error(&err.to_string()),
-        Err(err) => return server_error(&err.to_string()),
-    };
+    let sessions = sessions.clone();
+    let summary =
+        match tokio::task::spawn_blocking(move || build_session_summary(&sessions, &id)).await {
+            Ok(Ok(summary)) => summary,
+            Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
+                return not_found();
+            }
+            Ok(Err(err)) => return server_error(&err.to_string()),
+            Err(err) => return server_error(&err.to_string()),
+        };
     match summary {
         Some(summary) => match serde_json::to_string(&summary) {
             Ok(body) => ("200 OK", "application/json", body),
@@ -520,35 +584,36 @@ async fn session_summary(id: &str) -> (&'static str, &'static str, String) {
     }
 }
 
-async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
+async fn session_requests(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> (&'static str, &'static str, String) {
     let id = id.to_string();
-    let requests = match tokio::task::spawn_blocking(move || session_requests_json(&id)).await {
-        Ok(result) => result,
-        Err(e) => return server_error(&e.to_string()),
-    };
+    let sessions = sessions.clone();
+    let requests =
+        match tokio::task::spawn_blocking(move || session_requests_json(&sessions, &id)).await {
+            Ok(result) => result,
+            Err(e) => return server_error(&e.to_string()),
+        };
     match requests {
-        Ok(body) => ("200 OK", "application/json", body),
+        Ok(Some(body)) => ("200 OK", "application/json", body),
+        Ok(None) => not_found(),
         Err(e) => server_error(&e),
     }
 }
 
-fn session_requests_json(id: &str) -> std::result::Result<String, String> {
-    let dir = match session_dir(id) {
+fn session_requests_json(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> std::result::Result<Option<String>, String> {
+    let dir = match session_dir(sessions, id) {
         Ok(dir) => dir,
-        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
-            return Ok("[]".to_string());
-        }
+        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
-    if let Err(err) = smelt_core::session::ensure_session_db_read_only(&dir) {
-        if matches!(
-            err,
-            smelt_core::session::SessionStoreError::MissingDatabase { .. }
-        ) {
-            return Ok("[]".to_string());
-        }
-        return Err(err.to_string());
-    }
+    sessions
+        .ensure_session_db_read_only(&dir)
+        .map_err(|err| err.to_string())?;
     let db_path = dir.join("session.db");
     let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
     let attempts = db
@@ -559,17 +624,27 @@ fn session_requests_json(id: &str) -> std::result::Result<String, String> {
         })
         .map_err(|err| err.to_string())?;
     let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
-    serde_json::to_string(&values).map_err(|err| err.to_string())
+    serde_json::to_string(&values)
+        .map(Some)
+        .map_err(|err| err.to_string())
 }
 
 async fn session_request_payload(
+    sessions: &smelt_core::session::SessionStorage,
     id: &str,
     request_id: &str,
 ) -> (&'static str, &'static str, String) {
+    let attempt_id = match request_id.parse::<i64>() {
+        Ok(attempt_id) if attempt_id > 0 => attempt_id,
+        Ok(_) => return bad_request("request id must be positive"),
+        Err(error) => return bad_request(&format!("invalid request id: {error}")),
+    };
     let id = id.to_string();
-    let request_id = request_id.to_string();
+    let sessions = sessions.clone();
     let payload =
-        match tokio::task::spawn_blocking(move || request_payload_json(&id, &request_id)).await {
+        match tokio::task::spawn_blocking(move || request_payload_json(&sessions, &id, attempt_id))
+            .await
+        {
             Ok(result) => result,
             Err(e) => return server_error(&e.to_string()),
         };
@@ -580,24 +655,19 @@ async fn session_request_payload(
     }
 }
 
-fn request_payload_json(id: &str, request_id: &str) -> std::result::Result<Option<String>, String> {
-    let attempt_id = request_id
-        .parse::<i64>()
-        .map_err(|err| format!("invalid request id: {err}"))?;
-    let dir = match session_dir(id) {
+fn request_payload_json(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+    attempt_id: i64,
+) -> std::result::Result<Option<String>, String> {
+    let dir = match session_dir(sessions, id) {
         Ok(dir) => dir,
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
-    if let Err(err) = smelt_core::session::ensure_session_db_read_only(&dir) {
-        if matches!(
-            err,
-            smelt_core::session::SessionStoreError::MissingDatabase { .. }
-        ) {
-            return Ok(None);
-        }
-        return Err(err.to_string());
-    }
+    sessions
+        .ensure_session_db_read_only(&dir)
+        .map_err(|err| err.to_string())?;
     let db_path = dir.join("session.db");
     let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
     let Some(payloads) = db
@@ -679,8 +749,13 @@ fn remove_null_json_fields(value: &mut serde_json::Value) {
     }
 }
 
-fn session_dir(id: &str) -> Result<PathBuf, smelt_core::session::SessionStoreError> {
-    smelt_core::session::resolve_prefix(id).map(|id| smelt_core::session::session_dir(&id))
+fn session_dir(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> Result<PathBuf, smelt_core::session::SessionStoreError> {
+    sessions
+        .resolve_prefix(id)
+        .map(|id| sessions.session_dir(&id))
 }
 
 pub fn is_safe_session_ref(id: &str) -> bool {
@@ -688,9 +763,10 @@ pub fn is_safe_session_ref(id: &str) -> bool {
 }
 
 fn list_session_items(
+    sessions: &smelt_core::session::SessionStorage,
     query: smelt_core::session::SessionListQuery,
 ) -> smelt_core::session::SessionStoreResult<SessionListPage> {
-    let page = smelt_core::session::list_session_page_result(query)?;
+    let page = sessions.list_session_page_result(query)?;
     let sessions = page
         .entries
         .into_iter()
@@ -715,9 +791,10 @@ fn list_session_items(
 }
 
 fn build_session_summary(
+    sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> smelt_core::session::SessionStoreResult<Option<SessionSummary>> {
-    let Some(meta) = smelt_core::session::load_meta_result(id)? else {
+    let Some(meta) = sessions.load_meta_result(id)? else {
         return Ok(None);
     };
     let (project, path_group) = project_labels(meta.cwd.as_deref());
@@ -725,7 +802,7 @@ fn build_session_summary(
         id: meta.id.clone(),
         project,
         path_group,
-        request_stats: request_stats_for_session(&meta.id),
+        request_stats: request_stats_for_session(sessions, &meta.id),
     }))
 }
 
@@ -748,8 +825,11 @@ fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
     (project, path_group)
 }
 
-fn request_stats_for_session(id: &str) -> RequestStats {
-    let Ok(session_dir) = session_dir(id) else {
+fn request_stats_for_session(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> RequestStats {
+    let Ok(session_dir) = session_dir(sessions, id) else {
         return RequestStats::default();
     };
     let db_path = session_dir.join("session.db");
@@ -761,15 +841,35 @@ fn request_stats_for_session(id: &str) -> RequestStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::{Content, HistoryItem};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn fetch(path: &str) -> (String, String) {
-        let mut server = Server::start().await.unwrap();
-        let url = server.url();
-        let mut parts = url.split("//").nth(1).unwrap().split(':');
-        let host = parts.next().unwrap();
-        let port: u16 = parts.next().unwrap().parse().unwrap();
-        let mut stream = TcpStream::connect((host, port)).await.unwrap();
+    const OLDER_SESSION_ID: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const NEWER_SESSION_ID: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    const MISSING_SESSION_ID: &str =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    struct IsolatedState {
+        sessions: smelt_core::session::SessionStorage,
+        _directory: tempfile::TempDir,
+    }
+
+    impl IsolatedState {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().expect("temporary state directory");
+            let sessions = smelt_core::session::SessionStorage::new(directory.path().join("smelt"));
+            Self {
+                sessions,
+                _directory: directory,
+            }
+        }
+    }
+
+    async fn fetch(sessions: &smelt_core::session::SessionStorage, path: &str) -> (String, String) {
+        let mut server = Server::start_with_storage(sessions.clone()).await.unwrap();
+        let mut stream = TcpStream::connect(server.local_addr).await.unwrap();
         let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         stream.write_all(req.as_bytes()).await.unwrap();
         let mut buf = Vec::new();
@@ -780,33 +880,308 @@ mod tests {
         (head.to_string(), body.to_string())
     }
 
+    fn assert_status(head: &str, expected: &str) {
+        assert!(
+            head.contains(expected),
+            "expected {expected}, got response headers: {head}"
+        );
+    }
+
+    fn seed_session(
+        sessions: &smelt_core::session::SessionStorage,
+        id: &str,
+        title: &str,
+        cwd: &str,
+        updated_at_ms: u64,
+    ) {
+        let mut session = smelt_core::session::Session::new(1, PathBuf::from(cwd));
+        session.id = id.to_string();
+        session.title = Some(title.to_string());
+        session.first_user_message = Some(format!("message for {title}"));
+        session.created_at_ms = updated_at_ms.saturating_sub(1);
+        session.updated_at_ms = updated_at_ms;
+        session
+            .history
+            .push(HistoryItem::user(Content::text(format!(
+                "message for {title}"
+            ))));
+        sessions
+            .save_result(&session)
+            .expect("save canonical session");
+    }
+
+    fn append_request_audit(sessions: &smelt_core::session::SessionStorage, id: &str) -> i64 {
+        let sessions_dir = sessions.sessions_dir();
+        let mut writer = smelt_store::OwnedSessionWriter::open(sessions_dir, id)
+            .expect("open canonical session writer");
+        let attempt_id = writer
+            .append_request_attempt(
+                &protocol::request_log::RequestLogEntry {
+                    request_id: 42,
+                    kind: "turn".into(),
+                    turn_id: Some(7),
+                    ask_id: None,
+                    history_len: Some(1),
+                    timestamp_ms: 1_000,
+                    provider_kind: "openai".into(),
+                    api_base: "https://api.example.test".into(),
+                    model: "model-a".into(),
+                    url: "https://api.example.test/v1/chat/completions".into(),
+                    http_status: Some(200),
+                    body: serde_json::json!({"model": "model-a", "prompt": "hello"}),
+                    prompt_cache_key: None,
+                    stream: true,
+                    system_prompt: None,
+                    messages: None,
+                    tools: None,
+                    response: Some(protocol::request_log::RequestResponse {
+                        content: Some("world".into()),
+                        reasoning: None,
+                        tool_calls: None,
+                        raw: Some(serde_json::json!({"id": "response-1"})),
+                    }),
+                    usage: Some(protocol::TokenUsage {
+                        prompt_tokens: Some(10),
+                        completion_tokens: Some(5),
+                        ..Default::default()
+                    }),
+                    cost_usd: Some(0.001),
+                    tokens_per_sec: Some(20.0),
+                    elapsed_ms: Some(250),
+                    attempt: 1,
+                    error: None,
+                    background: false,
+                },
+                smelt_store::RequestAuditPayloadMode::Full,
+            )
+            .expect("append request audit");
+        writer.release().expect("release canonical session writer");
+        attempt_id
+    }
+
     #[tokio::test]
-    async fn serves_index_html_for_root() {
-        let (head, body) = fetch("/").await;
-        assert!(head.contains("200 OK"), "expected 200, got: {head}");
+    async fn serves_index_html_and_static_assets() {
+        let state = IsolatedState::new();
+        let (head, body) = fetch(&state.sessions, "/").await;
+        assert_status(&head, "200 OK");
         assert!(body.contains("Smelt Inspector"));
+
+        let (head, body) = fetch(&state.sessions, "/assets/style.css").await;
+        assert_status(&head, "200 OK");
+        assert!(head.contains("text/css"));
+        assert!(!body.is_empty());
     }
 
     #[tokio::test]
-    async fn api_sessions_returns_catalog_page() {
-        let (head, body) = fetch("/api/sessions?limit=10").await;
-        assert!(head.contains("200 OK"), "expected 200, got: {head}");
+    async fn session_list_paginates_canonical_sessions_with_stable_cursors() {
+        let state = IsolatedState::new();
+        seed_session(
+            &state.sessions,
+            OLDER_SESSION_ID,
+            "older",
+            "/work/older",
+            100,
+        );
+        seed_session(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            "newer",
+            "/work/newer",
+            200,
+        );
+
+        let (head, body) = fetch(&state.sessions, "/api/sessions?limit=1").await;
+        assert_status(&head, "200 OK");
         assert!(head.contains("application/json"));
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(parsed["sessions"].is_array());
-        assert!(parsed["catalog"]["state"].is_string());
+        let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(first["sessions"][0]["id"], NEWER_SESSION_ID);
+        assert_eq!(first["sessions"][0]["project"], "newer");
+        assert!(first["catalog"]["state"].is_string());
+        let cursor = &first["next_cursor"];
+        let next_path = format!(
+            "/api/sessions?limit=1&cursor_updated_at_ms={}&cursor_id={}",
+            cursor["updated_at_ms"].as_u64().unwrap(),
+            cursor["id"].as_str().unwrap()
+        );
+
+        let (head, body) = fetch(&state.sessions, &next_path).await;
+        assert_status(&head, "200 OK");
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(second["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(second["sessions"][0]["id"], OLDER_SESSION_ID);
+        assert!(second["next_cursor"].is_null());
     }
 
     #[tokio::test]
-    async fn unknown_session_requests_returns_empty_array() {
-        let (head, body) = fetch("/api/sessions/0000000000000000000000000000000000000000000000000000000000000000/requests").await;
-        assert!(head.contains("200 OK"), "expected 200, got: {head}");
-        assert_eq!(body, "[]");
+    async fn detail_and_summary_are_built_from_canonical_storage() {
+        let state = IsolatedState::new();
+        seed_session(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            "canonical",
+            "/workspace/canonical",
+            200,
+        );
+        append_request_audit(&state.sessions, NEWER_SESSION_ID);
+
+        let (head, body) = fetch(
+            &state.sessions,
+            &format!("/api/sessions/{NEWER_SESSION_ID}"),
+        )
+        .await;
+        assert_status(&head, "200 OK");
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["id"], NEWER_SESSION_ID);
+        assert_eq!(detail["title"], "canonical");
+        assert_eq!(detail["history"].as_array().unwrap().len(), 1);
+
+        let (head, body) = fetch(
+            &state.sessions,
+            &format!("/api/sessions/{NEWER_SESSION_ID}/summary"),
+        )
+        .await;
+        assert_status(&head, "200 OK");
+        let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(summary["id"], NEWER_SESSION_ID);
+        assert_eq!(summary["project"], "canonical");
+        assert_eq!(summary["path_group"], "/workspace");
+        assert_eq!(summary["request_stats"]["request_count"], 1);
+        assert_eq!(summary["request_stats"]["total_prompt_tokens"], 10);
+    }
+
+    #[tokio::test]
+    async fn request_list_and_payload_round_trip_canonical_audit_data() {
+        let state = IsolatedState::new();
+        seed_session(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            "requests",
+            "/work/requests",
+            200,
+        );
+        let attempt_id = append_request_audit(&state.sessions, NEWER_SESSION_ID);
+
+        let (head, body) = fetch(
+            &state.sessions,
+            &format!("/api/sessions/{NEWER_SESSION_ID}/requests"),
+        )
+        .await;
+        assert_status(&head, "200 OK");
+        let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(requests.as_array().unwrap().len(), 1);
+        assert_eq!(requests[0]["id"], attempt_id);
+        assert_eq!(requests[0]["request_id"], "42");
+        assert_eq!(requests[0]["provider_kind"], "openai");
+        assert_eq!(requests[0]["elapsed_ms"], 250);
+        assert_eq!(requests[0]["has_body"], true);
+        assert_eq!(requests[0]["response"]["content"], "world");
+
+        let (head, body) = fetch(
+            &state.sessions,
+            &format!("/api/sessions/{NEWER_SESSION_ID}/requests/{attempt_id}"),
+        )
+        .await;
+        assert_status(&head, "200 OK");
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(payload["body"]["prompt"], "hello");
+        assert_eq!(payload["response"]["raw"]["id"], "response-1");
+        assert!(payload["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn malformed_queries_and_request_ids_return_bad_request() {
+        let state = IsolatedState::new();
+        for path in [
+            "/api/sessions?limit=not-a-number",
+            "/api/sessions?limit=0",
+            "/api/sessions?cursor_updated_at_ms=1",
+            "/api/sessions?cursor_updated_at_ms=not-a-number&cursor_id=1111111111111111111111111111111111111111111111111111111111111111",
+            "/api/sessions?cursor_updated_at_ms=1&cursor_id=invalid",
+            "/api/sessions/1111111111111111111111111111111111111111111111111111111111111111/requests/not-a-number",
+            "/api/sessions/1111111111111111111111111111111111111111111111111111111111111111/requests/0",
+        ] {
+            let (head, body) = fetch(&state.sessions, path).await;
+            assert_status(&head, "400 Bad Request");
+            assert!(serde_json::from_str::<serde_json::Value>(&body).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_and_missing_resources_return_not_found() {
+        let state = IsolatedState::new();
+        for path in [
+            "/api/sessions/not-a-session",
+            "/api/sessions/../summary",
+            "/api/sessions/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "/api/sessions/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/summary",
+            "/api/sessions/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/requests",
+            "/api/sessions/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/requests/1",
+            "/api/sessions/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/requests/1/extra",
+        ] {
+            let (head, body) = fetch(&state.sessions, path).await;
+            assert_status(&head, "404 Not Found");
+            assert_eq!(body, r#"{"error":"not found"}"#);
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_canonical_storage_is_reported_as_unavailable() {
+        let state = IsolatedState::new();
+        seed_session(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            "corrupt",
+            "/work/corrupt",
+            200,
+        );
+        std::fs::write(
+            state
+                .sessions
+                .dir_for_id(NEWER_SESSION_ID)
+                .join("session.db"),
+            b"not a sqlite database",
+        )
+        .unwrap();
+
+        for path in [
+            format!("/api/sessions/{NEWER_SESSION_ID}"),
+            format!("/api/sessions/{NEWER_SESSION_ID}/summary"),
+            format!("/api/sessions/{NEWER_SESSION_ID}/requests"),
+            format!("/api/sessions/{NEWER_SESSION_ID}/requests/1"),
+        ] {
+            let (head, body) = fetch(&state.sessions, &path).await;
+            assert_status(&head, "500 Internal Server Error");
+            assert!(serde_json::from_str::<serde_json::Value>(&body).is_ok());
+        }
     }
 
     #[tokio::test]
     async fn unknown_api_path_returns_404() {
-        let (head, _) = fetch("/api/sessions/0000000000000000000000000000000000000000000000000000000000000000/unknown").await;
-        assert!(head.contains("404 Not Found"), "expected 404, got: {head}");
+        let state = IsolatedState::new();
+        let (head, _) = fetch(
+            &state.sessions,
+            &format!("/api/sessions/{MISSING_SESSION_ID}/unknown"),
+        )
+        .await;
+        assert_status(&head, "404 Not Found");
+    }
+
+    #[tokio::test]
+    async fn stop_is_idempotent_and_releases_the_listener() {
+        let state = IsolatedState::new();
+        let mut server = Server::start_with_storage(state.sessions).await.unwrap();
+        let addr = server.local_addr;
+        TcpStream::connect(addr)
+            .await
+            .expect("inspect listener accepts connections while running");
+
+        server.stop().await;
+        server.stop().await;
+
+        let rebound = TcpListener::bind(addr)
+            .await
+            .expect("stopped inspect server releases its listener");
+        drop(rebound);
     }
 }

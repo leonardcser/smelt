@@ -2,13 +2,12 @@
 
 use crate::app::transcript::TranscriptProjectionRestore;
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
-use crate::app::{AppFocus, EventOutcome, PromptResizeClick, PromptResizeDrag, TuiApp};
+#[cfg(test)]
+use crate::app::PromptResizeDrag;
+use crate::app::{AppFocus, EventOutcome, TuiApp};
 use crate::content::layout::HitRegion;
 use crate::smelt_edit::{ChromeOwner, HitTarget, RowIndex, WinId};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-
-const PROMPT_RESIZE_DOUBLE_CLICK_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(500);
 
 /// `true` for the four wheel directions. Used to decide whether an event
 /// merits a redraw after `Ui::dispatch_event` consumed it.
@@ -577,27 +576,19 @@ impl TuiApp {
     }
 
     fn update_prompt_resize_drag(&mut self, me: MouseEvent) -> bool {
-        let Some(mut drag) = self.prompt_resize_drag else {
+        if self.prompt.resize_drag().is_none() {
             return false;
-        };
+        }
         match me.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.prompt_resize_last_click = None;
-                drag.dragged = true;
-                self.set_prompt_resize_drag(Some(drag));
-                let delta = drag.start_row as i32 - me.row as i32;
-                let max_rows =
-                    Self::max_manual_prompt_input_rows_for(self.ui.terminal_size().1) as i32;
-                let rows = (drag.start_input_rows as i32 + delta).clamp(1, max_rows) as u16;
-                self.prompt_input_rows_override = Some(rows);
-                self.prompt_input_rows = rows;
+                let term_height = self.ui.terminal_size().1;
+                self.prompt.resize_drag_to(me.row, term_height);
+                self.publish_prompt_resize_state();
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.set_prompt_resize_drag(None);
-                if drag.dragged && self.prompt_input_rows_override == Some(1) {
-                    self.reset_prompt_input_rows();
-                }
+                self.prompt.finish_resize_drag();
+                self.publish_prompt_resize_state();
                 true
             }
             _ => true,
@@ -606,36 +597,16 @@ impl TuiApp {
 
     fn handle_prompt_resize_click(&mut self, me: MouseEvent) -> bool {
         let now = self.core.clock.instant_now();
-        let double_click = self.prompt_resize_last_click.is_some_and(|last| {
-            last.row == me.row
-                && last.col == me.column
-                && now.saturating_duration_since(last.at) <= PROMPT_RESIZE_DOUBLE_CLICK_WINDOW
-        });
-        if double_click {
-            self.reset_prompt_input_rows();
-            return true;
+        let reset = self.prompt.register_resize_click(me.row, me.column, now);
+        if reset {
+            self.publish_prompt_resize_state();
         }
-        self.prompt_resize_last_click = Some(PromptResizeClick {
-            row: me.row,
-            col: me.column,
-            at: now,
-        });
-        false
-    }
-
-    fn reset_prompt_input_rows(&mut self) {
-        self.prompt_input_rows_override = None;
-        self.set_prompt_resize_drag(None);
-        self.prompt_resize_last_click = None;
+        reset
     }
 
     fn start_prompt_resize_drag(&mut self, me: MouseEvent) {
-        self.set_prompt_resize_drag(Some(PromptResizeDrag {
-            chrome: "top",
-            start_row: me.row,
-            start_input_rows: self.prompt_input_rows.max(1),
-            dragged: false,
-        }));
+        self.prompt.start_resize_drag("top", me.row);
+        self.publish_prompt_resize_state();
         self.app_focus = AppFocus::Prompt;
         self.ui.set_focus(crate::app::PROMPT_WIN);
         self.ui.cancel_pointer_interaction();
@@ -1102,7 +1073,9 @@ mod tests {
             0,
             None,
         );
-        let buf_id = app.ui.win(top).expect("top bar win").buf;
+        let buf_id = app
+            .ui
+            .buf_create(crate::smelt_edit::BufCreateOpts::default());
         {
             let buf = app.ui.buf_mut(buf_id).expect("top bar buf");
             buf.set_all_lines(vec!["abc----xyz".into()]);
@@ -1116,6 +1089,7 @@ mod tests {
         }
         {
             let win = app.ui.win_mut(top).expect("top bar win");
+            win.buf = buf_id;
             win.viewport = Some(vp);
             win.set_surface(crate::smelt_edit::WindowSurface::selectable_text());
         }
@@ -1190,13 +1164,31 @@ mod tests {
     fn prompt_top_bar_selectable_text_drag_copies_and_focuses_prompt() {
         let mut app = app_with_seeded_prompt_top_bar();
 
+        let top = app
+            .ui
+            .named_win("smelt.prompt_bar.top")
+            .expect("prompt top bar window");
+        let viewport =
+            crate::smelt_edit::UiHost::viewport_for(&app, top).expect("prompt top bar viewport");
+        let win = app.ui.win(top).expect("prompt top bar window");
+        let buf = app.ui.buf(win.buf).expect("prompt top bar buffer");
+        let hit = win.text_hit_at_mouse(buf, left_down(0, 0), viewport);
+        assert!(
+            hit.is_selectable(),
+            "top bar text hit was {hit:?}, highlights were {:?}",
+            buf.highlights_at(0)
+        );
         app.handle_mouse(left_down(0, 0));
+        assert_eq!(app.ui.capture(), Some(HitTarget::Window(top)));
         app.handle_mouse(left_drag(0, 3));
+        assert!(app.ui.win(top).is_some_and(|win| win
+            .selection_range(app.ui.buf(win.buf).expect("top bar buffer"))
+            .is_some()));
         app.handle_mouse(left_up(0, 3));
 
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
-        assert_eq!(app.prompt_input_rows_override, None);
+        assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
         assert_eq!(app.core.clipboard.kill_ring.current(), "abc");
     }
 
@@ -1264,7 +1256,7 @@ mod tests {
     fn prompt_top_chrome_drag_grows_manual_prompt_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         let (row, col) = prompt_resize_handle_cell(&mut app);
-        let start_rows = app.prompt_input_rows;
+        let start_rows = app.prompt.prompt_rows_for_harness();
 
         app.handle_mouse(left_down(row, col));
         assert_eq!(
@@ -1287,18 +1279,18 @@ mod tests {
         );
         app.render_normal_to(&mut std::io::sink());
 
-        let expected = (start_rows + 2).min(crate::app::TuiApp::max_manual_prompt_input_rows_for(
+        let expected = (start_rows + 2).min(crate::app::PromptHeightState::max_manual_rows(
             app.ui.terminal_size().1,
         ));
-        assert_eq!(app.prompt_input_rows_override, Some(expected));
-        assert_eq!(app.prompt_input_rows, expected);
+        assert_eq!(app.prompt.manual_prompt_rows_for_harness(), Some(expected));
+        assert_eq!(app.prompt.prompt_rows_for_harness(), expected);
         assert_eq!(app.prompt_win().viewport.unwrap().rect.height, expected);
     }
 
     #[test]
     fn prompt_top_chrome_drag_shrinks_manual_prompt_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
-        app.prompt_input_rows_override = Some(4);
+        app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
         app.handle_mouse(left_down(row, col));
@@ -1306,8 +1298,8 @@ mod tests {
         app.handle_mouse(left_up(row + 2, col));
         app.render_normal_to(&mut std::io::sink());
 
-        assert_eq!(app.prompt_input_rows_override, Some(2));
-        assert_eq!(app.prompt_input_rows, 2);
+        assert_eq!(app.prompt.manual_prompt_rows_for_harness(), Some(2));
+        assert_eq!(app.prompt.prompt_rows_for_harness(), 2);
         assert_eq!(app.prompt_win().viewport.unwrap().rect.height, 2);
     }
 
@@ -1315,13 +1307,13 @@ mod tests {
     fn prompt_manual_resize_can_exceed_auto_height_cap() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.ui.set_terminal_size(30, 20);
-        app.prompt_input_rows_override = Some(13);
+        app.prompt.set_manual_prompt_rows_for_harness(Some(13));
 
         app.render_normal_to(&mut std::io::sink());
 
-        assert_eq!(crate::app::TuiApp::max_auto_prompt_input_rows_for(20), 10);
-        assert_eq!(crate::app::TuiApp::max_manual_prompt_input_rows_for(20), 14);
-        assert_eq!(app.prompt_input_rows, 13);
+        assert_eq!(crate::app::PromptHeightState::max_auto_rows(20), 10);
+        assert_eq!(crate::app::PromptHeightState::max_manual_rows(20), 14);
+        assert_eq!(app.prompt.prompt_rows_for_harness(), 13);
         assert_eq!(app.prompt_win().viewport.unwrap().rect.height, 13);
     }
 
@@ -1336,14 +1328,14 @@ mod tests {
 
         app.render_normal_to(&mut std::io::sink());
 
-        assert_eq!(app.prompt_input_rows, 6);
+        assert_eq!(app.prompt.prompt_rows_for_harness(), 6);
         assert_eq!(app.prompt_win().viewport.unwrap().rect.height, 6);
     }
 
     #[test]
     fn prompt_resize_handle_double_click_resets_to_auto_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
-        app.prompt_input_rows_override = Some(4);
+        app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
         app.handle_mouse(left_down(row, col));
@@ -1351,14 +1343,14 @@ mod tests {
         app.handle_mouse(left_down(row, col));
         app.handle_mouse(left_up(row, col));
 
-        assert_eq!(app.prompt_input_rows_override, None);
+        assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
     }
 
     #[test]
     fn prompt_resize_drag_to_minimum_resets_to_auto_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.ui.set_terminal_size(20, 16);
-        app.prompt_input_rows_override = Some(4);
+        app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         app.set_placeholder(
             crate::app::PROMPT_WIN,
             "this prediction is long enough to wrap across several prompt rows".into(),
@@ -1370,14 +1362,14 @@ mod tests {
         app.handle_mouse(left_up(row + 20, col));
         app.render_normal_to(&mut std::io::sink());
 
-        assert_eq!(app.prompt_input_rows_override, None);
-        assert!(app.prompt_input_rows > 1);
+        assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
+        assert!(app.prompt.prompt_rows_for_harness() > 1);
     }
 
     #[test]
     fn manual_prompt_rows_are_exact_even_when_prompt_content_overflows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
-        app.prompt_input_rows_override = Some(1);
+        app.prompt.set_manual_prompt_rows_for_harness(Some(1));
         app.ui
             .buf_mut(crate::app::PROMPT_EDIT_BUF)
             .expect("prompt buf")
@@ -1386,7 +1378,7 @@ mod tests {
         app.render_normal_to(&mut std::io::sink());
 
         let viewport = app.prompt_win().viewport.expect("prompt viewport");
-        assert_eq!(app.prompt_input_rows, 1);
+        assert_eq!(app.prompt.prompt_rows_for_harness(), 1);
         assert_eq!(viewport.rect.height, 1);
         assert!(
             viewport.total_rows > viewport.rect.height as crate::smelt_edit::RowIndex,
@@ -1406,8 +1398,8 @@ mod tests {
         app.render_normal_to(&mut std::io::sink());
 
         let viewport = app.prompt_win().viewport.expect("prompt viewport");
-        assert!(app.prompt_input_rows > 1);
-        assert_eq!(viewport.rect.height, app.prompt_input_rows);
+        assert!(app.prompt.prompt_rows_for_harness() > 1);
+        assert_eq!(viewport.rect.height, app.prompt.prompt_rows_for_harness());
         assert!(viewport.total_rows > 1);
     }
 
@@ -1415,7 +1407,7 @@ mod tests {
     fn prompt_placeholder_respects_manual_prompt_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.ui.set_terminal_size(20, 16);
-        app.prompt_input_rows_override = Some(1);
+        app.prompt.set_manual_prompt_rows_for_harness(Some(1));
         app.set_placeholder(
             crate::app::PROMPT_WIN,
             "this prediction is long enough to wrap across several prompt rows".into(),
@@ -1424,7 +1416,7 @@ mod tests {
         app.render_normal_to(&mut std::io::sink());
 
         let viewport = app.prompt_win().viewport.expect("prompt viewport");
-        assert_eq!(app.prompt_input_rows, 1);
+        assert_eq!(app.prompt.prompt_rows_for_harness(), 1);
         assert_eq!(viewport.rect.height, 1);
         assert!(viewport.total_rows > 1);
     }

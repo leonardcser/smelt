@@ -208,7 +208,7 @@ fn file_commands_for(platform: OpenPlatform, target: &FileOpenTarget) -> Vec<Ope
     commands
 }
 
-fn spawn_first(commands: Vec<OpenCommand>, label: &str) -> Result<(), String> {
+fn spawn_first(commands: Vec<OpenCommand>, label: &str, cwd: &Path) -> Result<(), String> {
     if commands.is_empty() {
         return Err("unsupported platform".to_string());
     }
@@ -216,6 +216,7 @@ fn spawn_first(commands: Vec<OpenCommand>, label: &str) -> Result<(), String> {
     for command in commands {
         match std::process::Command::new(command.program)
             .args(command.args)
+            .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -247,11 +248,25 @@ fn validate_url(url: &str) -> Result<(), String> {
 }
 
 pub fn open_url(url: &str) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|error| format!("resolve launcher cwd: {error}"))?;
+    open_url_in(url, &cwd)
+}
+
+pub fn open_url_in(url: &str, cwd: &Path) -> Result<(), String> {
     validate_url(url)?;
-    spawn_first(url_commands_for(OpenPlatform::current(), url), "browser")
+    spawn_first(
+        url_commands_for(OpenPlatform::current(), url),
+        "browser",
+        cwd,
+    )
 }
 
 pub fn open_file(target: &FileOpenTarget) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|error| format!("resolve launcher cwd: {error}"))?;
+    open_file_in(target, &cwd)
+}
+
+pub fn open_file_in(target: &FileOpenTarget, cwd: &Path) -> Result<(), String> {
     if !target.path().is_file() {
         return Err(format!(
             "open_file: file does not exist: {}",
@@ -261,17 +276,32 @@ pub fn open_file(target: &FileOpenTarget) -> Result<(), String> {
     spawn_first(
         file_commands_for(OpenPlatform::current(), target),
         "file opener",
+        cwd,
     )
 }
 
 pub fn open_url_if_available(url: &str) -> OpenResult {
+    let Ok(cwd) = std::env::current_dir() else {
+        return OpenResult::Failed("could not resolve launcher cwd".into());
+    };
+    open_url_if_available_in(url, &cwd)
+}
+
+pub fn open_url_if_available_in(url: &str, cwd: &Path) -> OpenResult {
     let status = open_status();
-    open_url_with_status(url, status, open_url)
+    open_url_with_status(url, status, |url| open_url_in(url, cwd))
 }
 
 pub fn open_file_if_available(target: &FileOpenTarget) -> OpenResult {
+    let Ok(cwd) = std::env::current_dir() else {
+        return OpenResult::Failed("could not resolve launcher cwd".into());
+    };
+    open_file_if_available_in(target, &cwd)
+}
+
+pub fn open_file_if_available_in(target: &FileOpenTarget, cwd: &Path) -> OpenResult {
     let status = open_status();
-    open_file_with_status(target, status, open_file)
+    open_file_with_status(target, status, |target| open_file_in(target, cwd))
 }
 
 fn open_url_with_status<F>(url: &str, status: OpenStatus, opener: F) -> OpenResult

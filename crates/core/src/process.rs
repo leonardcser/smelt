@@ -5,6 +5,7 @@
 use crate::output_limit::{limit_text_tail, OutputLimiter, DEFAULT_MAX_BYTES, TRUNCATION_NOTICE};
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,9 +16,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Defaults: 30s timeout, inherit env, no stdin, capture stdout+stderr.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct Options {
-    pub(crate) cwd: Option<String>,
+    pub(crate) cwd: PathBuf,
     pub(crate) env: HashMap<String, String>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) stdin: Option<String>,
@@ -63,10 +64,7 @@ pub(crate) async fn run_async(
     use tokio::io::AsyncWriteExt;
 
     let mut command = tokio::process::Command::new(cmd);
-    command.args(args);
-    if let Some(cwd) = &opts.cwd {
-        command.current_dir(cwd);
-    }
+    command.args(args).current_dir(&opts.cwd);
     apply_default_noninteractive_env(command.as_std_mut());
     for (k, v) in &opts.env {
         command.env(k, v);
@@ -197,6 +195,7 @@ pub struct StreamDetach {
 pub struct StreamConfig {
     pub timeout: Duration,
     pub shell: ShellSpec,
+    pub cwd: PathBuf,
     pub cancel: Option<CancellationToken>,
     pub detach: Option<StreamDetach>,
     pub detach_on_timeout: bool,
@@ -253,12 +252,13 @@ fn configure_child_session(command: &mut tokio::process::Command) {
     without_controlling_terminal(command.as_std_mut());
 }
 
-pub fn spawn_shell_child(command: &str, shell: &ShellSpec) -> io::Result<Child> {
+pub fn spawn_shell_child(command: &str, shell: &ShellSpec, cwd: &Path) -> io::Result<Child> {
     let mut cmd = tokio::process::Command::new(&shell.program);
     for a in &shell.args {
         cmd.arg(a);
     }
     cmd.arg(command)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -304,7 +304,7 @@ pub async fn run_streaming_with_shell(
         };
     }
 
-    let mut child = match spawn_shell_child(command, &config.shell) {
+    let mut child = match spawn_shell_child(command, &config.shell, &config.cwd) {
         Ok(c) => c,
         Err(e) => {
             return StreamOutput {
@@ -932,6 +932,19 @@ impl ProcessRegistry {
 mod tests {
     use super::*;
 
+    fn test_cwd() -> PathBuf {
+        std::env::current_dir().expect("test process has a current directory")
+    }
+
+    fn test_options() -> Options {
+        Options {
+            cwd: test_cwd(),
+            env: HashMap::new(),
+            timeout: None,
+            stdin: None,
+        }
+    }
+
     fn finished_rx(finished: bool) -> watch::Receiver<bool> {
         watch::channel(finished).1
     }
@@ -1040,7 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_echo_captures_stdout() {
-        let out = run("sh", &["-c", "echo hello"], &Options::default()).await;
+        let out = run("sh", &["-c", "echo hello"], &test_options()).await;
         assert!(out.stdout.contains("hello"));
         assert_eq!(out.exit_code, 0);
         assert!(!out.timed_out);
@@ -1048,7 +1061,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_propagates_exit_code() {
-        let out = run("sh", &["-c", "exit 42"], &Options::default()).await;
+        let out = run("sh", &["-c", "exit 42"], &test_options()).await;
         assert_eq!(out.exit_code, 42);
     }
 
@@ -1056,7 +1069,7 @@ mod tests {
     async fn run_pipes_stdin_to_child() {
         let opts = Options {
             stdin: Some("hello world".into()),
-            ..Default::default()
+            ..test_options()
         };
         let out = run("cat", &[], &opts).await;
         assert_eq!(out.stdout, "hello world");
@@ -1066,8 +1079,8 @@ mod tests {
     async fn run_honors_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
         let opts = Options {
-            cwd: Some(tmp.path().to_string_lossy().into_owned()),
-            ..Default::default()
+            cwd: tmp.path().to_path_buf(),
+            ..test_options()
         };
         let out = run("pwd", &[], &opts).await;
         assert!(out.stdout.contains(tmp.path().to_string_lossy().as_ref()));
@@ -1077,7 +1090,7 @@ mod tests {
     async fn run_times_out_long_command() {
         let opts = Options {
             timeout: Some(Duration::from_millis(100)),
-            ..Default::default()
+            ..test_options()
         };
         let out = run("sh", &["-c", "sleep 5"], &opts).await;
         assert!(out.timed_out);
@@ -1092,6 +1105,7 @@ mod tests {
             StreamConfig {
                 timeout: Duration::from_millis(100),
                 shell: ShellSpec::default(),
+                cwd: test_cwd(),
                 cancel: None,
                 detach: Some(StreamDetach {
                     registry: registry.clone(),
@@ -1125,6 +1139,7 @@ mod tests {
                 StreamConfig {
                     timeout: Duration::from_millis(100),
                     shell: ShellSpec::default(),
+                    cwd: test_cwd(),
                     cancel: None,
                     detach: None,
                     detach_on_timeout: false,
@@ -1154,6 +1169,7 @@ mod tests {
                 StreamConfig {
                     timeout: Duration::from_secs(5),
                     shell: ShellSpec::default(),
+                    cwd: test_cwd(),
                     cancel: None,
                     detach: Some(detach),
                     detach_on_timeout: false,
@@ -1191,7 +1207,7 @@ mod tests {
     #[tokio::test]
     async fn registry_uses_child_pid_as_background_id() {
         let registry = ProcessRegistry::new();
-        let child = spawn_shell_child("sleep 5", &ShellSpec::default()).unwrap();
+        let child = spawn_shell_child("sleep 5", &ShellSpec::default(), &test_cwd()).unwrap();
         let pid = child.id().expect("spawned child has pid");
         let id = registry.child_id(&child);
 
@@ -1210,6 +1226,7 @@ mod tests {
             StreamConfig {
                 timeout: Duration::from_secs(1),
                 shell: ShellSpec::default(),
+                cwd: test_cwd(),
                 cancel: None,
                 detach: None,
                 detach_on_timeout: false,
@@ -1266,6 +1283,7 @@ mod tests {
             StreamConfig {
                 timeout: Duration::from_secs(5),
                 shell: ShellSpec::default(),
+                cwd: test_cwd(),
                 cancel: None,
                 detach: None,
                 detach_on_timeout: false,
@@ -1296,7 +1314,7 @@ mod tests {
         let registry = ProcessRegistry::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         registry.set_completion_sender(tx);
-        let child = spawn_shell_child("echo done", &ShellSpec::default()).unwrap();
+        let child = spawn_shell_child("echo done", &ShellSpec::default(), &test_cwd()).unwrap();
         let id = registry.child_id(&child);
 
         registry.spawn(id.clone(), "echo done", child, Instant::now());
@@ -1321,7 +1339,8 @@ mod tests {
         let registry = ProcessRegistry::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         registry.set_completion_sender(tx);
-        let child = spawn_shell_child("echo ready; sleep 30", &ShellSpec::default()).unwrap();
+        let child =
+            spawn_shell_child("echo ready; sleep 30", &ShellSpec::default(), &test_cwd()).unwrap();
         let id = registry.child_id(&child);
 
         registry.spawn(id.clone(), "echo ready; sleep 30", child, Instant::now());
@@ -1349,7 +1368,8 @@ mod tests {
     #[tokio::test]
     async fn registry_stop_kills_process_and_returns_buffered_output() {
         let registry = ProcessRegistry::new();
-        let child = spawn_shell_child("echo started; sleep 30", &ShellSpec::default()).unwrap();
+        let child = spawn_shell_child("echo started; sleep 30", &ShellSpec::default(), &test_cwd())
+            .unwrap();
         let id = registry.child_id(&child);
 
         registry.spawn(id.clone(), "echo started; sleep 30", child, Instant::now());
@@ -1398,7 +1418,7 @@ mod tests {
         env.insert("SMELT_TEST_VAR".into(), "from_test".into());
         let opts = Options {
             env,
-            ..Default::default()
+            ..test_options()
         };
         let out = run("sh", &["-c", "echo $SMELT_TEST_VAR"], &opts).await;
         assert!(out.stdout.contains("from_test"));
@@ -1412,7 +1432,7 @@ mod tests {
                 "-c",
                 "printf '%s' \"$GIT_EDITOR|$GIT_SEQUENCE_EDITOR|$GIT_PAGER|$PAGER|$EDITOR|$VISUAL\"",
             ],
-            &Options::default(),
+            &test_options(),
         )
         .await;
         assert_eq!(out.stdout, "true|true|cat|cat|true|true");
@@ -1424,7 +1444,7 @@ mod tests {
         env.insert("GIT_EDITOR".into(), "custom-editor".into());
         let opts = Options {
             env,
-            ..Default::default()
+            ..test_options()
         };
         let out = run("sh", &["-c", "printf '%s' \"$GIT_EDITOR\""], &opts).await;
         assert_eq!(out.stdout, "custom-editor");
@@ -1432,7 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_captures_stderr_separately() {
-        let out = run("sh", &["-c", "echo err 1>&2"], &Options::default()).await;
+        let out = run("sh", &["-c", "echo err 1>&2"], &test_options()).await;
         assert_eq!(out.exit_code, 0);
         assert!(out.stderr.contains("err"));
         assert!(!out.stdout.contains("err"));
@@ -1444,7 +1464,7 @@ mod tests {
         let result = run_async(
             "__definitely_no_such_command__",
             &args,
-            &Options::default(),
+            &test_options(),
             CancellationToken::new(),
         )
         .await;
@@ -1498,7 +1518,7 @@ mod tests {
     #[tokio::test]
     async fn registry_clear_kills_running_child_immediately() {
         let registry = ProcessRegistry::new();
-        let child = spawn_shell_child("sleep 30", &ShellSpec::default()).unwrap();
+        let child = spawn_shell_child("sleep 30", &ShellSpec::default(), &test_cwd()).unwrap();
         let pid = child.id().expect("spawned child has pid");
         let id = registry.child_id(&child);
 

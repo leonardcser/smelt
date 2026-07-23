@@ -6,7 +6,7 @@ use smelt_core::transcript_model::{Block, TranscriptBlockRecord};
 use crate::app::search::SearchDirection;
 use crate::app::transcript::TranscriptDocument;
 use crate::app::transcript_scroll_trace::{
-    TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
+    TranscriptProjectionTargetTrace, TranscriptRecordTraceRange, TranscriptScrollIntent,
     TranscriptScrollTraceFrame, TranscriptTraceAnchor,
 };
 use crate::smelt_edit::VimMode;
@@ -75,22 +75,306 @@ impl Drop for SparseTranscriptFixture {
 }
 
 impl TestApp {
+    pub fn transcript_window(&self) -> TranscriptWindowSnapshot {
+        let win = self.app.transcript_win();
+        let scroll_top = win.scroll_top();
+        TranscriptWindowSnapshot {
+            buf: win.buf,
+            scroll_top,
+            following_tail: win.is_following_tail(),
+            viewport: win.viewport,
+            document_view: win.document_view_state(),
+            row_cursor: win.row_cursor(),
+            materialized_rows: win.materialized_rows(),
+            vim_mode: win.vim_mode(),
+            gutter_pad_left: win.config.gutters.pad_left,
+            effective_endpoint: win.effective_endpoint(),
+            cursor_absolute_row: win
+                .cursor_screen_row(u16::MAX)
+                .map(|row| scroll_top.saturating_add(row.into())),
+            search_ranges: win
+                .range_layer(crate::smelt_edit::RangeLayer::Search)
+                .to_vec(),
+        }
+    }
+
+    pub fn transcript_buffer_text(&self) -> String {
+        let win = self.app.transcript_win();
+        self.app
+            .ui
+            .buf(win.buf)
+            .map(|buf| buf.source().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn transcript_cursor_screen_row(&self, viewport_rows: u16) -> Option<u16> {
+        self.app.transcript_win().cursor_screen_row(viewport_rows)
+    }
+
+    pub fn configure_transcript_vim(&mut self, enabled: bool, mode: VimMode) {
+        self.app.transcript_win_mut().set_vim_enabled(enabled);
+        self.app.transcript_win_mut().set_vim_mode(mode);
+    }
+
+    pub fn follow_transcript_tail(&mut self) {
+        self.app.transcript_win_mut().follow_tail();
+    }
+
+    pub(crate) fn pan_transcript_by_lines(&mut self, lines: isize, viewport_rows: u16) {
+        let buf_id = self.app.transcript_win().buf;
+        let (window, buffer) = self
+            .app
+            .ui
+            .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+        window.expect("transcript window").pan_by_lines(
+            buffer.expect("transcript buffer"),
+            lines,
+            viewport_rows,
+        );
+    }
+
+    pub(crate) fn jump_transcript_to_bottom(&mut self) {
+        let buf_id = self.app.transcript_win().buf;
+        let (window, buffer) = self
+            .app
+            .ui
+            .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+        window
+            .expect("transcript window")
+            .jump_to_bottom(buffer.expect("transcript buffer"));
+    }
+
+    pub fn pin_transcript_scroll(&mut self, row: crate::smelt_edit::RowIndex) {
+        self.app.transcript_win_mut().pin_scroll(row);
+    }
+
+    pub fn set_transcript_document_view(&mut self, state: crate::smelt_edit::DocumentViewState) {
+        self.app.transcript_win_mut().set_document_view_state(state);
+    }
+
+    pub(crate) fn reveal_transcript_record_block(
+        &mut self,
+        record_index: usize,
+        top_padding: crate::smelt_edit::RowIndex,
+        move_cursor: bool,
+    ) -> bool {
+        self.app
+            .reveal_transcript_record_block(record_index, top_padding, move_cursor)
+    }
+
+    pub(crate) fn tick_drag_autoscroll_with_transcript_intent(&mut self) -> bool {
+        self.app.tick_drag_autoscroll_with_transcript_intent()
+    }
+
+    pub(crate) fn submit_search(
+        &mut self,
+        target: WinId,
+        direction: crate::app::search::SearchDirection,
+        query: String,
+    ) {
+        self.app.submit_search(target, direction, query);
+    }
+
+    pub(crate) fn document_action_at(
+        &mut self,
+        win: WinId,
+        pos: crate::smelt_edit::DocPosition,
+    ) -> Option<crate::smelt_edit::SpanAction> {
+        self.app.document_action_at(win, pos)
+    }
+
+    pub(crate) fn document_view_position_at_mouse_for_win(
+        &mut self,
+        win: WinId,
+        event: crossterm::event::MouseEvent,
+    ) -> Option<crate::smelt_edit::DocPosition> {
+        self.app.document_view_position_at_mouse_for_win(win, event)
+    }
+
+    pub(crate) fn transcript_selection_highlights(
+        &mut self,
+        scroll_top: crate::smelt_edit::RowIndex,
+        row_base: crate::smelt_edit::RowIndex,
+        viewport_rows: u16,
+    ) -> Vec<(usize, u16, u16)> {
+        self.app
+            .transcript_selection_highlights(scroll_top, row_base, viewport_rows)
+    }
+
+    pub(crate) fn transcript_has_row_selection(&self, now: std::time::Instant) -> bool {
+        let win = self.app.transcript_win();
+        self.app
+            .ui
+            .buf(win.buf)
+            .is_some_and(|buf| win.row_selection_range(buf, now).is_some())
+    }
+
+    pub(crate) fn materialize_loaded_transcript_display_rows_expensive(
+        &mut self,
+    ) -> std::sync::Arc<Vec<String>> {
+        self.app
+            .materialize_loaded_transcript_display_rows_expensive()
+    }
+
+    pub(crate) fn set_transcript_scroll_trace_for_harness(&mut self, enabled: bool) {
+        self.app
+            .conversation
+            .set_transcript_scroll_trace_for_harness(enabled);
+    }
+
+    pub(crate) fn set_next_transcript_scroll_trace_input(
+        &mut self,
+        input: crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput,
+    ) {
+        self.app
+            .conversation
+            .set_next_transcript_scroll_trace_input(input);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_transcript_scroll_trace_timings_for_harness(&mut self, enabled: bool) {
+        self.app
+            .conversation
+            .set_transcript_scroll_trace_timings_for_harness(enabled);
+    }
+
+    pub(crate) fn take_transcript_scroll_trace_frames_for_harness(
+        &mut self,
+    ) -> Vec<crate::app::transcript_scroll_trace::TranscriptScrollTraceFrame> {
+        self.app
+            .conversation
+            .take_transcript_scroll_trace_frames_for_harness()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_transcript_interaction_trace_events_for_harness(
+        &mut self,
+    ) -> Vec<crate::app::transcript_scroll_trace::TranscriptInteractionTraceEvent> {
+        self.app
+            .conversation
+            .take_transcript_interaction_trace_events_for_harness()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_transcript_memory_budget_for_harness(
+        &mut self,
+        budget: crate::app::transcript::TranscriptMemoryBudget,
+    ) {
+        self.app
+            .conversation
+            .set_transcript_memory_budget_for_harness(budget);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_transcript_compaction_for_harness(&mut self) {
+        self.app
+            .conversation
+            .drain_transcript_compaction_for_harness();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_tail_state_for_harness(
+        &self,
+    ) -> Option<(usize, smelt_core::transcript_model::BlockId, bool)> {
+        self.app.conversation.transcript_tail_state_for_harness()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn require_transcript_record_resave_from_for_harness(&mut self, index: usize) {
+        self.app
+            .conversation
+            .require_transcript_record_resave_from_for_harness(index);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_loaded_transcript_for_harness(
+        &mut self,
+        transcript: crate::app::transcript::LoadedTranscript,
+    ) {
+        self.app
+            .conversation
+            .replace_loaded_transcript_for_harness(transcript);
+    }
+
+    pub(crate) fn replace_transcript_document_for_harness(
+        &mut self,
+        transcript: crate::app::transcript::TranscriptDocument,
+    ) {
+        self.app
+            .conversation
+            .replace_transcript_document_for_harness(transcript);
+    }
+
+    pub(crate) fn with_pinned_transcript_blocks<R>(
+        &mut self,
+        ids: &[smelt_core::transcript_model::BlockId],
+        f: impl FnOnce(&smelt_core::transcript_model::BlockHistory) -> R,
+    ) -> Option<R> {
+        self.app.conversation.with_pinned_transcript_blocks(ids, f)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_total_rows(&mut self) -> crate::smelt_edit::RowIndex {
+        self.app.transcript_total_rows()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_rows_and_breaks_range(
+        &mut self,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
+    ) -> crate::smelt_edit::DisplayRows {
+        self.app.transcript_rows_and_breaks_range(start, count)
+    }
+
+    pub(crate) fn record_transcript_scroll_intent(
+        &mut self,
+        label: impl Into<String>,
+        intent: crate::app::transcript_scroll_trace::TranscriptScrollIntent,
+        window_scroll_before: crate::smelt_edit::RowIndex,
+    ) {
+        self.app
+            .record_transcript_scroll_intent(label, intent, window_scroll_before);
+    }
+
+    pub(crate) fn scroll_at_with_transcript_intent(
+        &mut self,
+        row: u16,
+        col: u16,
+        rows: isize,
+        label: &str,
+    ) -> bool {
+        self.app
+            .scroll_at_with_transcript_intent(row, col, rows, label)
+    }
+
+    pub(crate) fn execute_document_view_command_for_win(
+        &mut self,
+        win: WinId,
+        command: crate::smelt_edit::DocumentCommand,
+        viewport_rows: u16,
+        now: std::time::Instant,
+    ) -> Option<crate::smelt_edit::DocRange> {
+        self.app
+            .execute_document_view_command_for_win(win, command, viewport_rows, now)
+    }
+
     pub fn install_sparse_transcript_scroll_fixture(
         &mut self,
-        descriptor_count: usize,
+        record_count: usize,
         width: u16,
         height: u16,
     ) {
-        let descriptor_count = descriptor_count.clamp(96, 900);
+        let record_count = record_count.clamp(96, 900);
         let width = width.clamp(32, 140);
         let height = height.clamp(8, 40);
-        let records = heterogeneous_resume_records(descriptor_count);
+        let records = heterogeneous_resume_records(record_count);
         let fixture_id = SPARSE_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let fixture = SparseTranscriptFixture::new(
             managed_harness_dir("transcript-scroll").join(format!("fixture-{fixture_id}")),
         );
-        crate::persist::write_transcript_descriptor_suffix(fixture.path(), 0, &records)
-            .expect("write descriptor suffix");
+        crate::persist::write_transcript_record_suffix(fixture.path(), 0, &records)
+            .expect("write record suffix");
         let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
             fixture.path().to_path_buf(),
             width,
@@ -99,7 +383,11 @@ impl TestApp {
         .expect("tail transcript");
 
         self.set_terminal_size(width, height);
-        self.app.session_document.transcript = TranscriptDocument::from_loaded_transcript(loaded);
+        self.app
+            .conversation
+            .replace_transcript_document_for_harness(TranscriptDocument::from_loaded_transcript(
+                loaded,
+            ));
         self.app.app_focus = AppFocus::Content;
         self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         self.app.transcript_win_mut().set_vim_enabled(true);
@@ -108,18 +396,16 @@ impl TestApp {
             .set_vim_mode(crate::smelt_edit::VimMode::Normal);
         self.app.transcript_win_mut().follow_tail();
         self.app
-            .session_document
-            .transcript
-            .set_scroll_trace_enabled(true);
+            .conversation
+            .set_transcript_scroll_trace_for_harness(true);
         self.transcript_scroll_probe = TranscriptScrollProbeState {
             fixture: Some(fixture),
             ..TranscriptScrollProbeState::default()
         };
         self.render_silent();
         self.app
-            .session_document
-            .transcript
-            .take_scroll_trace_frames();
+            .conversation
+            .take_transcript_scroll_trace_frames_for_harness();
     }
 
     pub fn transcript_scroll_probe_render(&mut self) {
@@ -127,9 +413,8 @@ impl TestApp {
         self.render_silent();
         let frames = self
             .app
-            .session_document
-            .transcript
-            .take_scroll_trace_frames();
+            .conversation
+            .take_transcript_scroll_trace_frames_for_harness();
         assert_transcript_scroll_probe_frames(&mut self.transcript_scroll_probe, &frames);
         self.assert_invariants();
     }
@@ -304,33 +589,33 @@ impl TestApp {
         }
     }
 
-    pub fn transcript_scroll_probe_reveal_descriptor(&mut self, descriptor_index: usize) {
+    pub fn transcript_scroll_probe_reveal_record(&mut self, record_index: usize) {
         let total = self
             .app
-            .session_document
-            .transcript
-            .descriptor_total_count()
+            .conversation
+            .transcript()
+            .record_total_count()
             .unwrap_or(1)
             .max(1);
-        let descriptor_index = descriptor_index % total;
+        let record_index = record_index % total;
         let _ = self
             .app
-            .reveal_transcript_descriptor_block(descriptor_index, 1, true);
+            .reveal_transcript_record_block(record_index, 1, true);
     }
 
-    pub fn transcript_scroll_probe_search_record(&mut self, descriptor_index: usize) {
+    pub fn transcript_scroll_probe_search_record(&mut self, record_index: usize) {
         let total = self
             .app
-            .session_document
-            .transcript
-            .descriptor_total_count()
+            .conversation
+            .transcript()
+            .record_total_count()
             .unwrap_or(1)
             .max(1);
-        let descriptor_index = descriptor_index % total;
+        let record_index = record_index % total;
         self.app.submit_search(
             crate::app::TRANSCRIPT_WIN,
             SearchDirection::Forward,
-            format!("record-{descriptor_index:04}"),
+            format!("record-{record_index:04}"),
         );
     }
 
@@ -394,7 +679,7 @@ fn assert_transcript_scroll_probe_frames(
                     frame.first_visible_content_anchor.is_some(),
                     "local transcript movement lost its visible content anchor: {frame:?}"
                 );
-                assert_descriptor_ranges_overlap(state, frame);
+                assert_record_ranges_overlap(state, frame);
                 assert_user_delta_direction(state, *rows, frame);
             }
             TranscriptScrollIntent::SearchJump { .. }
@@ -437,26 +722,26 @@ fn assert_transcript_scroll_probe_frames(
     }
 }
 
-fn assert_descriptor_ranges_overlap(
+fn assert_record_ranges_overlap(
     state: &TranscriptScrollProbeState,
     frame: &TranscriptScrollTraceFrame,
 ) {
     let Some(edge) = state.drag_edge else {
         return;
     };
-    let Some(before) = frame.active_descriptor_range_before else {
+    let Some(before) = frame.active_record_range_before else {
         return;
     };
-    let Some(after) = frame.active_descriptor_range_after else {
+    let Some(after) = frame.active_record_range_after else {
         return;
     };
     assert!(
         ranges_overlap(before, after),
-        "{edge:?} drag/autoscroll jumped to disjoint descriptor coverage: before={before:?}, after={after:?}, frame={frame:?}"
+        "{edge:?} drag/autoscroll jumped to disjoint record coverage: before={before:?}, after={after:?}, frame={frame:?}"
     );
 }
 
-fn ranges_overlap(a: TranscriptDescriptorTraceRange, b: TranscriptDescriptorTraceRange) -> bool {
+fn ranges_overlap(a: TranscriptRecordTraceRange, b: TranscriptRecordTraceRange) -> bool {
     a.start <= b.end && b.start <= a.end
 }
 
@@ -493,7 +778,7 @@ fn assert_user_delta_direction(
 
 fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
     let Some(TranscriptTraceAnchor::Content {
-        descriptor_index: before_descriptor,
+        record_index: before_record,
         block_id: before_block,
         ..
     }) = frame.viewport_anchor_before
@@ -501,7 +786,7 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
         return;
     };
     let Some(TranscriptTraceAnchor::Content {
-        descriptor_index: after_descriptor,
+        record_index: after_record,
         block_id: after_block,
         ..
     }) = frame.viewport_anchor_after
@@ -509,8 +794,8 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
         panic!("preserve/resize frame lost content anchor: {frame:?}");
     };
     assert_eq!(
-        (after_descriptor, after_block),
-        (before_descriptor, before_block),
+        (after_record, after_block),
+        (before_record, before_block),
         "preserve/resize frame moved to different content identity: {frame:?}"
     );
 }
@@ -580,5 +865,5 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
             }),
         };
     }
-    source.history.descriptor_records()
+    source.history.block_records()
 }

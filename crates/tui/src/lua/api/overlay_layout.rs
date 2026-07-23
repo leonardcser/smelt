@@ -12,7 +12,7 @@
 //! `{ kind = "...", n = N }`.
 
 use crate::smelt_edit::layout::{Border, Justify};
-use crate::smelt_edit::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
+use crate::smelt_edit::{Constraint, Natural, NaturalRef, StaticNatural};
 use mlua::prelude::*;
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
@@ -358,101 +358,4 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
     )?;
 
     Ok(())
-}
-
-/// Walk the Lua-side layout tree and produce a `LayoutTree`. Also records the
-/// raw window ids that need pre-rendering before fit-mode size resolution.
-pub(crate) fn build_layout_tree(
-    app: &mut crate::app::TuiApp,
-    node: &LayoutNode,
-    window_leaves: &mut Vec<crate::smelt_edit::WinId>,
-) -> Result<(Constraint, LayoutTree), String> {
-    match node {
-        LayoutNode::DialogStage { id } => {
-            let modal = app
-                .ui
-                .docked_surface(*id)
-                .map(crate::smelt_edit::DockedSurface::modal)
-                .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?;
-            let tree = app
-                .docked_dialog_stage_layout(*id)
-                .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?;
-            if let Some(leaves) = app.ui.modal_leaves(modal) {
-                window_leaves.extend_from_slice(leaves);
-            }
-            Ok((Constraint::Fill, tree))
-        }
-        LayoutNode::Leaf {
-            raw_id,
-            chrome,
-            collapse_when_empty,
-            natural,
-        } => {
-            let leaf = app.resolve_leaf_id(*raw_id).ok_or_else(|| {
-                format!("layout leaf references missing window/paint id {raw_id}")
-            })?;
-            let mut tree = match leaf {
-                crate::lua::paint::LeafKind::Window(w) => {
-                    window_leaves.push(w);
-                    LayoutTree::leaf(w)
-                }
-                crate::lua::paint::LeafKind::Paint(p) => LayoutTree::leaf(p),
-            };
-            if let Some(n) = natural.clone() {
-                tree = tree.with_natural(n);
-            }
-            if let Some(b) = chrome.border {
-                tree = tree.with_border(b);
-            }
-            if let Some(t) = chrome.title.clone() {
-                tree = tree.with_title(t);
-            }
-            if chrome.padding > 0 {
-                tree = tree.with_padding(chrome.padding);
-            }
-            // Default leaf constraint is `Fill` when used at the root; container
-            // items override this via their own slot constraint. `collapse_when_empty`
-            // forces `Length(0)` when the wrapped window's buffer is empty.
-            let constraint = if let crate::lua::paint::LeafKind::Window(win) = leaf {
-                if *collapse_when_empty && super::super::ui_ops::window_buffer_empty_pub(app, win) {
-                    Constraint::Length(0)
-                } else {
-                    Constraint::Fill
-                }
-            } else {
-                Constraint::Fill
-            };
-            Ok((constraint, tree))
-        }
-        LayoutNode::Container {
-            kind,
-            items,
-            chrome,
-            gap,
-        } => {
-            let mut tree_items: Vec<(Constraint, LayoutTree)> = Vec::with_capacity(items.len());
-            for it in items {
-                let (_inner_default, child_tree) = build_layout_tree(app, &it.node, window_leaves)?;
-                tree_items.push((it.constraint, child_tree));
-            }
-            let mut tree = match kind {
-                ContainerKind::Vbox => LayoutTree::vbox(tree_items),
-                ContainerKind::Hbox => LayoutTree::hbox(tree_items),
-            };
-            if let Some(b) = chrome.border {
-                tree = tree.with_border(b);
-            }
-            if let Some(t) = chrome.title.clone() {
-                tree = tree.with_title(t);
-            }
-            if *gap > 0 {
-                tree = tree.with_gap(*gap);
-            }
-            tree = tree.with_justify(chrome.justify);
-            if chrome.padding > 0 {
-                tree = tree.with_padding(chrome.padding);
-            }
-            Ok((Constraint::Fill, tree))
-        }
-    }
 }

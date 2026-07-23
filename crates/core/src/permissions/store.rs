@@ -56,41 +56,101 @@ fn decode_path(encoded: &str) -> String {
     out
 }
 
-fn workspaces_dir() -> PathBuf {
-    config::state_dir().join("workspaces")
+#[derive(Debug, Clone)]
+pub struct WorkspacePermissionStore {
+    state_root: PathBuf,
 }
 
-fn workspace_dir(cwd: &str) -> PathBuf {
-    workspaces_dir().join(encode_path(cwd))
-}
-
-fn permissions_path(cwd: &str) -> PathBuf {
-    workspace_dir(cwd).join("permissions.json")
-}
-
-pub fn load(cwd: &str) -> Vec<Rule> {
-    let path = permissions_path(cwd);
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let store: Store = serde_json::from_str(&contents).unwrap_or_default();
-    store.rules
-}
-
-pub fn load_for_roots(cwd: &str, roots: &[PathBuf]) -> Vec<Rule> {
-    let mut loaded: Vec<PathBuf> = Vec::new();
-    let mut rules = Vec::new();
-    for root in std::iter::once(Path::new(cwd).to_path_buf()).chain(roots.iter().cloned()) {
-        if loaded
-            .iter()
-            .any(|existing| workspace::paths_equivalent(existing, &root))
-        {
-            continue;
-        }
-        merge_rules(&mut rules, load(&root.to_string_lossy()));
-        loaded.push(root);
+impl WorkspacePermissionStore {
+    pub fn new(state_root: PathBuf) -> Self {
+        Self { state_root }
     }
-    rules
+
+    pub fn from_process() -> Self {
+        Self::new(config::state_dir())
+    }
+
+    fn permissions_path(&self, cwd: &str) -> PathBuf {
+        self.state_root
+            .join("workspaces")
+            .join(encode_path(cwd))
+            .join("permissions.json")
+    }
+
+    pub fn load(&self, cwd: &str) -> Vec<Rule> {
+        let path = self.permissions_path(cwd);
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let store: Store = serde_json::from_str(&contents).unwrap_or_default();
+        store.rules
+    }
+
+    pub fn load_for_roots(&self, cwd: &str, roots: &[PathBuf]) -> Vec<Rule> {
+        let mut loaded: Vec<PathBuf> = Vec::new();
+        let mut rules = Vec::new();
+        for root in std::iter::once(Path::new(cwd).to_path_buf()).chain(roots.iter().cloned()) {
+            if loaded
+                .iter()
+                .any(|existing| workspace::paths_equivalent(existing, &root))
+            {
+                continue;
+            }
+            merge_rules(&mut rules, self.load(&root.to_string_lossy()));
+            loaded.push(root);
+        }
+        rules
+    }
+
+    pub fn save(&self, cwd: &str, rules: &[Rule]) {
+        let path = self.permissions_path(cwd);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let store = Store {
+            rules: rules.to_vec(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&store) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Add a tool-level approval rule, merging with any existing rule for the same tool.
+    pub fn add_tool(&self, cwd: &str, tool: &str, patterns: Vec<String>) {
+        let mut rules = self.load(cwd);
+        if let Some(existing) = rules.iter_mut().find(|r| r.tool == tool) {
+            if patterns.is_empty() || existing.patterns.is_empty() {
+                existing.patterns.clear();
+            } else {
+                for p in &patterns {
+                    if !existing.patterns.contains(p) {
+                        existing.patterns.push(p.clone());
+                    }
+                }
+            }
+        } else {
+            rules.push(Rule {
+                tool: tool.to_string(),
+                patterns,
+            });
+        }
+        self.save(cwd, &rules);
+    }
+
+    /// Add a directory-level approval rule (idempotent).
+    pub fn add_dir(&self, cwd: &str, dir: &str) {
+        let mut rules = self.load(cwd);
+        let already = rules
+            .iter()
+            .any(|r| r.tool == "directory" && r.patterns.iter().any(|p| p == dir));
+        if !already {
+            rules.push(Rule {
+                tool: "directory".into(),
+                patterns: vec![dir.to_string()],
+            });
+        }
+        self.save(cwd, &rules);
+    }
 }
 
 fn merge_rules(rules: &mut Vec<Rule>, incoming: Vec<Rule>) {
@@ -111,54 +171,20 @@ fn merge_rules(rules: &mut Vec<Rule>, incoming: Vec<Rule>) {
     }
 }
 
+pub fn load(cwd: &str) -> Vec<Rule> {
+    WorkspacePermissionStore::from_process().load(cwd)
+}
+
 pub fn save(cwd: &str, rules: &[Rule]) {
-    let path = permissions_path(cwd);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let store = Store {
-        rules: rules.to_vec(),
-    };
-    if let Ok(json) = serde_json::to_string_pretty(&store) {
-        let _ = std::fs::write(&path, json);
-    }
+    WorkspacePermissionStore::from_process().save(cwd, rules);
 }
 
-/// Add a tool-level approval rule, merging with any existing rule for the same tool.
 pub fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
-    let mut rules = load(cwd);
-    if let Some(existing) = rules.iter_mut().find(|r| r.tool == tool) {
-        if patterns.is_empty() || existing.patterns.is_empty() {
-            existing.patterns.clear(); // empty = "allow all"; that always wins
-        } else {
-            for p in &patterns {
-                if !existing.patterns.contains(p) {
-                    existing.patterns.push(p.clone());
-                }
-            }
-        }
-    } else {
-        rules.push(Rule {
-            tool: tool.to_string(),
-            patterns,
-        });
-    }
-    save(cwd, &rules);
+    WorkspacePermissionStore::from_process().add_tool(cwd, tool, patterns);
 }
 
-/// Add a directory-level approval rule (idempotent).
 pub fn add_dir(cwd: &str, dir: &str) {
-    let mut rules = load(cwd);
-    let already = rules
-        .iter()
-        .any(|r| r.tool == "directory" && r.patterns.iter().any(|p| p == dir));
-    if !already {
-        rules.push(Rule {
-            tool: "directory".into(),
-            patterns: vec![dir.to_string()],
-        });
-    }
-    save(cwd, &rules);
+    WorkspacePermissionStore::from_process().add_dir(cwd, dir);
 }
 
 /// Build compiled approval maps from persisted workspace rules.

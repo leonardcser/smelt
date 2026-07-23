@@ -158,8 +158,9 @@ rename the command file.
 
 ### Surviving reload smoothly
 
-Module bodies run on cold start and every successful `/reload`. Start each module
-with `smelt.plugin(name)` so state and resources reconnect automatically:
+Module bodies run with the frontend host in scope on cold start and every
+successful `/reload`. Start each module with `smelt.plugin(name)` so state and
+resources reconnect automatically:
 
 1. `M.state` is a JSON-shaped table that survives `/reload`, but not process
    restart. Store `is_open`, cursor position, and other rebuildable UI state here.

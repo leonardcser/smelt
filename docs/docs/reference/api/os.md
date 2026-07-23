@@ -43,10 +43,10 @@ Return the value of the environment variable `name`, or `nil` if it is not set.
 ## `smelt.os.home`
 
 ```lua
-fun(): string?
+fun(): string
 ```
 
-Return the user's home directory, or `nil` if it cannot be determined.
+Return the runtime home directory.
 
 ## `smelt.os.open_url`
 
@@ -70,7 +70,7 @@ Open `url` only when the host environment can auto-open a browser. Returns `{ op
 fun(): integer
 ```
 
-Return the OS process id of the running smelt instance.
+Return the runtime process id.
 
 ## `smelt.os.platform`
 
@@ -79,14 +79,6 @@ fun(): string
 ```
 
 Return the target operating system as reported by `std::env::consts::OS` (e.g. `"macos"`, `"linux"`).
-
-## `smelt.os.set_cwd`
-
-```lua
-fun(p: string): boolean, string?
-```
-
-Change the process working directory to `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 
 ## `smelt.os.setenv`
 

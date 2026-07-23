@@ -82,22 +82,14 @@ impl mlua::UserData for LuaPaintReg {
         });
 
         methods.add_method("remove", |_, this, ()| -> LuaResult<bool> {
-            let removed = crate::lua::with_app(|app| {
-                for id in app.ui.leaf_clear_callbacks(this.id) {
-                    app.lua.remove_callback(id);
-                }
-                if let Some(handle_id) = app.paint_registry.unregister(this.id) {
-                    app.lua.remove_callback(handle_id);
-                    true
-                } else {
-                    false
-                }
-            });
+            let removed = crate::lua::with_ui_host(|host| host.remove_paint(this.id));
             Ok(removed)
         });
 
         methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
-            let rect = crate::lua::try_with_app(|app| app.ui.paint_rect(this.id)).flatten();
+            let rect =
+                crate::lua::try_with_ui_host(|host| host.with_ui(|ui| ui.paint_rect(this.id)))
+                    .flatten();
             match rect {
                 Some(r) => {
                     let t = lua.create_table()?;
@@ -124,8 +116,8 @@ impl mlua::UserData for LuaPaintReg {
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
                 let event: crate::smelt_edit::WinEvent = event.into();
-                crate::lua::with_app(|app| {
-                    app.ui.leaf_on_event(
+                crate::lua::with_ui_host(|host| {
+                    host.register_paint_event(
                         this.id,
                         event,
                         crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
@@ -133,13 +125,15 @@ impl mlua::UserData for LuaPaintReg {
                 });
                 let leaf = this.id;
                 Ok(LuaReg::new(move || {
-                    let mut removed = false;
-                    crate::lua::with_app(|app| {
-                        let prev = app.ui.leaf_clear_event_by_id(leaf, event, id);
-                        removed = prev.is_some();
-                        crate::lua::drop_displaced_lua_handle(app, prev);
-                    });
-                    removed
+                    crate::lua::app_ref::defer_registered_lua_operation(
+                        &shared,
+                        id,
+                        crate::lua::app_ref::DeferredLuaOperation::PaintEvent {
+                            paint: leaf,
+                            event,
+                            callback_id: id,
+                        },
+                    )
                 }))
             },
         );
@@ -179,16 +173,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .or_else(|| crate::lua::auto_name_for_scope(lua, "paint"));
                 let handle_id =
                     crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
-                let paint_id = crate::lua::with_app(|app| {
-                    let (id, prev) = app.paint_registry.register(handle_id, name);
-                    for stale in app.ui.leaf_clear_callbacks(id) {
-                        app.lua.remove_callback(stale);
-                    }
-                    if let Some(p) = prev {
-                        app.lua.remove_callback(p);
-                    }
-                    id
-                });
+                let paint_id =
+                    crate::lua::with_ui_host(|host| host.register_paint(handle_id, name));
                 Ok(LuaPaintReg { id: paint_id })
             },
         )?;

@@ -47,9 +47,9 @@ pub(crate) struct HistoryRowInfo {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TranscriptDescriptorIndex(usize);
+pub struct TranscriptRecordOffset(usize);
 
-impl TranscriptDescriptorIndex {
+impl TranscriptRecordOffset {
     pub fn new(index: usize) -> Self {
         Self(index)
     }
@@ -59,40 +59,40 @@ impl TranscriptDescriptorIndex {
     }
 }
 
-impl From<usize> for TranscriptDescriptorIndex {
+impl From<usize> for TranscriptRecordOffset {
     fn from(value: usize) -> Self {
         Self::new(value)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TranscriptDescriptorRange {
-    start: TranscriptDescriptorIndex,
-    end: TranscriptDescriptorIndex,
+pub struct TranscriptRecordRange {
+    start: TranscriptRecordOffset,
+    end: TranscriptRecordOffset,
 }
 
-impl TranscriptDescriptorRange {
-    pub fn new(start: TranscriptDescriptorIndex, end: TranscriptDescriptorIndex) -> Self {
+impl TranscriptRecordRange {
+    pub fn new(start: TranscriptRecordOffset, end: TranscriptRecordOffset) -> Self {
         Self { start, end }
     }
 
-    pub fn start(self) -> TranscriptDescriptorIndex {
+    pub fn start(self) -> TranscriptRecordOffset {
         self.start
     }
 
-    pub fn end(self) -> TranscriptDescriptorIndex {
+    pub fn end(self) -> TranscriptRecordOffset {
         self.end
     }
 }
 
-impl From<Range<usize>> for TranscriptDescriptorRange {
+impl From<Range<usize>> for TranscriptRecordRange {
     fn from(value: Range<usize>) -> Self {
         Self::new(value.start.into(), value.end.into())
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct TranscriptDescriptorRecord {
+pub struct StoredTranscriptBlock {
     pub block_idx: u64,
     pub history_idx: Option<u64>,
     pub kind: String,
@@ -102,7 +102,7 @@ pub struct TranscriptDescriptorRecord {
     pub estimated_text_bytes: u64,
     pub preview_text: String,
     pub indexed_text: String,
-    pub descriptor_json: String,
+    pub block_json: String,
     pub origin_json: Option<String>,
     pub tool_state_json: Option<String>,
 }
@@ -110,7 +110,7 @@ pub struct TranscriptDescriptorRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptBlockMetadataRecord {
     pub block_idx: u64,
-    pub descriptor_idx: Option<u64>,
+    pub record_idx: Option<u64>,
     pub history_idx: Option<u64>,
     pub kind: String,
     pub tool_call_id: Option<String>,
@@ -119,35 +119,35 @@ pub struct TranscriptBlockMetadataRecord {
     pub estimated_text_bytes: u64,
     pub estimated_rows: Option<u64>,
     pub preview_text: String,
-    pub has_descriptor: bool,
+    pub has_block: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TranscriptDescriptorHydration {
+pub enum TranscriptRecordHydration {
     Hydrated,
     ObjectBacked,
 }
 
-impl TranscriptDescriptorHydration {
+impl TranscriptRecordHydration {
     fn hydrates_objects(self) -> bool {
         matches!(self, Self::Hydrated)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TranscriptDescriptorSlice {
-    pub start: TranscriptDescriptorIndex,
+pub struct TranscriptRecordSlice {
+    pub start: TranscriptRecordOffset,
     pub total_count: usize,
-    pub hydration: TranscriptDescriptorHydration,
-    pub records: Vec<TranscriptDescriptorRecord>,
+    pub hydration: TranscriptRecordHydration,
+    pub records: Vec<StoredTranscriptBlock>,
 }
 
-impl TranscriptDescriptorSlice {
+impl TranscriptRecordSlice {
     pub fn new(
-        start: TranscriptDescriptorIndex,
+        start: TranscriptRecordOffset,
         total_count: usize,
-        hydration: TranscriptDescriptorHydration,
-        records: Vec<TranscriptDescriptorRecord>,
+        hydration: TranscriptRecordHydration,
+        records: Vec<StoredTranscriptBlock>,
     ) -> Self {
         Self {
             start,
@@ -165,11 +165,11 @@ impl TranscriptDescriptorSlice {
         self.records.is_empty()
     }
 
-    pub fn end(&self) -> TranscriptDescriptorIndex {
-        TranscriptDescriptorIndex::new(self.start.get().saturating_add(self.records.len()))
+    pub fn end(&self) -> TranscriptRecordOffset {
+        TranscriptRecordOffset::new(self.start.get().saturating_add(self.records.len()))
     }
 
-    pub fn into_records(self) -> Vec<TranscriptDescriptorRecord> {
+    pub fn into_records(self) -> Vec<StoredTranscriptBlock> {
         self.records
     }
 }
@@ -212,17 +212,17 @@ pub(crate) fn item_hash(item: &HistoryItem) -> Result<String> {
 #[cfg(debug_assertions)]
 pub(crate) fn incoming_object_hashes(
     items: &[HistoryItem],
-    descriptors: Option<&[TranscriptDescriptorRecord]>,
+    records: Option<&[StoredTranscriptBlock]>,
 ) -> Result<Vec<String>> {
     let mut hashes = std::collections::BTreeSet::new();
     for item in items {
         let normalized = normalized_history_value(item, ObjectCompression::none(), None)?;
         hashes.extend(normalized.refs.into_iter().map(|(hash, _)| hash));
     }
-    for record in descriptors.into_iter().flatten() {
-        let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
+    for record in records.into_iter().flatten() {
+        let mut block: Value = serde_json::from_str(&record.block_json)?;
         let mut refs = Vec::new();
-        normalize_metadata(None, &mut descriptor, ObjectCompression::none(), &mut refs)?;
+        normalize_metadata(None, &mut block, ObjectCompression::none(), &mut refs)?;
         if let Some(tool_state_json) = &record.tool_state_json {
             let mut tool_state: Value = serde_json::from_str(tool_state_json)?;
             normalize_metadata(None, &mut tool_state, ObjectCompression::none(), &mut refs)?;
@@ -471,18 +471,18 @@ pub(crate) fn transcript_block_count(conn: &Connection) -> Result<usize> {
     Ok(count.max(0) as usize)
 }
 
-pub(crate) fn transcript_missing_descriptor_count(conn: &Connection) -> Result<usize> {
+pub(crate) fn transcript_missing_block_count(conn: &Connection) -> Result<usize> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NULL",
+        "SELECT COUNT(*) FROM transcript_blocks WHERE block_json IS NULL",
         [],
         |row| row.get(0),
     )?;
     Ok(count.max(0) as usize)
 }
 
-pub(crate) fn transcript_descriptor_max_history_idx(conn: &Connection) -> Result<Option<usize>> {
+pub(crate) fn transcript_record_max_history_idx(conn: &Connection) -> Result<Option<usize>> {
     let idx: Option<i64> = conn.query_row(
-        "SELECT MAX(history_idx) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+        "SELECT MAX(history_idx) FROM transcript_blocks WHERE block_json IS NOT NULL",
         [],
         |row| row.get(0),
     )?;
@@ -508,9 +508,9 @@ pub(crate) fn read_transcript_block_metadata_range(
     let start = checked_i64(range.start as u64, "block_start_idx")?;
     let end = checked_i64(range.end as u64, "block_end_idx")?;
     let mut stmt = conn.prepare(
-        "SELECT block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name,
+        "SELECT block_idx, record_idx, history_idx, kind, tool_call_id, tool_name,
                 content_hash, estimated_text_bytes, estimated_rows, preview_text,
-                descriptor_json IS NOT NULL AS has_descriptor
+                block_json IS NOT NULL AS has_block
          FROM transcript_blocks
          WHERE block_idx >= ?1 AND block_idx < ?2
          ORDER BY block_idx",
@@ -534,9 +534,9 @@ pub(crate) fn read_transcript_block_metadata_tail(
     }
     let limit = checked_i64(count as u64, "block_tail_count")?;
     let mut stmt = conn.prepare(
-        "SELECT block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name,
+        "SELECT block_idx, record_idx, history_idx, kind, tool_call_id, tool_name,
                 content_hash, estimated_text_bytes, estimated_rows, preview_text,
-                descriptor_json IS NOT NULL AS has_descriptor
+                block_json IS NOT NULL AS has_block
          FROM transcript_blocks
          ORDER BY block_idx DESC
          LIMIT ?1",
@@ -556,7 +556,7 @@ fn transcript_block_metadata_from_row(
 ) -> rusqlite::Result<TranscriptBlockMetadataRecord> {
     Ok(TranscriptBlockMetadataRecord {
         block_idx: row.get::<_, i64>(0)? as u64,
-        descriptor_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
+        record_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
         history_idx: row.get::<_, Option<i64>>(2)?.map(|idx| idx as u64),
         kind: row.get(3)?,
         tool_call_id: row.get(4)?,
@@ -565,7 +565,7 @@ fn transcript_block_metadata_from_row(
         estimated_text_bytes: row.get::<_, i64>(7)? as u64,
         estimated_rows: row.get::<_, Option<i64>>(8)?.map(|rows| rows as u64),
         preview_text: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-        has_descriptor: row.get::<_, i64>(10)? != 0,
+        has_block: row.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -583,33 +583,16 @@ pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {
 pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     let _perf = perf::begin("store:transcript:search_blob_full");
     let mut out = Vec::new();
-    let completed = write_search_blob_rows(conn, &mut out, &mut || false)?;
-    debug_assert!(completed);
+    write_search_blob_rows(conn, &mut out)?;
     Ok(String::from_utf8(out).expect("transcript search text is valid UTF-8"))
 }
 
 pub(crate) fn write_search_blob(conn: &Connection, writer: &mut impl Write) -> Result<()> {
     let _perf = perf::begin("store:transcript:search_blob_full");
-    let completed = write_search_blob_rows(conn, writer, &mut || false)?;
-    debug_assert!(completed);
-    Ok(())
+    write_search_blob_rows(conn, writer)
 }
 
-// COMPAT(session-derived-sidecar-exports): bound cancellation latency while streaming.
-pub(crate) fn write_search_blob_cancellable(
-    conn: &Connection,
-    writer: &mut impl Write,
-    mut should_cancel: impl FnMut() -> bool,
-) -> Result<bool> {
-    let _perf = perf::begin("store:transcript:search_blob_full");
-    write_search_blob_rows(conn, writer, &mut should_cancel)
-}
-
-fn write_search_blob_rows(
-    conn: &Connection,
-    writer: &mut impl Write,
-    should_cancel: &mut impl FnMut() -> bool,
-) -> Result<bool> {
+fn write_search_blob_rows(conn: &Connection, writer: &mut impl Write) -> Result<()> {
     const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 
     let mut stmt = conn.prepare(
@@ -631,9 +614,6 @@ fn write_search_blob_rows(
         row_count = row_count.saturating_add(1);
         let mut last_byte = None;
         loop {
-            if should_cancel() {
-                return Ok(false);
-            }
             let read = text.read(&mut chunk)?;
             if read == 0 {
                 break;
@@ -643,54 +623,51 @@ fn write_search_blob_rows(
             last_byte = Some(chunk[read - 1]);
         }
         if last_byte != Some(b'\n') {
-            if should_cancel() {
-                return Ok(false);
-            }
             writer.write_all(b"\n")?;
             byte_count = byte_count.saturating_add(1);
         }
     }
     perf::record_value("store:transcript:search_blob_rows_read", row_count);
     perf::record_value("store:transcript:search_blob_bytes_read", byte_count);
-    Ok(true)
+    Ok(())
 }
 
-pub(crate) fn transcript_descriptor_suffix_matches(
+pub(crate) fn transcript_record_suffix_matches(
     conn: &Connection,
-    start_descriptor_idx: usize,
-    records: &[TranscriptDescriptorRecord],
+    start_record_idx: usize,
+    records: &[StoredTranscriptBlock],
     compression: ObjectCompression,
 ) -> Result<bool> {
-    let current_count = transcript_descriptor_count(conn)?;
-    let expected_count = start_descriptor_idx
+    let current_count = transcript_record_count(conn)?;
+    let expected_count = start_record_idx
         .checked_add(records.len())
-        .ok_or_else(|| StoreError::Integrity("descriptor suffix length overflows usize".into()))?;
+        .ok_or_else(|| StoreError::Integrity("block suffix length overflows usize".into()))?;
     if current_count != expected_count {
         return Ok(false);
     }
-    let limit = checked_i64(records.len() as u64, "descriptor_suffix_len")?;
-    let offset = checked_i64(start_descriptor_idx as u64, "descriptor_suffix_start")?;
+    let limit = checked_i64(records.len() as u64, "block_suffix_len")?;
+    let offset = checked_i64(start_record_idx as u64, "block_suffix_start")?;
     let mut stmt = conn.prepare(
         "SELECT b.block_idx, b.history_idx, b.kind, b.tool_call_id, b.tool_name, b.content_hash,
                 b.estimated_text_bytes, b.preview_text, COALESCE(s.indexed_text, '') AS indexed_text,
-                b.descriptor_json, b.origin_json, b.tool_state_json
+                b.block_json, b.origin_json, b.tool_state_json
          FROM transcript_blocks b
          LEFT JOIN transcript_search s ON s.block_idx = b.block_idx
-         WHERE b.descriptor_json IS NOT NULL
-         ORDER BY b.descriptor_idx
+         WHERE b.block_json IS NOT NULL
+         ORDER BY b.record_idx
          LIMIT ?1 OFFSET ?2",
     )?;
-    let current = read_transcript_descriptor_records_from_stmt(
+    let current = read_transcript_records_from_stmt(
         conn,
         &mut stmt,
         params![limit, offset],
-        TranscriptDescriptorHydration::Hydrated,
+        TranscriptRecordHydration::Hydrated,
     )?;
     let mut expected = records.to_vec();
     for record in &mut expected {
-        let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
-        normalize_metadata(None, &mut descriptor, compression, &mut Vec::new())?;
-        record.descriptor_json = serde_json::to_string(&descriptor)?;
+        let mut block: Value = serde_json::from_str(&record.block_json)?;
+        normalize_metadata(None, &mut block, compression, &mut Vec::new())?;
+        record.block_json = serde_json::to_string(&block)?;
         if let Some(tool_state_json) = &mut record.tool_state_json {
             let mut tool_state: Value = serde_json::from_str(tool_state_json)?;
             normalize_metadata(None, &mut tool_state, compression, &mut Vec::new())?;
@@ -700,27 +677,27 @@ pub(crate) fn transcript_descriptor_suffix_matches(
     Ok(current == expected)
 }
 
-pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
+pub(crate) fn replace_transcript_record_suffix_in_transaction(
     conn: &Connection,
-    start_descriptor_idx: usize,
-    records: &[TranscriptDescriptorRecord],
+    start_record_idx: usize,
+    records: &[StoredTranscriptBlock],
     compression: ObjectCompression,
 ) -> Result<()> {
-    let _perf = perf::begin("store:transcript:replace_descriptor_suffix");
-    let current_descriptor_count = transcript_descriptor_count(conn)?;
-    if transcript_descriptor_dense_extent(conn)? != current_descriptor_count {
-        compact_transcript_descriptor_indices(conn)?;
+    let _perf = perf::begin("store:transcript:replace_block_suffix");
+    let current_block_count = transcript_record_count(conn)?;
+    if transcript_record_dense_extent(conn)? != current_block_count {
+        compact_transcript_record_indices(conn)?;
     }
-    if start_descriptor_idx > current_descriptor_count {
+    if start_record_idx > current_block_count {
         return Err(StoreError::Integrity(format!(
-            "transcript descriptor suffix starts past dense end: start {start_descriptor_idx}, count {current_descriptor_count}",
+            "transcript block suffix starts past dense end: start {start_record_idx}, count {current_block_count}",
         )));
     }
     perf::record_value(
-        "store:transcript:dirty_descriptor_suffix_rows",
+        "store:transcript:dirty_block_suffix_rows",
         records.len() as u64,
     );
-    let start_descriptor_idx = checked_i64(start_descriptor_idx as u64, "start_descriptor_idx")?;
+    let start_record_idx = checked_i64(start_record_idx as u64, "start_record_idx")?;
     let first_replacement_block_idx = records
         .first()
         .map(|record| checked_i64(record.block_idx, "block_idx"))
@@ -729,26 +706,23 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
         "DELETE FROM transcript_search
          WHERE block_idx IN (
              SELECT block_idx FROM transcript_blocks
-             WHERE descriptor_idx >= ?1
+             WHERE record_idx >= ?1
                 OR (?2 IS NOT NULL AND block_idx >= ?2)
          )",
-        params![start_descriptor_idx, first_replacement_block_idx],
+        params![start_record_idx, first_replacement_block_idx],
     )?;
-    let descriptor_deleted = conn.execute(
+    let block_deleted = conn.execute(
         "DELETE FROM transcript_blocks
-         WHERE descriptor_idx >= ?1
+         WHERE record_idx >= ?1
             OR (?2 IS NOT NULL AND block_idx >= ?2)",
-        params![start_descriptor_idx, first_replacement_block_idx],
+        params![start_record_idx, first_replacement_block_idx],
     )?;
     for (offset, record) in records.iter().enumerate() {
-        let descriptor_idx = checked_i64(
-            start_descriptor_idx as u64 + offset as u64,
-            "descriptor_idx",
-        )?;
-        let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
+        let record_idx = checked_i64(start_record_idx as u64 + offset as u64, "record_idx")?;
+        let mut block: Value = serde_json::from_str(&record.block_json)?;
         let mut refs = Vec::new();
-        normalize_metadata(Some(conn), &mut descriptor, compression, &mut refs)?;
-        let descriptor_json = serde_json::to_string(&descriptor)?;
+        normalize_metadata(Some(conn), &mut block, compression, &mut refs)?;
+        let block_json = serde_json::to_string(&block)?;
         let tool_state_json = match &record.tool_state_json {
             Some(json) => {
                 let mut value: Value = serde_json::from_str(json)?;
@@ -757,11 +731,11 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
             }
             None => None,
         };
-        insert_transcript_descriptor_record(
+        insert_transcript_record_record(
             conn,
-            descriptor_idx,
+            record_idx,
             record,
-            &descriptor_json,
+            &block_json,
             tool_state_json.as_deref(),
         )?;
         for (hash, role) in refs {
@@ -779,46 +753,46 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
         }
     }
     perf::record_value(
-        "store:transcript:descriptor_db_rows_deleted",
-        search_deleted.saturating_add(descriptor_deleted) as u64,
+        "store:transcript:block_db_rows_deleted",
+        search_deleted.saturating_add(block_deleted) as u64,
     );
     perf::record_value(
-        "store:transcript:descriptor_db_rows_inserted",
+        "store:transcript:block_db_rows_inserted",
         records.len() as u64,
     );
     Ok(())
 }
 
-fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<()> {
+fn compact_transcript_record_indices(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT block_idx
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
-         ORDER BY descriptor_idx",
+         WHERE block_json IS NOT NULL
+         ORDER BY record_idx",
     )?;
     let rows = stmt
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     conn.execute(
-        "UPDATE transcript_blocks SET descriptor_idx = NULL
-         WHERE descriptor_json IS NOT NULL",
+        "UPDATE transcript_blocks SET record_idx = NULL
+         WHERE block_json IS NOT NULL",
         [],
     )?;
     for (idx, block_idx) in rows.into_iter().enumerate() {
         conn.execute(
-            "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
+            "UPDATE transcript_blocks SET record_idx = ?1 WHERE block_idx = ?2",
             params![idx as i64, block_idx],
         )?;
     }
     Ok(())
 }
 
-fn insert_transcript_descriptor_record(
+fn insert_transcript_record_record(
     conn: &Connection,
-    descriptor_idx: i64,
-    record: &TranscriptDescriptorRecord,
-    descriptor_json: &str,
+    record_idx: i64,
+    record: &StoredTranscriptBlock,
+    block_json: &str,
     tool_state_json: Option<&str>,
 ) -> Result<()> {
     let block_idx = checked_i64(record.block_idx, "block_idx")?;
@@ -828,20 +802,20 @@ fn insert_transcript_descriptor_record(
         .transpose()?;
     conn.execute(
         "INSERT INTO transcript_blocks (
-            block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-            estimated_text_bytes, descriptor_json, origin_json, tool_state_json,
+            block_idx, record_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+            estimated_text_bytes, block_json, origin_json, tool_state_json,
             preview_text
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             block_idx,
-            descriptor_idx,
+            record_idx,
             history_idx,
             record.kind,
             record.tool_call_id,
             record.tool_name,
             record.content_hash,
             checked_i64(record.estimated_text_bytes, "estimated_text_bytes")?,
-            descriptor_json,
+            block_json,
             record.origin_json,
             tool_state_json,
             record.preview_text,
@@ -851,11 +825,11 @@ fn insert_transcript_descriptor_record(
     Ok(())
 }
 
-pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
-    let _perf = perf::begin("store:transcript:descriptor_count");
+pub(crate) fn transcript_record_count(conn: &Connection) -> Result<usize> {
+    let _perf = perf::begin("store:transcript:record_count");
     let cached = conn
         .query_row(
-            "SELECT descriptor_len FROM session_state WHERE singleton = 1",
+            "SELECT transcript_record_count FROM session_state WHERE singleton = 1",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -863,69 +837,66 @@ pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
     let count = match cached {
         Some(count) => count,
         None => conn.query_row(
-            "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+            "SELECT COUNT(*) FROM transcript_blocks WHERE block_json IS NOT NULL",
             [],
             |row| row.get::<_, i64>(0),
         )?,
     };
-    perf::record_value("store:transcript:descriptor_count_total", count as u64);
+    perf::record_value("store:transcript:record_count_total", count as u64);
     Ok(count as usize)
 }
 
-pub(crate) fn transcript_descriptor_dense_extent(conn: &Connection) -> Result<usize> {
-    let _perf = perf::begin("store:transcript:descriptor_dense_extent");
+pub(crate) fn transcript_record_dense_extent(conn: &Connection) -> Result<usize> {
+    let _perf = perf::begin("store:transcript:record_dense_extent");
     let count: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(descriptor_idx) + 1, 0)
+        "SELECT COALESCE(MAX(record_idx) + 1, 0)
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL",
+         WHERE block_json IS NOT NULL",
         [],
         |row| row.get(0),
     )?;
-    perf::record_value(
-        "store:transcript:descriptor_dense_extent_total",
-        count as u64,
-    );
+    perf::record_value("store:transcript:record_dense_extent_total", count as u64);
     Ok(count as usize)
 }
 
-pub(crate) fn transcript_descriptor_index_for_block_idx(
+pub(crate) fn transcript_record_index_for_block_idx(
     conn: &Connection,
     block_idx: u64,
-) -> Result<Option<TranscriptDescriptorIndex>> {
-    let _perf = perf::begin("store:transcript:descriptor_index_for_block");
+) -> Result<Option<TranscriptRecordOffset>> {
+    let _perf = perf::begin("store:transcript:block_index_for_block");
     let block_idx = checked_i64(block_idx, "block_idx")?;
     let index: Option<i64> = conn
         .query_row(
-            "SELECT descriptor_idx
+            "SELECT record_idx
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL AND block_idx = ?1",
+         WHERE block_json IS NOT NULL AND block_idx = ?1",
             [block_idx],
             |row| row.get(0),
         )
         .optional()?;
     perf::record_value(
-        "store:transcript:descriptor_block_found",
+        "store:transcript:block_block_found",
         u64::from(index.is_some()),
     );
-    Ok(index.map(|index| TranscriptDescriptorIndex::new(index.max(0) as usize)))
+    Ok(index.map(|index| TranscriptRecordOffset::new(index.max(0) as usize)))
 }
 
-pub(crate) fn transcript_descriptor_estimated_rows(
+pub(crate) fn transcript_record_estimated_rows(
     conn: &Connection,
-    range: TranscriptDescriptorRange,
+    range: TranscriptRecordRange,
     width: u16,
 ) -> Result<u64> {
-    let _perf = perf::begin("store:transcript:descriptor_estimated_rows");
+    let _perf = perf::begin("store:transcript:block_estimated_rows");
     let start = range.start().get();
     let end = range.end().get();
     if start >= end {
-        perf::record_value("store:transcript:descriptor_estimated_rows_requested", 0);
-        perf::record_value("store:transcript:descriptor_estimated_rows_total", 0);
+        perf::record_value("store:transcript:block_estimated_rows_requested", 0);
+        perf::record_value("store:transcript:block_estimated_rows_total", 0);
         return Ok(0);
     }
     let width = width.max(1) as u64;
-    let limit = checked_i64((end - start) as u64, "descriptor_estimated_rows_len")?;
-    let offset = checked_i64(start as u64, "descriptor_estimated_rows_start")?;
+    let limit = checked_i64((end - start) as u64, "block_estimated_rows_len")?;
+    let offset = checked_i64(start as u64, "block_estimated_rows_start")?;
     let rows: i64 = conn.query_row(
         "SELECT COALESCE(SUM(
              COALESCE(
@@ -939,252 +910,241 @@ pub(crate) fn transcript_descriptor_estimated_rows(
              )
          ), 0)
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
-           AND descriptor_idx >= ?3
-           AND descriptor_idx < ?3 + ?2",
+         WHERE block_json IS NOT NULL
+           AND record_idx >= ?3
+           AND record_idx < ?3 + ?2",
         params![
-            checked_i64(width, "descriptor_estimated_rows_width")?,
+            checked_i64(width, "block_estimated_rows_width")?,
             limit,
             offset
         ],
         |row| row.get(0),
     )?;
     perf::record_value(
-        "store:transcript:descriptor_estimated_rows_requested",
+        "store:transcript:block_estimated_rows_requested",
         end.saturating_sub(start) as u64,
     );
-    perf::record_value(
-        "store:transcript:descriptor_estimated_rows_total",
-        rows as u64,
-    );
+    perf::record_value("store:transcript:block_estimated_rows_total", rows as u64);
     Ok(rows as u64)
 }
 
-pub(crate) fn read_transcript_descriptor_records(
-    conn: &Connection,
-) -> Result<Vec<TranscriptDescriptorRecord>> {
-    let _perf = perf::begin("store:transcript:read_descriptors_full");
+pub(crate) fn read_transcript_records(conn: &Connection) -> Result<Vec<StoredTranscriptBlock>> {
+    let _perf = perf::begin("store:transcript:read_records_full");
     let mut stmt = conn.prepare(
         "SELECT b.block_idx, b.history_idx, b.kind, b.tool_call_id, b.tool_name, b.content_hash,
                 b.estimated_text_bytes, b.preview_text, COALESCE(s.indexed_text, '') AS indexed_text,
-                b.descriptor_json, b.origin_json, b.tool_state_json
+                b.block_json, b.origin_json, b.tool_state_json
          FROM transcript_blocks b
          LEFT JOIN transcript_search s ON s.block_idx = b.block_idx
-         WHERE b.descriptor_json IS NOT NULL
-         ORDER BY b.descriptor_idx",
+         WHERE b.block_json IS NOT NULL
+         ORDER BY b.record_idx",
     )?;
-    let records = read_transcript_descriptor_records_from_stmt(
+    let records = read_transcript_records_from_stmt(
         conn,
         &mut stmt,
         [],
-        TranscriptDescriptorHydration::Hydrated,
+        TranscriptRecordHydration::Hydrated,
     )?;
-    perf::record_value(
-        "store:transcript:descriptors_full_loaded",
-        records.len() as u64,
-    );
+    perf::record_value("store:transcript:records_full_loaded", records.len() as u64);
     Ok(records)
 }
 
-pub(crate) fn read_transcript_descriptor_slice(
+pub(crate) fn read_transcript_record_slice(
     conn: &Connection,
-    range: TranscriptDescriptorRange,
-) -> Result<TranscriptDescriptorSlice> {
-    let _perf = perf::begin("store:transcript:read_descriptor_slice");
-    let total_count = transcript_descriptor_count(conn)?;
-    read_transcript_descriptor_slice_with_total(conn, range, total_count)
+    range: TranscriptRecordRange,
+) -> Result<TranscriptRecordSlice> {
+    let _perf = perf::begin("store:transcript:read_block_slice");
+    let total_count = transcript_record_count(conn)?;
+    read_transcript_record_slice_with_total(conn, range, total_count)
 }
 
-pub(crate) fn read_transcript_descriptor_slice_with_total(
+pub(crate) fn read_transcript_record_slice_with_total(
     conn: &Connection,
-    range: TranscriptDescriptorRange,
+    range: TranscriptRecordRange,
     total_count: usize,
-) -> Result<TranscriptDescriptorSlice> {
+) -> Result<TranscriptRecordSlice> {
     let start = range.start().get().min(total_count);
     let end = range.end().get().min(total_count);
     if start >= end {
-        perf::record_value("store:transcript:descriptor_slice_requested", 0);
-        perf::record_value("store:transcript:descriptors_loaded", 0);
-        perf::record_value("store:transcript:descriptor_json_bytes_loaded", 0);
-        return Ok(TranscriptDescriptorSlice::new(
-            TranscriptDescriptorIndex::new(start),
+        perf::record_value("store:transcript:block_slice_requested", 0);
+        perf::record_value("store:transcript:records_loaded", 0);
+        perf::record_value("store:transcript:block_json_bytes_loaded", 0);
+        return Ok(TranscriptRecordSlice::new(
+            TranscriptRecordOffset::new(start),
             total_count,
-            TranscriptDescriptorHydration::ObjectBacked,
+            TranscriptRecordHydration::ObjectBacked,
             Vec::new(),
         ));
     }
-    let limit = checked_i64((end - start) as u64, "descriptor_range_len")?;
-    let offset = checked_i64(start as u64, "descriptor_range_start")?;
+    let limit = checked_i64((end - start) as u64, "block_range_len")?;
+    let offset = checked_i64(start as u64, "block_range_start")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, '' AS indexed_text,
-                descriptor_json, origin_json, tool_state_json
+                block_json, origin_json, tool_state_json
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
-           AND descriptor_idx >= ?2
-           AND descriptor_idx < ?2 + ?1
-         ORDER BY descriptor_idx",
+         WHERE block_json IS NOT NULL
+           AND record_idx >= ?2
+           AND record_idx < ?2 + ?1
+         ORDER BY record_idx",
     )?;
-    let records = read_transcript_descriptor_records_from_stmt(
+    let records = read_transcript_records_from_stmt(
         conn,
         &mut stmt,
         params![limit, offset],
-        TranscriptDescriptorHydration::ObjectBacked,
+        TranscriptRecordHydration::ObjectBacked,
     )?;
     perf::record_value(
-        "store:transcript:descriptor_slice_requested",
+        "store:transcript:block_slice_requested",
         end.saturating_sub(start) as u64,
     );
-    Ok(TranscriptDescriptorSlice::new(
-        TranscriptDescriptorIndex::new(start),
+    Ok(TranscriptRecordSlice::new(
+        TranscriptRecordOffset::new(start),
         total_count,
-        TranscriptDescriptorHydration::ObjectBacked,
+        TranscriptRecordHydration::ObjectBacked,
         records,
     ))
 }
 
-pub(crate) fn read_transcript_descriptor_tail_slice(
+pub(crate) fn read_transcript_record_tail_slice(
     conn: &Connection,
     count: usize,
-) -> Result<TranscriptDescriptorSlice> {
-    let _perf = perf::begin("store:transcript:read_descriptor_tail_slice");
-    perf::record_value("store:transcript:descriptor_tail_requested", count as u64);
-    let total_count = transcript_descriptor_count(conn)?;
-    read_transcript_descriptor_tail_slice_with_total(conn, total_count, count)
+) -> Result<TranscriptRecordSlice> {
+    let _perf = perf::begin("store:transcript:read_block_tail_slice");
+    perf::record_value("store:transcript:block_tail_requested", count as u64);
+    let total_count = transcript_record_count(conn)?;
+    read_transcript_record_tail_slice_with_total(conn, total_count, count)
 }
 
-pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
+pub(crate) fn read_transcript_record_tail_slice_with_total(
     conn: &Connection,
     total_count: usize,
     count: usize,
-) -> Result<TranscriptDescriptorSlice> {
+) -> Result<TranscriptRecordSlice> {
     let count = count.min(total_count);
     let start = total_count.saturating_sub(count);
     if count == 0 {
-        perf::record_value("store:transcript:descriptor_slice_requested", 0);
-        perf::record_value("store:transcript:descriptors_loaded", 0);
-        perf::record_value("store:transcript:descriptor_json_bytes_loaded", 0);
-        return Ok(TranscriptDescriptorSlice::new(
-            TranscriptDescriptorIndex::new(start),
+        perf::record_value("store:transcript:block_slice_requested", 0);
+        perf::record_value("store:transcript:records_loaded", 0);
+        perf::record_value("store:transcript:block_json_bytes_loaded", 0);
+        return Ok(TranscriptRecordSlice::new(
+            TranscriptRecordOffset::new(start),
             total_count,
-            TranscriptDescriptorHydration::ObjectBacked,
+            TranscriptRecordHydration::ObjectBacked,
             Vec::new(),
         ));
     }
-    let limit = checked_i64(count as u64, "descriptor_tail_len")?;
+    let limit = checked_i64(count as u64, "block_tail_len")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, '' AS indexed_text,
-                descriptor_json, origin_json, tool_state_json
+                block_json, origin_json, tool_state_json
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
-         ORDER BY descriptor_idx DESC
+         WHERE block_json IS NOT NULL
+         ORDER BY record_idx DESC
          LIMIT ?1",
     )?;
-    let mut records = read_transcript_descriptor_records_from_stmt(
+    let mut records = read_transcript_records_from_stmt(
         conn,
         &mut stmt,
         params![limit],
-        TranscriptDescriptorHydration::ObjectBacked,
+        TranscriptRecordHydration::ObjectBacked,
     )?;
     records.reverse();
-    perf::record_value("store:transcript:descriptor_slice_requested", count as u64);
-    Ok(TranscriptDescriptorSlice::new(
-        TranscriptDescriptorIndex::new(start),
+    perf::record_value("store:transcript:block_slice_requested", count as u64);
+    Ok(TranscriptRecordSlice::new(
+        TranscriptRecordOffset::new(start),
         total_count,
-        TranscriptDescriptorHydration::ObjectBacked,
+        TranscriptRecordHydration::ObjectBacked,
         records,
     ))
 }
 
-pub(crate) fn read_transcript_descriptor_centered_slice(
+pub(crate) fn read_transcript_record_centered_slice(
     conn: &Connection,
-    center_descriptor_idx: u64,
+    center_record_idx: u64,
     before: usize,
     after: usize,
-) -> Result<TranscriptDescriptorSlice> {
-    let _perf = perf::begin("store:transcript:read_descriptor_centered_slice");
-    let total_count = transcript_descriptor_count(conn)?;
+) -> Result<TranscriptRecordSlice> {
+    let _perf = perf::begin("store:transcript:read_block_centered_slice");
+    let total_count = transcript_record_count(conn)?;
     if total_count == 0 {
-        return read_transcript_descriptor_slice_with_total(conn, (0..0).into(), total_count);
+        return read_transcript_record_slice_with_total(conn, (0..0).into(), total_count);
     }
-    let center = (center_descriptor_idx as usize).min(total_count.saturating_sub(1));
+    let center = (center_record_idx as usize).min(total_count.saturating_sub(1));
     let start = center.saturating_sub(before);
     let end = center
         .saturating_add(after)
         .saturating_add(1)
         .min(total_count);
-    read_transcript_descriptor_slice_with_total(conn, (start..end).into(), total_count)
+    read_transcript_record_slice_with_total(conn, (start..end).into(), total_count)
 }
 
-pub(crate) fn read_transcript_descriptor_before_kind_at_index(
+pub(crate) fn read_transcript_record_before_kind_at_index(
     conn: &Connection,
     kind: &str,
-    before_or_at_descriptor_index: u64,
-) -> Result<Option<TranscriptDescriptorRecord>> {
-    let _perf = perf::begin("store:transcript:read_descriptor_before_kind");
-    let before_or_at = checked_i64(
-        before_or_at_descriptor_index,
-        "before_or_at_descriptor_index",
-    )?;
+    before_or_at_block_index: u64,
+) -> Result<Option<StoredTranscriptBlock>> {
+    let _perf = perf::begin("store:transcript:read_block_before_kind");
+    let before_or_at = checked_i64(before_or_at_block_index, "before_or_at_block_index")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, '' AS indexed_text,
-                descriptor_json, origin_json, tool_state_json
+                block_json, origin_json, tool_state_json
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
+         WHERE block_json IS NOT NULL
            AND kind = ?1
-           AND descriptor_idx <= ?2
-         ORDER BY descriptor_idx DESC
+           AND record_idx <= ?2
+         ORDER BY record_idx DESC
          LIMIT 1",
     )?;
-    let mut records = read_transcript_descriptor_records_from_stmt(
+    let mut records = read_transcript_records_from_stmt(
         conn,
         &mut stmt,
         params![kind, before_or_at],
-        TranscriptDescriptorHydration::ObjectBacked,
+        TranscriptRecordHydration::ObjectBacked,
     )?;
     Ok(records.pop())
 }
 
-pub(crate) fn read_transcript_descriptor_after_kind_at_index(
+pub(crate) fn read_transcript_record_after_kind_at_index(
     conn: &Connection,
     kind: &str,
-    after_or_at_descriptor_index: u64,
-) -> Result<Option<TranscriptDescriptorRecord>> {
-    let _perf = perf::begin("store:transcript:read_descriptor_after_kind");
-    let after_or_at = checked_i64(after_or_at_descriptor_index, "after_or_at_descriptor_index")?;
+    after_or_at_block_index: u64,
+) -> Result<Option<StoredTranscriptBlock>> {
+    let _perf = perf::begin("store:transcript:read_block_after_kind");
+    let after_or_at = checked_i64(after_or_at_block_index, "after_or_at_block_index")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, '' AS indexed_text,
-                descriptor_json, origin_json, tool_state_json
+                block_json, origin_json, tool_state_json
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
+         WHERE block_json IS NOT NULL
            AND kind = ?1
-           AND descriptor_idx >= ?2
-         ORDER BY descriptor_idx ASC
+           AND record_idx >= ?2
+         ORDER BY record_idx ASC
          LIMIT 1",
     )?;
-    let mut records = read_transcript_descriptor_records_from_stmt(
+    let mut records = read_transcript_records_from_stmt(
         conn,
         &mut stmt,
         params![kind, after_or_at],
-        TranscriptDescriptorHydration::ObjectBacked,
+        TranscriptRecordHydration::ObjectBacked,
     )?;
     Ok(records.pop())
 }
 
-fn read_transcript_descriptor_records_from_stmt<P>(
+fn read_transcript_records_from_stmt<P>(
     conn: &Connection,
     stmt: &mut Statement<'_>,
     params: P,
-    hydration: TranscriptDescriptorHydration,
-) -> Result<Vec<TranscriptDescriptorRecord>>
+    hydration: TranscriptRecordHydration,
+) -> Result<Vec<StoredTranscriptBlock>>
 where
     P: rusqlite::Params,
 {
     let rows = stmt.query_map(params, |row| {
-        Ok(TranscriptDescriptorRecord {
+        Ok(StoredTranscriptBlock {
             block_idx: row.get::<_, i64>(0)? as u64,
             history_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
             kind: row.get(2)?,
@@ -1194,7 +1154,7 @@ where
             estimated_text_bytes: row.get::<_, i64>(6)? as u64,
             preview_text: row.get(7)?,
             indexed_text: row.get(8)?,
-            descriptor_json: row.get(9)?,
+            block_json: row.get(9)?,
             origin_json: row.get(10)?,
             tool_state_json: row.get(11)?,
         })
@@ -1203,14 +1163,14 @@ where
     let mut json_bytes = 0u64;
     for row in rows {
         let mut record = row?;
-        json_bytes = json_bytes.saturating_add(record.descriptor_json.len() as u64);
+        json_bytes = json_bytes.saturating_add(record.block_json.len() as u64);
         if let Some(json) = &record.tool_state_json {
             json_bytes = json_bytes.saturating_add(json.len() as u64);
         }
         if hydration.hydrates_objects() {
-            let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
-            rehydrate_object_refs(conn, &mut descriptor)?;
-            record.descriptor_json = serde_json::to_string(&descriptor)?;
+            let mut block: Value = serde_json::from_str(&record.block_json)?;
+            rehydrate_object_refs(conn, &mut block)?;
+            record.block_json = serde_json::to_string(&block)?;
             if let Some(json) = &record.tool_state_json {
                 let mut value: Value = serde_json::from_str(json)?;
                 rehydrate_object_refs(conn, &mut value)?;
@@ -1219,15 +1179,15 @@ where
         }
         records.push(record);
     }
-    perf::record_value("store:transcript:descriptors_loaded", records.len() as u64);
-    perf::record_value("store:transcript:descriptor_json_bytes_loaded", json_bytes);
+    perf::record_value("store:transcript:records_loaded", records.len() as u64);
+    perf::record_value("store:transcript:block_json_bytes_loaded", json_bytes);
     match hydration {
-        TranscriptDescriptorHydration::Hydrated => perf::record_value(
-            "store:transcript:descriptors_hydrated_loaded",
+        TranscriptRecordHydration::Hydrated => perf::record_value(
+            "store:transcript:records_hydrated_loaded",
             records.len() as u64,
         ),
-        TranscriptDescriptorHydration::ObjectBacked => perf::record_value(
-            "store:transcript:descriptors_object_backed_loaded",
+        TranscriptRecordHydration::ObjectBacked => perf::record_value(
+            "store:transcript:records_object_backed_loaded",
             records.len() as u64,
         ),
     }
@@ -1869,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_history_reads_batch_large_descriptor_origin_sets() {
+    fn indexed_history_reads_batch_large_block_origin_sets() {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::schema::migrate(&mut conn, "test").unwrap();
         let items = (0..=HISTORY_INDEX_READ_BATCH_SIZE)

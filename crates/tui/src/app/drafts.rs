@@ -98,13 +98,13 @@ impl ToolDraftController {
         })
     }
 
-    fn finished_for_call(&self, call_id: &str) -> bool {
+    pub(super) fn finished_for_call(&self, call_id: &str) -> bool {
         self.drafts
             .values()
             .any(|draft| draft.call_id.as_deref() == Some(call_id) && draft.finished)
     }
 
-    fn update(
+    pub(super) fn update(
         &mut self,
         event: ToolDraftEvent,
         now: Instant,
@@ -148,7 +148,7 @@ impl ToolDraftController {
         }
     }
 
-    fn drain_due_renders(&mut self, now: Instant) -> Vec<ToolDraftSnapshot> {
+    pub(super) fn drain_due_renders(&mut self, now: Instant) -> Vec<ToolDraftSnapshot> {
         let stream_ids: Vec<String> = self
             .drafts
             .iter()
@@ -171,7 +171,7 @@ impl ToolDraftController {
         snapshots
     }
 
-    fn next_render_delay(&self, now: Instant) -> Option<Duration> {
+    pub(super) fn next_render_delay(&self, now: Instant) -> Option<Duration> {
         self.drafts
             .values()
             .filter_map(|draft| draft.render_state.pending_deadline())
@@ -179,12 +179,12 @@ impl ToolDraftController {
             .min()
     }
 
-    fn remove_by_stream_id(&mut self, stream_id: &str) {
+    pub(super) fn remove_by_stream_id(&mut self, stream_id: &str) {
         self.drafts.remove(stream_id);
     }
 }
 
-struct ToolDraftEvent {
+pub(super) struct ToolDraftEvent {
     stream_id: String,
     call_id: Option<String>,
     tool_name: Option<String>,
@@ -193,7 +193,7 @@ struct ToolDraftEvent {
     finished: bool,
 }
 
-struct ToolDraftSnapshot {
+pub(super) struct ToolDraftSnapshot {
     stream_id: String,
     call_id: Option<String>,
     tool_name: Option<String>,
@@ -217,9 +217,9 @@ impl TuiApp {
             arguments: None,
             finished: false,
         };
-        if let Some(snapshot) = self
-            .draft_tools
-            .update(event, self.core.clock.instant_now(), true)
+        if let Some(snapshot) =
+            self.conversation
+                .update_tool_draft(event, self.core.clock.instant_now(), true)
         {
             self.render_tool_draft(snapshot);
         }
@@ -251,9 +251,9 @@ impl TuiApp {
             arguments: None,
             finished: false,
         };
-        if let Some(snapshot) = self
-            .draft_tools
-            .update(event, self.core.clock.instant_now(), false)
+        if let Some(snapshot) =
+            self.conversation
+                .update_tool_draft(event, self.core.clock.instant_now(), false)
         {
             self.render_tool_draft(snapshot);
         }
@@ -274,9 +274,9 @@ impl TuiApp {
             arguments: Some(arguments),
             finished: true,
         };
-        if let Some(snapshot) = self
-            .draft_tools
-            .update(event, self.core.clock.instant_now(), true)
+        if let Some(snapshot) =
+            self.conversation
+                .update_tool_draft(event, self.core.clock.instant_now(), true)
         {
             self.render_tool_draft(snapshot);
         }
@@ -289,46 +289,41 @@ impl TuiApp {
         summary: protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
     ) -> bool {
-        let stream_id = self.draft_tools.stream_id_for_call(&call_id);
-        let preview_output = self
-            .draft_tools
-            .finished_for_call(&call_id)
-            .then(|| self.lua.tool_preview_output(&tool_name, &args))
-            .flatten();
-        let promoted = self
-            .apply_session_document_mutation(
-                crate::app::session_document::SessionMutation::PromoteToolDraft {
-                    stream_id: stream_id.clone(),
-                    start: ToolStart {
-                        call_id,
-                        name: tool_name,
-                        summary,
-                        args,
-                        preview_output,
-                    },
-                    now: self.core.clock.instant_now(),
-                },
-            )
-            .applied;
+        let (stream_id, finished) = self.conversation.tool_draft_state(&call_id);
+        let preview_output = if finished {
+            let lua = self.lua.execution();
+            crate::lua::scope_app(self, || lua.tool_preview_output(&tool_name, &args))
+        } else {
+            None
+        };
+        let promoted = self.conversation.promote_tool_draft(
+            stream_id.clone(),
+            ToolStart {
+                call_id,
+                name: tool_name,
+                summary,
+                args,
+                preview_output,
+            },
+            self.core.clock.instant_now(),
+        );
         if promoted {
             if let Some(stream_id) = stream_id {
-                self.draft_tools.remove_by_stream_id(&stream_id);
+                self.conversation.remove_tool_draft(&stream_id);
             }
         }
         promoted
     }
 
     pub(crate) fn clear_tool_drafts(&mut self) {
-        self.draft_tools.clear();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::ClearToolDrafts,
-        );
+        self.conversation.clear_tool_draft_state();
+        self.conversation.clear_stream_tool_drafts();
     }
 
     pub(crate) fn flush_due_tool_drafts(&mut self) -> bool {
         let snapshots = self
-            .draft_tools
-            .drain_due_renders(self.core.clock.instant_now());
+            .conversation
+            .drain_due_tool_drafts(self.core.clock.instant_now());
         let did_work = !snapshots.is_empty();
         for snapshot in snapshots {
             self.render_tool_draft(snapshot);
@@ -337,28 +332,30 @@ impl TuiApp {
     }
 
     pub(crate) fn next_tool_draft_render_delay(&self) -> Option<Duration> {
-        self.draft_tools
-            .next_render_delay(self.core.clock.instant_now())
+        self.conversation
+            .next_tool_draft_render_delay(self.core.clock.instant_now())
     }
 
     fn render_tool_draft(&mut self, snapshot: ToolDraftSnapshot) {
         let name = snapshot.tool_name.unwrap_or_else(|| "tool".to_string());
         let args = snapshot.args;
-        let summary = crate::app::history::ToolSummaryResolver::new(&self.lua)
-            .resolve_with_context(&name, &args, snapshot.finished);
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::UpsertToolDraft {
-                update: ToolDraftUpdate {
-                    stream_id: snapshot.stream_id,
-                    call_id: snapshot.call_id,
-                    name,
-                    summary,
-                    args,
-                    raw_arguments: snapshot.raw_arguments,
-                    finished: snapshot.finished,
-                },
-            },
-        );
+        let lua = self.lua.execution();
+        let summary = crate::lua::scope_app(self, || {
+            crate::app::history::ToolSummaryResolver::new(&lua).resolve_with_context(
+                &name,
+                &args,
+                snapshot.finished,
+            )
+        });
+        self.conversation.upsert_tool_draft(ToolDraftUpdate {
+            stream_id: snapshot.stream_id,
+            call_id: snapshot.call_id,
+            name,
+            summary,
+            args,
+            raw_arguments: snapshot.raw_arguments,
+            finished: snapshot.finished,
+        });
     }
 }
 

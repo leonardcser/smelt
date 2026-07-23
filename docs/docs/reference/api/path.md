@@ -30,7 +30,7 @@ Resolve `p` to its canonical absolute form (following symlinks). Returns `(path,
 fun(): string
 ```
 
-Return the absolute path to the slash-commands directory under the user config root.
+Return the absolute path to the slash-commands directory under the runtime config root.
 
 ## `smelt.path.config_dir`
 
@@ -38,7 +38,7 @@ Return the absolute path to the slash-commands directory under the user config r
 fun(): string
 ```
 
-Return the absolute path to smelt's user config directory.
+Return the absolute path to smelt's runtime config directory.
 
 ## `smelt.path.display`
 

@@ -30,10 +30,10 @@ fn cmdline_completion_renders_prompt_style_list_above_cmdline() {
     app.type_text("zz");
     app.press(KeyCode::Tab);
 
-    let leaf = *app
-        .app
-        .picker_state
-        .keys()
+    let leaf = app
+        .overlays_probe()
+        .picker_leaves()
+        .into_iter()
         .next()
         .expect("cmdline completion picker opens");
     let lines = picker_buffer_lines(&app, leaf);
@@ -46,14 +46,12 @@ fn cmdline_completion_renders_prompt_style_list_above_cmdline() {
 
     app.render_silent();
     let picker_rect = app
-        .app
-        .ui
+        .ui_probe()
         .paint_rect(crate::smelt_edit::PaintId::from(leaf))
         .expect("picker rect");
-    let cmdline = app.app.well_known.cmdline.expect("cmdline win");
+    let cmdline = app.well_known_probe().cmdline.expect("cmdline win");
     let cmdline_rect = app
-        .app
-        .ui
+        .ui_probe()
         .paint_rect(crate::smelt_edit::PaintId::from(cmdline))
         .expect("cmdline rect");
     assert_eq!(picker_rect.top + picker_rect.height, cmdline_rect.top);
@@ -63,7 +61,7 @@ fn cmdline_completion_renders_prompt_style_list_above_cmdline() {
 fn cmdline_up_down_use_history_when_completion_closed() {
     let mut app = TestApp::builder().with_vim(true).build();
     register_cmdline_test_commands(&mut app);
-    app.app.cmdline.history.push(
+    app.push_cmdline_history(
         crate::app::cmdline_history::CommandHistoryKind::Command,
         "older-command".to_string(),
     );
@@ -86,7 +84,7 @@ fn cmdline_up_down_use_history_when_completion_closed() {
 fn cmdline_up_down_select_completion_when_picker_is_open() {
     let mut app = TestApp::builder().with_vim(true).build();
     register_cmdline_test_commands(&mut app);
-    app.app.cmdline.history.push(
+    app.push_cmdline_history(
         crate::app::cmdline_history::CommandHistoryKind::Command,
         "older-command".to_string(),
     );
@@ -112,12 +110,11 @@ fn cmdline_up_down_select_completion_when_picker_is_open() {
 }
 
 fn cmdline_completion_selected(app: &TestApp) -> Option<usize> {
-    app.app.cmdline.completer.as_ref().map(|c| c.selected)
+    app.overlays_probe().cmdline_completion_selected()
 }
 
 fn cmdline_completion_selected_label(app: &TestApp) -> Option<String> {
-    let comp = app.app.cmdline.completer.as_ref()?;
-    comp.items.get(comp.selected).map(|item| item.label.clone())
+    app.overlays_probe().selected_cmdline_completion_label()
 }
 
 fn register_cmdline_test_commands(app: &mut TestApp) {

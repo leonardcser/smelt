@@ -5,35 +5,9 @@ use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
-fn starts_assistant_or_tool_output(ev: &EngineEvent) -> bool {
-    match ev {
-        EngineEvent::Reasoning { content, .. } | EngineEvent::Text { content } => {
-            !content.is_empty()
-        }
-        EngineEvent::ReasoningPartDelta { delta, .. } | EngineEvent::TextDelta { delta } => {
-            !delta.is_empty()
-        }
-        EngineEvent::ReasoningPartFinished { title, content, .. } => {
-            title.is_some() || !content.is_empty()
-        }
-        EngineEvent::ReasoningPartStarted { .. } => false,
-        EngineEvent::ToolCallDraftStarted { .. }
-        | EngineEvent::ToolCallDraftFinished { .. }
-        | EngineEvent::ToolStarted { .. }
-        | EngineEvent::ToolOutput { .. }
-        | EngineEvent::ToolFinished { .. }
-        | EngineEvent::RequestPermission { .. } => true,
-        EngineEvent::ToolCallDraftDelta { delta, .. } => !delta.is_empty(),
-        EngineEvent::HistoryAppended { delta, .. } => delta
-            .items
-            .iter()
-            .any(|item| matches!(item, protocol::HistoryItem::Assistant(_))),
-        EngineEvent::HistoryUpdated { update, .. } => update
-            .items
-            .iter()
-            .any(|item| matches!(item, protocol::HistoryItem::Assistant(_))),
-        _ => false,
-    }
+struct EngineEventResult {
+    control: SessionControl,
+    assistant_output_started: bool,
 }
 
 impl TuiApp {
@@ -54,14 +28,11 @@ impl TuiApp {
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         if !self.session_is_read_only() {
             let identity = self.active_context_token_identity();
-            let result = self.apply_session_document_mutation(
-                crate::app::session_document::SessionMutation::RecordTokenUsage {
-                    usage: usage.clone(),
-                    identity,
-                },
-            );
-            if result.context_tokens_updated {
-                self.context_tokens_updated_this_turn = true;
+            if self
+                .conversation
+                .record_context_tokens(usage.clone(), identity)
+            {
+                self.conversation.mark_context_tokens_updated();
                 if self.active_provider_supports_mid_turn_reasoning_changes() {
                     self.sync_reasoning_effort_applied();
                 }
@@ -71,7 +42,7 @@ impl TuiApp {
     }
 
     fn resolve_tool_summary_for_engine_event(
-        &self,
+        &mut self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
         summary: protocol::StyledLines,
@@ -79,8 +50,16 @@ impl TuiApp {
         if !summary.is_empty() {
             return summary;
         }
-        let summary =
-            crate::app::history::ToolSummaryResolver::new(&self.lua).resolve(tool_name, args);
+        let lua = self.lua.execution();
+        let summary = crate::lua::scope_app(self, || {
+            lua.tool_summary_with_context(tool_name, args, true)
+        });
+        if summary.is_empty() && !lua.has_tool(tool_name) {
+            let summary = smelt_core::mcp::args_summary(args);
+            if !summary.is_empty() {
+                return summary;
+            }
+        }
         if summary.is_empty() {
             protocol::StyledLines::from_plain(tool_name)
         } else {
@@ -158,28 +137,24 @@ impl TuiApp {
         }
     }
 
-    fn complete_reasoning_summary_part(&mut self, title: Option<String>, content: String) {
+    fn complete_reasoning_summary_part(&mut self, title: Option<String>, content: String) -> bool {
         let title = title
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty());
         let content = content.trim().to_string();
         if title.is_none() && content.is_empty() {
-            return;
+            return false;
         }
 
         self.flush_streaming_thinking();
-        let Some(previous) = self
-            .session_document
-            .transcript
-            .promote_last_reasoning_summary()
-        else {
+        let Some(previous) = self.conversation.promote_last_reasoning_summary() else {
             self.push_block(Block::Thinking {
                 summary_titles: title.iter().cloned().collect(),
                 title,
                 content,
                 kind: protocol::ReasoningKind::Summary,
             });
-            return;
+            return true;
         };
         let id = previous.id;
         let previous_title = previous.title;
@@ -196,17 +171,16 @@ impl TuiApp {
             (true, false) => content,
             (false, false) => format!("{previous_content}\n{content}"),
         };
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::RewriteTranscriptBlock {
-                id,
-                block: Block::Thinking {
-                    title: title.or(previous_title),
-                    summary_titles,
-                    content,
-                    kind: protocol::ReasoningKind::Summary,
-                },
+        self.conversation.rewrite_block(
+            id,
+            Block::Thinking {
+                title: title.or(previous_title),
+                summary_titles,
+                content,
+                kind: protocol::ReasoningKind::Summary,
             },
         );
+        true
     }
 
     /// Route an `EngineEvent` through the correct branch of the agent
@@ -217,53 +191,43 @@ impl TuiApp {
     /// scenario replay binary so all three drive identical state.
     pub fn dispatch_engine_event(&mut self, ev: EngineEvent) -> bool {
         let _perf = smelt_perf::perf::begin("tui:dispatch_engine_event");
-        // Engine ask callbacks can call UiHost Lua APIs such as transcript updates.
-        crate::lua::with_app_ptr(self, |app| app.dispatch_engine_event_inner(ev))
+        self.dispatch_engine_event_inner(ev)
     }
 
     fn dispatch_engine_event_inner(&mut self, ev: EngineEvent) -> bool {
-        if let Some(mut ag) = self.agent.take() {
-            if starts_assistant_or_tool_output(&ev) {
-                ag.assistant_output_started = true;
-            }
-            let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
-            let prev_dispatching_permissions = self
-                .dispatching_turn_permissions
-                .replace(ag.permissions.clone());
-            let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-            let end = self.dispatch_control(ctrl, &mut ag);
-            if let Some(permissions) = &self.dispatching_turn_permissions {
-                if !std::sync::Arc::ptr_eq(permissions, &ag.permissions) {
-                    ag.permissions = permissions.clone();
-                }
-            }
-            self.dispatching_turn_id = prev_dispatching_turn_id;
-            self.dispatching_turn_permissions = prev_dispatching_permissions;
-            self.agent = Some(ag);
-            match end {
-                SessionControl::Continue | SessionControl::NeedsConfirm(_) => true,
-                SessionControl::Done => {
-                    self.discard_turn(crate::app::TurnEnd::Complete);
-                    false
-                }
-                SessionControl::Error { kind, retry_at_ms } => {
-                    self.discard_turn(crate::app::TurnEnd::Errored { kind, retry_at_ms });
-                    false
-                }
-            }
-        } else {
+        if !self.conversation.is_active() {
             self.handle_idle_engine_event(ev);
-            true
+            return true;
+        }
+
+        let end = self
+            .with_dispatched_turn(move |app, turn| {
+                let result = app.handle_engine_event(ev, turn.turn_id, &mut turn.pending);
+                turn.assistant_output_started |= result.assistant_output_started;
+                app.dispatch_control(result.control, turn)
+            })
+            .expect("active turn enters engine event dispatch");
+        match end {
+            SessionControl::Continue | SessionControl::NeedsConfirm(_) => true,
+            SessionControl::Done => {
+                self.discard_turn(crate::app::TurnEnd::Complete);
+                false
+            }
+            SessionControl::Error { kind, retry_at_ms } => {
+                self.discard_turn(crate::app::TurnEnd::Errored { kind, retry_at_ms });
+                false
+            }
         }
     }
 
-    pub(crate) fn handle_engine_event(
+    fn handle_engine_event(
         &mut self,
         ev: EngineEvent,
         turn_id: u64,
         pending: &mut Vec<PendingTool>,
-    ) -> SessionControl {
-        match ev {
+    ) -> EngineEventResult {
+        let mut assistant_output_started = false;
+        let control = match ev {
             EngineEvent::Ready => SessionControl::Continue,
             EngineEvent::TokenUsage {
                 usage,
@@ -282,40 +246,39 @@ impl TuiApp {
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 if !self.session_is_read_only() {
-                    self.apply_session_document_mutation(
-                        crate::app::session_document::SessionMutation::AccumulateUsage {
-                            usage: usage.clone(),
-                            cost_usd: cost,
-                        },
-                    );
+                    self.conversation.accumulate_usage(usage.clone(), cost);
                 }
-                crate::metrics::append(&crate::metrics::MetricsEntry {
-                    timestamp_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                    prompt_tokens: usage.prompt_tokens.unwrap_or(0),
-                    completion_tokens: usage.completion_tokens.unwrap_or(0),
-                    model: self
-                        .core
-                        .config
-                        .active_model()
-                        .map_or_else(|| "unknown".into(), |model| model.model_name.clone()),
-                    cost_usd,
-                    cache_read_tokens: usage.cache_read_tokens,
-                    cache_write_tokens: usage.cache_write_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                });
+                crate::metrics::append(
+                    self.core.sessions.state_root(),
+                    &crate::metrics::MetricsEntry {
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        prompt_tokens: usage.prompt_tokens.unwrap_or(0),
+                        completion_tokens: usage.completion_tokens.unwrap_or(0),
+                        model: self
+                            .core
+                            .config
+                            .active_model()
+                            .map_or_else(|| "unknown".into(), |model| model.model_name.clone()),
+                        cost_usd,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cache_write_tokens: usage.cache_write_tokens,
+                        reasoning_tokens: usage.reasoning_tokens,
+                    },
+                );
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {
+                assistant_output_started = true;
                 self.append_active_output(&call_id, &chunk);
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
                 self.flush_streaming_thinking();
                 self.flush_streaming_text();
-                let drained = self.queued_inputs.drain_request_ack(count);
+                let drained = self.prompt.acknowledge_requests(count);
                 if !drained.is_empty() {
                     let display = drained
                         .iter()
@@ -347,6 +310,7 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::ReasoningPartDelta { kind, delta, .. } => {
+                assistant_output_started = !delta.is_empty();
                 let bytes = delta.len();
                 if kind == protocol::ReasoningKind::Raw {
                     self.append_streaming_thinking(&delta);
@@ -372,7 +336,7 @@ impl TuiApp {
                 if kind == protocol::ReasoningKind::Raw {
                     self.flush_streaming_thinking();
                 } else {
-                    self.complete_reasoning_summary_part(title, content);
+                    assistant_output_started = self.complete_reasoning_summary_part(title, content);
                 }
                 SessionControl::Continue
             }
@@ -382,21 +346,20 @@ impl TuiApp {
                 content,
             } => {
                 if kind == protocol::ReasoningKind::Summary {
-                    self.complete_reasoning_summary_part(title, content);
+                    assistant_output_started = self.complete_reasoning_summary_part(title, content);
                 } else {
                     self.flush_streaming_thinking();
-                    if !content.is_empty() {
-                        self.push_block(Block::Thinking {
-                            title,
-                            summary_titles: Vec::new(),
-                            content,
-                            kind,
-                        });
-                    }
+                    assistant_output_started = self.try_push_block(Block::Thinking {
+                        title,
+                        summary_titles: Vec::new(),
+                        content,
+                        kind,
+                    });
                 }
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {
+                assistant_output_started = !delta.is_empty();
                 let bytes = delta.len();
                 self.append_streaming_text(&delta);
                 self.core.signals.emit_dyn(
@@ -416,6 +379,7 @@ impl TuiApp {
                 call_id,
                 tool_name,
             } => {
+                assistant_output_started = true;
                 self.handle_tool_draft_started(stream_id, call_id, tool_name);
                 SessionControl::Continue
             }
@@ -425,6 +389,7 @@ impl TuiApp {
                 tool_name,
                 delta,
             } => {
+                assistant_output_started = !delta.is_empty();
                 self.handle_tool_draft_delta(stream_id, call_id, tool_name, delta);
                 SessionControl::Continue
             }
@@ -434,12 +399,13 @@ impl TuiApp {
                 tool_name,
                 arguments,
             } => {
+                assistant_output_started = true;
                 self.handle_tool_draft_finished(stream_id, call_id, tool_name, arguments);
                 SessionControl::Continue
             }
             EngineEvent::Text { content } => {
                 self.flush_streaming_text();
-                self.push_block(Block::Text { content });
+                assistant_output_started = self.try_push_block(Block::Text { content });
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -447,6 +413,7 @@ impl TuiApp {
                 tool_name,
                 args,
             } => {
+                assistant_output_started = true;
                 let summary = self.resolve_tool_summary_for_engine_event(
                     &tool_name,
                     &args,
@@ -460,6 +427,7 @@ impl TuiApp {
                 result,
                 elapsed_ms,
             } => {
+                assistant_output_started = true;
                 let status = if result.is_error {
                     ToolStatus::Err
                 } else {
@@ -476,6 +444,7 @@ impl TuiApp {
                 result,
                 elapsed_ms,
             } => {
+                assistant_output_started = true;
                 let summary =
                     self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
                 self.begin_tool_block_for_engine_event(
@@ -501,8 +470,12 @@ impl TuiApp {
                 approval_patterns,
                 summary,
             } => {
+                assistant_output_started = true;
                 let summary =
                     self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
+                let lua = self.lua.execution();
+                let tool_paths =
+                    crate::lua::scope_app(self, || lua.tool_paths_for_workspace(&tool_name, &args));
                 self.begin_tool_block_for_engine_event(
                     pending,
                     call_id.clone(),
@@ -514,6 +487,7 @@ impl TuiApp {
                     call_id,
                     tool_name,
                     args,
+                    tool_paths,
                     approval_candidates: approval_patterns,
                     grant_options: Vec::new(),
                     summary,
@@ -543,15 +517,21 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::EngineAskDelta { id, delta } => {
-                self.lua.fire_ask_delta_callback(id, &delta);
+                let lua = self.lua.execution();
+                crate::lua::scope_app(self, || lua.fire_ask_delta_callback(id, &delta));
                 SessionControl::Continue
             }
             EngineEvent::EngineAskResponse { id, message, error } => {
-                self.lua.fire_ask_callback(id, message.as_ref(), error);
+                let lua = self.lua.execution();
+                crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
                 SessionControl::Continue
             }
             EngineEvent::HistoryAppended { turn_id: id, delta } => {
                 if id == turn_id {
+                    assistant_output_started = delta
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, protocol::HistoryItem::Assistant(_)));
                     self.append_engine_history_items(delta.first_index.get(), delta.items);
                     self.save_session();
                 }
@@ -562,6 +542,10 @@ impl TuiApp {
                 update,
             } => {
                 if id == turn_id {
+                    assistant_output_started = update
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, protocol::HistoryItem::Assistant(_)));
                     self.set_history_from(update.first_index.get(), update.items);
                     self.save_session();
                 }
@@ -573,23 +557,24 @@ impl TuiApp {
                 meta,
             } => {
                 if id != turn_id {
-                    return SessionControl::Continue;
+                    SessionControl::Continue
+                } else {
+                    if let Some(history) = history {
+                        self.set_history_from(history.first_index.get(), history.items);
+                    }
+                    let payload = meta.clone().unwrap_or(protocol::TurnMeta {
+                        elapsed_ms: 0,
+                        avg_tps: None,
+                        display_tps: None,
+                        interrupted: false,
+                        tool_elapsed: std::collections::HashMap::new(),
+                    });
+                    self.core
+                        .signals
+                        .emit_dyn("turn_complete", std::rc::Rc::new(payload));
+                    self.conversation.set_pending_meta(meta);
+                    SessionControl::Done
                 }
-                if let Some(history) = history {
-                    self.set_history_from(history.first_index.get(), history.items);
-                }
-                let payload = meta.clone().unwrap_or(protocol::TurnMeta {
-                    elapsed_ms: 0,
-                    avg_tps: None,
-                    display_tps: None,
-                    interrupted: false,
-                    tool_elapsed: std::collections::HashMap::new(),
-                });
-                self.core
-                    .signals
-                    .emit_dyn("turn_complete", std::rc::Rc::new(payload));
-                self.pending_turn_meta = meta;
-                SessionControl::Done
             }
             EngineEvent::TurnError {
                 message,
@@ -629,18 +614,23 @@ impl TuiApp {
                 args,
                 mode,
             } => {
-                let _guard = crate::lua::install_app_ptr(self);
-                let metadata = self.lua.evaluate_tool_metadata(&tool_name, &args);
-                drop(_guard);
+                let lua = self.lua.execution();
+                let metadata =
+                    crate::lua::scope_app(self, || lua.evaluate_tool_metadata(&tool_name, &args));
                 let decision = if let Some(err) = metadata.preflight_error.clone() {
                     protocol::Decision::Error(err)
                 } else {
+                    let lua = self.lua.execution();
+                    let tool_paths = crate::lua::scope_app(self, || {
+                        lua.tool_paths_for_workspace(&tool_name, &args)
+                    });
                     let permissions = self.active_permissions();
-                    let outcome = permissions.evaluate_tool_with_approvals(
+                    let outcome = permissions.evaluate_tool_with_paths_and_approvals(
                         mode,
                         smelt_core::permissions::ToolOrigin::Lua,
                         &tool_name,
                         &args,
+                        &tool_paths,
                     );
                     outcome.decision
                 };
@@ -659,10 +649,16 @@ impl TuiApp {
                 is_error,
                 metadata,
             } => {
-                self.lua
-                    .resolve_core_tool_call(request_id, content, is_error, metadata);
+                let lua = self.lua.execution();
+                crate::lua::scope_app(self, move || {
+                    lua.resolve_core_tool_call(request_id, content, is_error, metadata)
+                });
                 SessionControl::Continue
             }
+        };
+        EngineEventResult {
+            control,
+            assistant_output_started,
         }
     }
     /// Handle engine events that arrive when no turn is active.
@@ -679,10 +675,12 @@ impl TuiApp {
                 self.save_session();
             }
             EngineEvent::EngineAskDelta { id, delta } => {
-                self.lua.fire_ask_delta_callback(id, &delta);
+                let lua = self.lua.execution();
+                crate::lua::scope_app(self, || lua.fire_ask_delta_callback(id, &delta));
             }
             EngineEvent::EngineAskResponse { id, message, error } => {
-                self.lua.fire_ask_callback(id, message.as_ref(), error);
+                let lua = self.lua.execution();
+                crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);

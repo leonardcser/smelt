@@ -250,9 +250,9 @@ pub struct LuaShared {
     external_effects_active: AtomicBool,
     candidate_skills: Mutex<Option<Arc<engine::SkillLoader>>>,
     staged_logs: Mutex<Vec<(engine::log::Level, String, serde_json::Value)>>,
-    /// Project context used while this generation is evaluated as a candidate.
-    /// Committed generations read process cwd so explicit runtime cwd changes
-    /// retain their documented behavior.
+    /// Runtime-owned home used by path expansion and display callbacks.
+    runtime_home: Mutex<PathBuf>,
+    /// Runtime-owned project cwd used by candidate and committed generations.
     project_cwd: Mutex<PathBuf>,
     /// Current boot phase. Phase-sensitive APIs use this to gate their
     /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`;
@@ -416,7 +416,8 @@ impl Default for LuaShared {
             external_effects_active: AtomicBool::new(true),
             candidate_skills: Mutex::new(None),
             staged_logs: Mutex::new(Vec::new()),
-            project_cwd: Mutex::new(std::env::current_dir().unwrap_or_default()),
+            runtime_home: Mutex::new(PathBuf::new()),
+            project_cwd: Mutex::new(PathBuf::new()),
             phase: AtomicU8::new(Phase::Early as u8),
             generation_id: AtomicU64::new(0),
         }
@@ -506,38 +507,39 @@ impl LuaShared {
         }
     }
 
+    pub fn set_runtime_home(&self, home: &Path) {
+        *self
+            .runtime_home
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = home.to_path_buf();
+    }
+
+    pub fn runtime_home(&self) -> PathBuf {
+        self.runtime_home
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn set_project_cwd(&self, cwd: Option<&Path>) {
-        let cwd = cwd
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_default();
         *self
             .project_cwd
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = cwd;
+            .unwrap_or_else(|error| error.into_inner()) =
+            cwd.map(Path::to_path_buf).unwrap_or_default();
     }
 
-    /// Resolve cwd-sensitive reads against the candidate's target project.
-    /// Once committed, process cwd remains authoritative for runtime APIs.
+    /// Resolve cwd-sensitive reads against this generation's runtime project.
     pub fn evaluation_cwd(&self) -> PathBuf {
-        if self.external_effects_active() {
-            std::env::current_dir().unwrap_or_else(|_| {
-                self.project_cwd
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone()
-            })
-        } else {
-            self.project_cwd
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone()
-        }
+        self.project_cwd
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     pub fn resolve_project_path(&self, path: impl AsRef<Path>) -> PathBuf {
         let path = path.as_ref();
-        if path.is_absolute() || self.external_effects_active() {
+        if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.evaluation_cwd().join(path)

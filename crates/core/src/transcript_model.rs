@@ -42,6 +42,7 @@ pub struct ConfirmRequest {
     pub call_id: String,
     pub tool_name: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
+    pub tool_paths: Vec<crate::permissions::ToolPath>,
     pub approval_candidates: Vec<String>,
     pub grant_options: Vec<ConfirmApprovalOption>,
     /// Styled summary of the pending call. Sole source for the dialog
@@ -329,6 +330,37 @@ impl Block {
             Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
         }
     }
+
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::ToolDraft { name, .. } | Self::ToolCall { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        match self {
+            Self::ToolDraft { call_id, .. } => call_id.as_deref(),
+            Self::ToolCall { call_id, .. } => Some(call_id),
+            _ => None,
+        }
+    }
+
+    pub fn process_field(&self, field: &str) -> Option<String> {
+        match self {
+            Self::ProcessStatus {
+                event: Some(event), ..
+            } => event.field_value(field),
+            _ => None,
+        }
+    }
+
+    pub fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
+        match self {
+            Self::ToolDraft { args, .. } | Self::ToolCall { args, .. } => args.get(arg),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn thinking_markdown_source(
@@ -529,340 +561,8 @@ pub struct LayoutKey {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub enum TranscriptBlockDescriptor {
-    User {
-        text: String,
-        image_labels: Vec<String>,
-        /// Whether the leading slash-command token receives accent styling.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        command: bool,
-    },
-    Mode {
-        text: String,
-        icon: String,
-        hl_group: String,
-    },
-    ProcessStatus {
-        text: String,
-        event: Option<protocol::ProcessStatusEvent>,
-    },
-    Thinking {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        title: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        summary_titles: Vec<String>,
-        content: String,
-        #[serde(default)]
-        kind: protocol::ReasoningKind,
-    },
-    Text {
-        content: String,
-    },
-    CodeLine {
-        content: String,
-        lang: String,
-    },
-    ToolDraft {
-        stream_id: String,
-        call_id: Option<String>,
-        name: String,
-        summary: protocol::StyledLines,
-        args: HashMap<String, serde_json::Value>,
-        raw_arguments: String,
-        finished: bool,
-    },
-    ToolCall {
-        call_id: String,
-        name: String,
-        summary: protocol::StyledLines,
-        args: HashMap<String, serde_json::Value>,
-    },
-    Exec {
-        command: String,
-        output: String,
-    },
-    Compacted {
-        summary: String,
-    },
-    CompactionPreview {
-        summary: String,
-    },
-}
-
-impl TranscriptBlockDescriptor {
-    fn normalize_content(self) -> Self {
-        match self {
-            Self::Thinking {
-                title,
-                summary_titles,
-                content,
-                kind,
-            } => Self::Thinking {
-                title,
-                summary_titles,
-                content: crate::content::markdown_stream::normalize_thinking_title_spacing(
-                    &content,
-                ),
-                kind,
-            },
-            other => other,
-        }
-    }
-
-    pub fn from_block(block: Block) -> Self {
-        match block {
-            Block::User {
-                text,
-                image_labels,
-                command,
-            } => Self::User {
-                text,
-                image_labels,
-                command,
-            },
-            Block::Mode {
-                text,
-                icon,
-                hl_group,
-            } => Self::Mode {
-                text,
-                icon,
-                hl_group,
-            },
-            Block::ProcessStatus { text, event } => Self::ProcessStatus { text, event },
-            Block::Thinking {
-                title,
-                summary_titles,
-                content,
-                kind,
-            } => Self::Thinking {
-                title,
-                summary_titles,
-                content,
-                kind,
-            },
-            Block::Text { content } => Self::Text { content },
-            Block::CodeLine { content, lang } => Self::CodeLine { content, lang },
-            Block::ToolDraft {
-                stream_id,
-                call_id,
-                name,
-                summary,
-                args,
-                raw_arguments,
-                finished,
-            } => Self::ToolDraft {
-                stream_id,
-                call_id,
-                name,
-                summary,
-                args,
-                raw_arguments,
-                finished,
-            },
-            Block::ToolCall {
-                call_id,
-                name,
-                summary,
-                args,
-            } => Self::ToolCall {
-                call_id,
-                name,
-                summary,
-                args,
-            },
-            Block::Exec { command, output } => Self::Exec { command, output },
-            Block::Compacted { summary } => Self::Compacted { summary },
-            Block::CompactionPreview { summary } => Self::CompactionPreview { summary },
-        }
-    }
-
-    pub fn to_block(&self) -> Block {
-        match self {
-            Self::User {
-                text,
-                image_labels,
-                command,
-            } => Block::User {
-                text: text.clone(),
-                image_labels: image_labels.clone(),
-                command: *command,
-            },
-            Self::Mode {
-                text,
-                icon,
-                hl_group,
-            } => Block::Mode {
-                text: text.clone(),
-                icon: icon.clone(),
-                hl_group: hl_group.clone(),
-            },
-            Self::ProcessStatus { text, event } => Block::ProcessStatus {
-                text: text.clone(),
-                event: event.clone(),
-            },
-            Self::Thinking {
-                title,
-                summary_titles,
-                content,
-                kind,
-            } => Block::Thinking {
-                title: title.clone(),
-                summary_titles: summary_titles.clone(),
-                content: content.clone(),
-                kind: *kind,
-            },
-            Self::Text { content } => Block::Text {
-                content: content.clone(),
-            },
-            Self::CodeLine { content, lang } => Block::CodeLine {
-                content: content.clone(),
-                lang: lang.clone(),
-            },
-            Self::ToolDraft {
-                stream_id,
-                call_id,
-                name,
-                summary,
-                args,
-                raw_arguments,
-                finished,
-            } => Block::ToolDraft {
-                stream_id: stream_id.clone(),
-                call_id: call_id.clone(),
-                name: name.clone(),
-                summary: summary.clone(),
-                args: args.clone(),
-                raw_arguments: raw_arguments.clone(),
-                finished: *finished,
-            },
-            Self::ToolCall {
-                call_id,
-                name,
-                summary,
-                args,
-            } => Block::ToolCall {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                summary: summary.clone(),
-                args: args.clone(),
-            },
-            Self::Exec { command, output } => Block::Exec {
-                command: command.clone(),
-                output: output.clone(),
-            },
-            Self::Compacted { summary } => Block::Compacted {
-                summary: summary.clone(),
-            },
-            Self::CompactionPreview { summary } => Block::CompactionPreview {
-                summary: summary.clone(),
-            },
-        }
-    }
-
-    pub fn row_estimate_text(&self) -> Option<BlockText<'_>> {
-        match self {
-            Self::User { text, .. }
-            | Self::ProcessStatus { text, .. }
-            | Self::Text { content: text }
-            | Self::CodeLine { content: text, .. }
-            | Self::Compacted { summary: text }
-            | Self::CompactionPreview { summary: text } => Some(BlockText::Plain(text)),
-            Self::Thinking {
-                title,
-                summary_titles,
-                content,
-                ..
-            } => Some(BlockText::Thinking {
-                title: title.as_deref(),
-                summary_titles,
-                content,
-            }),
-            Self::Mode { text, icon, .. } => Some(BlockText::Prefixed { prefix: icon, text }),
-            Self::Exec { command, output } => Some(BlockText::Exec { command, output }),
-            Self::ToolDraft { .. } | Self::ToolCall { .. } => None,
-        }
-    }
-
-    fn content_hash(&self) -> u64 {
-        crate::utils::hash_serializable(self)
-    }
-
-    pub fn raw_text(&self) -> Option<String> {
-        match self {
-            Self::User { text, .. } => Some(text.clone()),
-            Self::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
-            Self::ProcessStatus { text, .. } => Some(text.clone()),
-            Self::Text { content } => Some(content.clone()),
-            Self::Thinking {
-                title,
-                summary_titles,
-                content,
-                ..
-            } => Some(thinking_markdown_source(
-                title.as_deref(),
-                summary_titles,
-                content,
-            )),
-            Self::CodeLine { content, .. } => Some(content.clone()),
-            Self::Exec { command, output } => Some(format!("$ {command}\n{output}")),
-            Self::Compacted { summary } | Self::CompactionPreview { summary } => {
-                Some(summary.clone())
-            }
-            Self::ToolDraft { .. } | Self::ToolCall { .. } => None,
-        }
-    }
-
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::User { .. } => "user",
-            Self::Mode { .. } => "mode",
-            Self::ProcessStatus { .. } => "process_status",
-            Self::Thinking { .. } => "thinking",
-            Self::Text { .. } => "assistant",
-            Self::CodeLine { .. } => "code",
-            Self::ToolDraft { .. } | Self::ToolCall { .. } => "tool",
-            Self::Exec { .. } => "exec",
-            Self::Compacted { .. } => "compacted",
-            Self::CompactionPreview { .. } => "compaction_preview",
-        }
-    }
-
-    pub fn tool_name(&self) -> Option<&str> {
-        match self {
-            Self::ToolDraft { name, .. } | Self::ToolCall { name, .. } => Some(name.as_str()),
-            _ => None,
-        }
-    }
-
-    pub fn tool_call_id(&self) -> Option<&str> {
-        match self {
-            Self::ToolDraft { call_id, .. } => call_id.as_deref(),
-            Self::ToolCall { call_id, .. } => Some(call_id.as_str()),
-            _ => None,
-        }
-    }
-
-    pub fn process_field(&self, field: &str) -> Option<String> {
-        match self {
-            Self::ProcessStatus {
-                event: Some(event), ..
-            } => event.field_value(field),
-            _ => None,
-        }
-    }
-
-    pub fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
-        match self {
-            Self::ToolDraft { args, .. } | Self::ToolCall { args, .. } => args.get(arg),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptBlockRecord {
-    pub descriptor: TranscriptBlockDescriptor,
+    pub block: Block,
     #[serde(default)]
     pub content_hash: u64,
     pub origin: Option<BlockOrigin>,
@@ -881,11 +581,11 @@ pub struct StoredBlockWithId {
     pub stored: Arc<StoredBlockRef>,
 }
 
-impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecord {
+impl TryFrom<smelt_store::StoredTranscriptBlock> for TranscriptBlockRecord {
     type Error = serde_json::Error;
 
-    fn try_from(row: smelt_store::TranscriptDescriptorRecord) -> Result<Self, Self::Error> {
-        let descriptor: TranscriptBlockDescriptor = serde_json::from_str(&row.descriptor_json)?;
+    fn try_from(row: smelt_store::StoredTranscriptBlock) -> Result<Self, Self::Error> {
+        let block: Block = serde_json::from_str(&row.block_json)?;
         let origin = row
             .origin_json
             .as_deref()
@@ -902,7 +602,7 @@ impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecord 
             .transpose()?;
         let content_hash = row.content_hash.parse::<u64>().unwrap_or_default();
         Ok(Self {
-            descriptor,
+            block,
             content_hash,
             origin,
             tool_state,
@@ -910,19 +610,19 @@ impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecord 
     }
 }
 
-impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecordWithId {
+impl TryFrom<smelt_store::StoredTranscriptBlock> for TranscriptBlockRecordWithId {
     type Error = serde_json::Error;
 
-    fn try_from(row: smelt_store::TranscriptDescriptorRecord) -> Result<Self, Self::Error> {
+    fn try_from(row: smelt_store::StoredTranscriptBlock) -> Result<Self, Self::Error> {
         let block_id = BlockId::new(row.block_idx);
         let record = TranscriptBlockRecord::try_from(row)?;
         Ok(Self { block_id, record })
     }
 }
 
-pub fn compact_descriptor_rows(
-    start_descriptor_index: usize,
-    rows: Vec<smelt_store::TranscriptDescriptorRecord>,
+pub fn compact_block_rows(
+    start_record_index: usize,
+    rows: Vec<smelt_store::StoredTranscriptBlock>,
 ) -> Result<Vec<StoredBlockWithId>, serde_json::Error> {
     rows.into_iter()
         .enumerate()
@@ -931,7 +631,7 @@ pub fn compact_descriptor_rows(
             let preview = row.preview_text.clone();
             let record = TranscriptBlockRecordWithId::try_from(row)?;
             let (block_id, stored) = StoredBlockRef::from_record(
-                start_descriptor_index.saturating_add(offset),
+                start_record_index.saturating_add(offset),
                 record.block_id,
                 &record.record,
                 estimated_text_bytes,
@@ -952,10 +652,10 @@ pub struct TranscriptIndexedText {
 }
 
 pub fn transcript_indexed_text(
-    descriptor: &TranscriptBlockDescriptor,
+    block: &Block,
     tool_state: Option<&ToolState>,
 ) -> TranscriptIndexedText {
-    let full_text = transcript_descriptor_full_indexed_text(descriptor, tool_state);
+    let full_text = transcript_block_full_indexed_text(block, tool_state);
     let estimated_text_bytes = full_text.len() as u64;
     let indexed_text = cap_indexed_text(&full_text, TRANSCRIPT_INDEXED_TEXT_MAX_BYTES);
     TranscriptIndexedText {
@@ -987,30 +687,24 @@ fn cap_indexed_text(text: &str, max_bytes: usize) -> String {
     )
 }
 
-fn transcript_descriptor_full_indexed_text(
-    descriptor: &TranscriptBlockDescriptor,
-    tool_state: Option<&ToolState>,
-) -> String {
-    if descriptor.tool_name().is_some() {
-        return tool_indexed_text(descriptor, tool_state);
+fn transcript_block_full_indexed_text(block: &Block, tool_state: Option<&ToolState>) -> String {
+    if block.tool_name().is_some() {
+        return tool_indexed_text(block, tool_state);
     }
 
-    let mut text = descriptor.raw_text().unwrap_or_default();
-    append_indexed_line(&mut text, thinking_summary(descriptor).as_deref());
-    append_indexed_line(&mut text, compacted_label(descriptor));
-    append_indexed_line(&mut text, compacted_separator(descriptor));
+    let mut text = block.raw_text().unwrap_or_default();
+    append_indexed_line(&mut text, thinking_summary(block).as_deref());
+    append_indexed_line(&mut text, compacted_label(block));
+    append_indexed_line(&mut text, compacted_separator(block));
     text
 }
 
-fn tool_indexed_text(
-    descriptor: &TranscriptBlockDescriptor,
-    tool_state: Option<&ToolState>,
-) -> String {
+fn tool_indexed_text(block: &Block, tool_state: Option<&ToolState>) -> String {
     let mut text = String::new();
-    append_indexed_line(&mut text, descriptor.tool_name());
+    append_indexed_line(&mut text, block.tool_name());
     append_indexed_line(&mut text, tool_state.map(|state| state.status.label()));
-    append_indexed_line(&mut text, tool_summary_text(descriptor).as_deref());
-    append_indexed_line(&mut text, tool_arg_indexed_text(descriptor).as_deref());
+    append_indexed_line(&mut text, tool_summary_text(block).as_deref());
+    append_indexed_line(&mut text, tool_arg_indexed_text(block).as_deref());
     append_indexed_line(
         &mut text,
         tool_state.and_then(|state| state.user_message.as_deref()),
@@ -1029,7 +723,7 @@ fn tool_indexed_text(
     );
     append_indexed_line(
         &mut text,
-        edit_file_indexed_text(descriptor, tool_state).as_deref(),
+        edit_file_indexed_text(block, tool_state).as_deref(),
     );
     if let Some(display_count) = tool_state.and_then(display_count_indexed_text) {
         append_indexed_line(&mut text, Some(&display_count));
@@ -1037,19 +731,21 @@ fn tool_indexed_text(
     text
 }
 
-fn tool_summary_text(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
-    match descriptor {
-        TranscriptBlockDescriptor::ToolDraft { summary, .. }
-        | TranscriptBlockDescriptor::ToolCall { summary, .. } => Some(summary.as_plain_text()),
+fn tool_summary_text(block: &Block) -> Option<String> {
+    match block {
+        Block::ToolDraft { summary, .. } | Block::ToolCall { summary, .. } => {
+            Some(summary.as_plain_text())
+        }
         _ => None,
     }
     .filter(|summary| !summary.is_empty())
 }
 
-fn tool_arg_indexed_text(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
-    let (tool_name, args) = match descriptor {
-        TranscriptBlockDescriptor::ToolDraft { name, args, .. }
-        | TranscriptBlockDescriptor::ToolCall { name, args, .. } => (name.as_str(), args),
+fn tool_arg_indexed_text(block: &Block) -> Option<String> {
+    let (tool_name, args) = match block {
+        Block::ToolDraft { name, args, .. } | Block::ToolCall { name, args, .. } => {
+            (name.as_str(), args)
+        }
         _ => return None,
     };
     if tool_name == "edit_file" {
@@ -1133,8 +829,8 @@ fn append_indexed_line(out: &mut String, text: Option<&str>) {
     out.push_str(text);
 }
 
-fn thinking_summary(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
-    let TranscriptBlockDescriptor::Thinking { title, content, .. } = descriptor else {
+fn thinking_summary(block: &Block) -> Option<String> {
+    let Block::Thinking { title, content, .. } = block else {
         return None;
     };
     let (inferred_label, line_count) = thinking_summary_label(content);
@@ -1183,19 +879,16 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn compacted_label(descriptor: &TranscriptBlockDescriptor) -> Option<&'static str> {
-    matches!(descriptor, TranscriptBlockDescriptor::Compacted { .. }).then_some("compacted")
+fn compacted_label(block: &Block) -> Option<&'static str> {
+    matches!(block, Block::Compacted { .. }).then_some("compacted")
 }
 
-fn compacted_separator(descriptor: &TranscriptBlockDescriptor) -> Option<&'static str> {
-    matches!(descriptor, TranscriptBlockDescriptor::Compacted { .. }).then_some("─")
+fn compacted_separator(block: &Block) -> Option<&'static str> {
+    matches!(block, Block::Compacted { .. }).then_some("─")
 }
 
-fn edit_file_indexed_text(
-    descriptor: &TranscriptBlockDescriptor,
-    tool_state: Option<&ToolState>,
-) -> Option<String> {
-    let args = edit_file_args(descriptor)?;
+fn edit_file_indexed_text(block: &Block, tool_state: Option<&ToolState>) -> Option<String> {
+    let args = edit_file_args(block)?;
     let mut text = String::new();
     let old_string = string_field(args, "old_string").unwrap_or_default();
     let new_string = string_field(args, "new_string").unwrap_or_default();
@@ -1227,12 +920,9 @@ fn edit_file_indexed_text(
     (!text.is_empty()).then_some(text)
 }
 
-fn edit_file_args(
-    descriptor: &TranscriptBlockDescriptor,
-) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-    match descriptor {
-        TranscriptBlockDescriptor::ToolDraft { name, args, .. }
-        | TranscriptBlockDescriptor::ToolCall { name, args, .. }
+fn edit_file_args(block: &Block) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+    match block {
+        Block::ToolDraft { name, args, .. } | Block::ToolCall { name, args, .. }
             if name == "edit_file" =>
         {
             Some(args)
@@ -1309,23 +999,23 @@ fn format_lua_number(value: f64) -> String {
     }
 }
 
-pub fn transcript_descriptor_row(
-    descriptor_idx: usize,
+pub fn transcript_block_row(
+    record_idx: usize,
     record: &TranscriptBlockRecord,
-) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
-    transcript_descriptor_row_with_block_idx(descriptor_idx, descriptor_idx as u64, record)
+) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
+    transcript_block_row_with_block_idx(record_idx, record_idx as u64, record)
 }
 
-pub fn transcript_descriptor_row_with_block_idx(
-    _descriptor_idx: usize,
+pub fn transcript_block_row_with_block_idx(
+    _record_idx: usize,
     block_idx: u64,
     record: &TranscriptBlockRecord,
-) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
+) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
     let indexed_text = transcript_indexed_text(
-        &record.descriptor,
+        &record.block,
         record.tool_state.as_ref().map(|(_, state)| state),
     );
-    let descriptor_json = serde_json::to_string(&record.descriptor)?;
+    let block_json = serde_json::to_string(&record.block)?;
     let origin_json = record
         .origin
         .as_ref()
@@ -1340,17 +1030,17 @@ pub fn transcript_descriptor_row_with_block_idx(
         Some(BlockOrigin::History(idx)) => Some(idx as u64),
         _ => None,
     };
-    Ok(smelt_store::TranscriptDescriptorRecord {
+    Ok(smelt_store::StoredTranscriptBlock {
         block_idx,
         history_idx,
-        kind: record.descriptor.kind().to_string(),
-        tool_call_id: record.descriptor.tool_call_id().map(str::to_string),
-        tool_name: record.descriptor.tool_name().map(str::to_string),
+        kind: record.block.kind().to_string(),
+        tool_call_id: record.block.tool_call_id().map(str::to_string),
+        tool_name: record.block.tool_name().map(str::to_string),
         content_hash: record.content_hash.to_string(),
         estimated_text_bytes: indexed_text.estimated_text_bytes,
         preview_text: preview(&indexed_text.indexed_text, 512),
         indexed_text: indexed_text.indexed_text,
-        descriptor_json,
+        block_json,
         origin_json,
         tool_state_json,
     })
@@ -1413,10 +1103,10 @@ impl StoredBlockKind {
 }
 
 /// Compact canonical locator and render-plan metadata for a durable block.
-/// Full descriptor JSON, tool output, and block text remain in SQLite.
+/// Full block JSON, tool output, and block text remain in SQLite.
 #[derive(Clone, Debug)]
 pub struct StoredBlockRef {
-    pub descriptor_index: usize,
+    pub record_index: usize,
     pub kind: StoredBlockKind,
     pub preview: String,
     pub estimated_text_bytes: u64,
@@ -1436,21 +1126,20 @@ pub struct StoredBlockRef {
 
 impl StoredBlockRef {
     pub fn from_record(
-        descriptor_index: usize,
+        record_index: usize,
         block_id: BlockId,
         record: &TranscriptBlockRecord,
         estimated_text_bytes: u64,
         preview: String,
     ) -> (BlockId, Arc<Self>) {
-        let descriptor = &record.descriptor;
+        let block = &record.block;
         let tool_state = record.tool_state.as_ref().map(|(_, state)| state);
-        let kind = StoredBlockKind::from_kind(descriptor.kind())
-            .expect("transcript descriptors use a known block kind");
-        let tool_call_id = descriptor.tool_call_id().map(str::to_string);
-        let tool_name = descriptor.tool_name().map(str::to_string);
-        let selector_fields = match descriptor {
-            TranscriptBlockDescriptor::ToolDraft { args, .. }
-            | TranscriptBlockDescriptor::ToolCall { args, .. } => args
+        let kind = StoredBlockKind::from_kind(block.kind())
+            .expect("transcript blocks use a known block kind");
+        let tool_call_id = block.tool_call_id().map(str::to_string);
+        let tool_name = block.tool_name().map(str::to_string);
+        let selector_fields = match block {
+            Block::ToolDraft { args, .. } | Block::ToolCall { args, .. } => args
                 .iter()
                 .filter_map(|(key, value)| {
                     let encoded = serde_json::to_string(value).ok()?;
@@ -1464,21 +1153,17 @@ impl StoredBlockRef {
             ["event", "event_type", "process_id", "exit_code"]
                 .into_iter()
                 .filter_map(|field| {
-                    descriptor
+                    block
                         .process_field(field)
                         .map(|value| (field.to_string(), value))
                 })
                 .collect();
-        let starts_with_thinking_title = match descriptor {
-            TranscriptBlockDescriptor::Thinking { title, content, .. } => {
-                has_thinking_title(title.as_deref(), content)
-            }
+        let starts_with_thinking_title = match block {
+            Block::Thinking { title, content, .. } => has_thinking_title(title.as_deref(), content),
             _ => false,
         };
-        let ends_with_heading = match descriptor {
-            TranscriptBlockDescriptor::Text { content } => {
-                crate::content::markdown_ir::ends_with_heading(content)
-            }
+        let ends_with_heading = match block {
+            Block::Text { content } => crate::content::markdown_ir::ends_with_heading(content),
             _ => false,
         };
         let retained_bytes = std::mem::size_of::<Self>()
@@ -1503,12 +1188,12 @@ impl StoredBlockRef {
         (
             block_id,
             Arc::new(Self {
-                descriptor_index,
+                record_index,
                 kind,
                 preview,
                 estimated_text_bytes,
                 content_hash: if record.content_hash == 0 {
-                    descriptor.content_hash()
+                    block.content_hash()
                 } else {
                     record.content_hash
                 },
@@ -1518,8 +1203,8 @@ impl StoredBlockRef {
                 tool_display_hash: tool_state.map_or(0, ToolState::display_hash),
                 origin: record.origin,
                 stable_scroll_anchor: !matches!(
-                    descriptor,
-                    TranscriptBlockDescriptor::ToolDraft {
+                    block,
+                    Block::ToolDraft {
                         finished: false,
                         ..
                     }
@@ -1600,8 +1285,20 @@ impl ToolStateEntry {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct BlockMetadata {
+    content_hash: u64,
+    status: Status,
+    origin: Option<BlockOrigin>,
+}
+
+struct LiveBlock {
+    block: Block,
+    metadata: BlockMetadata,
+}
+
 enum BlockEntry {
-    Live(Block),
+    Live(Box<LiveBlock>),
     Stored(Arc<StoredBlockRef>),
     Hydrated {
         stored: Arc<StoredBlockRef>,
@@ -1614,7 +1311,7 @@ enum BlockEntry {
 impl BlockEntry {
     fn block(&self) -> Option<&Block> {
         match self {
-            Self::Live(block) => Some(block),
+            Self::Live(live) => Some(&live.block),
             Self::Hydrated { block, .. } => Some(block),
             Self::Stored(_) => None,
         }
@@ -1622,7 +1319,7 @@ impl BlockEntry {
 
     fn into_materialized(self) -> Option<Block> {
         match self {
-            Self::Live(block) => Some(block),
+            Self::Live(live) => Some(live.block),
             Self::Hydrated { block, .. } => Some(*block),
             Self::Stored(_) => None,
         }
@@ -1630,7 +1327,7 @@ impl BlockEntry {
 
     fn kind(&self) -> &'static str {
         match self {
-            Self::Live(block) => block.kind(),
+            Self::Live(live) => live.block.kind(),
             Self::Hydrated { block, .. } => block.kind(),
             Self::Stored(stored) => stored.kind.as_str(),
         }
@@ -1684,7 +1381,7 @@ impl BlockEntry {
             .is_some_and(|block| matches!(block, Block::ToolDraft { .. }))
     }
 
-    fn has_persisted_descriptor(&self) -> bool {
+    fn is_persisted_block(&self) -> bool {
         self.kind() != "compaction_preview" && !self.is_tool_draft()
     }
 
@@ -1700,7 +1397,7 @@ impl BlockEntry {
     fn estimated_text_bytes(&self) -> u64 {
         match self {
             Self::Stored(stored) | Self::Hydrated { stored, .. } => stored.estimated_text_bytes,
-            Self::Live(block) => block.raw_text().map_or(0, |text| text.len() as u64),
+            Self::Live(live) => live.block.raw_text().map_or(0, |text| text.len() as u64),
         }
     }
 
@@ -1717,10 +1414,8 @@ impl BlockEntry {
         self.block().and_then(Block::raw_text)
     }
 
-    fn descriptor(&self) -> Option<TranscriptBlockDescriptor> {
-        self.block()
-            .cloned()
-            .map(TranscriptBlockDescriptor::from_block)
+    fn cloned_block(&self) -> Option<Block> {
+        self.block().cloned()
     }
 
     fn stored(&self) -> Option<&Arc<StoredBlockRef>> {
@@ -1758,19 +1453,13 @@ impl BlockEntry {
     }
 }
 
-const DESCRIPTOR_CHANGE_LOG_CAPACITY: usize = 64;
+const RECORD_CHANGE_LOG_CAPACITY: usize = 64;
 
 pub struct BlockHistory {
     pub order: Vec<BlockId>,
     entries: HashMap<BlockId, BlockEntry>,
-    /// Cached per-block content hashes; avoids re-hashing on layout-key construction.
-    pub(crate) content_hashes: HashMap<BlockId, u64>,
     pub(crate) next_id: u64,
     tool_states: HashMap<String, ToolStateEntry>,
-    /// Absent entries default to `Status::Done`.
-    pub(crate) statuses: HashMap<BlockId, Status>,
-    /// Optional provenance for blocks projected from durable history or session checkpoints.
-    origins: HashMap<BlockId, BlockOrigin>,
     /// Blocks that transitioned `Streaming` → `Done` since last drain;
     /// drained by the app loop to emit `block_done` autocmds.
     pub finished_blocks: Vec<BlockId>,
@@ -1781,21 +1470,21 @@ pub struct BlockHistory {
     order_generation: u64,
     /// Bumped when semantic navigation coordinates, roles, or labels may change.
     navigation_generation: u64,
-    /// Number of ordered entries represented by canonical transcript descriptors.
-    persisted_descriptor_count: usize,
+    /// Number of ordered entries represented by canonical transcript blocks.
+    persisted_block_count: usize,
     /// Hydrated entries and their retained memory, maintained across entry transitions.
     hydrated_ids: HashSet<BlockId>,
     hydrated_block_bytes: usize,
     hydrated_tool_state_bytes: usize,
-    /// Earliest transcript order index whose persisted descriptor may be stale.
-    descriptor_dirty_from: Option<usize>,
-    /// Bumped when a persisted descriptor may have changed. Unlike `generation`,
+    /// Earliest transcript order index whose persisted block may be stale.
+    record_dirty_from: Option<usize>,
+    /// Bumped when a persisted block may have changed. Unlike `generation`,
     /// this ignores display-only status changes.
-    descriptor_dirty_generation: u64,
-    /// Recent descriptor mutation boundaries remain available after persistence
-    /// clears `descriptor_dirty_from`, allowing projections that have not rendered
+    record_dirty_generation: u64,
+    /// Recent block mutation boundaries remain available after persistence
+    /// clears `block_dirty_from`, allowing projections that have not rendered
     /// yet to update an appended suffix without scanning the unchanged prefix.
-    descriptor_changes: VecDeque<(u64, usize)>,
+    record_changes: VecDeque<(u64, usize)>,
 }
 
 impl BlockHistory {
@@ -1803,22 +1492,19 @@ impl BlockHistory {
         Self {
             order: Vec::new(),
             entries: HashMap::new(),
-            content_hashes: HashMap::new(),
             next_id: 0,
             tool_states: HashMap::new(),
-            statuses: HashMap::new(),
-            origins: HashMap::new(),
             finished_blocks: Vec::new(),
             generation: 0,
             order_generation: 0,
             navigation_generation: 0,
-            persisted_descriptor_count: 0,
+            persisted_block_count: 0,
             hydrated_ids: HashSet::new(),
             hydrated_block_bytes: 0,
             hydrated_tool_state_bytes: 0,
-            descriptor_dirty_from: None,
-            descriptor_dirty_generation: 0,
-            descriptor_changes: VecDeque::new(),
+            record_dirty_from: None,
+            record_dirty_generation: 0,
+            record_changes: VecDeque::new(),
         }
     }
 
@@ -1848,14 +1534,14 @@ impl BlockHistory {
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
     }
 
-    fn recount_persisted_descriptors(&mut self) {
-        self.persisted_descriptor_count = self
+    fn recount_persisted_blocks(&mut self) {
+        self.persisted_block_count = self
             .order
             .iter()
             .filter(|id| {
                 self.entries
                     .get(id)
-                    .is_some_and(BlockEntry::has_persisted_descriptor)
+                    .is_some_and(BlockEntry::is_persisted_block)
             })
             .count();
     }
@@ -1882,17 +1568,17 @@ impl BlockHistory {
         let block_bytes = entry.hydrated_block_weight();
         let tool_state_bytes = entry.hydrated_tool_state_weight();
         let hydrated = matches!(&entry, BlockEntry::Hydrated { .. });
-        let persisted = entry.has_persisted_descriptor();
+        let persisted = entry.is_persisted_block();
         let previous = self.entries.insert(id, entry);
         let was_persisted = previous
             .as_ref()
-            .is_some_and(BlockEntry::has_persisted_descriptor);
+            .is_some_and(BlockEntry::is_persisted_block);
         match (was_persisted, persisted) {
             (false, true) => {
-                self.persisted_descriptor_count = self.persisted_descriptor_count.saturating_add(1);
+                self.persisted_block_count = self.persisted_block_count.saturating_add(1);
             }
             (true, false) => {
-                self.persisted_descriptor_count = self.persisted_descriptor_count.saturating_sub(1);
+                self.persisted_block_count = self.persisted_block_count.saturating_sub(1);
             }
             _ => {}
         }
@@ -1918,8 +1604,8 @@ impl BlockHistory {
 
     fn remove_entry(&mut self, id: BlockId) -> Option<BlockEntry> {
         let entry = self.entries.remove(&id)?;
-        if entry.has_persisted_descriptor() {
-            self.persisted_descriptor_count = self.persisted_descriptor_count.saturating_sub(1);
+        if entry.is_persisted_block() {
+            self.persisted_block_count = self.persisted_block_count.saturating_sub(1);
         }
         self.hydrated_ids.remove(&id);
         self.hydrated_block_bytes = self
@@ -1933,41 +1619,41 @@ impl BlockHistory {
 
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
-        self.recount_persisted_descriptors();
+        self.recount_persisted_blocks();
         self.recount_hydrated_entries();
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(0);
+        self.mark_record_dirty_from(0);
     }
 
-    pub fn persisted_descriptor_count(&self) -> usize {
-        self.persisted_descriptor_count
+    pub fn persisted_block_count(&self) -> usize {
+        self.persisted_block_count
     }
 
-    pub fn descriptor_dirty_from(&self) -> Option<usize> {
-        self.descriptor_dirty_from
+    pub fn record_dirty_from(&self) -> Option<usize> {
+        self.record_dirty_from
     }
 
-    pub fn descriptor_dirty_generation(&self) -> u64 {
-        self.descriptor_dirty_generation
+    pub fn record_dirty_generation(&self) -> u64 {
+        self.record_dirty_generation
     }
 
-    pub fn descriptor_changed_from_since(&self, generation: u64) -> Option<usize> {
-        if generation == self.descriptor_dirty_generation {
+    pub fn record_changed_from_since(&self, generation: u64) -> Option<usize> {
+        if generation == self.record_dirty_generation {
             return Some(self.order.len());
         }
         let first_generation = generation.checked_add(1)?;
         let first = self
-            .descriptor_changes
+            .record_changes
             .iter()
             .position(|(change_generation, _)| *change_generation == first_generation)?;
         let mut expected_generation = first_generation;
         let mut changed_from = self.order.len();
-        for (change_generation, index) in self.descriptor_changes.iter().skip(first) {
+        for (change_generation, index) in self.record_changes.iter().skip(first) {
             if *change_generation != expected_generation {
                 return None;
             }
             changed_from = changed_from.min(*index);
-            if *change_generation == self.descriptor_dirty_generation {
+            if *change_generation == self.record_dirty_generation {
                 return Some(changed_from);
             }
             expected_generation = expected_generation.checked_add(1)?;
@@ -1975,33 +1661,33 @@ impl BlockHistory {
         None
     }
 
-    pub fn clear_descriptor_dirty(&mut self) {
-        self.descriptor_dirty_from = None;
+    pub fn clear_record_dirty(&mut self) {
+        self.record_dirty_from = None;
     }
 
-    pub fn require_descriptor_resave_from(&mut self, idx: usize) {
-        self.descriptor_dirty_generation = self
-            .descriptor_dirty_generation
+    pub fn require_record_resave_from(&mut self, idx: usize) {
+        self.record_dirty_generation = self
+            .record_dirty_generation
             .checked_add(1)
-            .expect("transcript descriptor generation overflow");
-        self.descriptor_changes
-            .push_back((self.descriptor_dirty_generation, idx));
-        if self.descriptor_changes.len() > DESCRIPTOR_CHANGE_LOG_CAPACITY {
-            self.descriptor_changes.pop_front();
+            .expect("transcript block generation overflow");
+        self.record_changes
+            .push_back((self.record_dirty_generation, idx));
+        if self.record_changes.len() > RECORD_CHANGE_LOG_CAPACITY {
+            self.record_changes.pop_front();
         }
-        self.descriptor_dirty_from = Some(
-            self.descriptor_dirty_from
+        self.record_dirty_from = Some(
+            self.record_dirty_from
                 .map_or(idx, |current| current.min(idx)),
         );
     }
 
-    fn mark_descriptor_dirty_from(&mut self, idx: usize) {
-        self.require_descriptor_resave_from(idx);
+    fn mark_record_dirty_from(&mut self, idx: usize) {
+        self.require_record_resave_from(idx);
     }
 
-    fn mark_descriptor_dirty_for_id(&mut self, id: BlockId) {
+    fn mark_record_dirty_for_id(&mut self, id: BlockId) {
         if let Some(idx) = self.order.iter().position(|candidate| *candidate == id) {
-            self.mark_descriptor_dirty_from(idx);
+            self.mark_record_dirty_from(idx);
         }
     }
 
@@ -2010,7 +1696,13 @@ impl BlockHistory {
     }
 
     pub fn content_hash(&self, id: BlockId) -> u64 {
-        self.content_hashes.get(&id).copied().unwrap_or(0)
+        match self.entries.get(&id) {
+            Some(BlockEntry::Live(live)) => live.metadata.content_hash,
+            Some(BlockEntry::Stored(stored) | BlockEntry::Hydrated { stored, .. }) => {
+                stored.content_hash
+            }
+            None => 0,
+        }
     }
 
     pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
@@ -2075,8 +1767,8 @@ impl BlockHistory {
         self.entries.get(&id).and_then(BlockEntry::raw_text)
     }
 
-    pub fn descriptor(&self, id: BlockId) -> Option<TranscriptBlockDescriptor> {
-        self.entries.get(&id).and_then(BlockEntry::descriptor)
+    pub fn cloned_block(&self, id: BlockId) -> Option<Block> {
+        self.entries.get(&id).and_then(BlockEntry::cloned_block)
     }
 
     pub fn first_line(&self, id: BlockId) -> Option<String> {
@@ -2124,73 +1816,69 @@ impl BlockHistory {
         self.entries.get(&id).and_then(|entry| entry.arg_field(arg))
     }
 
-    pub fn descriptor_records(&self) -> Vec<TranscriptBlockRecord> {
-        self.descriptor_records_from(0)
+    pub fn block_records(&self) -> Vec<TranscriptBlockRecord> {
+        self.block_records_from(0)
     }
 
-    pub fn descriptor_records_with_ids(&self) -> Vec<TranscriptBlockRecordWithId> {
-        self.descriptor_records_with_ids_from(0)
+    pub fn block_records_with_ids(&self) -> Vec<TranscriptBlockRecordWithId> {
+        self.block_records_with_ids_from(0)
     }
 
-    pub fn descriptor_record_index_for_order_index(&self, start: usize) -> usize {
+    pub fn record_index_for_order_index(&self, start: usize) -> usize {
         let start = start.min(self.order.len());
         let suffix_len = self.order.len().saturating_sub(start);
-        let descriptor_index = if start <= suffix_len {
+        let record_index = if start <= suffix_len {
             self.order
                 .iter()
                 .take(start)
                 .filter(|id| {
                     self.entries
                         .get(id)
-                        .is_some_and(BlockEntry::has_persisted_descriptor)
+                        .is_some_and(BlockEntry::is_persisted_block)
                 })
                 .count()
         } else {
-            let suffix_descriptors = self
+            let suffix_blocks = self
                 .order
                 .iter()
                 .skip(start)
                 .filter(|id| {
                     self.entries
                         .get(id)
-                        .is_some_and(BlockEntry::has_persisted_descriptor)
+                        .is_some_and(BlockEntry::is_persisted_block)
                 })
                 .count();
-            self.persisted_descriptor_count
-                .saturating_sub(suffix_descriptors)
+            self.persisted_block_count.saturating_sub(suffix_blocks)
         };
         smelt_perf::perf::record_value(
-            "transcript:descriptor_record_index:entries_scanned",
+            "transcript:block_record_index:entries_scanned",
             start.min(suffix_len) as u64,
         );
-        descriptor_index
+        record_index
     }
 
-    pub fn descriptor_records_from(&self, start: usize) -> Vec<TranscriptBlockRecord> {
-        self.descriptor_records_with_ids_from(start)
+    pub fn block_records_from(&self, start: usize) -> Vec<TranscriptBlockRecord> {
+        self.block_records_with_ids_from(start)
             .into_iter()
             .map(|record| record.record)
             .collect()
     }
 
-    pub fn descriptor_records_with_ids_from(
-        &self,
-        start: usize,
-    ) -> Vec<TranscriptBlockRecordWithId> {
+    pub fn block_records_with_ids_from(&self, start: usize) -> Vec<TranscriptBlockRecordWithId> {
         self.order
             .iter()
             .skip(start.min(self.order.len()))
-            .filter_map(|id| self.descriptor_record_with_id(*id))
+            .filter_map(|id| self.block_record_with_id(*id))
             .collect()
     }
 
-    fn descriptor_record_with_id(&self, id: BlockId) -> Option<TranscriptBlockRecordWithId> {
+    fn block_record_with_id(&self, id: BlockId) -> Option<TranscriptBlockRecordWithId> {
         let entry = self.entries.get(&id)?;
-        if !entry.has_persisted_descriptor() {
+        if !entry.is_persisted_block() {
             return None;
         }
-        let descriptor = entry.descriptor()?;
-        let tool_state = descriptor.tool_call_id().and_then(|call_id| {
+        let block = entry.cloned_block()?;
+        let tool_state = block.tool_call_id().and_then(|call_id| {
             self.tool_state(call_id)
                 .cloned()
                 .map(|state| (call_id.to_string(), state))
@@ -2198,7 +1886,7 @@ impl BlockHistory {
         Some(TranscriptBlockRecordWithId {
             block_id: id,
             record: TranscriptBlockRecord {
-                descriptor,
+                block,
                 content_hash: self.content_hash(id),
                 origin: self.block_origin(id),
                 tool_state,
@@ -2209,20 +1897,20 @@ impl BlockHistory {
     pub fn stored_ref_for_materialized(
         &self,
         id: BlockId,
-        descriptor_index: usize,
+        record_index: usize,
     ) -> Option<Arc<StoredBlockRef>> {
         if let Some(stored) = self.stored_ref(id) {
-            if stored.descriptor_index == descriptor_index {
+            if stored.record_index == record_index {
                 return Some(Arc::clone(stored));
             }
         }
-        let record = self.descriptor_record_with_id(id)?;
+        let record = self.block_record_with_id(id)?;
         let indexed = transcript_indexed_text(
-            &record.record.descriptor,
+            &record.record.block,
             record.record.tool_state.as_ref().map(|(_, state)| state),
         );
         let (_, stored) = StoredBlockRef::from_record(
-            descriptor_index,
+            record_index,
             id,
             &record.record,
             indexed.estimated_text_bytes,
@@ -2231,7 +1919,7 @@ impl BlockHistory {
         Some(stored)
     }
 
-    pub fn from_descriptor_records(records: Vec<TranscriptBlockRecord>) -> Self {
+    pub fn from_block_records(records: Vec<TranscriptBlockRecord>) -> Self {
         let records = records
             .into_iter()
             .enumerate()
@@ -2240,21 +1928,21 @@ impl BlockHistory {
                 record,
             })
             .collect();
-        Self::from_descriptor_records_with_ids(records)
+        Self::from_block_records_with_ids(records)
     }
 
-    pub fn from_descriptor_records_with_ids(records: Vec<TranscriptBlockRecordWithId>) -> Self {
+    pub fn from_block_records_with_ids(records: Vec<TranscriptBlockRecordWithId>) -> Self {
         let mut history = Self::new();
         let stored = records
             .into_iter()
             .enumerate()
-            .map(|(descriptor_index, record)| {
+            .map(|(record_index, record)| {
                 let indexed = transcript_indexed_text(
-                    &record.record.descriptor,
+                    &record.record.block,
                     record.record.tool_state.as_ref().map(|(_, state)| state),
                 );
                 StoredBlockRef::from_record(
-                    descriptor_index,
+                    record_index,
                     record.block_id,
                     &record.record,
                     indexed.estimated_text_bytes,
@@ -2263,7 +1951,7 @@ impl BlockHistory {
             })
             .collect::<Vec<_>>();
         history.install_stored_projection(stored);
-        history.clear_descriptor_dirty();
+        history.clear_record_dirty();
         history
     }
 
@@ -2289,7 +1977,6 @@ impl BlockHistory {
         for (id, stored) in records {
             self.next_id = self.next_id.max(id.0.saturating_add(1));
             next_order.push(id);
-            self.content_hashes.insert(id, stored.content_hash);
             if let Some(call_id) = stored.tool_call_id.as_ref() {
                 let entry = self.tool_states.entry(call_id.clone());
                 if let std::collections::hash_map::Entry::Vacant(entry) = entry {
@@ -2301,7 +1988,6 @@ impl BlockHistory {
                     }
                 }
             }
-            self.origins.remove(&id);
             match self.entries.remove(&id) {
                 Some(entry @ BlockEntry::Live(_)) => {
                     self.entries.insert(id, entry);
@@ -2311,7 +1997,7 @@ impl BlockHistory {
                     block,
                     block_weight,
                     tool_state_weight,
-                }) if previous.descriptor_index == stored.descriptor_index => {
+                }) if previous.record_index == stored.record_index => {
                     self.entries.insert(
                         id,
                         BlockEntry::Hydrated {
@@ -2328,17 +2014,14 @@ impl BlockHistory {
             }
         }
         next_order.extend(preserved_live);
-        let live_ids = next_order.iter().copied().collect::<HashSet<_>>();
-        self.entries.retain(|id, _| live_ids.contains(id));
-        self.content_hashes.retain(|id, _| live_ids.contains(id));
-        self.statuses.retain(|id, _| live_ids.contains(id));
-        self.origins.retain(|id, _| live_ids.contains(id));
+        let retained_ids = next_order.iter().copied().collect::<HashSet<_>>();
+        self.entries.retain(|id, _| retained_ids.contains(id));
         if self.order != next_order {
             self.order = next_order;
             self.bump_order_generation();
             self.bump_navigation_generation();
         }
-        self.recount_persisted_descriptors();
+        self.recount_persisted_blocks();
         self.recount_hydrated_entries();
         self.gc_tool_states();
     }
@@ -2355,7 +2038,7 @@ impl BlockHistory {
         {
             return false;
         }
-        let block = record.descriptor.to_block().normalize_content();
+        let block = record.block.clone().normalize_content();
         if block.kind() != stored.kind.as_str() {
             return false;
         }
@@ -2388,8 +2071,6 @@ impl BlockHistory {
             }
         }
         self.next_id = self.next_id.max(id.0.saturating_add(1));
-        self.content_hashes.insert(id, block_hash);
-        self.origins.remove(&id);
         self.insert_entry(
             id,
             BlockEntry::Hydrated {
@@ -2410,16 +2091,24 @@ impl BlockHistory {
         let Some(BlockEntry::Hydrated { block, stored, .. }) = self.remove_entry(id) else {
             unreachable!("entry was checked as hydrated");
         };
-        if let Some(origin) = stored.origin {
-            self.origins.insert(id, origin);
-        }
+        let metadata = BlockMetadata {
+            content_hash: stored.content_hash,
+            origin: stored.origin,
+            ..BlockMetadata::default()
+        };
         if let Some(call_id) = stored.tool_call_id.as_ref() {
             if let Some(ToolStateEntry::Hydrated(state)) = self.tool_states.remove(call_id) {
                 self.tool_states
                     .insert(call_id.clone(), ToolStateEntry::Live(state));
             }
         }
-        self.insert_entry(id, BlockEntry::Live(*block));
+        self.insert_entry(
+            id,
+            BlockEntry::Live(Box::new(LiveBlock {
+                block: *block,
+                metadata,
+            })),
+        );
         true
     }
 
@@ -2455,7 +2144,6 @@ impl BlockHistory {
                 }
             }
         }
-        self.origins.remove(&id);
         self.insert_entry(id, BlockEntry::Stored(stored));
         smelt_perf::perf::record_value("transcript:block_cache:evicted_bytes", weight as u64);
         weight
@@ -2465,10 +2153,10 @@ impl BlockHistory {
         if !matches!(self.entries.get(&id), Some(BlockEntry::Live(_))) {
             return 0;
         }
-        let Some(BlockEntry::Live(block)) = self.remove_entry(id) else {
+        let Some(BlockEntry::Live(live)) = self.remove_entry(id) else {
             unreachable!("entry was checked as live");
         };
-        let mut weight = block_retained_bytes(&block);
+        let mut weight = block_retained_bytes(&live.block);
         if let Some(call_id) = stored.tool_call_id.as_ref() {
             if let Some(ToolStateEntry::Live(state)) = self.tool_states.remove(call_id) {
                 weight = weight.saturating_add(tool_state_retained_bytes(&state));
@@ -2483,8 +2171,6 @@ impl BlockHistory {
                 );
             }
         }
-        self.origins.remove(&id);
-        self.statuses.remove(&id);
         self.insert_entry(id, BlockEntry::Stored(stored));
         weight
     }
@@ -2499,7 +2185,7 @@ impl BlockHistory {
 
     pub fn materialized_retained_bytes(&self, id: BlockId) -> usize {
         match self.entries.get(&id) {
-            Some(BlockEntry::Live(block)) => block_retained_bytes(block).saturating_add(
+            Some(BlockEntry::Live(live)) => block_retained_bytes(&live.block).saturating_add(
                 self.tool_call_id(id)
                     .and_then(|call_id| self.tool_states.get(call_id))
                     .and_then(|entry| match entry {
@@ -2517,7 +2203,7 @@ impl BlockHistory {
         self.entries
             .values()
             .filter_map(|entry| match entry {
-                BlockEntry::Live(block) => Some(block_retained_bytes(block)),
+                BlockEntry::Live(live) => Some(block_retained_bytes(&live.block)),
                 _ => None,
             })
             .sum()
@@ -2548,20 +2234,9 @@ impl BlockHistory {
             .saturating_add(self.tool_states.keys().map(String::capacity).sum::<usize>())
     }
 
-    pub fn origin_hash_retained_bytes(&self) -> usize {
-        self.content_hashes
-            .capacity()
-            .saturating_mul(std::mem::size_of::<(BlockId, u64)>())
-            .saturating_add(
-                self.origins
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<(BlockId, BlockOrigin)>()),
-            )
-            .saturating_add(
-                self.statuses
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<(BlockId, Status)>()),
-            )
+    pub fn block_metadata_retained_bytes(&self) -> usize {
+        self.live_block_count()
+            .saturating_mul(std::mem::size_of::<BlockMetadata>())
     }
 
     pub fn live_retained_bytes(&self) -> usize {
@@ -2620,10 +2295,11 @@ impl BlockHistory {
     }
 
     pub fn block_origin(&self, id: BlockId) -> Option<BlockOrigin> {
-        self.origins
-            .get(&id)
-            .copied()
-            .or_else(|| self.stored_ref(id).and_then(|stored| stored.origin))
+        match self.entries.get(&id) {
+            Some(BlockEntry::Live(live)) => live.metadata.origin,
+            Some(BlockEntry::Stored(stored) | BlockEntry::Hydrated { stored, .. }) => stored.origin,
+            None => None,
+        }
     }
 
     pub fn block_origin_at(&self, i: usize) -> Option<BlockOrigin> {
@@ -2642,23 +2318,22 @@ impl BlockHistory {
         })
     }
 
-    pub fn status(&self, id: BlockId) -> Status {
-        self.statuses.get(&id).copied().unwrap_or_default()
+    pub fn status(&self, id: BlockId) -> Option<Status> {
+        self.entries.get(&id).map(|entry| match entry {
+            BlockEntry::Live(live) => live.metadata.status,
+            BlockEntry::Stored(_) | BlockEntry::Hydrated { .. } => Status::Done,
+        })
     }
 
     /// Status changes do not invalidate the layout cache (style concern only).
     pub(crate) fn set_status(&mut self, id: BlockId, status: Status) {
-        let was_streaming = matches!(
-            self.statuses.get(&id).copied().unwrap_or_default(),
-            Status::Streaming
-        );
-        if matches!(status, Status::Done) {
-            self.statuses.remove(&id);
-            if was_streaming {
-                self.finished_blocks.push(id);
-            }
-        } else {
-            self.statuses.insert(id, status);
+        let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+            panic!("status can only change on a live transcript block: {id:?}");
+        };
+        let was_streaming = matches!(live.metadata.status, Status::Streaming);
+        live.metadata.status = status;
+        if matches!(status, Status::Done) && was_streaming {
+            self.finished_blocks.push(id);
         }
         self.bump_generation();
     }
@@ -2674,59 +2349,62 @@ impl BlockHistory {
         let id = BlockId(self.next_id);
         self.next_id += 1;
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
-        let entry = BlockEntry::Live(block);
+        let entry = BlockEntry::Live(Box::new(LiveBlock {
+            block,
+            metadata: BlockMetadata {
+                content_hash: hash,
+                origin,
+                ..BlockMetadata::default()
+            },
+        }));
         self.order.insert(order_index, id);
         self.insert_entry(id, entry);
-        self.content_hashes.insert(id, hash);
-        if let Some(origin) = origin {
-            self.origins.insert(id, origin);
-        }
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(order_index);
+        self.mark_record_dirty_from(order_index);
         id
     }
 
-    fn add_descriptor(
+    fn add_hydrated_block(
         &mut self,
         idx: Option<usize>,
-        descriptor: TranscriptBlockDescriptor,
+        block: Block,
         origin: Option<BlockOrigin>,
         content_hash: Option<u64>,
     ) -> BlockId {
         let id = BlockId(self.next_id);
         self.next_id += 1;
-        self.add_descriptor_with_id(id, idx, descriptor, origin, content_hash)
+        self.add_hydrated_block_with_id(id, idx, block, origin, content_hash)
     }
 
-    fn add_descriptor_with_id(
+    fn add_hydrated_block_with_id(
         &mut self,
         id: BlockId,
         idx: Option<usize>,
-        descriptor: TranscriptBlockDescriptor,
+        block: Block,
         origin: Option<BlockOrigin>,
         content_hash: Option<u64>,
     ) -> BlockId {
-        let normalized = descriptor.normalize_content();
+        let normalized = block.normalize_content();
         let normalized_hash = normalized.content_hash();
         let hash = content_hash
             .filter(|hash| *hash == normalized_hash)
             .unwrap_or(normalized_hash);
-        let descriptor = normalized;
+        let block = normalized;
         self.next_id = self.next_id.max(id.0.saturating_add(1));
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
-        let tool_state = descriptor.tool_call_id().and_then(|call_id| {
+        let tool_state = block.tool_call_id().and_then(|call_id| {
             self.tool_state(call_id)
                 .cloned()
                 .map(|state| (call_id.to_string(), state))
         });
         let record = TranscriptBlockRecord {
-            descriptor,
+            block,
             content_hash: hash,
             origin,
             tool_state,
         };
         let indexed = transcript_indexed_text(
-            &record.descriptor,
+            &record.block,
             record.tool_state.as_ref().map(|(_, state)| state),
         );
         let (_, stored) = StoredBlockRef::from_record(
@@ -2736,7 +2414,7 @@ impl BlockHistory {
             indexed.estimated_text_bytes,
             preview(&indexed.indexed_text, 512),
         );
-        let block = record.descriptor.to_block();
+        let block = record.block.clone();
         let block_weight = block_retained_bytes(&block);
         let tool_state_weight = record
             .tool_state
@@ -2750,12 +2428,8 @@ impl BlockHistory {
         };
         self.order.insert(order_index, id);
         self.insert_entry(id, entry);
-        self.content_hashes.insert(id, hash);
-        if let Some(origin) = origin {
-            self.origins.insert(id, origin);
-        }
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(order_index);
+        self.mark_record_dirty_from(order_index);
         id
     }
 
@@ -2767,12 +2441,12 @@ impl BlockHistory {
         self.add_block(None, block, Some(origin))
     }
 
-    pub fn push_descriptor_with_origin(
+    pub fn push_hydrated_block_with_origin(
         &mut self,
-        descriptor: TranscriptBlockDescriptor,
+        block: Block,
         origin: BlockOrigin,
     ) -> BlockId {
-        self.add_descriptor(None, descriptor, Some(origin), None)
+        self.add_hydrated_block(None, block, Some(origin), None)
     }
 
     pub(crate) fn insert_checkpoint_marker(
@@ -2819,8 +2493,6 @@ impl BlockHistory {
             return None;
         }
         self.order.remove(idx);
-        self.content_hashes.remove(&id);
-        self.statuses.remove(&id);
         if let Some(call_id) = self.tool_call_id(id).map(str::to_string) {
             self.tool_states.remove(&call_id);
         }
@@ -2828,7 +2500,7 @@ impl BlockHistory {
             .remove_entry(id)
             .and_then(BlockEntry::into_materialized);
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(idx);
+        self.mark_record_dirty_from(idx);
         block
     }
 
@@ -2850,12 +2522,9 @@ impl BlockHistory {
         self.order.retain(|id| !removed.contains(id));
         for id in removed {
             self.remove_entry(id);
-            self.content_hashes.remove(&id);
-            self.statuses.remove(&id);
-            self.origins.remove(&id);
         }
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(first_removed);
+        self.mark_record_dirty_from(first_removed);
     }
 
     pub(crate) fn push_with_state(
@@ -2881,16 +2550,16 @@ impl BlockHistory {
         self.push_with_origin(block, origin)
     }
 
-    pub fn push_descriptor_with_state_and_origin(
+    pub fn push_hydrated_block_with_state_and_origin(
         &mut self,
-        descriptor: TranscriptBlockDescriptor,
+        block: Block,
         call_id: String,
         state: ToolState,
         origin: BlockOrigin,
     ) -> BlockId {
         self.tool_states
             .insert(call_id, ToolStateEntry::Hydrated(state));
-        self.add_descriptor(None, descriptor, Some(origin), None)
+        self.add_hydrated_block(None, block, Some(origin), None)
     }
 
     pub fn update_tool_state(
@@ -2911,7 +2580,7 @@ impl BlockHistory {
         mutator(state);
         self.bump_generation();
         if let Some(idx) = dirty_idx {
-            self.mark_descriptor_dirty_from(idx);
+            self.mark_record_dirty_from(idx);
         }
         true
     }
@@ -2925,10 +2594,11 @@ impl BlockHistory {
             return;
         };
         let origin = self.block_origin(id);
+        let status = self
+            .status(id)
+            .expect("rewrite target disappeared after existence check");
+        let previous_hash = self.content_hash(id);
         self.promote_hydrated(id);
-        if let Some(origin) = origin {
-            self.origins.insert(id, origin);
-        }
         let block = block.normalize_content();
         let navigation = (
             block.kind(),
@@ -2938,18 +2608,23 @@ impl BlockHistory {
                 .unwrap_or_default(),
         );
         let hash = block.content_hash();
-        let entry = BlockEntry::Live(block);
-        if self.content_hashes.get(&id) == Some(&hash) {
-            self.insert_entry(id, entry);
+        let entry = BlockEntry::Live(Box::new(LiveBlock {
+            block,
+            metadata: BlockMetadata {
+                content_hash: hash,
+                status,
+                origin,
+            },
+        }));
+        self.insert_entry(id, entry);
+        if previous_hash == hash {
             return;
         }
-        self.insert_entry(id, entry);
-        self.content_hashes.insert(id, hash);
         self.bump_generation();
         if navigation != previous_navigation {
             self.bump_navigation_generation();
         }
-        self.mark_descriptor_dirty_for_id(id);
+        self.mark_record_dirty_for_id(id);
     }
 
     pub(crate) fn rewrite_with_tool_state(
@@ -2963,7 +2638,7 @@ impl BlockHistory {
         self.tool_states
             .insert(call_id, ToolStateEntry::Live(state));
         self.bump_generation();
-        self.mark_descriptor_dirty_for_id(id);
+        self.mark_record_dirty_for_id(id);
     }
 
     pub(crate) fn remove_block(&mut self, id: BlockId) {
@@ -2973,12 +2648,9 @@ impl BlockHistory {
         let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
         self.order.retain(|candidate| *candidate != id);
         self.remove_entry(id);
-        self.content_hashes.remove(&id);
-        self.statuses.remove(&id);
-        self.origins.remove(&id);
         self.bump_order_generation();
         if let Some(idx) = dirty_idx {
-            self.mark_descriptor_dirty_from(idx);
+            self.mark_record_dirty_from(idx);
         }
         self.gc_tool_states();
     }
@@ -2986,30 +2658,24 @@ impl BlockHistory {
     pub fn clear(&mut self) {
         if self.order.is_empty() {
             self.entries.clear();
-            self.content_hashes.clear();
-            self.persisted_descriptor_count = 0;
+            self.persisted_block_count = 0;
             self.hydrated_ids.clear();
             self.hydrated_block_bytes = 0;
             self.hydrated_tool_state_bytes = 0;
             self.next_id = 0;
             self.tool_states.clear();
-            self.statuses.clear();
-            self.origins.clear();
             return;
         }
         self.order.clear();
         self.entries.clear();
-        self.content_hashes.clear();
-        self.persisted_descriptor_count = 0;
+        self.persisted_block_count = 0;
         self.hydrated_ids.clear();
         self.hydrated_block_bytes = 0;
         self.hydrated_tool_state_bytes = 0;
         self.next_id = 0;
         self.tool_states.clear();
-        self.statuses.clear();
-        self.origins.clear();
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(0);
+        self.mark_record_dirty_from(0);
     }
 
     pub fn block_gap(&self, i: usize) -> u16 {
@@ -3056,12 +2722,9 @@ impl BlockHistory {
         let removed: Vec<BlockId> = self.order.drain(idx..).collect();
         for id in removed {
             self.remove_entry(id);
-            self.content_hashes.remove(&id);
-            self.statuses.remove(&id);
-            self.origins.remove(&id);
         }
         self.bump_order_generation();
-        self.mark_descriptor_dirty_from(idx);
+        self.mark_record_dirty_from(idx);
         self.gc_tool_states();
     }
 
@@ -3181,7 +2844,7 @@ mod tests {
         indexed_tool_state_with_content("output", metadata)
     }
 
-    fn edit_file_descriptor(old_string: &str, new_string: &str) -> TranscriptBlockDescriptor {
+    fn edit_file_block(old_string: &str, new_string: &str) -> Block {
         let mut args = std::collections::HashMap::new();
         args.insert(
             "file_path".to_string(),
@@ -3195,7 +2858,7 @@ mod tests {
             "new_string".to_string(),
             serde_json::Value::String(new_string.to_string()),
         );
-        TranscriptBlockDescriptor::ToolCall {
+        Block::ToolCall {
             call_id: "call-1".to_string(),
             name: "edit_file".to_string(),
             summary: protocol::StyledLines::from_plain("example.rs"),
@@ -3205,11 +2868,11 @@ mod tests {
 
     #[test]
     fn indexed_text_preserves_full_size_for_extent_estimation() {
-        let descriptor = TranscriptBlockDescriptor::Text {
+        let block = Block::Text {
             content: "alpha λ".to_string(),
         };
 
-        let indexed = transcript_indexed_text(&descriptor, None);
+        let indexed = transcript_indexed_text(&block, None);
 
         assert_eq!(indexed.indexed_text, "alpha λ");
         assert_eq!(indexed.estimated_text_bytes, "alpha λ".len() as u64);
@@ -3227,9 +2890,9 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_row_computes_indexed_text_from_record() {
+    fn block_row_computes_indexed_text_from_record() {
         let record = TranscriptBlockRecord {
-            descriptor: TranscriptBlockDescriptor::ToolCall {
+            block: Block::ToolCall {
                 call_id: "call-1".to_string(),
                 name: "bash".to_string(),
                 summary: protocol::StyledLines::from_plain("bash"),
@@ -3243,7 +2906,7 @@ mod tests {
             )),
         };
 
-        let row = transcript_descriptor_row(7, &record).expect("descriptor row");
+        let row = transcript_block_row(7, &record).expect("block row");
 
         assert_eq!(row.block_idx, 7);
         let expected = "bash\nok\nbash\nalpha λ";
@@ -3262,7 +2925,7 @@ mod tests {
             "api_key".to_string(),
             serde_json::Value::String("secret needle".to_string()),
         );
-        let descriptor = TranscriptBlockDescriptor::ToolCall {
+        let block = Block::ToolCall {
             call_id: "call-1".to_string(),
             name: "bash".to_string(),
             summary: protocol::StyledLines::from_plain("printf needle"),
@@ -3275,7 +2938,7 @@ mod tests {
         );
         let state = indexed_tool_state_with_content(&output, serde_json::json!({}));
 
-        let indexed = transcript_indexed_text(&descriptor, Some(&state));
+        let indexed = transcript_indexed_text(&block, Some(&state));
 
         assert!(indexed.indexed_text.contains("bash"));
         assert!(indexed.indexed_text.contains("command: printf needle"));
@@ -3308,7 +2971,7 @@ mod tests {
 
     #[test]
     fn indexed_text_includes_thinking_summary_chrome() {
-        let descriptor = TranscriptBlockDescriptor::Thinking {
+        let block = Block::Thinking {
             title: Some("Analyzing the bug".to_string()),
             summary_titles: vec![
                 "Inspecting the report".to_string(),
@@ -3318,36 +2981,36 @@ mod tests {
             kind: protocol::ReasoningKind::Summary,
         };
         assert_eq!(
-            transcript_indexed_text(&descriptor, None).indexed_text,
+            transcript_indexed_text(&block, None).indexed_text,
             "**Inspecting the report**\n**Analyzing the bug**\nChecking files\nReviewing output\nAnalyzing the bug\n… 2 lines collapsed …"
         );
 
-        let descriptor = TranscriptBlockDescriptor::Thinking {
+        let block = Block::Thinking {
             title: None,
             summary_titles: Vec::new(),
             content: "Checking files\nReviewing output".to_string(),
             kind: protocol::ReasoningKind::Raw,
         };
         assert_eq!(
-            transcript_indexed_text(&descriptor, None).indexed_text,
+            transcript_indexed_text(&block, None).indexed_text,
             "Checking files\nReviewing output\nthinking\n… 2 lines collapsed …"
         );
     }
 
     #[test]
     fn indexed_text_includes_default_compacted_chrome() {
-        let descriptor = TranscriptBlockDescriptor::Compacted {
+        let block = Block::Compacted {
             summary: "archived".to_string(),
         };
         assert_eq!(
-            transcript_indexed_text(&descriptor, None).indexed_text,
+            transcript_indexed_text(&block, None).indexed_text,
             "archived\ncompacted\n─"
         );
     }
 
     #[test]
     fn indexed_text_includes_edit_file_snapshot_metadata() {
-        let descriptor = edit_file_descriptor("old needle", "new needle");
+        let block = edit_file_block("old needle", "new needle");
         let state = indexed_tool_state_with_content(
             "edited example.rs",
             serde_json::json!({
@@ -3358,17 +3021,17 @@ mod tests {
         );
 
         assert_eq!(
-            transcript_indexed_text(&descriptor, Some(&state)).indexed_text,
+            transcript_indexed_text(&block, Some(&state)).indexed_text,
             "edit_file\nok\nexample.rs\nedited example.rs\n1 old line, 1 new line\n/tmp/example.rs\nfn old_snapshot() {}\nfn new_snapshot() {}\n"
         );
     }
 
     #[test]
     fn indexed_text_includes_edit_file_planned_strings_without_snapshot() {
-        let descriptor = edit_file_descriptor("alpha\nbeta", "gamma");
+        let block = edit_file_block("alpha\nbeta", "gamma");
 
         assert_eq!(
-            transcript_indexed_text(&descriptor, None).indexed_text,
+            transcript_indexed_text(&block, None).indexed_text,
             "edit_file\nexample.rs\n2 old lines, 1 new line\n/tmp/example.rs\nalpha\nbeta\ngamma"
         );
     }
@@ -3400,49 +3063,49 @@ mod tests {
     }
 
     #[test]
-    fn status_changes_do_not_bump_descriptor_dirty_generation() {
+    fn status_changes_do_not_bump_block_dirty_generation() {
         let mut history = BlockHistory::new();
         let id = history.push(Block::Text {
             content: "hello".into(),
         });
-        history.clear_descriptor_dirty();
+        history.clear_record_dirty();
         let generation = history.generation();
-        let descriptor_generation = history.descriptor_dirty_generation();
+        let block_generation = history.record_dirty_generation();
 
         history.set_status(id, Status::Streaming);
 
         assert_ne!(history.generation(), generation);
-        assert_eq!(history.descriptor_dirty_generation(), descriptor_generation);
-        assert_eq!(history.descriptor_dirty_from(), None);
+        assert_eq!(history.record_dirty_generation(), block_generation);
+        assert_eq!(history.record_dirty_from(), None);
     }
 
     #[test]
-    fn descriptor_change_log_tracks_unrendered_mutations_after_persistence() {
+    fn block_change_log_tracks_unrendered_mutations_after_persistence() {
         let mut history = BlockHistory::new();
         history.push(Block::Text {
             content: "first".into(),
         });
-        history.clear_descriptor_dirty();
-        let generation = history.descriptor_dirty_generation();
+        history.clear_record_dirty();
+        let generation = history.record_dirty_generation();
 
         assert_eq!(
-            history.descriptor_changed_from_since(generation),
+            history.record_changed_from_since(generation),
             Some(history.order.len())
         );
 
         history.push(Block::Text {
             content: "second".into(),
         });
-        history.clear_descriptor_dirty();
-        assert_eq!(history.descriptor_changed_from_since(generation), Some(1));
+        history.clear_record_dirty();
+        assert_eq!(history.record_changed_from_since(generation), Some(1));
 
-        history.require_descriptor_resave_from(0);
-        assert_eq!(history.descriptor_changed_from_since(generation), Some(0));
+        history.require_record_resave_from(0);
+        assert_eq!(history.record_changed_from_since(generation), Some(0));
 
-        for _ in 0..DESCRIPTOR_CHANGE_LOG_CAPACITY {
-            history.require_descriptor_resave_from(0);
+        for _ in 0..RECORD_CHANGE_LOG_CAPACITY {
+            history.require_record_resave_from(0);
         }
-        assert_eq!(history.descriptor_changed_from_since(generation), None);
+        assert_eq!(history.record_changed_from_since(generation), None);
     }
 
     #[test]
@@ -3463,9 +3126,9 @@ mod tests {
     }
 
     #[test]
-    fn stored_descriptor_metadata_does_not_hydrate_block() {
+    fn stored_block_metadata_does_not_hydrate_block() {
         let record = TranscriptBlockRecord {
-            descriptor: TranscriptBlockDescriptor::ToolCall {
+            block: Block::ToolCall {
                 call_id: "call-1".into(),
                 name: "read_file".into(),
                 summary: "read".into(),
@@ -3475,7 +3138,7 @@ mod tests {
             origin: Some(BlockOrigin::History(0)),
             tool_state: None,
         };
-        let history = BlockHistory::from_descriptor_records(vec![record]);
+        let history = BlockHistory::from_block_records(vec![record]);
         let id = history.order[0];
 
         assert!(!history.is_materialized(id));
@@ -3516,7 +3179,7 @@ mod tests {
             preview_output: None,
         };
         let record = TranscriptBlockRecord {
-            descriptor: TranscriptBlockDescriptor::ToolCall {
+            block: Block::ToolCall {
                 call_id: "call-1".into(),
                 name: "bash".into(),
                 summary: "run".into(),
@@ -3526,14 +3189,16 @@ mod tests {
             origin: Some(BlockOrigin::History(1)),
             tool_state: Some(("call-1".into(), state.clone())),
         };
-        let mut history = BlockHistory::from_descriptor_records(vec![record.clone()]);
+        let mut history = BlockHistory::from_block_records(vec![record.clone()]);
+        assert_eq!(history.block_metadata_retained_bytes(), 0);
         let id = history.order[0];
         let stored = history.stored_ref(id).cloned().expect("stored ref");
         let expected_weight =
-            block_retained_bytes(&record.descriptor.to_block()) + tool_state_retained_bytes(&state);
+            block_retained_bytes(&record.block) + tool_state_retained_bytes(&state);
 
         assert!(history.install_hydrated_record(id, stored, record));
         assert!(history.is_hydrated(id));
+        assert_eq!(history.block_metadata_retained_bytes(), 0);
         assert_eq!(history.hydrated_block_count(), 1);
         assert_eq!(history.hydrated_blocks().count(), 1);
         assert_eq!(history.hydrated_retained_bytes(), expected_weight);
@@ -3553,6 +3218,7 @@ mod tests {
 
         assert_eq!(history.evict_hydrated(id), expected_weight);
         assert!(!history.is_materialized(id));
+        assert_eq!(history.block_metadata_retained_bytes(), 0);
         assert_eq!(history.hydrated_block_count(), 0);
         assert_eq!(history.hydrated_blocks().count(), 0);
         assert_eq!(history.hydrated_retained_bytes(), 0);
@@ -3564,14 +3230,14 @@ mod tests {
     #[test]
     fn state_specific_eviction_never_removes_other_entry_states() {
         let record = TranscriptBlockRecord {
-            descriptor: TranscriptBlockDescriptor::Text {
+            block: Block::Text {
                 content: "stored".into(),
             },
             content_hash: 0,
             origin: None,
             tool_state: None,
         };
-        let mut stored_history = BlockHistory::from_descriptor_records(vec![record.clone()]);
+        let mut stored_history = BlockHistory::from_block_records(vec![record.clone()]);
         let stored_id = stored_history.order[0];
         let stored = stored_history
             .stored_ref(stored_id)
@@ -3603,16 +3269,16 @@ mod tests {
     }
 
     #[test]
-    fn hydrated_mutation_promotes_to_live_and_marks_descriptor_dirty() {
+    fn hydrated_mutation_promotes_to_live_and_marks_block_dirty() {
         let record = TranscriptBlockRecord {
-            descriptor: TranscriptBlockDescriptor::Text {
+            block: Block::Text {
                 content: "before".into(),
             },
             content_hash: 0,
             origin: Some(BlockOrigin::History(0)),
             tool_state: None,
         };
-        let mut history = BlockHistory::from_descriptor_records(vec![record.clone()]);
+        let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         let id = history.order[0];
         let stored = history.stored_ref(id).cloned().expect("stored ref");
         assert!(history.install_hydrated_record(id, stored, record));
@@ -3627,7 +3293,7 @@ mod tests {
         assert!(history.is_live(id));
         assert_eq!(history.hydrated_block_count(), 0);
         assert_eq!(history.hydrated_retained_bytes(), 0);
-        assert_eq!(history.descriptor_dirty_from(), Some(0));
+        assert_eq!(history.record_dirty_from(), Some(0));
         assert!(matches!(history.block(id), Some(Block::Text { content }) if content == "after"));
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(0)));
     }
@@ -3646,7 +3312,7 @@ mod tests {
             preview_output: None,
         };
         let record = TranscriptBlockRecord {
-            descriptor: TranscriptBlockDescriptor::ToolCall {
+            block: Block::ToolCall {
                 call_id: "call-1".into(),
                 name: "bash".into(),
                 summary: "run".into(),
@@ -3656,7 +3322,7 @@ mod tests {
             origin: Some(BlockOrigin::History(0)),
             tool_state: Some(("call-1".into(), state)),
         };
-        let mut history = BlockHistory::from_descriptor_records(vec![record.clone()]);
+        let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         let id = history.order[0];
         let stored = history.stored_ref(id).cloned().expect("stored ref");
         assert!(history.install_hydrated_record(id, stored, record));
@@ -3668,7 +3334,7 @@ mod tests {
         assert!(history.is_live(id));
         assert_eq!(history.hydrated_block_count(), 0);
         assert_eq!(history.hydrated_retained_bytes(), 0);
-        assert_eq!(history.descriptor_dirty_from(), Some(0));
+        assert_eq!(history.record_dirty_from(), Some(0));
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(0)));
         assert_eq!(
             history
@@ -3682,7 +3348,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_records_skip_transient_tool_drafts() {
+    fn block_records_skip_transient_tool_drafts() {
         let mut history = BlockHistory::new();
         history.push(Block::Text {
             content: "before".into(),
@@ -3700,19 +3366,18 @@ mod tests {
             content: "after".into(),
         });
 
-        let records = history.descriptor_records();
+        let records = history.block_records();
 
         assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| !matches!(
-            record.descriptor,
-            TranscriptBlockDescriptor::ToolDraft { .. }
-        )));
-        assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("before"));
-        assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("after"));
+        assert!(records
+            .iter()
+            .all(|record| !matches!(record.block, Block::ToolDraft { .. })));
+        assert_eq!(records[0].block.raw_text().as_deref(), Some("before"));
+        assert_eq!(records[1].block.raw_text().as_deref(), Some("after"));
     }
 
     #[test]
-    fn descriptor_records_skip_compaction_previews() {
+    fn block_records_skip_compaction_previews() {
         let mut history = BlockHistory::new();
         history.push(Block::Text {
             content: "before".into(),
@@ -3724,25 +3389,24 @@ mod tests {
             content: "after".into(),
         });
 
-        let records = history.descriptor_records();
+        let records = history.block_records();
 
         assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| !matches!(
-            record.descriptor,
-            TranscriptBlockDescriptor::CompactionPreview { .. }
-        )));
-        assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("before"));
-        assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("after"));
+        assert!(records
+            .iter()
+            .all(|record| !matches!(record.block, Block::CompactionPreview { .. })));
+        assert_eq!(records[0].block.raw_text().as_deref(), Some("before"));
+        assert_eq!(records[1].block.raw_text().as_deref(), Some("after"));
     }
 
     #[test]
-    fn descriptor_record_index_counts_only_persisted_prefix() {
+    fn block_record_index_counts_only_persisted_prefix() {
         let mut history = BlockHistory::new();
         history.push(Block::Text {
             content: "before".into(),
         });
-        let draft = history.push_descriptor_with_origin(
-            TranscriptBlockDescriptor::ToolDraft {
+        let draft = history.push_hydrated_block_with_origin(
+            Block::ToolDraft {
                 stream_id: "stream-1".into(),
                 call_id: Some("call-1".into()),
                 name: "bash".into(),
@@ -3763,17 +3427,17 @@ mod tests {
             content: "tail".into(),
         });
 
-        assert_eq!(history.descriptor_record_index_for_order_index(0), 0);
-        assert_eq!(history.descriptor_record_index_for_order_index(1), 1);
-        assert_eq!(history.descriptor_record_index_for_order_index(2), 1);
-        assert_eq!(history.descriptor_record_index_for_order_index(3), 1);
-        assert_eq!(history.descriptor_record_index_for_order_index(4), 2);
-        assert_eq!(history.descriptor_record_index_for_order_index(5), 3);
+        assert_eq!(history.record_index_for_order_index(0), 0);
+        assert_eq!(history.record_index_for_order_index(1), 1);
+        assert_eq!(history.record_index_for_order_index(2), 1);
+        assert_eq!(history.record_index_for_order_index(3), 1);
+        assert_eq!(history.record_index_for_order_index(4), 2);
+        assert_eq!(history.record_index_for_order_index(5), 3);
 
-        let records = history.descriptor_records_from(3);
+        let records = history.block_records_from(3);
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("after"));
-        assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("tail"));
+        assert_eq!(records[0].block.raw_text().as_deref(), Some("after"));
+        assert_eq!(records[1].block.raw_text().as_deref(), Some("tail"));
 
         history.rewrite(
             draft,
@@ -3781,17 +3445,17 @@ mod tests {
                 content: "finished tool".into(),
             },
         );
-        assert_eq!(history.descriptor_record_index_for_order_index(5), 4);
+        assert_eq!(history.record_index_for_order_index(5), 4);
         history.remove_block(draft);
-        assert_eq!(history.descriptor_record_index_for_order_index(4), 3);
+        assert_eq!(history.record_index_for_order_index(4), 3);
         history.truncate(3);
-        assert_eq!(history.descriptor_record_index_for_order_index(3), 2);
+        assert_eq!(history.record_index_for_order_index(3), 2);
     }
 
     #[test]
-    fn descriptor_dirty_range_is_owned_by_block_history_mutations() {
+    fn block_dirty_range_is_owned_by_block_history_mutations() {
         let mut history = BlockHistory::new();
-        assert_eq!(history.descriptor_dirty_from(), None);
+        assert_eq!(history.record_dirty_from(), None);
 
         let first = history.push(Block::Text {
             content: "first".into(),
@@ -3799,8 +3463,8 @@ mod tests {
         history.push(Block::Text {
             content: "second".into(),
         });
-        assert_eq!(history.descriptor_dirty_from(), Some(0));
-        history.clear_descriptor_dirty();
+        assert_eq!(history.record_dirty_from(), Some(0));
+        history.clear_record_dirty();
 
         history.rewrite(
             first,
@@ -3808,14 +3472,14 @@ mod tests {
                 content: "changed".into(),
             },
         );
-        assert_eq!(history.descriptor_dirty_from(), Some(0));
-        history.clear_descriptor_dirty();
+        assert_eq!(history.record_dirty_from(), Some(0));
+        history.clear_record_dirty();
 
         history.truncate(1);
-        assert_eq!(history.descriptor_dirty_from(), Some(1));
+        assert_eq!(history.record_dirty_from(), Some(1));
 
-        let restored = BlockHistory::from_descriptor_records(history.descriptor_records());
-        assert_eq!(restored.descriptor_dirty_from(), None);
+        let restored = BlockHistory::from_block_records(history.block_records());
+        assert_eq!(restored.record_dirty_from(), None);
     }
 
     #[test]
@@ -3905,20 +3569,6 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_hash_matches_materialized_block_hash() {
-        let descriptor = TranscriptBlockDescriptor::ToolCall {
-            call_id: "call-1".into(),
-            name: "read_file".into(),
-            summary: "read".into(),
-            args: HashMap::from([("path".into(), serde_json::json!("/tmp/a"))]),
-        };
-        assert_eq!(
-            descriptor.content_hash(),
-            descriptor.to_block().content_hash()
-        );
-    }
-
-    #[test]
     fn tool_display_hash_includes_preview_output() {
         let a = pending_state();
         let mut b = pending_state();
@@ -4003,10 +3653,10 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_history_normalizes_thinking_title_spacing() {
+    fn hydrated_block_history_normalizes_thinking_title_spacing() {
         let mut history = BlockHistory::new();
-        let id = history.push_descriptor_with_origin(
-            TranscriptBlockDescriptor::Thinking {
+        let id = history.push_hydrated_block_with_origin(
+            Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
                 kind: protocol::ReasoningKind::Raw,
@@ -4059,6 +3709,45 @@ mod tests {
     fn content_hash_returns_zero_for_unknown_id() {
         let history = BlockHistory::new();
         assert_eq!(history.content_hash(BlockId(9999)), 0);
+        assert_eq!(history.status(BlockId(9999)), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "status can only change on a live transcript block")]
+    fn set_status_rejects_stored_blocks() {
+        let record = TranscriptBlockRecord {
+            block: Block::Text {
+                content: "persisted".into(),
+            },
+            content_hash: 0,
+            origin: None,
+            tool_state: None,
+        };
+        let mut history = BlockHistory::from_block_records(vec![record]);
+        let id = history.order[0];
+        assert_eq!(history.status(id), Some(Status::Done));
+        history.set_status(id, Status::Streaming);
+    }
+
+    #[test]
+    #[should_panic(expected = "status can only change on a live transcript block")]
+    fn set_status_rejects_hydrated_blocks() {
+        let mut history = BlockHistory::new();
+        let id = history.push_hydrated_block_with_origin(
+            Block::Text {
+                content: "hydrated".into(),
+            },
+            BlockOrigin::History(0),
+        );
+        assert_eq!(history.status(id), Some(Status::Done));
+        history.set_status(id, Status::Streaming);
+    }
+
+    #[test]
+    #[should_panic(expected = "status can only change on a live transcript block")]
+    fn set_status_rejects_missing_blocks() {
+        let mut history = BlockHistory::new();
+        history.set_status(BlockId(9999), Status::Streaming);
     }
 
     #[test]
@@ -4068,9 +3757,9 @@ mod tests {
             content: "x".into(),
         });
         history.set_status(id, Status::Streaming);
-        assert_eq!(history.status(id), Status::Streaming);
+        assert_eq!(history.status(id), Some(Status::Streaming));
         history.set_status(id, Status::Done);
-        assert_eq!(history.status(id), Status::Done);
+        assert_eq!(history.status(id), Some(Status::Done));
         assert!(history.finished_blocks.contains(&id));
     }
 
@@ -4082,6 +3771,34 @@ mod tests {
         });
         history.set_status(id, Status::Done);
         assert!(!history.finished_blocks.contains(&id));
+    }
+
+    #[test]
+    fn metadata_updates_preserve_other_block_metadata() {
+        let mut history = BlockHistory::new();
+        let id = history.push_with_origin(
+            Block::Text {
+                content: "before".into(),
+            },
+            BlockOrigin::History(7),
+        );
+        let original_hash = history.content_hash(id);
+
+        history.set_status(id, Status::Streaming);
+
+        assert_eq!(history.content_hash(id), original_hash);
+        assert_eq!(history.block_origin(id), Some(BlockOrigin::History(7)));
+
+        history.rewrite(
+            id,
+            Block::Text {
+                content: "after".into(),
+            },
+        );
+
+        assert_ne!(history.content_hash(id), original_hash);
+        assert_eq!(history.status(id), Some(Status::Streaming));
+        assert_eq!(history.block_origin(id), Some(BlockOrigin::History(7)));
     }
 
     #[test]
@@ -4127,7 +3844,7 @@ mod tests {
         history.clear();
         assert!(history.is_empty());
         assert_eq!(history.next_id, 0);
-        assert!(history.statuses.is_empty());
+        assert_eq!(history.block_metadata_retained_bytes(), 0);
         assert!(history.tool_states.is_empty());
         assert_ne!(history.generation(), g);
     }
@@ -4292,34 +4009,34 @@ mod tests {
     }
 
     #[test]
-    fn block_gap_uses_descriptors_without_materializing_blocks() {
-        let descriptors = vec![
-            TranscriptBlockDescriptor::Text {
+    fn block_gap_uses_blocks_without_materializing_blocks() {
+        let blocks = vec![
+            Block::Text {
                 content: "# heading".into(),
             },
-            TranscriptBlockDescriptor::CodeLine {
+            Block::CodeLine {
                 content: "let x = 1;".into(),
                 lang: "rust".into(),
             },
-            TranscriptBlockDescriptor::Thinking {
+            Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
                 kind: protocol::ReasoningKind::Raw,
                 content: "plain thought".into(),
             },
-            TranscriptBlockDescriptor::Thinking {
+            Block::Thinking {
                 title: Some("New section".into()),
                 summary_titles: vec!["New section".into()],
                 kind: protocol::ReasoningKind::Summary,
                 content: "body".into(),
             },
         ];
-        let history = BlockHistory::from_descriptor_records(
-            descriptors
+        let history = BlockHistory::from_block_records(
+            blocks
                 .into_iter()
                 .enumerate()
-                .map(|(index, descriptor)| TranscriptBlockRecord {
-                    descriptor,
+                .map(|(index, block)| TranscriptBlockRecord {
+                    block,
                     content_hash: 0,
                     origin: Some(BlockOrigin::History(index)),
                     tool_state: None,

@@ -90,19 +90,12 @@ fn replay_smelt(text: &str, path: &Path, trace: bool) {
             eprintln!("--- op{i} {op:?} ---");
             smelt_fuzz::apply(&mut app, op);
             for wid in [tui::app::PROMPT_WIN, tui::app::TRANSCRIPT_WIN] {
-                let win = match app.app.ui.win(wid) {
-                    Some(w) => w,
-                    None => continue,
+                let Some(win) = app.window_snapshot(wid) else {
+                    continue;
                 };
-                let buf = app.app.ui.buf(win.buf);
-                let slen = buf.map(|b| b.source().len()).unwrap_or(0);
                 eprintln!(
                     "  {:?} cpos={} src.len={} vim_mode={:?} sel_anchor={:?}",
-                    wid,
-                    win.cpos(),
-                    slen,
-                    win.vim_mode(),
-                    win.selection_anchor()
+                    wid, win.cpos, win.source_len, win.vim_mode, win.selection_anchor
                 );
             }
             if app.quit_requested() {

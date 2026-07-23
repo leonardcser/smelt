@@ -188,7 +188,10 @@ struct LuaLaunchInputs {
 
 #[derive(Clone)]
 struct LuaLoadPaths {
+    home: PathBuf,
     config_dir: PathBuf,
+    state_root: PathBuf,
+    cache_root: PathBuf,
     runtime_override: Option<PathBuf>,
     development_runtime: Option<PathBuf>,
     project_cwd: Option<PathBuf>,
@@ -196,23 +199,46 @@ struct LuaLoadPaths {
 }
 
 impl LuaLoadPaths {
+    fn development_runtime() -> Option<PathBuf> {
+        if !cfg!(debug_assertions) {
+            return None;
+        }
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("runtime")
+            .join("lua");
+        path.is_dir().then_some(path)
+    }
+
     fn from_process() -> Self {
-        let development_runtime = if cfg!(debug_assertions) {
-            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("..")
-                .join("runtime")
-                .join("lua");
-            path.is_dir().then_some(path)
-        } else {
-            None
-        };
         Self {
+            home: engine::paths::home_dir(),
             config_dir: crate::config::config_dir(),
+            state_root: crate::config::state_dir(),
+            cache_root: engine::paths::cache_dir(),
             runtime_override: std::env::var_os("SMELT_RUNTIME_DIR").map(PathBuf::from),
-            development_runtime,
+            development_runtime: Self::development_runtime(),
             project_cwd: std::env::current_dir().ok(),
             data_runtime: engine::data_dir().join("runtime"),
+        }
+    }
+
+    fn from_runtime(
+        env: &engine::env::RuntimeEnv,
+        config_dir: Option<PathBuf>,
+        runtime_override: Option<PathBuf>,
+        project_cwd: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            home: env.home().clone(),
+            config_dir: config_dir.unwrap_or_else(|| env.xdg_config().join("smelt")),
+            state_root: env.xdg_state().join("smelt"),
+            cache_root: env.xdg_cache().join("smelt"),
+            runtime_override,
+            development_runtime: Self::development_runtime(),
+            project_cwd: project_cwd.or_else(|| Some(env.cwd())),
+            data_runtime: env.xdg_data().join("smelt").join("runtime"),
         }
     }
 
@@ -260,6 +286,24 @@ pub struct LuaRuntime {
     candidate_commits: Vec<mlua::RegistryKey>,
 }
 
+/// Owned handle for executing callbacks from an existing Lua generation.
+///
+/// It shares the Lua VM and synchronized registries, but carries no candidate
+/// commit handles. Frontends create it before mutably lending their host, which
+/// keeps callback execution disjoint from the runtime controller stored inside
+/// that host.
+pub struct LuaExecution {
+    runtime: LuaRuntime,
+}
+
+impl std::ops::Deref for LuaExecution {
+    type Target = LuaRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
 impl Default for LuaRuntime {
     fn default() -> Self {
         Self::new()
@@ -279,17 +323,37 @@ impl LuaRuntime {
         Self::with_shared_and_paths(shared, LuaLoadPaths::from_process(), true)
     }
 
+    pub fn with_shared_for_runtime(
+        shared: Arc<LuaShared>,
+        env: &engine::env::RuntimeEnv,
+        config_dir: Option<PathBuf>,
+        runtime_override: Option<PathBuf>,
+        project_cwd: Option<PathBuf>,
+    ) -> Self {
+        Self::with_shared_and_paths(
+            shared,
+            LuaLoadPaths::from_runtime(env, config_dir, runtime_override, project_cwd),
+            true,
+        )
+    }
+
     fn with_shared_and_paths(
         shared: Arc<LuaShared>,
         load_paths: LuaLoadPaths,
         load_bootstrap: bool,
     ) -> Self {
+        shared.set_runtime_home(&load_paths.home);
         shared.set_project_cwd(load_paths.project_cwd.as_deref());
         let lua = Lua::new();
         lua.set_app_data(shared.lua_handle_ledger());
-        let load_error = Self::register_api(&lua, &shared)
-            .err()
-            .map(|error| error.to_string());
+        let load_error = Self::register_api(
+            &lua,
+            &shared,
+            &load_paths.state_root,
+            &load_paths.cache_root,
+        )
+        .err()
+        .map(|error| error.to_string());
         let load_failure_location = load_error.as_ref().map(|_| LuaLoadFailureLocation {
             phase: "api_registration",
             path: None,
@@ -337,6 +401,25 @@ impl LuaRuntime {
         Self::with_shared_and_paths(shared, self.load_paths.for_target_cwd(target_cwd), false)
     }
 
+    /// Clone the VM-facing portion needed for synchronous callback execution.
+    pub fn execution(&self) -> LuaExecution {
+        LuaExecution {
+            runtime: Self {
+                lua: self.lua.clone(),
+                load_error: self.load_error.clone(),
+                load_failure_location: self.load_failure_location.clone(),
+                shared: Arc::clone(&self.shared),
+                init_lua_path: self.init_lua_path.clone(),
+                bootstrap_mode: self.bootstrap_mode,
+                load_paths: self.load_paths.clone(),
+                launch_inputs: self.launch_inputs.clone(),
+                load_warnings: self.load_warnings.clone(),
+                loaded_files: Arc::clone(&self.loaded_files),
+                candidate_commits: Vec::new(),
+            },
+        }
+    }
+
     pub fn load_error(&self) -> Option<&str> {
         self.load_error.as_deref()
     }
@@ -361,20 +444,6 @@ impl LuaRuntime {
     pub fn load_full_bootstrap(&mut self) {
         self.bootstrap_mode = BootstrapMode::Full;
         self.load_bootstrap();
-    }
-
-    #[doc(hidden)]
-    pub fn set_load_paths_for_harness(
-        &mut self,
-        config_dir: PathBuf,
-        runtime_override: Option<PathBuf>,
-        target_cwd: Option<PathBuf>,
-    ) {
-        self.load_paths.config_dir = config_dir;
-        self.load_paths.runtime_override = runtime_override;
-        self.load_paths.project_cwd = target_cwd;
-        self.shared
-            .set_project_cwd(self.load_paths.project_cwd.as_deref());
     }
 
     fn current_launch_inputs(&self) -> LuaLaunchInputs {
@@ -436,6 +505,22 @@ impl LuaRuntime {
 
     pub fn configured_init_lua_path(&self) -> Option<&std::path::Path> {
         self.init_lua_path.as_deref()
+    }
+
+    pub fn state_root(&self) -> &std::path::Path {
+        &self.load_paths.state_root
+    }
+
+    pub fn cache_root(&self) -> &std::path::Path {
+        &self.load_paths.cache_root
+    }
+
+    pub fn project_trust_state(&self, cwd: &std::path::Path) -> crate::trust::TrustState {
+        crate::trust::TrustStore::new(self.load_paths.state_root.clone()).project_trust_state(cwd)
+    }
+
+    pub fn mark_project_trusted(&self, cwd: &std::path::Path) -> Result<String, String> {
+        crate::trust::TrustStore::new(self.load_paths.state_root.clone()).mark_trusted(cwd)
     }
 
     pub fn loaded_config_files(&self) -> Vec<PathBuf> {
@@ -567,7 +652,7 @@ impl LuaRuntime {
         if self.load_error.is_some() {
             return;
         }
-        let state = crate::trust::project_trust_state(cwd);
+        let state = self.project_trust_state(cwd);
         if !matches!(state, crate::trust::TrustState::Trusted { .. }) {
             return;
         }
@@ -999,7 +1084,6 @@ impl LuaRuntime {
             "smelt.notebook.apply_edit_async",
             "smelt.os.open_url",
             "smelt.os.open_url_if_available",
-            "smelt.os.set_cwd",
             "smelt.os.setenv",
             "smelt.os.unsetenv",
             "smelt.permissions.grant_session",
@@ -1250,7 +1334,7 @@ impl LuaRuntime {
 
     /// Load `.smelt/init.lua` and `.smelt/plugins/*.lua`, gated by trust. Returns the trust state.
     pub fn load_project_config(&mut self, cwd: &std::path::Path) -> crate::trust::TrustState {
-        let state = crate::trust::project_trust_state(cwd);
+        let state = self.project_trust_state(cwd);
         if !matches!(state, crate::trust::TrustState::Trusted { .. }) {
             return state;
         }
@@ -1605,8 +1689,11 @@ impl LuaRuntime {
     /// Lua surface isn't bound (e.g. an early-boot failure before
     /// `register_api` has run).
     pub fn record_error(&self, msg: String) {
-        let routed = self
-            .lua
+        Self::record_error_with(&self.lua, &self.shared, msg);
+    }
+
+    pub fn record_error_with(lua: &mlua::Lua, shared: &LuaShared, msg: String) {
+        let routed = lua
             .globals()
             .get::<mlua::Table>("smelt")
             .and_then(|s| s.get::<mlua::Table>("notify"))
@@ -1616,7 +1703,7 @@ impl LuaRuntime {
         if routed {
             return;
         }
-        if let Ok(mut messages) = self.shared.messages.lock() {
+        if let Ok(mut messages) = shared.messages.lock() {
             messages.append(crate::messages::MessageKind::Error, "lua".to_string(), msg);
         }
     }
@@ -1650,18 +1737,40 @@ impl LuaRuntime {
     where
         F: Fn(&mlua::Lua) -> mlua::Result<mlua::Value>,
     {
-        let hooks = self.shared.hooks.lifecycle.drain_for(&self.lua, event);
+        let hooks = self.take_lifecycle_hooks(event);
+        Self::invoke_lifecycle_hooks(&self.lua, event, hooks, build_ctx)
+    }
+
+    /// Remove and resolve all callbacks registered for one lifecycle event.
+    ///
+    /// Frontends can prepare this batch before lending their host, then invoke
+    /// it from a scoped Lua entry without retaining a borrow of the runtime
+    /// stored in that host.
+    pub fn take_lifecycle_hooks(&self, event: &str) -> Vec<mlua::Function> {
+        self.shared.hooks.lifecycle.drain_for(&self.lua, event)
+    }
+
+    /// Invoke a prepared lifecycle batch in registration order.
+    pub fn invoke_lifecycle_hooks<F>(
+        lua: &mlua::Lua,
+        event: &str,
+        hooks: Vec<mlua::Function>,
+        build_ctx: F,
+    ) -> Vec<String>
+    where
+        F: Fn(&mlua::Lua) -> mlua::Result<mlua::Value>,
+    {
         let mut errors = Vec::with_capacity(hooks.len());
-        for f in hooks {
-            let ctx = match build_ctx(&self.lua) {
-                Ok(v) => v,
-                Err(e) => {
-                    errors.push(format!("lifecycle.{event}: ctx build: {e}"));
+        for function in hooks {
+            let ctx = match build_ctx(lua) {
+                Ok(value) => value,
+                Err(error) => {
+                    errors.push(format!("lifecycle.{event}: ctx build: {error}"));
                     continue;
                 }
             };
-            if let Err(e) = f.call::<()>(ctx) {
-                errors.push(format!("lifecycle.{event}: {e}"));
+            if let Err(error) = function.call::<()>(ctx) {
+                errors.push(format!("lifecycle.{event}: {error}"));
             }
         }
         errors
@@ -2045,56 +2154,63 @@ impl LuaRuntime {
     }
 
     /// Run a tool's `preview(args)` callback and return the composed `BlockLayout` tree.
-    /// `None` if the tool registered no preview, the call failed, or the return value
-    /// wasn't a `smelt.layout` userdata.
+    /// `None` means the tool registered no preview or returned nil.
     pub fn render_tool_preview(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
     ) -> Option<crate::content::block_layout::BlockLayout> {
-        let preview_fn = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let h = handlers.get(tool_name)?;
-            let rh = h.preview.as_ref()?;
-            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
-        };
-
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool preview: build args: {e}"));
-                return None;
-            }
-        };
-
-        let _perf = smelt_perf::perf::begin("lua:tool");
-        let result: mlua::Value = match preview_fn.call(args_table) {
-            Ok(v) => v,
-            Err(e) => {
-                self.record_error(format!("tool preview `{tool_name}`: {e}"));
-                return None;
-            }
-        };
-
-        match result {
-            mlua::Value::Nil => None,
-            mlua::Value::UserData(ud) => {
-                match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
-                    Ok(layout) => Some(layout.0.clone()),
-                    Err(e) => {
-                        self.record_error(format!(
-                            "tool preview `{tool_name}`: expected smelt.layout value: {e}"
-                        ));
-                        None
-                    }
-                }
-            }
-            _ => {
-                self.record_error(format!(
-                    "tool preview `{tool_name}`: expected smelt.layout value or nil"
-                ));
+        match Self::call_tool_preview(&self.lua, &self.shared, tool_name, args) {
+            Ok(layout) => layout,
+            Err(error) => {
+                self.record_error(error);
                 None
             }
+        }
+    }
+
+    /// Invoke a preview callback using explicit Lua state rather than ambient host access.
+    /// UI bindings use this after releasing their mutable app borrow so preview code may
+    /// call host APIs safely.
+    pub fn call_tool_preview(
+        lua: &mlua::Lua,
+        shared: &LuaShared,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> Result<Option<crate::content::block_layout::BlockLayout>, String> {
+        let preview_fn = {
+            let handlers = shared
+                .tools
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(handler) = handlers.get(tool_name) else {
+                return Ok(None);
+            };
+            let Some(preview) = handler.preview.as_ref() else {
+                return Ok(None);
+            };
+            lua.registry_value::<mlua::Function>(&preview.key)
+                .map_err(|error| format!("tool preview `{tool_name}`: {error}"))?
+        };
+        let args_table = args_to_lua_table(lua, args)
+            .map_err(|error| format!("tool preview: build args: {error}"))?;
+
+        let _perf = smelt_perf::perf::begin("lua:tool");
+        let result: mlua::Value = preview_fn
+            .call(args_table)
+            .map_err(|error| format!("tool preview `{tool_name}`: {error}"))?;
+
+        match result {
+            mlua::Value::Nil => Ok(None),
+            mlua::Value::UserData(userdata) => userdata
+                .borrow::<crate::lua::api::layout::LuaBlockLayout>()
+                .map(|layout| Some(layout.0.clone()))
+                .map_err(|error| {
+                    format!("tool preview `{tool_name}`: expected smelt.layout value: {error}")
+                }),
+            _ => Err(format!(
+                "tool preview `{tool_name}`: expected smelt.layout value or nil"
+            )),
         }
     }
 
@@ -2826,11 +2942,23 @@ impl LuaRuntime {
         }
     }
 
-    fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    fn register_api(
+        lua: &Lua,
+        shared: &Arc<LuaShared>,
+        state_root: &std::path::Path,
+        cache_root: &std::path::Path,
+    ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
-        crate::lua::api::register_host_api(lua, &smelt, &smelt_keymap, shared)?;
+        crate::lua::api::register_host_api(
+            lua,
+            &smelt,
+            &smelt_keymap,
+            shared,
+            state_root,
+            cache_root,
+        )?;
 
         lua.globals().set("smelt", smelt)?;
         lua.globals().set("smelt_keymap", smelt_keymap)?;
@@ -3586,9 +3714,9 @@ fn load_bootstrap_group_with_roots(
 }
 
 /// Extract the embedded `runtime/lua/smelt/` tree to
-/// `<XDG_DATA_HOME>/smelt/builtins/lua/smelt/` so the agent (and humans)
-/// can inspect the built-in source as worked examples. Versioned by
-/// `CARGO_PKG_VERSION`: re-extracts on smelt upgrade, skips otherwise.
+/// `<data_dir>/builtins/lua/smelt/` so the agent (and humans) can inspect
+/// the built-in source as worked examples. Versioned by `CARGO_PKG_VERSION`:
+/// re-extracts on smelt upgrade, skips otherwise.
 ///
 /// Best-effort. Returns the target directory on success, or the I/O
 /// error on failure - callers should log and continue, since the
@@ -3597,8 +3725,8 @@ fn load_bootstrap_group_with_roots(
 /// This is intentionally separate from the user-overlay path
 /// (`<XDG_DATA_HOME>/smelt/runtime/`) so user overrides don't get
 /// clobbered on upgrade.
-pub fn ensure_builtins_extracted() -> std::io::Result<PathBuf> {
-    let target = engine::data_dir().join("builtins");
+pub fn ensure_builtins_extracted(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    let target = data_dir.join("builtins");
     let version_file = target.join(".version");
     let expected = env!("CARGO_PKG_VERSION");
     if let Ok(found) = std::fs::read_to_string(&version_file) {

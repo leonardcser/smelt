@@ -3,34 +3,6 @@
 Compatibility code we intend to remove while Smelt is alpha. Mark matching code
 with `COMPAT(<id>)`.
 
-## session-derived-sidecar-exports
-
-- Remove after: all supported smelt versions and bundled Lua/UI consumers read
-  session lists from `catalog.db` and session content/search from canonical
-  SQLite, at least two alpha releases have shipped with revision-stamped exports
-  deprecated, and no supported external import/export contract requires
-  `meta.json` or `content.txt`
-- Why: keep revision-stamped `meta.json` and `content.txt` as best-effort exports
-  for alpha-era external tooling while canonical state lives only in
-  `session.db`
-- Code:
-  - `crates/core/src/session_exports.rs`: bounded process exporter, revision-pinned
-    format generation, cross-process locking, and atomic streaming writes
-  - `crates/core/src/session.rs`: offline-save scheduling, explicit maintenance
-    export, read-only revision diagnostics, and stale temporary-file cleanup
-  - `crates/tui/src/persist.rs`: post-commit compatibility export scheduling
-  - `crates/tui/src/app/history.rs`: post-publication fork export scheduling
-  - `src/main.rs`: explicit `session rebuild-derived` export command
-  - `crates/store/src/db.rs` and `crates/store/src/history.rs`: revision-pinned
-    snapshot and cancellable row streaming
-- Tests:
-  - compatibility exports are revision-stamped and rebuilt from canonical SQLite
-  - crash probes before and after atomic rename leave an old or new complete file,
-    never a partial target
-  - missing, malformed, stale, permission-denied, symlinked, cancelled, and slow
-    exports never affect canonical reads, list, search, resume, model dispatch, or
-    bounded shutdown
-
 ## legacy-attachment-blobs
 
 - Remove after: sessions written before attachment objects no longer need to be
@@ -43,20 +15,20 @@ with `COMPAT(<id>)`.
 - Tests:
   - `legacy_attachment_blobs_remain_readable_and_missing_blobs_are_explicit`
 
-## transcript-descriptor-history-link-mismatch
+## transcript-record-history-link-mismatch
 
 - Remove after: sessions saved by early sparse transcript append builds no longer
   need to resume in supported versions
-- Why: detach transcript descriptor `history_idx` / `origin_json` values that
-  point at a missing or wrong-kind history row, such as a user descriptor linked
-  to a context note after sparse resume
+- Why: detach transcript record `history_idx` / `origin_json` values that point at
+  a missing or wrong-kind history row, such as a user record linked to a context
+  note after sparse resume
 - Code:
   - `crates/store/src/access.rs`: `SessionMaintenance` exposes the repair only
     while holding exclusive session ownership
-  - `crates/store/src/history.rs`: repair scans linked descriptor rows and
-    clears only mismatched history links, leaving descriptor content intact
+  - `crates/store/src/history.rs`: repair scans linked transcript records and
+    clears only mismatched history links, leaving block content intact
 - Tests:
-  - `repair_mismatched_transcript_descriptor_history_links_detaches_bad_links`
+  - `maintenance_repair_preserves_semantic_links_and_detaches_mismatches`
 
 ## session-checkpoint-live-index-past-history
 

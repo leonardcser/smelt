@@ -13,8 +13,7 @@ impl TuiApp {
         resizable: bool,
     ) -> Result<(crate::smelt_edit::ContainerId, crate::smelt_edit::ModalId), String> {
         let mut leaves = Vec::new();
-        let (_, tree) =
-            crate::lua::api::overlay_layout::build_layout_tree(self, &layout, &mut leaves)?;
+        let (_, tree) = crate::lua::ui_ops::build_layout_tree(self, &layout, &mut leaves)?;
         if leaves.is_empty() {
             return Err("dialog requires at least one window leaf".into());
         }
@@ -68,8 +67,7 @@ impl TuiApp {
         // composer never observes dangling leaves.
         self.refresh_main_layout();
         for leaf in leaves {
-            self.placeholders.remove(&leaf);
-            self.placeholder_opts.remove(&leaf);
+            self.prompt.clear_placeholder(leaf);
             for callback in self.ui.win_close(leaf) {
                 self.lua.remove_callback(callback);
             }
@@ -136,7 +134,7 @@ impl TuiApp {
     }
 
     fn suspend_notification_for_dialog(&mut self) {
-        let Some(notification) = self.notification.take() else {
+        let Some(notification) = self.overlays.take_notification() else {
             return;
         };
         let now = self.core.clock.instant_now();
@@ -147,16 +145,17 @@ impl TuiApp {
             NotificationLifetime::Sticky => SuspendedNotificationLifetime::Sticky,
         };
         self.close_overlay_leaf(notification.win);
-        self.suspended_notification = Some(SuspendedNotification {
-            lifetime,
-            kind: notification.kind,
-            summary: notification.summary,
-            owner: notification.owner,
-        });
+        self.overlays
+            .install_suspended_notification(SuspendedNotification {
+                lifetime,
+                kind: notification.kind,
+                summary: notification.summary,
+                owner: notification.owner,
+            });
     }
 
     fn resume_notification_after_dialog(&mut self) {
-        let Some(notification) = self.suspended_notification.take() else {
+        let Some(notification) = self.overlays.take_suspended_notification() else {
             return;
         };
         let lifetime = match notification.lifetime {

@@ -135,12 +135,15 @@ impl StatusPublisher {
     }
 
     pub fn new() -> io::Result<Self> {
-        let pid = std::process::id();
-        let dir = status_dir();
+        Self::new_in(&runtime_root(), std::process::id())
+    }
+
+    pub fn new_in(runtime_root: &Path, pid: u32) -> io::Result<Self> {
+        let dir = status_dir_in(runtime_root);
         fs::create_dir_all(&dir)?;
         Ok(Self {
             pid,
-            path: status_path_for_pid(pid),
+            path: dir.join(format!("{pid}.json")),
             identity: process_identity(pid),
             last: None,
         })
@@ -288,7 +291,11 @@ pub fn status_path_for_pid(pid: u32) -> PathBuf {
 }
 
 pub fn status_dir() -> PathBuf {
-    runtime_root().join("smelt").join("status")
+    status_dir_in(&runtime_root())
+}
+
+fn status_dir_in(runtime_root: &Path) -> PathBuf {
+    runtime_root.join("smelt").join("status")
 }
 
 fn runtime_root() -> PathBuf {
@@ -414,27 +421,23 @@ fn unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn status_path_uses_xdg_runtime_dir() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        environment.set_var("XDG_RUNTIME_DIR", dir.path());
         assert_eq!(
             status_path_for_pid(7),
             dir.path().join("smelt/status/7.json")
         );
-        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
     fn publisher_writes_and_reads_own_status() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        environment.set_var("XDG_RUNTIME_DIR", dir.path());
         let mut publisher = StatusPublisher::new().unwrap();
         publisher
             .publish(StatusUpdate {
@@ -462,7 +465,6 @@ mod tests {
         }
         drop(publisher);
         assert!(!status_path_for_pid(std::process::id()).exists());
-        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
@@ -518,9 +520,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn read_rejects_status_for_reused_pid_identity() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        environment.set_var("XDG_RUNTIME_DIR", dir.path());
         let pid = std::process::id();
         let now_ms = unix_ms();
         write_status_atomic(
@@ -546,14 +548,13 @@ mod tests {
 
         let err = read_status_for_pid(pid).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
     fn read_all_removes_stale_status_files() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let environment = smelt_test_support::ProcessEnvironmentGuard::capture();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        environment.set_var("XDG_RUNTIME_DIR", dir.path());
         let pid = 424_242;
         let path = status_path_for_pid(pid);
         write_status_atomic(
@@ -579,6 +580,5 @@ mod tests {
 
         assert!(read_all_statuses().unwrap().is_empty());
         assert!(!path.exists());
-        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 }

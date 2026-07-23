@@ -15,7 +15,7 @@ use tui::app::test_harness::{TranscriptScrollProbeCommand, TranscriptScrollProbe
 
 #[derive(Arbitrary, Debug)]
 struct Input {
-    descriptors: u16,
+    records: u16,
     fixture: u8,
     width: u8,
     height: u8,
@@ -31,8 +31,8 @@ enum Op {
     DragAutoscroll { ticks: u8 },
     FinishDrag,
     Command { kind: u8, repeat: u8 },
-    Search { descriptor: u16 },
-    Reveal { descriptor: u16 },
+    Search { record: u16 },
+    Reveal { record: u16 },
     Scrollbar { row: u8 },
     Resize { width: u8, height: u8 },
     Append { variant: u8 },
@@ -47,16 +47,16 @@ fn run(input: Input) {
 
 fn run_with_app(input: Input) {
     let heavy_fixture = input.fixture.is_multiple_of(16);
-    let descriptor_count = if heavy_fixture {
-        256 + usize::from(input.descriptors % 512)
+    let record_count = if heavy_fixture {
+        256 + usize::from(input.records % 512)
     } else {
-        96 + usize::from(input.descriptors % 96)
+        96 + usize::from(input.records % 96)
     };
     let op_limit = if heavy_fixture { 128 } else { 48 };
     let width = u16::from(input.width % 96).saturating_add(40);
     let height = u16::from(input.height % 28).saturating_add(10);
     let mut app = TestApp::builder().with_vim(true).build();
-    app.install_sparse_transcript_scroll_fixture(descriptor_count, width, height);
+    app.install_sparse_transcript_scroll_fixture(record_count, width, height);
 
     for op in input.ops.into_iter().take(op_limit) {
         match op {
@@ -105,11 +105,11 @@ fn run_with_app(input: Input) {
                 }
                 continue;
             }
-            Op::Search { descriptor } => {
-                app.transcript_scroll_probe_search_record(usize::from(descriptor));
+            Op::Search { record } => {
+                app.transcript_scroll_probe_search_record(usize::from(record));
             }
-            Op::Reveal { descriptor } => {
-                app.transcript_scroll_probe_reveal_descriptor(usize::from(descriptor));
+            Op::Reveal { record } => {
+                app.transcript_scroll_probe_reveal_record(usize::from(record));
             }
             Op::Scrollbar { row } => app.transcript_scroll_probe_scrollbar_click(u16::from(row)),
             Op::Resize { width, height } => {

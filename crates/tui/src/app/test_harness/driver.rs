@@ -14,10 +14,6 @@ impl TestApp {
     {
         let (a0, b0) = smelt_perf::alloc::thread_snapshot();
         {
-            // Install the TLS app pointer so Lua bindings (e.g. `:quit`
-            // setting `pending_quit`) can call back into the app, mirroring
-            // the main loop's `install_app_ptr` boundary.
-            let _guard = crate::lua::install_app_ptr(&mut self.app);
             match ev {
                 SourceEvent::Term(ev) => {
                     let quit = self.app.dispatch_terminal_event(ev);
@@ -47,12 +43,13 @@ impl TestApp {
                 SourceEvent::ExecDone(code) => {
                     self.app.finish_exec(code);
                     self.app.finalize_exec();
-                    self.app.exec = None;
+                    self.app.overlays.finish_execution();
                 }
                 SourceEvent::Resize { width, height } => {
                     self.app.handle_resize(width, height);
                 }
             }
+            self.app.pump_lua();
             self.app.drain_idle_work();
         }
         self.drain_cmd();
@@ -94,9 +91,7 @@ impl TestApp {
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
     pub fn render(&mut self) {
-        crate::lua::with_app_ptr(&mut self.app, |app| {
-            app.render_normal();
-        });
+        self.app.render_normal();
     }
 
     /// Render variant that exercises the full projection pipeline (layout,
@@ -109,20 +104,17 @@ impl TestApp {
     /// libFuzzer's log file.
     pub fn render_silent(&mut self) {
         let mut sink = std::io::sink();
-        crate::lua::with_app_ptr(&mut self.app, |app| {
-            app.render_normal_to(&mut sink);
-        });
+        self.app.render_normal_to(&mut sink);
         self.assert_render_layout_invariants();
         self.assert_prompt_cursor_projection();
     }
 
     /// Render one frame and return the resulting `SnapshotFrame`. Used
     /// by the app-level storybook harness; `render_normal_to` updates the
-    /// `Ui` snapshot buffer as a side effect of composing layers, so
-    /// the post-render `ui.snapshot()` reflects the rendered frame. ANSI
-    /// bytes are written to a sink so tests stay quiet.
+    /// compositor snapshot buffer as a side effect of composing layers, so
+    /// `flushed_snapshot()` captures that exact frame without running a second,
+    /// callback-free UI render. ANSI bytes are written to a sink so tests stay quiet.
     pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
-        let _guard = crate::lua::install_app_ptr(&mut self.app);
         // The main loop refreshes diff signals once per tick before
         // rendering; storybook drives the render path directly without
         // that loop, so we have to publish here or Lua renderers see
@@ -130,6 +122,10 @@ impl TestApp {
         self.app.publish_diff_signals();
         let mut sink = std::io::sink();
         self.app.render_normal_to(&mut sink);
+        self.app.ui.flushed_snapshot()
+    }
+
+    pub(crate) fn ui_snapshot(&mut self) -> crate::smelt_edit::SnapshotFrame {
         self.app.ui.snapshot()
     }
 
@@ -168,6 +164,62 @@ impl TestApp {
     /// internal grid to the OS-reported size.
     pub fn set_terminal_size(&mut self, width: u16, height: u16) {
         self.app.handle_resize(width, height);
+    }
+
+    pub(crate) fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W) {
+        self.app.render_frame_to(out);
+    }
+
+    pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
+        self.app.render_normal_to(out);
+    }
+
+    pub(crate) fn dispatch_engine_event(&mut self, event: EngineEvent) -> bool {
+        self.app.dispatch_engine_event(event)
+    }
+
+    pub(crate) fn dispatch_engine_event_in_render_loop_to<
+        W: std::io::Write,
+        F: FnOnce(crate::smelt_edit::SnapshotFrame),
+    >(
+        &mut self,
+        event: EngineEvent,
+        out: &mut W,
+        on_transient_frame: F,
+    ) -> bool {
+        self.app
+            .dispatch_engine_event_in_render_loop_to(event, out, |app| {
+                on_transient_frame(app.ui.snapshot());
+            })
+    }
+
+    pub(crate) fn dispatch_engine_output_in_render_loop_to<
+        W: std::io::Write,
+        F: FnOnce(crate::smelt_edit::SnapshotFrame),
+    >(
+        &mut self,
+        output: engine::EngineOutput,
+        out: &mut W,
+        on_transient_frame: F,
+    ) -> bool {
+        self.app
+            .dispatch_engine_output_in_render_loop_to(output, out, |app| {
+                on_transient_frame(app.ui.snapshot());
+            })
+    }
+
+    pub(crate) fn drain_ready_engine_outputs_for_frame_to<
+        W: std::io::Write,
+        F: FnMut(crate::smelt_edit::SnapshotFrame),
+    >(
+        &mut self,
+        out: &mut W,
+        mut on_transient_frame: F,
+    ) -> crate::app::render_loop::EngineOutputDrainOutcome {
+        self.app
+            .drain_ready_engine_outputs_for_frame_to(out, |app| {
+                on_transient_frame(app.ui.snapshot());
+            })
     }
 
     pub fn feed<I>(&mut self, events: I)
@@ -215,6 +267,12 @@ impl TestApp {
 
     pub fn inject_host_call(&self, call: engine::HostCall) -> Result<(), Box<engine::HostCall>> {
         self.output_injector.send_host_call(call)
+    }
+
+    pub(crate) fn try_receive_engine_output(
+        &mut self,
+    ) -> Result<engine::EngineOutput, tokio::sync::mpsc::error::TryRecvError> {
+        self.app.core.engine.try_recv_output()
     }
 
     /// Drain `UiCommand`s buffered on the engine channel into the action log.
@@ -279,11 +337,11 @@ impl TestApp {
             cmdline_text,
             focused_overlay: self.app.ui.focused_overlay(),
             active_modal: self.app.ui.active_modal(),
-            picker_count: self.app.picker_state.len(),
+            picker_count: self.app.overlays.picker_count(),
             prompt_text,
-            queued_inputs: self.app.queued_inputs.display_texts(),
-            agent_running: self.app.agent.is_some(),
-            term_focused: self.app.term_focused,
+            queued_inputs: self.app.prompt.queued_texts(),
+            agent_running: self.app.agent_is_running(),
+            term_focused: self.app.terminal_is_focused(),
             quit_requested: self.quit,
             notification: self.app.notification_win(),
             pending_quit: self.app.pending_quit,

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store"]
+members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support"]
 exclude = ["fuzz"]
 
 [workspace.dependencies]
@@ -17,6 +17,7 @@ smelt-core = { path = "crates/core" }
 smelt-store = { path = "crates/store" }
 smelt-tui = { path = "crates/tui", default-features = false }
 smelt-lua-doc-derive = { path = "crates/lua-doc-derive" }
+smelt-test-support = { path = "crates/test-support" }
 
 # Async / runtime
 tokio = { version = "1", default-features = false }
@@ -135,6 +136,7 @@ debug = false
 
 [dev-dependencies]
 insta = { workspace = true }
+smelt-test-support = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"

@@ -4,9 +4,15 @@ use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::path::Path;
 use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+pub(super) fn register(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    shared: &Arc<LuaShared>,
+    state_root: &Path,
+) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -14,13 +20,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Query and mutate the per-project content trust store.",
         Tier::Host,
     )?;
+    let trust_store = crate::trust::TrustStore::new(state_root.to_path_buf());
+    let status_store = trust_store.clone();
     let status_context = Arc::clone(shared);
     m.fn_(
         "status",
         "Return the trust state of the current working directory: `\"trusted\"`, `\"untrusted\"`, or `\"no_content\"`.",
         &[],
         move |_, ()| -> LuaResult<&'static str> {
-            Ok(match crate::trust::project_trust_state(&status_context.evaluation_cwd()) {
+            Ok(match status_store.project_trust_state(&status_context.evaluation_cwd()) {
                 crate::trust::TrustState::Trusted { .. } => "trusted",
                 crate::trust::TrustState::Untrusted { .. } => "untrusted",
                 crate::trust::TrustState::NoContent => "no_content",
@@ -34,7 +42,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Mark the current working directory as trusted, persisting it in the user's trust store.",
         &[],
         move |_, ()| -> LuaResult<String> {
-            crate::trust::mark_trusted(&mark_context.evaluation_cwd())
+            trust_store
+                .mark_trusted(&mark_context.evaluation_cwd())
                 .map_err(LuaError::RuntimeError)
         },
     )?;

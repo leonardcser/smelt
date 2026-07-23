@@ -31,6 +31,16 @@ impl TerminalInput {
         })
     }
 
+    #[cfg(all(unix, test))]
+    fn spawn_from_fd(fd: std::os::fd::RawFd) -> io::Result<Self> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let shutdown = platform::spawn_reader_from_fd(fd, tx)?;
+        Ok(Self {
+            rx,
+            shutdown: Some(shutdown),
+        })
+    }
+
     pub(crate) async fn recv(&mut self) -> Option<Event> {
         self.rx.recv().await
     }
@@ -54,7 +64,16 @@ mod platform {
 
     pub(super) struct Shutdown {
         write_fd: RawFd,
+        #[cfg(test)]
+        read_fd: RawFd,
         thread: Option<JoinHandle<()>>,
+    }
+
+    #[cfg(test)]
+    impl Shutdown {
+        pub(super) fn pipe_fds(&self) -> (RawFd, RawFd) {
+            (self.read_fd, self.write_fd)
+        }
     }
 
     impl Drop for Shutdown {
@@ -73,7 +92,13 @@ mod platform {
     pub(super) fn spawn_reader(
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
     ) -> io::Result<Shutdown> {
-        let fd = open_input_fd()?;
+        spawn_reader_from_fd(open_input_fd()?, tx)
+    }
+
+    pub(super) fn spawn_reader_from_fd(
+        fd: RawFd,
+        tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    ) -> io::Result<Shutdown> {
         let (shutdown_read_fd, shutdown_write_fd) = match open_shutdown_pipe() {
             Ok(pipe) => pipe,
             Err(e) => {
@@ -97,6 +122,8 @@ mod platform {
         };
         Ok(Shutdown {
             write_fd: shutdown_write_fd,
+            #[cfg(test)]
+            read_fd: shutdown_read_fd,
             thread: Some(thread),
         })
     }
@@ -191,10 +218,16 @@ mod platform {
                 }
                 continue;
             }
-            if pfds[1].revents & libc::POLLIN != 0 {
+            if pfds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                != 0
+            {
                 break;
             }
-            if pfds[0].revents & libc::POLLIN == 0 {
+            let input_events = pfds[0].revents;
+            if input_events & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                break;
+            }
+            if input_events & (libc::POLLIN | libc::POLLHUP) == 0 {
                 continue;
             }
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -803,6 +836,74 @@ fn invalid(consumed: usize) -> ParseResult {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::fd::{FromRawFd, RawFd};
+
+    #[cfg(unix)]
+    fn terminal_reader_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[cfg(unix)]
+    fn pipe_terminal_input() -> (TerminalInput, std::fs::File, [RawFd; 3]) {
+        let mut input_fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(input_fds.as_mut_ptr()) }, 0);
+        let input_fd = input_fds[0];
+        let writer = unsafe { std::fs::File::from_raw_fd(input_fds[1]) };
+        let input = TerminalInput::spawn_from_fd(input_fd).expect("spawn pipe-backed input");
+        let shutdown_fds = input.shutdown.as_ref().unwrap().pipe_fds();
+        (input, writer, [input_fd, shutdown_fds.0, shutdown_fds.1])
+    }
+
+    #[cfg(unix)]
+    fn assert_fd_closed(fd: RawFd) {
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[cfg(unix)]
+    fn wait_until_pipe_consumed(fd: RawFd) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let mut available = 0;
+            assert_eq!(
+                unsafe { libc::ioctl(fd, libc::FIONREAD, &mut available) },
+                0
+            );
+            if available == 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal reader did not consume buffered bytes"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    fn recv_with_timeout(input: &mut TerminalInput) -> Option<Event> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            match input.try_recv() {
+                Ok(event) => return Some(event),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "terminal reader did not produce an event or close"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
     fn keys_text(events: &[Event]) -> String {
         events
             .iter()
@@ -973,5 +1074,111 @@ mod tests {
                 ..
             }) if modifiers.contains(KeyModifiers::ALT)
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn complete_input_is_delivered_before_writer_eof_closes_the_stream() {
+        let _lock = terminal_reader_test_lock();
+        let (mut input, mut writer, fds) = pipe_terminal_input();
+        writer.write_all(b"x").unwrap();
+        drop(writer);
+
+        assert!(matches!(
+            recv_with_timeout(&mut input),
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Char('x'),
+                ..
+            }))
+        ));
+        assert_eq!(recv_with_timeout(&mut input), None);
+
+        drop(input);
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_escape_sequence_is_discarded_when_the_writer_closes() {
+        let _lock = terminal_reader_test_lock();
+        let (mut input, mut writer, fds) = pipe_terminal_input();
+        writer.write_all(b"\x1b[").unwrap();
+        drop(writer);
+
+        assert_eq!(recv_with_timeout(&mut input), None);
+        drop(input);
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_interrupts_a_blocked_reader_and_joins_it() {
+        let _lock = terminal_reader_test_lock();
+        let (input, writer, fds) = pipe_terminal_input();
+
+        let started = std::time::Instant::now();
+        drop(input);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_interrupts_a_reader_with_buffered_escape_bytes() {
+        let _lock = terminal_reader_test_lock();
+        let (input, mut writer, fds) = pipe_terminal_input();
+        writer.write_all(b"\x1b[").unwrap();
+        wait_until_pipe_consumed(fds[0]);
+
+        let started = std::time::Instant::now();
+        drop(input);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_bytes_do_not_poison_following_input() {
+        let _lock = terminal_reader_test_lock();
+        let (mut input, mut writer, fds) = pipe_terminal_input();
+        writer.write_all(&[0xff, 0xfe, b'z']).unwrap();
+
+        assert!(matches!(
+            recv_with_timeout(&mut input),
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Char('z'),
+                ..
+            }))
+        ));
+
+        drop(input);
+        drop(writer);
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_spawn_and_drop_closes_input_and_shutdown_descriptors() {
+        let _lock = terminal_reader_test_lock();
+        for _ in 0..32 {
+            let (input, writer, fds) = pipe_terminal_input();
+            drop(input);
+            for fd in fds {
+                assert_fd_closed(fd);
+            }
+            drop(writer);
+        }
     }
 }

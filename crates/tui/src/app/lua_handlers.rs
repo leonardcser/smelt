@@ -1,11 +1,117 @@
-//! Operations called by Lua bindings through `with_app`.
+//! Application operations exposed through the scoped Lua capability host.
 
 use crate::app::{LuaBringUpError, TuiApp};
 use smelt_core::transcript_model::ConfirmChoice;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LuaReloadKind {
     Manual,
     AutoConfig,
+}
+
+pub(crate) struct LuaRuntimeController {
+    generation: crate::lua::LuaGeneration,
+    wakeup_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    pending_runtime_reconcile: bool,
+    pending_reload: Option<LuaReloadKind>,
+    failure: Option<LuaBringUpError>,
+}
+
+impl LuaRuntimeController {
+    pub(super) fn new(generation: crate::lua::LuaGeneration) -> Self {
+        let (wakeup_tx, wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = generation.shared().wakeup_tx.set(wakeup_tx.clone());
+        Self {
+            generation,
+            wakeup_tx,
+            wakeup_rx,
+            pending_runtime_reconcile: false,
+            pending_reload: None,
+            failure: None,
+        }
+    }
+
+    pub(super) fn wakeup_sender(&self) -> tokio::sync::mpsc::UnboundedSender<()> {
+        self.wakeup_tx.clone()
+    }
+
+    pub(super) async fn receive_wakeup(&mut self) -> Option<()> {
+        self.wakeup_rx.recv().await
+    }
+
+    pub(super) fn drain_wakeups(&mut self) {
+        while self.wakeup_rx.try_recv().is_ok() {}
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_receive_wakeup(&mut self) -> bool {
+        self.wakeup_rx.try_recv().is_ok()
+    }
+
+    fn schedule_reload(&mut self, kind: LuaReloadKind) -> bool {
+        let was_pending = self.pending_reload.is_some();
+        if !was_pending || matches!(kind, LuaReloadKind::Manual) {
+            self.pending_reload = Some(kind);
+        }
+        !was_pending
+    }
+
+    fn pending_reload(&self) -> bool {
+        self.pending_reload.is_some()
+    }
+
+    fn take_pending_reload(&mut self) -> Option<LuaReloadKind> {
+        self.pending_reload.take()
+    }
+
+    fn clear_pending_reload(&mut self) {
+        self.pending_reload = None;
+    }
+
+    fn schedule_runtime_reconcile(&mut self) {
+        self.pending_runtime_reconcile = true;
+    }
+
+    fn take_runtime_reconcile(&mut self) -> bool {
+        std::mem::take(&mut self.pending_runtime_reconcile)
+    }
+
+    #[cfg(test)]
+    pub(super) fn runtime_reconcile_pending(&self) -> bool {
+        self.pending_runtime_reconcile
+    }
+
+    pub(super) fn failure(&self) -> Option<&LuaBringUpError> {
+        self.failure.as_ref()
+    }
+
+    fn set_failure(&mut self, failure: LuaBringUpError) {
+        self.failure = Some(failure);
+    }
+
+    fn clear_failure(&mut self) {
+        self.failure = None;
+    }
+
+    fn commit_generation(&mut self, generation: crate::lua::LuaGeneration) {
+        self.generation.retire();
+        self.generation = generation;
+    }
+}
+
+impl std::ops::Deref for LuaRuntimeController {
+    type Target = crate::lua::LuaGeneration;
+
+    fn deref(&self) -> &Self::Target {
+        &self.generation
+    }
+}
+
+impl std::ops::DerefMut for LuaRuntimeController {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.generation
+    }
 }
 
 fn bring_up_error(
@@ -23,11 +129,8 @@ struct LuaTuiGeneration {
     ui: crate::smelt_edit::Ui,
     paint_registry: crate::lua::paint::PaintRegistry,
     picker_state: std::collections::HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
-    placeholders: std::collections::HashMap<crate::smelt_edit::WinId, String>,
-    placeholder_opts:
-        std::collections::HashMap<crate::smelt_edit::WinId, crate::app::PlaceholderOpts>,
+    placeholders: crate::app::PlaceholderState,
     busy_stack: crate::app::BusyStack,
-    prompt_placeholder_display: Option<String>,
 }
 
 impl LuaReloadKind {
@@ -37,6 +140,13 @@ impl LuaReloadKind {
 }
 
 impl TuiApp {
+    /// Route a runtime error through Lua while lending the frontend host only
+    /// for the notification callback's dynamic extent.
+    pub(crate) fn record_lua_error(&mut self, message: String) {
+        let lua = self.lua.execution();
+        crate::lua::scope_app(self, move || lua.record_error(message));
+    }
+
     /// Run a Lua command line through the shared dispatcher. Bare names (`"btw foo"`)
     /// are normalized to prompt-command syntax so Lua APIs keep their historical shape,
     /// while explicit `:`, `/`, and `!` prefixes keep their typed meaning.
@@ -54,7 +164,7 @@ impl TuiApp {
             crate::commands::CommandContext::lua(),
         ) {
             crate::app::CommandAction::Exec(handle) => {
-                self.exec = Some(handle);
+                self.overlays.install_execution(handle);
             }
             crate::app::CommandAction::Continue => {}
         }
@@ -75,30 +185,29 @@ impl TuiApp {
     }
 
     fn reload_lua_inner(&mut self, kind: LuaReloadKind) {
-        self.pending_lua_reload = false;
-        self.pending_lua_reload_refresh_agent_inputs = false;
+        self.lua.clear_pending_reload();
         let err = self.bring_up_lua("reload", kind.refresh_agent_inputs());
         match err {
             Some(error) => {
                 let message = format!("lua reload: {error}");
                 if self
-                    .lua_reload_failure
-                    .as_ref()
+                    .lua
+                    .failure()
                     .is_none_or(|failure| failure.message != message)
                 {
                     self.notify_error_sticky(message.clone());
                 }
-                self.lua_reload_failure = Some(LuaBringUpError {
+                self.lua.set_failure(LuaBringUpError {
                     message,
                     location: error.location,
                 });
             }
             None if self.lua.warnings().is_empty() => {
-                self.lua_reload_failure = None;
+                self.lua.clear_failure();
                 self.notify("lua reloaded".into());
             }
             None => {
-                self.lua_reload_failure = None;
+                self.lua.clear_failure();
             }
         }
     }
@@ -107,25 +216,35 @@ impl TuiApp {
     /// callbacks that the reload would wipe. Returns `true` for a new request
     /// and `false` when one was already pending.
     pub(crate) fn schedule_lua_reload(&mut self) -> bool {
-        let was_pending = self.pending_lua_reload;
-        self.pending_lua_reload = true;
-        self.pending_lua_reload_refresh_agent_inputs = true;
-        !was_pending
+        self.lua.schedule_reload(LuaReloadKind::Manual)
     }
 
     /// Mark a Lua-config-only reload for auto-reload. If a full reload is
     /// already pending, keep it full.
     pub(crate) fn schedule_lua_config_reload(&mut self) -> bool {
-        if self.pending_lua_reload {
-            return false;
-        }
-        self.pending_lua_reload = true;
-        self.pending_lua_reload_refresh_agent_inputs = false;
-        true
+        self.lua.schedule_reload(LuaReloadKind::AutoConfig)
     }
 
     pub(crate) fn schedule_runtime_reconcile(&mut self) {
-        self.pending_runtime_reconcile = true;
+        self.lua.schedule_runtime_reconcile();
+    }
+
+    pub(crate) fn lua_reload_pending(&self) -> bool {
+        self.lua.pending_reload()
+    }
+
+    pub(crate) fn lua_reload_failure(&self) -> Option<&LuaBringUpError> {
+        self.lua.failure()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lua_runtime_reconcile_pending(&self) -> bool {
+        self.lua.runtime_reconcile_pending()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_receive_lua_wakeup(&mut self) -> bool {
+        self.lua.try_receive_wakeup()
     }
 
     pub(crate) fn drain_idle_work(&mut self) -> bool {
@@ -136,15 +255,23 @@ impl TuiApp {
         did_work |= self.try_perform_scheduled_runtime_reconcile();
         did_work |= self.try_perform_scheduled_cwd_change();
         did_work |= self.try_perform_scheduled_lua_reload();
-        did_work |= self.session_document.transcript.drain_compaction_slice();
+        did_work |= self.drain_deferred_layout();
+        did_work |= self.conversation.drain_transcript_compaction_slice();
         did_work
     }
 
-    pub(crate) fn try_perform_scheduled_runtime_reconcile(&mut self) -> bool {
-        if !self.pending_runtime_reconcile {
+    pub(crate) fn drain_deferred_layout(&mut self) -> bool {
+        if smelt_core::host::host_access_active() || !self.lua.shared().layout_refresh_pending() {
             return false;
         }
-        self.pending_runtime_reconcile = false;
+        self.refresh_main_layout();
+        true
+    }
+
+    pub(crate) fn try_perform_scheduled_runtime_reconcile(&mut self) -> bool {
+        if !self.lua.take_runtime_reconcile() {
+            return false;
+        }
         if let Err(error) = self.reconcile_committed_lua_runtime() {
             self.notify_error_sticky(error);
         }
@@ -152,16 +279,12 @@ impl TuiApp {
     }
 
     fn try_perform_scheduled_lua_reload(&mut self) -> bool {
-        if !self.pending_lua_reload || !self.can_reload_lua_now() {
+        if !self.can_reload_lua_now() {
             return false;
         }
-        let kind = if self.pending_lua_reload_refresh_agent_inputs {
-            LuaReloadKind::Manual
-        } else {
-            LuaReloadKind::AutoConfig
+        let Some(kind) = self.lua.take_pending_reload() else {
+            return false;
         };
-        self.pending_lua_reload = false;
-        self.pending_lua_reload_refresh_agent_inputs = false;
         self.reload_lua_inner(kind);
         true
     }
@@ -182,14 +305,20 @@ impl TuiApp {
     /// Manual reloads additionally refresh AGENTS.md, skills, and explicit
     /// system-prompt inputs; automatic reloads leave those inputs unchanged.
     ///
-    /// Must be called inside an `install_app_ptr` scope. Returns a candidate
-    /// load or resolution error without changing the committed generation.
+    /// Candidate scripts and lifecycle hooks receive frontend access only for
+    /// their individual Lua entry scopes. Returns a load or resolution error
+    /// without changing the committed generation.
     pub(crate) fn bring_up_lua(
         &mut self,
         kind: &'static str,
         refresh_agent_inputs: bool,
     ) -> Option<LuaBringUpError> {
-        self.bring_up_lua_at(kind, refresh_agent_inputs, None)
+        self.bring_up_lua_at(kind, refresh_agent_inputs, None, true, true)
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn bring_up_lua_for_harness(&mut self) -> Option<LuaBringUpError> {
+        self.bring_up_lua_at("launch", false, None, false, false)
     }
 
     pub(crate) fn bring_up_lua_for_cwd(
@@ -197,17 +326,21 @@ impl TuiApp {
         path: std::path::PathBuf,
         mark_session_dirty: bool,
     ) -> Option<LuaBringUpError> {
-        self.bring_up_lua_at("cwd", true, Some((path, mark_session_dirty)))
+        self.bring_up_lua_at("cwd", true, Some((path, mark_session_dirty)), true, true)
     }
 
     fn bring_up_lua_at(
         &mut self,
         kind: &'static str,
         refresh_agent_inputs: bool,
-        cwd_transition: Option<(std::path::PathBuf, bool)>,
+        mut cwd_transition: Option<(std::path::PathBuf, bool)>,
+        apply_runtime_effects: bool,
+        run_ready_hooks: bool,
     ) -> Option<LuaBringUpError> {
         if matches!(kind, "reload" | "cwd") {
-            if let Some(error) = self.lua.flush_persistent_state() {
+            let lua = self.lua.execution();
+            let flush_error = crate::lua::scope_app(self, move || lua.flush_persistent_state());
+            if let Some(error) = flush_error {
                 return Some(bring_up_error(
                     "state_flush",
                     None,
@@ -220,19 +353,17 @@ impl TuiApp {
             .as_ref()
             .map(|(path, _)| path.clone())
             .unwrap_or_else(|| self.core.env.cwd().clone());
-        let candidate_skills = std::sync::Arc::new(engine::SkillLoader::load_for_cwd(
-            &self.prompt_inputs.skill_extra_paths,
-            &target_cwd,
-        ));
+        let candidate_skills = self.prompt_inputs.skill_loader_for_cwd(&target_cwd);
         let retired_generation = self.lua.id;
         let candidate_id = retired_generation.wrapping_add(1);
-        let committed_tui = self.begin_lua_tui_candidate();
-        let candidate_result = self.lua.load_candidate(
+        let candidate = self.lua.prepare_candidate(
             candidate_id,
             Some(&target_cwd),
             candidate_skills,
-            self.lua_wakeup_tx.clone(),
+            self.lua.wakeup_sender(),
         );
+        let committed_tui = self.begin_lua_tui_candidate();
+        let candidate_result = crate::lua::scope_app(self, move || candidate.load());
         let mut candidate_tui = self.finish_lua_tui_candidate(committed_tui);
         let candidate = match candidate_result {
             Ok(candidate) => candidate,
@@ -257,7 +388,11 @@ impl TuiApp {
             &candidate.desired().permissions.tool_defaults,
             candidate.desired().modes.behaviors.clone(),
             &next_runtime.settings,
-            &target_cwd,
+            smelt_core::permissions::PermissionRuntimePaths {
+                cwd: &target_cwd,
+                home: self.core.env.home(),
+            },
+            &self.core.workspace_permissions,
             self.core.permissions.paths_fn(),
         );
         for callback in candidate_tui
@@ -270,24 +405,9 @@ impl TuiApp {
         candidate_tui
             .picker_state
             .retain(|win, _| candidate_tui.ui.win(*win).is_some());
-        candidate_tui
-            .placeholders
-            .retain(|win, _| candidate_tui.ui.win(*win).is_some());
-        candidate_tui
-            .placeholder_opts
-            .retain(|win, _| candidate_tui.ui.win(*win).is_some());
-        let staged_cwd = if let Some((path, _)) = &cwd_transition {
-            match Self::stage_process_cwd(path.clone()) {
-                Ok(staged) => Some(staged),
-                Err(error) => {
-                    self.discard_lua_candidate_resources(candidate_id);
-                    return Some(bring_up_error("cwd", Some(path.clone()), error));
-                }
-            }
-        } else {
-            None
-        };
-        if let Err(error) = candidate.activate() {
+        candidate_tui.placeholders.retain_windows(&candidate_tui.ui);
+        let activation = crate::lua::scope_app(self, || candidate.activate());
+        if let Err(error) = activation {
             self.discard_lua_candidate_resources(candidate_id);
             return Some(bring_up_error(
                 "activation",
@@ -295,19 +415,10 @@ impl TuiApp {
                 format!("activate Lua candidate: {error}"),
             ));
         }
-        let cwd_commit = match (&staged_cwd, &cwd_transition) {
-            (Some(staged), Some((_, mark_session_dirty))) => {
-                Some((staged.cwd().to_path_buf(), *mark_session_dirty))
-            }
-            (None, None) => None,
-            _ => unreachable!("staged cwd must match the requested transition"),
-        };
-
         self.core.signals.clear_lua_generation(retired_generation);
         self.core.timers.clear_generation(retired_generation);
-        self.lua.retire();
+        self.lua.commit_generation(candidate);
         self.commit_lua_tui_candidate(candidate_tui);
-        self.lua = candidate;
         self.command_catalog
             .activate(self.lua.command_names_handle());
         if let Some(prompt) = self.ui.buf_mut(crate::app::PROMPT_EDIT_BUF) {
@@ -318,51 +429,56 @@ impl TuiApp {
         if let Err(error) = crate::lua::api::terminal::commit_staged_title(&lua_shared) {
             self.notify_error_sticky(format!("terminal title: {error}"));
         }
-        crate::lua::api::notify::commit_staged_notices(&lua_shared);
+        for (kind, source, message) in crate::lua::api::notify::take_staged_notices(&lua_shared) {
+            self.record_notice(kind, source, message);
+        }
         lua_shared.commit_staged_logs();
-        for warning in self.lua.warnings().to_vec() {
-            self.notify_warn(warning);
-        }
-        self.managed_models = next_managed_models;
-        self.commit_lua_runtime_config(next_runtime, next_permissions);
-        if let Some((cwd, mark_session_dirty)) = &cwd_commit {
-            self.install_runtime_cwd(cwd.clone(), *mark_session_dirty);
-        }
-        let committed_cwd = match (staged_cwd, cwd_commit) {
-            (Some(staged), Some((_, mark_session_dirty))) => {
-                staged.commit();
-                Some(mark_session_dirty)
+        if apply_runtime_effects {
+            for warning in self.lua.warnings().to_vec() {
+                self.notify_warn(warning);
             }
-            (None, None) => None,
-            _ => unreachable!("staged cwd must match the requested transition"),
-        };
-        self.submit_managed_model_refreshes();
-        self.reconcile_auto_reload();
-        if refresh_agent_inputs {
-            self.refresh_agent_inputs();
+            self.managed_models.replace_catalog(next_managed_models);
+            self.commit_lua_runtime_config(next_runtime, next_permissions);
+            let committed_cwd = cwd_transition.take().map(|(cwd, mark_session_dirty)| {
+                self.install_runtime_cwd(cwd, mark_session_dirty);
+                mark_session_dirty
+            });
+            self.submit_managed_model_refreshes();
+            self.reconcile_auto_reload();
+            if refresh_agent_inputs {
+                self.refresh_agent_inputs();
+            }
+            if let Some(mark_session_dirty) = committed_cwd {
+                self.sync_inline_options();
+                self.publish_cwd_change(mark_session_dirty);
+                self.lua.clear_pending_reload();
+            } else if refresh_agent_inputs {
+                self.publish_agent_project_context();
+            }
+            self.publish_diff_signals();
+            self.reconcile_runtime_controllers();
+        } else {
+            debug_assert!(cwd_transition.is_none());
         }
-        if let Some(mark_session_dirty) = committed_cwd {
-            self.sync_inline_options();
-            self.publish_cwd_change(mark_session_dirty);
-            self.pending_lua_reload = false;
-            self.pending_lua_reload_refresh_agent_inputs = false;
-        } else if refresh_agent_inputs {
-            self.publish_agent_project_context();
-        }
-        self.publish_diff_signals();
-        self.reconcile_runtime_controllers();
 
         // Make layout geometry current before `ready` hooks open overlays or
         // query `Win:rect()`. Without this, cold-start hooks see the seed layout
         // until the first render, while resize/reload paths see the Lua layout.
         self.refresh_main_layout();
-        let hook_errors = self.lua.drain_lifecycle_hooks("ready", move |lua| {
-            let t = lua.create_table()?;
-            t.set("kind", kind)?;
-            Ok::<mlua::Value, mlua::Error>(mlua::Value::Table(t))
-        });
-        for error in hook_errors {
-            self.notify_error_sticky(error);
+        if run_ready_hooks {
+            let hooks = self.lua.take_lifecycle_hooks("ready");
+            let lua = self.lua.lua().clone();
+            for function in hooks {
+                let lua = lua.clone();
+                let result = crate::lua::scope_app(self, move || -> mlua::Result<()> {
+                    let table = lua.create_table()?;
+                    table.set("kind", kind)?;
+                    function.call(table)
+                });
+                if let Err(error) = result {
+                    self.notify_error_sticky(format!("lifecycle.ready: {error}"));
+                }
+            }
         }
         None
     }
@@ -376,7 +492,8 @@ impl TuiApp {
     /// The caller publishes them with the rest of the project context after
     /// every part of the transaction has committed.
     pub(crate) fn refresh_agent_inputs(&mut self) {
-        let outcome = self.prompt_inputs.refresh();
+        let cwd = self.core.env.cwd();
+        let outcome = self.prompt_inputs.refresh(&cwd);
         self.core.skills = Some(outcome.loader);
         if let Some(err) = outcome.system_prompt_read_error {
             self.notify_error_sticky(err);
@@ -384,8 +501,35 @@ impl TuiApp {
     }
 
     pub(crate) fn reconcile_committed_lua_runtime(&mut self) -> Result<(), String> {
-        self.lua.refresh_desired_state()?;
+        let lua = self.lua.execution();
+        let desired = crate::lua::scope_app(self, move || lua.snapshot_desired_state())?;
+        self.lua.install_desired_state(desired);
         self.reconcile_runtime_snapshot()
+    }
+
+    pub fn shutdown_lua(&mut self) -> (Vec<String>, Option<String>) {
+        let context = self.shutdown_context();
+        let hooks = self.lua.take_lifecycle_hooks("shutdown");
+        let lua = self.lua.lua().clone();
+        let mut errors = Vec::new();
+        for function in hooks {
+            let lua = lua.clone();
+            let session_id = context.session_id.clone();
+            let result = crate::lua::scope_app(self, move || -> mlua::Result<()> {
+                let table = lua.create_table()?;
+                table.set("session_id", session_id)?;
+                table.set("has_messages", context.has_messages)?;
+                table.set("ephemeral", context.ephemeral)?;
+                function.call(table)
+            });
+            if let Err(error) = result {
+                errors.push(format!("lifecycle.shutdown: {error}"));
+            }
+        }
+
+        let lua = self.lua.execution();
+        let flush_error = crate::lua::scope_app(self, move || lua.flush_persistent_state());
+        (errors, flush_error)
     }
 
     pub(crate) fn reconcile_runtime_snapshot(&mut self) -> Result<(), String> {
@@ -396,10 +540,14 @@ impl TuiApp {
             &desired.permissions.tool_defaults,
             desired.modes.behaviors,
             &next.settings,
-            &self.core.env.cwd(),
+            smelt_core::permissions::PermissionRuntimePaths {
+                cwd: &self.core.env.cwd(),
+                home: self.core.env.home(),
+            },
+            &self.core.workspace_permissions,
             self.core.permissions.paths_fn(),
         );
-        self.managed_models = managed_models;
+        self.managed_models.replace_catalog(managed_models);
         self.commit_lua_runtime_config(next, permissions);
         self.submit_managed_model_refreshes();
         self.reconcile_runtime_controllers();
@@ -413,7 +561,7 @@ impl TuiApp {
         desired: &crate::lua::LuaDesiredState,
     ) -> Result<(smelt_core::RuntimeState, smelt_core::ManagedModels), String> {
         let mut config = desired.config.clone();
-        let mut managed_models = self.managed_models.clone();
+        let mut managed_models = self.managed_models.catalog().clone();
         managed_models.inject_oauth_providers(&mut config);
         managed_models.sync_desired(&config, self.core.config.revision.wrapping_add(1));
         let mut available_models = config.resolve_models();
@@ -446,7 +594,11 @@ impl TuiApp {
             &desired.permissions.tool_defaults,
             desired.modes.behaviors.clone(),
             &self.core.config.settings,
-            &self.core.env.cwd(),
+            smelt_core::permissions::PermissionRuntimePaths {
+                cwd: &self.core.env.cwd(),
+                home: self.core.env.home(),
+            },
+            &self.core.workspace_permissions,
             self.core.permissions.paths_fn(),
         );
         self.core
@@ -506,17 +658,18 @@ impl TuiApp {
     /// set without further coordination.
     fn reconcile_runtime_controllers(&mut self) {
         self.reconcile_mcp_servers();
-        self.lua
-            .shared()
-            .lsp
-            .configure_detached(self.core.config.lsp.clone());
+        self.lua.shared().lsp.configure_detached(
+            self.core.config.lsp.clone(),
+            &self.core.env.cwd(),
+            self.core.env.home(),
+        );
     }
 
     pub(crate) fn reconcile_mcp_servers(&mut self) {
         let Some(manager) = self.core.mcp.clone() else {
             return;
         };
-        manager.reconcile_detached(self.core.config.mcp.clone());
+        manager.reconcile_detached(self.core.config.mcp.clone(), self.core.env.cwd());
     }
 
     /// Replace live TUI generation projections with isolated candidate copies.
@@ -527,83 +680,52 @@ impl TuiApp {
         let mut candidate_ui = self.ui.fork_for_lua_generation();
         let _ = candidate_ui.reap_anonymous(smelt_core::lua::LUA_BUF_ID_BASE);
         let candidate_paint_registry = self.paint_registry.fork_for_lua_generation();
-        let mut candidate_placeholders = self.placeholders.clone();
-        candidate_placeholders.retain(|win, _| candidate_ui.win(*win).is_some());
-        let mut candidate_placeholder_opts = self.placeholder_opts.clone();
-        candidate_placeholder_opts.retain(|win, _| candidate_ui.win(*win).is_some());
-        let prompt_placeholder_display = self
-            .prompt_placeholder_display
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
+        let candidate_placeholders = self.prompt.fork_lua_placeholders(&candidate_ui);
 
         LuaTuiGeneration {
             ui: std::mem::replace(&mut self.ui, candidate_ui),
             paint_registry: std::mem::replace(&mut self.paint_registry, candidate_paint_registry),
-            picker_state: std::mem::take(&mut self.picker_state),
-            placeholders: std::mem::replace(&mut self.placeholders, candidate_placeholders),
-            placeholder_opts: std::mem::replace(
-                &mut self.placeholder_opts,
-                candidate_placeholder_opts,
-            ),
+            picker_state: self.overlays.take_lua_pickers(),
+            placeholders: self.prompt.swap_lua_placeholders(candidate_placeholders),
             busy_stack: std::mem::take(&mut self.busy_stack),
-            prompt_placeholder_display,
         }
     }
 
     /// Restore the committed TUI state after candidate evaluation and return
     /// the isolated candidate state for either commit or discard.
     fn finish_lua_tui_candidate(&mut self, committed: LuaTuiGeneration) -> LuaTuiGeneration {
-        let candidate_prompt_placeholder_display = self
-            .prompt_placeholder_display
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        *self
-            .prompt_placeholder_display
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            committed.prompt_placeholder_display.clone();
-
-        LuaTuiGeneration {
+        let candidate = LuaTuiGeneration {
             ui: std::mem::replace(&mut self.ui, committed.ui),
             paint_registry: std::mem::replace(&mut self.paint_registry, committed.paint_registry),
-            picker_state: std::mem::replace(&mut self.picker_state, committed.picker_state),
-            placeholders: std::mem::replace(&mut self.placeholders, committed.placeholders),
-            placeholder_opts: std::mem::replace(
-                &mut self.placeholder_opts,
-                committed.placeholder_opts,
-            ),
+            picker_state: self.overlays.swap_lua_pickers(committed.picker_state),
+            placeholders: self.prompt.swap_lua_placeholders(committed.placeholders),
             busy_stack: std::mem::replace(&mut self.busy_stack, committed.busy_stack),
-            prompt_placeholder_display: candidate_prompt_placeholder_display,
-        }
+        };
+        self.sync_prompt_placeholder_display();
+        candidate
     }
 
     fn commit_lua_tui_candidate(&mut self, mut candidate: LuaTuiGeneration) {
         candidate.ui.merge_rust_callbacks_from(&mut self.ui);
         self.ui = candidate.ui;
         self.paint_registry = candidate.paint_registry;
-        self.picker_state = candidate.picker_state;
-        self.placeholders = candidate.placeholders;
-        self.placeholder_opts = candidate.placeholder_opts;
+        self.overlays.swap_lua_pickers(candidate.picker_state);
+        self.prompt.swap_lua_placeholders(candidate.placeholders);
         self.busy_stack = candidate.busy_stack;
-        *self
-            .prompt_placeholder_display
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = candidate.prompt_placeholder_display;
+        self.sync_prompt_placeholder_display();
     }
 
     pub(crate) fn rewind_active_user_turn_if_no_output(
         &mut self,
         restore_vim_insert: bool,
     ) -> bool {
-        let Some(turn) = self.agent.as_ref() else {
+        let Some(turn) = self.conversation.active() else {
             return false;
         };
         let Some(block_idx) = turn.rewind_block_idx else {
             return false;
         };
-        if !self.queued_inputs.is_empty() || turn.assistant_output_started {
+        if !self.prompt.queue_is_empty() || turn.assistant_output_started {
             return false;
         }
         self.rewind_to_block(Some(block_idx), restore_vim_insert);
@@ -613,21 +735,21 @@ impl TuiApp {
     /// Rewind to a transcript block, or to before the first turn when `block_idx` is `None`.
     pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
         if let Some(bidx) = block_idx {
-            if self.agent.is_some() {
+            if self.conversation.is_active() {
                 self.cancel_agent();
-                self.agent = None;
+                self.conversation.clear_active();
             }
             if let Some((text, images)) = self.rewind_to(bidx) {
                 self.clear_prompt_prediction();
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.input.restore_from_rewind(&mut pctx, text, images);
+                self.prompt.restore_from_rewind(&mut pctx, text, images);
             }
             while self.core.engine.try_recv().is_ok() {}
             self.save_session();
         } else {
-            if self.agent.is_some() {
+            if self.conversation.is_active() {
                 self.cancel_agent();
-                self.agent = None;
+                self.conversation.clear_active();
             }
             self.clear_prompt_prediction();
             self.rewind_to_start();
@@ -638,7 +760,7 @@ impl TuiApp {
                     .ui
                     .win_mut(crate::app::PROMPT_WIN)
                     .expect("prompt window");
-                self.input
+                self.prompt
                     .set_vim_mode(win, crate::smelt_edit::VimMode::Insert);
             }
         }
@@ -646,9 +768,13 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        let target_rows = crate::app::transcript::descriptor_tail_target_rows(self.last_height);
+        let target_rows = crate::app::transcript::record_tail_target_rows(self.last_height);
         let resume =
-            match smelt_core::session::load_store_resume_result(id, self.last_width, target_rows) {
+            match self
+                .core
+                .sessions
+                .load_store_resume_result(id, self.last_width, target_rows)
+            {
                 Ok(Some(resume)) => resume,
                 Ok(None) => {
                     self.notify_error_sticky(format!("session {id:?} has no stored state"));
@@ -663,32 +789,39 @@ impl TuiApp {
             header,
             store_ref,
             head,
-            descriptor_tail,
+            transcript_record_tail: record_tail,
         } = resume;
         let degraded_warnings = header.degraded_warnings.clone();
-        let (transcript, repair_descriptors) =
-            match crate::app::transcript::LoadedTranscript::from_descriptor_slice(
-                descriptor_tail,
+        let (transcript, repair_records) =
+            match crate::app::transcript::LoadedTranscript::from_record_slice(
+                record_tail,
                 store_ref.session_dir.clone(),
             ) {
                 Some(transcript) => (transcript, false),
-                None => match crate::app::history::materialize_full_transcript_read_only_result(
-                    &self.lua, id,
-                ) {
-                    Ok(Some(transcript)) => (transcript, true),
-                    Ok(None) => {
-                        self.notify_error_sticky(format!(
-                            "session {id:?} has no readable transcript state"
-                        ));
-                        return;
+                None => {
+                    let lua = self.lua.execution();
+                    let sessions = self.core.sessions.clone();
+                    let materialized = crate::lua::scope_app(self, || {
+                        crate::app::history::materialize_full_transcript_read_only_result(
+                            &sessions, &lua, id,
+                        )
+                    });
+                    match materialized {
+                        Ok(Some(transcript)) => (transcript, true),
+                        Ok(None) => {
+                            self.notify_error_sticky(format!(
+                                "session {id:?} has no readable transcript state"
+                            ));
+                            return;
+                        }
+                        Err(err) => {
+                            self.notify_error_sticky(format!(
+                                "failed to load session transcript: {err}"
+                            ));
+                            return;
+                        }
                     }
-                    Err(err) => {
-                        self.notify_error_sticky(format!(
-                            "failed to load session transcript: {err}"
-                        ));
-                        return;
-                    }
-                },
+                }
             };
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
@@ -699,8 +832,8 @@ impl TuiApp {
             self.core.env.cwd(),
         );
         let mut document = document.into_store_backed();
-        if repair_descriptors {
-            document = document.requiring_descriptor_repair();
+        if repair_records {
+            document = document.requiring_record_repair();
         }
         self.load_store_backed_session(document);
         if !degraded_warnings.is_empty() {
@@ -725,7 +858,48 @@ impl TuiApp {
         let should_cancel = self.resolve_confirm((choice, message), call_id, request_id, tool_name);
         if should_cancel {
             self.finish_turn(crate::app::TurnEnd::Cancelled);
-            self.agent = None;
+            self.conversation.clear_active();
         }
+    }
+}
+
+#[cfg(test)]
+mod controller_tests {
+    use super::*;
+
+    fn controller() -> LuaRuntimeController {
+        let runtime = crate::lua::LuaRuntime::new();
+        let generation = crate::lua::LuaGeneration::initial(
+            runtime,
+            None,
+            smelt_core::trust::TrustState::NoContent,
+        );
+        LuaRuntimeController::new(generation)
+    }
+
+    #[test]
+    fn manual_reload_upgrades_pending_config_reload() {
+        let mut controller = controller();
+
+        assert!(controller.schedule_reload(LuaReloadKind::AutoConfig));
+        assert!(!controller.schedule_reload(LuaReloadKind::Manual));
+        assert_eq!(
+            controller.take_pending_reload(),
+            Some(LuaReloadKind::Manual)
+        );
+        assert!(!controller.pending_reload());
+    }
+
+    #[test]
+    fn runtime_reconcile_and_wakeup_are_owned_and_drained() {
+        let mut controller = controller();
+        controller.schedule_runtime_reconcile();
+        controller.schedule_runtime_reconcile();
+        assert!(controller.take_runtime_reconcile());
+        assert!(!controller.take_runtime_reconcile());
+
+        controller.wakeup_sender().send(()).unwrap();
+        assert!(controller.try_receive_wakeup());
+        assert!(!controller.try_receive_wakeup());
     }
 }

@@ -42,10 +42,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return the vim mode of the focused surface, or `nil` if it isn't vim-enabled.",
         &[],
         |_, ()| -> LuaResult<Option<LuaVimMode>> {
-            Ok(
-                crate::lua::try_with_app(|app| app.focused_vim_mode().map(LuaVimMode::from))
-                    .flatten(),
-            )
+            Ok(crate::lua::try_with_agent_host(|host| {
+                host.focused_vim_mode().map(LuaVimMode::from)
+            })
+            .flatten())
         },
     )?;
     m.fn_(
@@ -54,9 +54,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["mode"],
         |_, mode: LuaVimMode| -> LuaResult<()> {
             let target = mode.into();
-            crate::lua::with_app(|app| {
-                app.set_focused_vim_mode(target);
-            });
+            crate::lua::with_agent_host(|host| host.set_focused_vim_mode(target));
             Ok(())
         },
     )?;

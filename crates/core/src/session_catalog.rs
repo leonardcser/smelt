@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -54,10 +56,34 @@ enum PendingAction {
 }
 
 #[derive(Default)]
+struct WorkBatch {
+    actions: HashMap<String, PendingAction>,
+    reconcile_all: bool,
+    barriers: Vec<mpsc::Sender<()>>,
+}
+
+#[derive(Default)]
 struct PendingWork {
+    batches: VecDeque<WorkBatch>,
     actions: HashMap<String, PendingAction>,
     reconcile_all: bool,
     shutdown: bool,
+}
+
+impl PendingWork {
+    fn take_current(&mut self, barriers: Vec<mpsc::Sender<()>>) -> WorkBatch {
+        WorkBatch {
+            actions: std::mem::take(&mut self.actions),
+            reconcile_all: std::mem::take(&mut self.reconcile_all),
+            barriers,
+        }
+    }
+
+    fn next_batch(&mut self) -> Option<WorkBatch> {
+        self.batches.pop_front().or_else(|| {
+            (!self.actions.is_empty() || self.reconcile_all).then(|| self.take_current(Vec::new()))
+        })
+    }
 }
 
 #[derive(Default)]
@@ -68,6 +94,7 @@ struct Overlays {
 
 #[derive(Clone)]
 struct ServiceHandle {
+    state_root: PathBuf,
     sessions_root: PathBuf,
     catalog_path: PathBuf,
     lock_path: PathBuf,
@@ -78,6 +105,7 @@ struct ServiceHandle {
 }
 
 struct ServiceOwner {
+    #[cfg(test)]
     state_root: PathBuf,
     handle: ServiceHandle,
     worker: Option<thread::JoinHandle<()>>,
@@ -85,7 +113,7 @@ struct ServiceOwner {
 
 impl ServiceOwner {
     fn spawn(state_root: PathBuf) -> Result<Self, String> {
-        crate::session::create_private_dir_all(&state_root)
+        crate::session::create_private_dir_all_in(&state_root, &state_root)
             .map_err(|error| format!("create session catalog state directory: {error}"))?;
         let sessions_root = state_root.join("sessions");
         let catalog_path = state_root.join("catalog.db");
@@ -98,6 +126,7 @@ impl ServiceOwner {
         let status = Arc::new(Mutex::new(ServiceStatus::default()));
         let (wake, wakes) = mpsc::sync_channel(1);
         let handle = ServiceHandle {
+            state_root: state_root.clone(),
             sessions_root,
             catalog_path,
             lock_path,
@@ -112,6 +141,7 @@ impl ServiceOwner {
             .spawn(move || catalog_worker(worker_handle, wakes))
             .map_err(|error| format!("spawn session catalog worker: {error}"))?;
         let owner = Self {
+            #[cfg(test)]
             state_root,
             handle,
             worker: Some(worker),
@@ -135,6 +165,60 @@ impl Drop for ServiceOwner {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct SessionCatalog {
+    owner: Arc<ServiceOwner>,
+}
+
+impl SessionCatalog {
+    pub(crate) fn open(state_root: PathBuf) -> Result<Self, String> {
+        ServiceOwner::spawn(state_root).map(|owner| Self {
+            owner: Arc::new(owner),
+        })
+    }
+
+    pub(crate) fn request_reconciliation(&self) {
+        self.owner.handle.request_reconciliation();
+    }
+
+    pub(crate) fn publish_commit(
+        &self,
+        command: &smelt_store::SessionCommit,
+        receipt: &smelt_store::SaveReceipt,
+        schedule_projection: bool,
+    ) {
+        publish_commit_to(&self.owner.handle, command, receipt, schedule_projection);
+    }
+
+    pub(crate) fn request_projection(&self, id: &str, revision: smelt_store::Revision) {
+        self.owner
+            .handle
+            .request_action(id.to_string(), PendingAction::Project(revision.get()));
+    }
+
+    pub(crate) fn begin_delete(&self, id: &str) {
+        self.owner.handle.begin_delete(id);
+    }
+
+    pub(crate) fn cancel_delete(&self, id: &str) {
+        self.owner.handle.cancel_delete(id);
+    }
+
+    pub(crate) fn complete_delete(&self, id: &str) {
+        self.owner
+            .handle
+            .request_action(id.to_string(), PendingAction::Remove);
+    }
+
+    pub(crate) fn read_page(&self, query: &CatalogQuery) -> ReadPage {
+        read_page_from(&self.owner.handle, query)
+    }
+
+    pub(crate) fn wait_for_queued_work(&self, timeout: Duration) -> bool {
+        self.owner.handle.wait_for_barrier(timeout)
+    }
+}
+
 impl ServiceHandle {
     fn signal(&self) -> Result<(), String> {
         match self.wake.try_send(()) {
@@ -143,6 +227,28 @@ impl ServiceHandle {
                 Err("session catalog worker disconnected".into())
             }
         }
+    }
+
+    fn enqueue_barrier(&self) -> Result<mpsc::Receiver<()>, String> {
+        let (complete, completed) = mpsc::channel();
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if pending.shutdown {
+                return Err("session catalog worker is shutting down".into());
+            }
+            let batch = pending.take_current(vec![complete]);
+            pending.batches.push_back(batch);
+        }
+        self.signal()?;
+        Ok(completed)
+    }
+
+    fn wait_for_barrier(&self, timeout: Duration) -> bool {
+        self.enqueue_barrier()
+            .is_ok_and(|completed| completed.recv_timeout(timeout).is_ok())
     }
 
     fn request_reconciliation(&self) {
@@ -292,11 +398,13 @@ impl ServiceHandle {
     }
 }
 
+#[cfg(test)]
 fn global_service() -> &'static Mutex<Option<ServiceOwner>> {
     static SERVICE: OnceLock<Mutex<Option<ServiceOwner>>> = OnceLock::new();
     SERVICE.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(test)]
 fn service() -> Option<ServiceHandle> {
     let state_root = crate::config::state_dir();
     let mut service = global_service()
@@ -320,12 +428,14 @@ fn service() -> Option<ServiceHandle> {
     service.as_ref().map(|owner| owner.handle.clone())
 }
 
+#[cfg(test)]
 pub(crate) fn request_reconciliation() {
     if let Some(service) = service() {
         service.request_reconciliation();
     }
 }
 
+#[cfg(test)]
 pub(crate) fn publish_commit(
     command: &smelt_store::SessionCommit,
     receipt: &smelt_store::SaveReceipt,
@@ -334,6 +444,15 @@ pub(crate) fn publish_commit(
     let Some(service) = service() else {
         return;
     };
+    publish_commit_to(&service, command, receipt, schedule_projection);
+}
+
+fn publish_commit_to(
+    service: &ServiceHandle,
+    command: &smelt_store::SessionCommit,
+    receipt: &smelt_store::SaveReceipt,
+    schedule_projection: bool,
+) {
     service.publish_overlay(catalog_session_from_commit(command, receipt));
     if schedule_projection {
         service.request_action(
@@ -343,6 +462,7 @@ pub(crate) fn publish_commit(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn request_projection(id: &str, revision: smelt_store::Revision) {
     let Some(service) = service() else {
         return;
@@ -350,38 +470,43 @@ pub(crate) fn request_projection(id: &str, revision: smelt_store::Revision) {
     service.request_action(id.to_string(), PendingAction::Project(revision.get()));
 }
 
+#[cfg(test)]
 pub(crate) fn begin_delete(id: &str) {
     if let Some(service) = service() {
         service.begin_delete(id);
     }
 }
 
+#[cfg(test)]
 pub(crate) fn cancel_delete(id: &str) {
     if let Some(service) = service() {
         service.cancel_delete(id);
     }
 }
 
-pub(crate) fn complete_delete(id: &str) {
-    if let Some(service) = service() {
-        service.request_action(id.to_string(), PendingAction::Remove);
+#[cfg(test)]
+pub(crate) fn read_page(query: &CatalogQuery) -> ReadPage {
+    let Some(service) = service() else {
+        return unavailable_read_page("session catalog service is unavailable");
+    };
+    read_page_from(&service, query)
+}
+
+pub(crate) fn unavailable_read_page(error: impl Into<String>) -> ReadPage {
+    ReadPage {
+        sessions: Vec::new(),
+        next_cursor: None,
+        status: ServiceStatus {
+            state: ServiceState::Degraded,
+            completed_scan_id: 0,
+            reconciled_at: None,
+            last_error: Some(error.into()),
+        },
     }
 }
 
-pub(crate) fn read_page(query: &CatalogQuery) -> ReadPage {
+fn read_page_from(service: &ServiceHandle, query: &CatalogQuery) -> ReadPage {
     let _perf = smelt_perf::perf::begin("session:catalog:query");
-    let Some(service) = service() else {
-        return ReadPage {
-            sessions: Vec::new(),
-            next_cursor: None,
-            status: ServiceStatus {
-                state: ServiceState::Degraded,
-                completed_scan_id: 0,
-                reconciled_at: None,
-                last_error: Some("session catalog service is unavailable".into()),
-            },
-        };
-    };
     let (active, deleted) = {
         let overlays = service
             .overlays
@@ -529,40 +654,34 @@ fn catalog_session_from_commit(
 }
 
 fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
+    const RETRY_DELAY: Duration = Duration::from_millis(50);
+
     let mut warning = WarningLimiter::default();
     while wakes.recv().is_ok() {
         loop {
-            let (actions, reconcile_all, shutdown) = {
+            let Some(mut batch) = ({
                 let mut pending = handle
                     .pending
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                let actions = std::mem::take(&mut pending.actions);
-                let reconcile_all = std::mem::take(&mut pending.reconcile_all);
-                (actions, reconcile_all, pending.shutdown)
-            };
-            if shutdown {
-                return;
-            }
-            if actions.is_empty() && !reconcile_all {
+                if pending.shutdown {
+                    pending.batches.clear();
+                    return;
+                }
+                pending.next_batch()
+            }) else {
                 break;
-            }
+            };
 
-            if reconcile_all {
+            if batch.reconcile_all {
                 handle.set_reconciling();
                 match reconcile_all_sessions(&handle) {
-                    Ok(()) => {}
+                    Ok(()) => complete_barriers(batch.barriers),
                     Err(error) => {
                         warning.warn(&error);
                         handle.set_degraded(error);
-                        let mut pending = handle
-                            .pending
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner());
-                        pending.reconcile_all = true;
-                        for (id, action) in actions {
-                            pending.actions.entry(id).or_insert(action);
-                        }
+                        batch.reconcile_all = true;
+                        requeue_failed_batch(&handle, batch, RETRY_DELAY);
                         break;
                     }
                 }
@@ -570,51 +689,74 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
             }
 
             let mut needs_reconciliation = false;
-            for (id, action) in actions {
+            for (id, action) in std::mem::take(&mut batch.actions) {
                 let result = match action {
                     PendingAction::Project(minimum_revision) => {
                         project_session(&handle, &id, minimum_revision)
                     }
-                    PendingAction::Remove => remove_session(&handle, &id),
+                    PendingAction::Remove => remove_session(&handle, &id).map(|()| false),
                 };
-                if let Err(error) = result {
-                    warning.warn(&error);
-                    handle.set_degraded(error);
-                    needs_reconciliation = true;
+                match result {
+                    Ok(reconcile) => needs_reconciliation |= reconcile,
+                    Err(error) => {
+                        warning.warn(&error);
+                        handle.set_degraded(error);
+                        needs_reconciliation = true;
+                    }
                 }
             }
             if needs_reconciliation {
-                handle
-                    .pending
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .reconcile_all = true;
+                batch.reconcile_all = true;
+                requeue_failed_batch(&handle, batch, RETRY_DELAY);
+                break;
             }
+            complete_barriers(batch.barriers);
         }
     }
 }
 
-fn project_session(handle: &ServiceHandle, id: &str, minimum_revision: u64) -> Result<(), String> {
+fn requeue_failed_batch(handle: &ServiceHandle, batch: WorkBatch, retry_delay: Duration) {
+    handle
+        .pending
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .batches
+        .push_front(batch);
+    thread::sleep(retry_delay);
+    let _ = handle.signal();
+}
+
+fn complete_barriers(barriers: Vec<mpsc::Sender<()>>) {
+    for barrier in barriers {
+        let _ = barrier.send(());
+    }
+}
+
+fn project_session(
+    handle: &ServiceHandle,
+    id: &str,
+    minimum_revision: u64,
+) -> Result<bool, String> {
     let _duration = smelt_perf::perf::begin_value_ms("session:catalog:projection_duration_ms");
     let _perf = smelt_perf::perf::begin("session:catalog:project");
     smelt_perf::perf::record_value(
         "session:catalog:project_requested_revision",
         minimum_revision,
     );
-    let mut projected = load_projection(&handle.sessions_root, id);
+    let mut projected = load_projection(&handle.state_root, &handle.sessions_root, id);
     if projected
         .as_ref()
         .is_ok_and(|session| session.source_revision < minimum_revision)
     {
         smelt_perf::perf::record_value("session:catalog:post_publication_retry", 1);
-        projected = load_projection(&handle.sessions_root, id);
+        projected = load_projection(&handle.state_root, &handle.sessions_root, id);
     }
 
     let _lock = CatalogReconcileLock::acquire(&handle.lock_path)
         .map_err(|error| format!("lock session catalog projection: {error}"))?;
     let mut catalog = Catalog::open(&handle.catalog_path)
         .map_err(|error| format!("open session catalog for projection: {error}"))?;
-    match projected {
+    let needs_reconciliation = match projected {
         Ok(session) => {
             let revision = session.source_revision;
             smelt_perf::perf::record_value(
@@ -625,13 +767,7 @@ fn project_session(handle: &ServiceHandle, id: &str, minimum_revision: u64) -> R
                 .upsert_available(&session)
                 .map_err(|error| format!("project session {id}: {error}"))?;
             handle.clear_projected(id, revision);
-            if revision < minimum_revision {
-                handle
-                    .pending
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .reconcile_all = true;
-            }
+            revision < minimum_revision
         }
         Err(error) => {
             catalog
@@ -639,9 +775,11 @@ fn project_session(handle: &ServiceHandle, id: &str, minimum_revision: u64) -> R
                 .map_err(|catalog_error| {
                     format!("record unavailable session {id}: {catalog_error}")
                 })?;
+            handle.clear_projected(id, minimum_revision);
+            false
         }
-    }
-    Ok(())
+    };
+    Ok(needs_reconciliation)
 }
 
 fn remove_session(handle: &ServiceHandle, id: &str) -> Result<(), String> {
@@ -674,13 +812,19 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
     let scan_id = catalog
         .allocate_scan()
         .map_err(|error| format!("allocate session catalog scan: {error}"))?;
-    let entries = session_directory_entries(&handle.sessions_root)?;
-    let tombstones = handle
-        .overlays
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .deleted
-        .clone();
+    let (active_overlays, tombstones) = {
+        let overlays = handle
+            .overlays
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let active = overlays
+            .active
+            .iter()
+            .map(|(id, session)| (id.clone(), session.source_revision))
+            .collect::<Vec<_>>();
+        (active, overlays.deleted.clone())
+    };
+    let entries = session_directory_entries(&handle.state_root, &handle.sessions_root)?;
     let mut seen_tombstones = HashSet::with_capacity(tombstones.len());
     let mut candidates = 0_u64;
     let mut available = 0_u64;
@@ -703,7 +847,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
             if tombstones.contains(&id) {
                 seen_tombstones.insert(id.clone());
             }
-            match load_projection(&handle.sessions_root, &id) {
+            match load_projection(&handle.state_root, &handle.sessions_root, &id) {
                 Ok(session) => {
                     available += 1;
                     let revision = session.source_revision;
@@ -737,6 +881,9 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
         .map_err(|error| format!("complete session catalog scan {scan_id}: {error}"))?;
     smelt_perf::perf::record_value("session:catalog:reconcile_removed", deleted as u64);
 
+    for (id, revision) in active_overlays {
+        handle.clear_projected(&id, revision);
+    }
     {
         let mut overlays = handle
             .overlays
@@ -759,8 +906,11 @@ fn retain_reconciliation_tombstones(
     current.retain(|id| !snapshot.contains(id) || seen.contains(id));
 }
 
-fn session_directory_entries(root: &Path) -> Result<Option<fs::ReadDir>, String> {
-    crate::session_store::reject_symlink(root, "reconcile catalog")
+fn session_directory_entries(
+    state_root: &Path,
+    root: &Path,
+) -> Result<Option<fs::ReadDir>, String> {
+    crate::session_store::reject_symlink_in(state_root, root, "reconcile catalog")
         .map_err(|error| error.to_string())?;
     match fs::read_dir(root) {
         Ok(entries) => Ok(Some(entries)),
@@ -777,13 +927,21 @@ struct ProjectionError {
     summary: String,
 }
 
-fn load_projection(root: &Path, id: &str) -> Result<CatalogSession, ProjectionError> {
+fn load_projection(
+    state_root: &Path,
+    root: &Path,
+    id: &str,
+) -> Result<CatalogSession, ProjectionError> {
     let session_dir = root.join(id);
     let db_path = session_dir.join("session.db");
-    if let Err(error) = crate::session_store::reject_symlink(&session_dir, "project catalog") {
+    if let Err(error) =
+        crate::session_store::reject_symlink_in(state_root, &session_dir, "project catalog")
+    {
         return Err(projection_error(error));
     }
-    if let Err(error) = crate::session_store::reject_symlink(&db_path, "project catalog") {
+    if let Err(error) =
+        crate::session_store::reject_symlink_in(state_root, &db_path, "project catalog")
+    {
         return Err(projection_error(error));
     }
     if !db_path.is_file() {
@@ -879,21 +1037,8 @@ impl WarningLimiter {
 }
 
 #[cfg(test)]
-pub(crate) fn wait_until_ready(timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let page = read_page(&CatalogQuery {
-            limit: 1,
-            ..CatalogQuery::default()
-        });
-        if page.status.state == ServiceState::Ready {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+pub(crate) fn wait_for_queued_work(timeout: Duration) -> bool {
+    service().is_some_and(|service| service.wait_for_barrier(timeout))
 }
 
 #[cfg(test)]
@@ -908,6 +1053,40 @@ mod tests {
         session.title = Some(title.into());
         session.updated_at_ms = 1_700_000_000_000;
         session
+    }
+
+    fn test_worker(root: &Path) -> (ServiceHandle, thread::JoinHandle<()>) {
+        test_worker_with_lock(root, root.join(".catalog.lock"))
+    }
+
+    fn test_worker_with_lock(
+        root: &Path,
+        lock_path: PathBuf,
+    ) -> (ServiceHandle, thread::JoinHandle<()>) {
+        let (wake, wakes) = mpsc::sync_channel(1);
+        let handle = ServiceHandle {
+            state_root: root.to_path_buf(),
+            sessions_root: root.join("sessions"),
+            catalog_path: root.join("catalog.db"),
+            lock_path,
+            pending: Arc::new(Mutex::new(PendingWork::default())),
+            overlays: Arc::new(Mutex::new(Overlays::default())),
+            status: Arc::new(Mutex::new(ServiceStatus::default())),
+            wake,
+        };
+        let worker_handle = handle.clone();
+        let worker = thread::spawn(move || catalog_worker(worker_handle, wakes));
+        (handle, worker)
+    }
+
+    fn stop_test_worker(handle: &ServiceHandle, worker: thread::JoinHandle<()>) {
+        handle
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .shutdown = true;
+        handle.signal().unwrap();
+        worker.join().unwrap();
     }
 
     fn stale_catalog_row() -> CatalogSession {
@@ -940,6 +1119,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (wake, _wakes) = mpsc::sync_channel(1);
         let handle = ServiceHandle {
+            state_root: temp.path().to_path_buf(),
             sessions_root: temp.path().join("sessions"),
             catalog_path: temp.path().join("catalog.db"),
             lock_path: temp.path().join(".catalog.lock"),
@@ -966,6 +1146,115 @@ mod tests {
     }
 
     #[test]
+    fn failed_projection_retires_only_the_overlay_it_attempted() {
+        let temp = tempfile::tempdir().unwrap();
+        let (handle, worker) = test_worker(temp.path());
+        let mut overlay = stale_catalog_row();
+        overlay.source_revision = 5;
+        handle.publish_overlay(overlay);
+
+        assert!(!project_session(&handle, SESSION_ID, 5).unwrap());
+        assert!(!handle
+            .overlays
+            .lock()
+            .unwrap()
+            .active
+            .contains_key(SESSION_ID));
+
+        let mut newer_overlay = stale_catalog_row();
+        newer_overlay.source_revision = 6;
+        handle.publish_overlay(newer_overlay);
+        assert!(!project_session(&handle, SESSION_ID, 5).unwrap());
+        assert_eq!(
+            handle.overlays.lock().unwrap().active[SESSION_ID].source_revision,
+            6
+        );
+        stop_test_worker(&handle, worker);
+    }
+
+    #[test]
+    fn reconciliation_retires_active_overlays_missing_from_canonical_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let (handle, worker) = test_worker(temp.path());
+        let mut overlay = stale_catalog_row();
+        overlay.source_revision = 5;
+        handle.publish_overlay(overlay);
+
+        reconcile_all_sessions(&handle).unwrap();
+
+        assert!(!handle
+            .overlays
+            .lock()
+            .unwrap()
+            .active
+            .contains_key(SESSION_ID));
+        stop_test_worker(&handle, worker);
+    }
+
+    #[test]
+    fn barrier_waits_for_work_queued_before_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let (handle, worker) = test_worker(temp.path());
+        handle.request_action(SESSION_ID.into(), PendingAction::Remove);
+        let completed = handle.enqueue_barrier().unwrap();
+
+        completed.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let catalog = CatalogReader::open_existing(&handle.catalog_path)
+            .unwrap()
+            .expect("remove action created catalog");
+        assert!(catalog.session(SESSION_ID).unwrap().is_none());
+        stop_test_worker(&handle, worker);
+    }
+
+    #[test]
+    fn work_queued_after_barrier_does_not_delay_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("blocked");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        let (handle, worker) =
+            test_worker_with_lock(temp.path(), blocked_parent.join("catalog.lock"));
+        let completed = handle.enqueue_barrier().unwrap();
+        handle.request_reconciliation();
+
+        completed.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        stop_test_worker(&handle, worker);
+    }
+
+    #[test]
+    fn failed_reconciliation_retries_without_acknowledging_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("blocked");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        let (handle, worker) =
+            test_worker_with_lock(temp.path(), blocked_parent.join("catalog.lock"));
+        handle.request_reconciliation();
+        let completed = handle.enqueue_barrier().unwrap();
+
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        fs::remove_file(&blocked_parent).unwrap();
+        completed.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        stop_test_worker(&handle, worker);
+    }
+
+    #[test]
+    fn shutdown_rejects_new_barriers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (handle, worker) = test_worker(temp.path());
+        handle.pending.lock().unwrap().shutdown = true;
+
+        assert!(handle.enqueue_barrier().is_err());
+
+        handle.signal().unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn reconciliation_preserves_tombstones_added_after_its_snapshot() {
         let snapshot = HashSet::from(["gone".to_string(), "present".to_string()]);
         let seen = HashSet::from(["present".to_string()]);
@@ -985,7 +1274,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         request_reconciliation();
-        assert!(wait_until_ready(Duration::from_secs(2)));
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
 
         let session = canonical_session("current");
         crate::session::create_private_dir_all(&crate::session::sessions_dir()).unwrap();
@@ -1021,7 +1310,7 @@ mod tests {
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         let session = canonical_session("canonical");
         let receipt = crate::session::save_result(&session).unwrap();
-        assert!(wait_until_ready(Duration::from_secs(2)));
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
         let catalog_path = crate::config::state_dir().join("catalog.db");
 
         let mut catalog = Catalog::open(&catalog_path).unwrap();
@@ -1041,13 +1330,13 @@ mod tests {
 
         smelt_store::rebuild_catalog(&catalog_path).unwrap();
         request_reconciliation();
-        assert!(wait_until_ready(Duration::from_secs(2)));
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
         assert_eq!(read_page(&CatalogQuery::default()).sessions.len(), 1);
 
         smelt_store::rebuild_catalog(&catalog_path).unwrap();
         fs::write(&catalog_path, b"corrupt catalog").unwrap();
         request_reconciliation();
-        assert!(wait_until_ready(Duration::from_secs(2)));
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
         let rebuilt = read_page(&CatalogQuery::default());
         assert_eq!(rebuilt.sessions.len(), 1);
         assert_eq!(rebuilt.sessions[0].title.as_deref(), Some("canonical"));

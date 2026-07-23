@@ -17,7 +17,7 @@ Enter
   -> one canonical session.db transaction:
        session revision
        submitted history suffix
-       transcript descriptor suffix
+       transcript record suffix
        deterministic turn state = ready
        transactional search rows
   -> durable CommitReceipt
@@ -25,8 +25,6 @@ Enter
 
 After commit, asynchronously:
   -> catalog.db projection
-  -> COMPAT meta.json export
-  -> COMPAT content.txt export
   -> active transcript dematerialization
 ```
 
@@ -71,8 +69,8 @@ priority over literal adherence to a proposed type, phase, queue, or mechanism.
    readers, compatibility wrappers, reconciliation state, or UI policy merely to
    hide an ownership, ordering, durability, or data-model flaw. Catalog
    reconciliation is justified only because the catalog is explicitly disposable
-   derived state; it must never conceal canonical inconsistency. Sidecar
-   compatibility exists only under its documented `COMPAT` removal contract.
+   derived state; it must never conceal canonical inconsistency. No per-session
+   compatibility projection is retained.
 5. **Delete superseded mechanisms completely.** A successful cutover removes old
    writers, readers, workers, state variants, tests, metrics, comments, and
    adapters. Do not leave dormant implementations in case the replacement fails.
@@ -114,7 +112,7 @@ The implementation phases below supersede this historical inventory:
   the journal and durability mechanism.
 - `crates/store/src/schema.rs:682` stores canonical session state and revision.
 - `crates/store/src/schema.rs:707` and `crates/store/src/schema.rs:718` store
-  history and transcript descriptors.
+  history and transcript records.
 - `crates/store/src/schema.rs:844` keeps transcript search and FTS updates in the
   session database.
 - `crates/tui/src/app/agent.rs:181` appends the user message before dispatch, and
@@ -127,11 +125,11 @@ The implementation phases below supersede this historical inventory:
   directory and reading `meta.json` or opening each `session.db`.
 - `crates/core/src/session.rs:2257` revision-stamps derived metadata, and
   `crates/core/src/session.rs:2286` streams revision-stamped derived content.
-- `crates/core/src/transcript_model.rs:1280` lazily materializes descriptor-backed
+- `crates/core/src/transcript_model.rs:1280` lazily materializes record-backed
   blocks through `OnceLock`, but hydration cannot be evicted.
 - `crates/core/src/transcript_model.rs:1405` keeps every active block entry and
   coupled maps resident for the life of the active session.
-- `crates/tui/src/app/transcript.rs:264` has bounded sparse descriptor windows for
+- `crates/tui/src/app/transcript.rs:264` has bounded sparse record windows for
   resumed display-only sessions. The same bounded discipline does not yet apply
   to a long-lived active session.
 
@@ -148,8 +146,7 @@ Adopt the following design:
    each Enter submission.
 4. Explicit persisted turn states, not an automatically retried provider outbox.
 5. One rebuildable root `catalog.db` used for session listing.
-6. Separate bounded, coalescing workers for catalog projection and compatibility
-   exports.
+6. One bounded, coalescing worker for the rebuildable catalog projection.
 7. Transactional per-session search indexes.
 8. Compact durable block references plus byte-budgeted hydration and render
    caches for committed old transcript blocks.
@@ -212,7 +209,7 @@ changing user-visible session semantics. It lives only in `session.db`:
 - Immutable session identity and fork parent.
 - Mutable session metadata and canonical revision.
 - Model history and history-indexed side tables.
-- Transcript descriptors, origins, durable tool state, and descriptor extents.
+- Transcript records, origins, durable tool state, and record extents.
 - Persisted turn IDs, turn states, and terminal turn outcomes.
 - Content-addressed objects and typed references.
 - Transactional transcript search text, character masks, and FTS rows.
@@ -236,9 +233,8 @@ Derived state may lag, fail, be deleted, or be rebuilt without changing session
 semantics:
 
 - Root `catalog.db`.
-- `meta.json` and `content.txt` compatibility exports.
 - In-memory session-list overlays.
-- Loaded descriptor windows.
+- Loaded record windows.
 - Hydrated transcript blocks.
 - Render plans, exact-height measurements, rows, and layout caches.
 - Metrics and diagnostic summaries.
@@ -265,13 +261,12 @@ Ephemeral state is process-local and is never treated as a recovery source:
 3. Every canonical transaction verifies the fenced owner token.
 4. Revision is checked, never wrapped or saturated.
 5. A canonical transaction either commits all supplied metadata, history,
-   descriptors, turn state, and search changes, or none of them.
+   records, turn state, and search changes, or none of them.
 6. The session commit fingerprint includes every supplied canonical field and
    turn mutation.
 7. Exact replay of an ambiguously acknowledged transaction returns the persisted
    receipt rather than applying the mutation twice.
-8. WAL checkpoints, catalog writes, and sidecar writes are not part of the Enter
-   barrier.
+8. WAL checkpoints and catalog writes are not part of the Enter barrier.
 
 ### Enter
 
@@ -319,15 +314,15 @@ Ephemeral state is process-local and is never treated as a recovery source:
 
 1. Mutable or uncommitted blocks remain materialized.
 2. A committed block becomes evictable only after the document applies a receipt
-   proving its descriptor is durable.
+   proving its record is durable.
 3. Visible blocks, overscan, active streaming blocks, pending tool blocks, and
    explicit operation targets are pinned.
 4. Unpinned hydrated blocks are evicted by byte budget, not entry count.
-5. Hydration reads bounded descriptor ranges from SQLite.
+5. Hydration reads bounded record ranges from SQLite.
 6. Search does not hydrate every matching block.
 7. A single required block larger than a budget may temporarily exceed it, but
    all unpinned entries are evicted and the oversize debt is measured.
-8. Cache eviction never changes canonical dirtiness, descriptor generations,
+8. Cache eviction never changes canonical dirtiness, record generations,
    block IDs, navigation semantics, or scroll anchors.
 
 ## Canonical submit transaction
@@ -345,7 +340,7 @@ struct SubmitTurn {
     metadata: SessionMetadata,
     history: HistorySuffix,
     side_tables: SideTableSuffixes,
-    descriptors: Option<TranscriptDescriptorSuffix>,
+    transcript_records: Option<TranscriptRecordSuffix>,
     turn: NewTurn,
 }
 
@@ -386,7 +381,7 @@ The store performs this ordering inside one SQLite transaction:
 3. Validate suffix coordinates and object references before destructive writes.
 4. Insert referenced content-addressed objects.
 5. Apply history and history-indexed side-table suffixes.
-6. Apply transcript descriptor suffixes.
+6. Apply transcript record suffixes.
 7. Update `transcript_search`, `transcript_search_chars`, and FTS triggers in the
    same transaction.
 8. Calculate the one next session revision after all canonical changes are known.
@@ -530,7 +525,7 @@ running -> interrupted
 
 `running` is written after the engine accepts dispatch. The one mutation owner
 serializes this transition before subsequent engine history or completion
-mutations. Completion commits final history, descriptors, turn metadata, and
+mutations. Completion commits final history, records, turn metadata, and
 `completed` in one transaction.
 
 Cancellation records `cancelled` only after the cancellation outcome is known.
@@ -730,126 +725,18 @@ scan.
 Pagination and filters must execute in SQLite. Do not load all catalog rows and
 sort them in Rust for a bounded list view.
 
-## Compatibility exports
+## Derived-state boundaries
 
-### Compatibility ID
-
-Use one compatibility ID for every removable sidecar read, write, export worker,
-fixture, and fallback path:
-
-```text
-COMPAT(session-derived-sidecar-exports)
-```
-
-During implementation, replace the existing
-`session-search-sidecar-missing` entry in `docs/compat.md` rather than keeping two
-IDs for the same debt. Delete internal sidecar reads after catalog cutover. Mark
-all surviving export paths with the new ID.
-
-### Phase 0 compatibility inventory
-
-| Category | Current path | Source of truth | Cutover or removal |
-| --- | --- | --- | --- |
-| Production read | `crates/core/src/session.rs` reads `meta.json` only for directory-scanned list metadata, then opens `session.db` when the export is absent | `session.db` | Phase 3 replaces directory scanning and this read with `catalog.db` |
-| Production search/read | Search, exact metadata load, resume, and full session load already read canonical SQLite; production code never reads `content.txt` | `session.db` | Preserve this invariant |
-| Production write | Offline core save writes both exports; the TUI persistence actor writes metadata synchronously and queues content on a capacity-1 wake channel | `session.db` revision receipt | Phase 2 removes exports from Enter; Phase 4 installs one bounded process exporter |
-| Fork write | Fork publication writes both exports before publishing the destination | Forked `session.db` | Phase 4 schedules the process exporter after canonical publication |
-| Explicit CLI export | `smelt session rebuild-derived` rebuilds both files under maintenance ownership | `session.db` | Keep only while this compatibility ID remains |
-| Cleanup | Session-root cleanup removes abandoned `.meta.json.*` and `.content.txt.*` atomic-write temporaries | None | Remove with the exporters |
-| Store test utility | The test-only store helper writes `meta.json` from canonical state | `session.db` | Phase 4 tests use the shared exporter primitive |
-| Storybook and tests | Storybook list fixtures, CLI integration, fork/failure E2E tests, and transcript/resume benchmarks explicitly create, remove, mutate, read, or wait for exports | Canonical fixture database | Phase 4 seeds SQLite directly and retains file access only in compatibility tests |
-| Lua exposure | `smelt.session.list()` indirectly reaches the list metadata reader; Lua search calls canonical SQLite and does not read `content.txt` | Mixed list cache today, SQLite for search | Phase 3 moves list to catalog; no Lua compatibility file API is added |
-| Inspect exposure | The inspect session list indirectly reaches the list metadata reader; detail, history, transcript, and summary paths use SQLite | Mixed list cache today, SQLite for detail | Phase 3 moves list to catalog; inspect never exposes a sidecar endpoint |
-
-All removable code and fixture paths carry
-`COMPAT(session-derived-sidecar-exports)`. Current instrumentation records
-canonical session-commit attempt/completion counts, monotonic commit and provider
-dispatch ordering, sidecar completion revisions, and the content worker's
-requested revision, queue depth, and coalescing. There is no catalog writer in the
-Phase 0 baseline, so catalog queue/write labels begin with the Phase 3 catalog
-implementation rather than a placeholder abstraction. The descriptor-backed
-`OnceLock` baseline records payload bytes hydrated and pinned; each hydration
-records zero evicted bytes because the current cache has no eviction path. Phase 5
-replaces those baseline labels with byte-budget and oversize-debt accounting.
-
-The final `docs/compat.md` entry should be:
-
-```markdown
-## session-derived-sidecar-exports
-
-- Remove after: all supported smelt versions and bundled Lua/UI consumers read
-  session lists from `catalog.db` and session content/search from canonical
-  SQLite, at least two alpha releases have shipped with revision-stamped exports
-  deprecated, and no supported external import/export contract requires
-  `meta.json` or `content.txt`
-- Why: keep revision-stamped `meta.json` and `content.txt` as best-effort exports
-  for alpha-era external tooling while canonical state lives only in
-  `session.db`
-- Code:
-  - `crates/core/src/session.rs`: compatibility export format and atomic writers
-  - `crates/tui/src/persist.rs`: post-commit compatibility export scheduling
-- Tests:
-  - compatibility exports are revision-stamped and rebuilt from canonical SQLite
-  - stale or failed compatibility exports never affect list, search, resume, or
-    model dispatch
-```
-
-Update the code list if the exporter moves to a more focused module. The ID and
-removal conditions stay the same.
-
-### Exporter design
-
-Use one process-level compatibility exporter, separate from the catalog worker.
-A large `content.txt` export must not delay catalog freshness for other sessions.
-
-The exporter uses the same bounded coalescing pattern:
-
-- Highest requested revision per session.
-- Capacity-1 wake channel.
-- Fixed distinct-session bound and full-reconciliation fallback.
-- A short quiet-period debounce before starting expensive content work, so a
-  streaming turn does not repeatedly scan a growing transcript.
-- One revision-pinned read-only SQLite snapshot per export attempt.
-- Atomic temporary file, file sync, rename, and directory sync.
-- No transcript-sized snapshot passed from the actor.
-- No full transcript string in memory.
-
-A stable per-session compatibility-export lock serializes target revision checks
-and file replacement across smelt processes. It is independent of the canonical
-writer lease and is never acquired by Enter.
-
-For each session, write `meta.json` first and stream `content.txt` from SQLite.
-Both outputs include `source_revision`. A stale export is allowed temporarily.
-When a newer revision arrives during a long content export, a cancellation check
-between streamed rows/chunks may discard the current atomic temporary file and
-return to the quiet-period debounce, then converge directly to the highest
-pending revision without generating intermediate revisions. Shutdown uses the
-same cancellation seam and never waits unboundedly for a huge compatibility
-export.
-
-A target file with a higher valid source revision is not replaced by older work.
-Malformed or symlinked sidecars are never trusted and are replaced only through
-the safe atomic writer.
-
-### Internal read removal
-
-After catalog cutover:
-
-- Session listing never reads `meta.json`.
-- Session search never reads `content.txt`.
-- Resume and exact metadata load always read `session.db`.
-- Missing or stale sidecars produce no internal warning.
-- Sidecar export failure appears only as a bounded diagnostic warning/metric.
-- Explicit export and compatibility tests may read the files.
-
-`content.txt` remains a streamed export. Do not reintroduce a full transcript
-buffer to generate it.
+The root catalog is the only derived persistent session projection. Session
+listing reads `catalog.db`; search, resume, exact metadata, forks, and inspection
+read canonical `session.db` files. No per-session metadata or transcript sidecars
+are generated, read, diagnosed, or repaired.
 
 ## Transactional search
 
 Keep search tables and triggers in each canonical session database.
 
-1. Descriptor/history mutation and corresponding search rows commit together.
+1. Record/history mutation and corresponding search rows commit together.
 2. `transcript_search_chars` remains a compact candidate filter for covered
    one-character queries.
 3. FTS result ordering continues to use FTS rowid without a temporary sort.
@@ -857,8 +744,8 @@ Keep search tables and triggers in each canonical session database.
 5. Catalog contains list/filter metadata only, not a second full transcript
    search index.
 6. Cross-session search opens canonical databases in bounded parallel batches and
-   issues indexed queries. It does not concatenate every `content.txt` or every
-   full SQLite search blob in memory.
+   issues indexed queries. It does not concatenate every full SQLite search blob
+   in memory.
 7. No search watermark or eventually indexed live suffix is introduced.
 
 If future measurements show search-row work dominates SubmitTurn, first optimize
@@ -870,7 +757,7 @@ review with explicit query-merging semantics.
 ### Problem
 
 The sparse resume path is bounded, but the active `BlockHistory` eventually
-retains every block and every `OnceLock` hydration. Descriptor-backed blocks can
+retains every block and every `OnceLock` hydration. Record-backed blocks can
 become fully materialized but never become light again. Coupled `tool_states`,
 origin, content-hash, layout, and render caches can also retain old content.
 
@@ -895,7 +782,7 @@ enum BlockEntry {
 
 struct StoredBlockRef {
     block_id: BlockId,
-    descriptor_idx: DescriptorIndex,
+    record_index: usize,
     kind: BlockKind,
     content_hash: u64,
     estimated_rows: Option<u32>,
@@ -906,14 +793,14 @@ struct StoredBlockRef {
 }
 ```
 
-Exact fields should match operations that can remain descriptor-only. Do not put
-full descriptor JSON, raw tool output, or complete tool state in
+Exact fields should match operations that can remain record-only. Do not put
+full record JSON, raw tool output, or complete tool state in
 `StoredBlockRef`. Load those from SQLite when an operation actually needs them.
 
 `Live` is mutable and dirty-capable. `Stored` is a compact durable reference.
 `Hydrated` is clean, reconstructible, and evictable. A mutation targeting a
 stored or hydrated block first hydrates it, then promotes it to `Live` and lowers
-the descriptor dirty boundary.
+the record dirty boundary.
 
 ### Ownership boundary
 
@@ -921,11 +808,11 @@ Keep SQLite access out of `smelt-core` transcript domain types:
 
 - Core defines compact entry state, promotion, installation, and eviction
   primitives.
-- `TranscriptDocument` in the TUI owns the session descriptor reader and decides
+- `TranscriptDocument` in the TUI owns the session record reader and decides
   which ranges to hydrate.
 - Rendering explicitly calls `ensure_hydrated(range)` before code that requires
   full blocks.
-- Descriptor-only methods continue to provide kind, preview, navigation target,
+- Record-only methods continue to provide kind, preview, navigation target,
   extent estimate, tool identity, and content hash without hydration.
 
 Replace APIs that assume every `block(id)` can return a permanently borrowed full
@@ -936,9 +823,9 @@ SQLite I/O inside an innocent immutable accessor.
 
 A block is evictable only when all conditions hold:
 
-1. Its descriptor index is below the durable descriptor length in the latest
+1. Its record index is below the durable record length in the latest
    applied receipt.
-2. It is before every current descriptor/history dirty boundary.
+2. It is before every current record/history dirty boundary.
 3. It is not streaming, a tool draft, pending confirmation, or otherwise mutable.
 4. It is not part of the active turn's live suffix.
 5. It is not in the visible viewport or configured overscan.
@@ -948,7 +835,7 @@ A block is evictable only when all conditions hold:
 
 Checkpoint markers, compaction previews, and other non-persisted blocks remain
 `Live` until removed. A completed tool block may be stored only after its durable
-tool state and descriptor are acknowledged.
+tool state and record are acknowledged.
 
 ### Hydration triggers
 
@@ -959,10 +846,10 @@ Hydrate only bounded targets for:
 - Current search-result reveal.
 - Copy, yank, inspect, or Lua APIs that explicitly request full block content.
 - Rewind/edit operations that target a committed block.
-- Navigation operations whose compact descriptor cannot answer the query.
+- Navigation operations whose compact record cannot answer the query.
 
 Search candidate discovery, session listing, total extent estimation, and normal
-scrolling over unloaded ranges must remain descriptor-only.
+scrolling over unloaded ranges must remain record-only.
 
 ### Byte budgets
 
@@ -971,7 +858,7 @@ Create one concrete transcript cache policy with independently measurable limits
 ```rust
 struct TranscriptMemoryBudget {
     hydrated_blocks: usize,
-    descriptor_windows: usize,
+    record_windows: usize,
     rendered_rows: usize,
 }
 ```
@@ -979,7 +866,7 @@ struct TranscriptMemoryBudget {
 Start with a 64 MiB default total split as:
 
 - 32 MiB hydrated block payloads.
-- 16 MiB loaded descriptor windows.
+- 16 MiB loaded record windows.
 - 16 MiB rendered rows and layout payloads.
 
 Treat these as measured defaults, not API guarantees. Keep them centralized and
@@ -1000,7 +887,7 @@ pins are released.
 After applying a canonical receipt, schedule a bounded idle-loop compaction pass
 in the TUI:
 
-1. Advance the known durable history and descriptor prefixes.
+1. Advance the known durable history and record prefixes.
 2. Convert eligible old `Live` entries to compact `StoredBlockRef` values.
 3. Remove duplicated old full tool state and origin payloads from side maps after
    their compact fields are installed.
@@ -1024,20 +911,17 @@ to use checkpointing/compaction for truly large model context.
 | Boundary | Required result |
 |---|---|
 | Before SubmitTurn transaction | No canonical change, no dispatch |
-| During history/descriptor/search writes | Full rollback, no dispatch |
+| During history/record/search writes | Full rollback, no dispatch |
 | After turn insert but before commit | Full rollback, no turn visible |
 | WAL commit before receipt delivery | Fingerprint reconciliation returns exact receipt |
 | Receipt delivered before provider dispatch | Durable `ready`; restart marks `interrupted` |
 | Dispatch accepted before `running` commit | `ready` or `running`; restart marks either `interrupted` |
 | Provider stream during disk full | Stop further canonical progress, best-effort cancel, recover as interrupted |
 | Final history before terminal commit | Nonterminal durable turn, restart marks interrupted |
-| Terminal commit succeeds | Final history, descriptors, metadata, search, and terminal state agree |
+| Terminal commit succeeds | Final history, records, metadata, search, and terminal state agree |
 | Catalog write fails | Session remains usable; bounded warning and later reconciliation |
 | Catalog is stale or missing | Read available rows, overlay active state, reconcile asynchronously |
 | Catalog is corrupt | Recreate derived database and reconcile |
-| `meta.json` write fails | Canonical state and dispatch remain successful |
-| `content.txt` generation is slow | No Enter or catalog blocking; requests coalesce |
-| Sidecar rename crashes | Old complete revision or new complete revision, never partial file |
 | Cache hydration fails | Surface unavailable content for that operation; never invent or discard canonical state |
 | Cache budget is exceeded by pins | Record debt, evict unpinned entries, converge after unpin |
 
@@ -1057,7 +941,7 @@ Never rely only on mocked error mapping.
    with no turn rows and `next_turn_id = 1`.
 4. There can be no legitimate running provider process across a binary restart,
    so no old in-flight state needs backfill.
-5. Keep the migration additive. Do not rewrite history or descriptor tables for
+5. Keep the migration additive. Do not rewrite history or record tables for
    this phase.
 
 Migration failure rolls back the transaction and leaves the previous schema
@@ -1073,7 +957,7 @@ The catalog is disposable:
 - On incompatible schema, failed migration, or integrity failure, rebuild it from
   canonical session databases.
 - Never block session open on catalog migration.
-- Never use sidecars as the source for catalog reconstruction.
+- Reconstruct it only from canonical session databases.
 
 ### Runtime cutover
 
@@ -1082,7 +966,6 @@ Perform atomic code-path cutovers within the implementation branch:
 - Store submit API before TUI Enter cutover.
 - New Enter command and old save-plus-flush path must not coexist after cutover.
 - Catalog listing replaces directory scanning in one phase.
-- Internal sidecar reads are deleted when catalog listing lands.
 - Permanent `OnceLock` hydration is deleted when byte-budgeted hydration lands.
 
 No release should depend on an intermediate phase that has two competing sources
@@ -1109,28 +992,26 @@ After each phase, reassess the implementation against the engineering principles
 Change direction and update the plan when the answers support a simpler design
 with equal or stronger invariants.
 
-### Phase 0: Lock invariants, compatibility scope, and baselines
+### Phase 0: Lock invariants and baselines
 
 1. Add this plan and obtain approval.
-2. Inventory every `meta.json` and `content.txt` read, write, test fixture, Lua
+2. Inventory every canonical and derived read/write path, test fixture, Lua
    exposure, inspect endpoint, and cleanup path.
-3. Reserve `COMPAT(session-derived-sidecar-exports)` and replace the existing
-   overlapping compatibility entry when code work begins.
-4. Add test instrumentation for:
+3. Add test instrumentation for:
    - canonical transaction count by operation;
    - provider dispatch timestamp and turn ID;
-   - sidecar/catalog writes inside the Enter interval;
+   - catalog writes inside the Enter interval;
    - projection queue depth and revision;
    - hydrated, pinned, and evicted bytes.
-5. Preserve the current benchmark logs and rerun one release smoke baseline before
+4. Preserve the current benchmark logs and rerun one release smoke baseline before
    changing behavior.
-6. Add an end-to-end test that currently presses Enter through the real TUI,
-   persistence actor, SQLite store, and engine command capture.
+5. Add an end-to-end test that presses Enter through the real TUI, persistence
+   actor, SQLite store, and engine command capture.
 
 Exit criteria:
 
 - The current barrier and failure behavior are reproducible.
-- Every compatibility path is identified.
+- Every canonical and derived path is identified.
 - Metrics can prove the later one-transaction and no-derived-write claims.
 
 ### Phase 1: Add canonical turn state and store SubmitTurn
@@ -1149,7 +1030,7 @@ Exit criteria:
 
 Exit criteria:
 
-- A store-level SubmitTurn commits history, descriptors, search, and `ready` in one
+- A store-level SubmitTurn commits history, records, search, and `ready` in one
   transaction.
 - Ambiguous outcome recovery returns the original turn ID.
 - No provider-facing code has changed yet.
@@ -1163,18 +1044,15 @@ Exit criteria:
 4. Use the persisted turn ID for `StartTurnPayload`.
 5. Enqueue `running` only after dispatch acceptance.
 6. Commit terminal state with final canonical history and metadata.
-7. Remove synchronous `refresh_derived_meta_file` from
+7. Remove all per-session derived-file generation from
    `PersistenceActor::complete_commit`.
-8. Replace per-session `DerivedContentRefresh` threads with temporary calls to the
-   process-level bounded compatibility exporter, completed in Phase 4.
-9. Ensure Enter schedules but never waits for catalog/export work.
-10. Add E2E crash and dispatch-order tests before optimizing latency.
+8. Ensure Enter schedules but never waits for catalog work.
+9. Add E2E crash and dispatch-order tests before optimizing latency.
 
 Exit criteria:
 
 - A normal Enter causes exactly one SubmitTurn transaction and then dispatch.
-- No `meta.json`, `content.txt`, or catalog filesystem write occurs in the Enter
-  interval.
+- No catalog filesystem write occurs in the Enter interval.
 - Canonical failure prevents dispatch and preserves retryable input.
 - Restart never auto-resends a ready/running turn.
 
@@ -1189,7 +1067,7 @@ Exit criteria:
 5. Add active-session and deletion overlays.
 6. Move Lua session list, resume picker, inspect server, and other list consumers
    to paged catalog queries.
-7. Remove directory-scan and `meta.json` read behavior from normal listing.
+7. Remove directory-scan behavior from normal listing.
 8. Keep exact open/resume/fork/delete validation against `session.db`.
 
 Exit criteria:
@@ -1200,44 +1078,36 @@ Exit criteria:
 - A just-committed active session is immediately visible through overlay.
 - Deleting `catalog.db` loses no canonical information.
 
-### Phase 4: Finish compatibility export isolation
+### Phase 4: Remove compatibility exports
 
-1. Install the exact compatibility entry in `docs/compat.md`.
-2. Tag every surviving removable sidecar path with
-   `COMPAT(session-derived-sidecar-exports)`.
-3. Complete the process-level bounded compatibility exporter.
-4. Generate both files from one revision-pinned canonical read, with atomic
-   streaming writes and revision stamps.
-5. Delete all internal sidecar reads and fallback decisions.
-6. Update storybook/test fixtures to seed canonical SQLite and wait for an export
-   only when the test explicitly covers compatibility files.
-7. Make exporter shutdown bounded; canonical shutdown must not wait for a huge
-   `content.txt` rebuild unless an explicit export command requests it.
-8. Add explicit repair/export entry points rather than regenerating files during
-   list or search.
+1. Delete per-session metadata and transcript sidecar generation.
+2. Delete the export worker, snapshot API, status diagnostics, maintenance command,
+   metrics, cleanup paths, and compatibility debt entry.
+3. Update storybook and test fixtures to seed canonical SQLite directly.
+4. Keep catalog projection as the only derived persistent session service.
 
 Exit criteria:
 
-- Sidecars are write-only compatibility exports for normal runtime code.
-- Export lag/failure cannot affect list, search, resume, shutdown durability, or
-  dispatch.
-- The compatibility ID and removal conditions cover every remaining path.
+- No per-session sidecar is generated or consumed.
+- List, search, resume, fork, inspection, and maintenance use canonical SQLite or
+  the rebuildable catalog according to their ownership boundaries.
+- No exporter thread, queue, lock, cancellation seam, or compatibility API remains.
 
 ### Phase 5: Bound active transcript memory
 
-1. Measure retained bytes by block/descriptor/tool/render category in an active
+1. Measure retained bytes by block/record/tool/render category in an active
    50 MiB and 500 MiB session.
-2. Introduce compact stored block references without full descriptor JSON.
+2. Introduce compact stored block references without full record JSON.
 3. Replace permanent `OnceLock` hydration with explicit install/promote/evict
    operations.
 4. Refactor rendering and detail APIs to prehydrate bounded ranges.
-5. Add byte accounting and LRU eviction for hydrated blocks, descriptor windows,
+5. Add byte accounting and LRU eviction for hydrated blocks, record windows,
    and rendered payloads.
 6. Add pin scopes for viewport, active turn, tool mutation, copy/yank, inspect,
    Lua detail, and rewind operations.
 7. Add receipt-driven incremental dematerialization on bounded idle slices.
 8. Compact duplicated old tool-state and origin maps.
-9. Verify search, navigation, anchors, rewinds, forks, and descriptor suffix saves
+9. Verify search, navigation, anchors, rewinds, forks, and record suffix saves
    across eviction and rehydration.
 10. Tune default budgets only from release benchmarks.
 
@@ -1251,12 +1121,12 @@ Exit criteria:
 
 ### Phase 6: Harden recovery, migration, observability, and cleanup
 
-1. Run subprocess crash tests at every transaction, dispatch, projection, and
-   atomic-rename boundary.
-2. Test disk full, permissions, ownership loss, catalog corruption, stale
-   revisions, and exporter shutdown.
-3. Add doctor output for nonterminal turns, catalog lag, and compatibility export
-   lag without treating derived lag as canonical corruption.
+1. Run subprocess crash tests at every transaction, dispatch, and projection
+   boundary.
+2. Test disk full, permissions, ownership loss, catalog corruption, and stale
+   revisions.
+3. Add doctor output for nonterminal turns and catalog lag without treating
+   derived lag as canonical corruption.
 4. Add metrics listed below with bounded labels and no user content.
 5. Remove superseded functions, worker state, tests, comments, and metrics.
 6. Reconcile `docs/storage-architecture-plan.md`, compatibility docs, Lua docs,
@@ -1266,8 +1136,7 @@ Exit criteria:
 
 Exit criteria:
 
-- There is one canonical submit path, one catalog path, and one compatibility
-  exporter path.
+- There is one canonical submit path and one catalog path.
 - Recovery outcomes are deterministic and user-visible.
 - No old path remains dormant.
 
@@ -1277,7 +1146,7 @@ The hardened implementation uses production SQLite transactions and concrete
 workers rather than a generic failure-injection framework:
 
 - `subprocess_crashes_cover_submit_transaction_and_receipt_boundaries` aborts an
-  actual `SubmitTurn` before begin, after history, descriptor, search, and ready
+  actual `SubmitTurn` before begin, after history, record, search, and ready
   inserts, and after WAL commit. Pre-commit crashes reopen with no canonical
   change; post-commit exact replay returns turn 1 without duplication.
 - Enter harness tests cover receipt publication before dispatch, engine rejection,
@@ -1292,12 +1161,8 @@ workers rather than a generic failure-injection framework:
 - `subprocess_crashes_leave_catalog_projection_absent_or_complete`, interrupted
   scan tests, revision-guard tests, queue-overflow reconciliation, 100,000-row
   pagination, and corrupt-catalog rebuild cover projection boundaries and repair.
-- Compatibility exporter subprocesses abort before and after the shared atomic
-  rename primitive. Permission, symlink, cancellation, stale-worker, queue
-  overflow, revision pinning, streaming, and bounded-shutdown tests prove that an
-  old or new complete export remains and canonical operations are unaffected.
-- `session doctor` integration coverage reports ready turns and catalog/export
-  lag while remaining read-only and preserving canonical health.
+- `session doctor` integration coverage reports ready turns and catalog lag while
+  remaining read-only and preserving canonical health.
 
 ### Phase 7: Final performance, memory, and quality validation
 
@@ -1317,17 +1182,17 @@ workers rather than a generic failure-injection framework:
   medians for Enter were 38.279 ms at 50,000 short rows and 27.938 ms at 2,000
   rows x 8 KiB, improving on the preserved baselines by 16.02 and 24.16 percent.
   Every sample attributed exactly one `submit_turn` transaction, two history rows,
-  and one descriptor row to Enter, with zero invariant-history or search-blob rows,
-  one last-user block scanned, at most two descriptor-rank entries scanned, and
+  and one record row to Enter, with zero invariant-history or search-blob rows,
+  one last-user block scanned, at most two record-rank entries scanned, and
   provider dispatch only after the durable receipt.
 - Five-run 50 MiB and 500 MiB search measurements passed the fixed-cost and scaling
   limits. The 500 MiB means were 11.296 ms for absent one-character submit, 3.426
   ms for common FTS submit, 3.628 ms for sparse common FTS submit, and 10.914 ms
-  after append. Candidate pages stayed bounded at 512 blocks and descriptor
+  after append. Candidate pages stayed bounded at 512 blocks and record
   hydration used known canonical extents without table recounts.
 - Sparse resume retained 77,249 B at 50 MiB and 80,969 B at 500 MiB. The 240-frame
   resumed wheel took 324.922 and 335.140 ms respectively, with zero foreground
-  descriptor loads and two row-index rebuilds. Active 50 MiB and 500 MiB sessions
+  record loads and two row-index rebuilds. Active 50 MiB and 500 MiB sessions
   both retained 915 hydrated blocks and about 32 MiB of hydrated content; the 500
   MiB process peak was only 15.7 MiB higher, and working-set rereads stayed zero.
 - Indexed catalog-page medians changed by at most 5 us between 1,000 and 100,000
@@ -1342,9 +1207,9 @@ workers rather than a generic failure-injection framework:
   also passed.
 - `docs/transcript-layout-benchmarks.md` records the complete commands, methodology,
   measurements, acceptance comparisons, remaining limits, and raw output paths.
-  Cached descriptor rank, hydration membership, and retained-byte accounting were
+  Cached record rank, hydration membership, and retained-byte accounting were
   kept because the 500 MiB measurements prove material scaling benefits. Final
-  reflection centralized descriptor-count updates with the entry-transition
+  reflection centralized record-count updates with the entry-transition
   helpers, leaving full recounts only at bulk projection and external-mutation
   seams. No generic rank tree, LRU framework, repository, event log, or SQLite
   abstraction was added.
@@ -1353,12 +1218,12 @@ workers rather than a generic failure-injection framework:
 
 ### Store tests
 
-- SubmitTurn creates one history/descriptor/search/turn revision atomically.
+- SubmitTurn creates one history/record/search/turn revision atomically.
 - Failure at each statement boundary rolls back all tables.
 - Turn ID allocation starts at one, is monotonic, and rejects overflow.
 - Command fingerprint changes for every canonical turn field.
 - Exact ambiguous retry returns the same turn ID and revision.
-- Stale head, identity mismatch, bad history link, and bad descriptor link fail
+- Stale head, identity mismatch, bad history link, and bad record link fail
   before commit.
 - Every allowed state transition succeeds; every other transition fails.
 - Terminal state and final history commit together.
@@ -1372,7 +1237,7 @@ workers rather than a generic failure-injection framework:
 - SubmitTurn supersedes queued not-started desired save.
 - SubmitTurn waits behind but does not duplicate an already-running commit.
 - One receipt maps to one engine dispatch.
-- Sidecar/catalog failure cannot change SubmitTurn result.
+- Catalog failure cannot change SubmitTurn result.
 - Engine send rejection schedules failed state.
 - Actor panic after receipt leaves ready for interruption recovery.
 - Ownership loss prevents submit and preserves dirty input.
@@ -1392,18 +1257,6 @@ workers rather than a generic failure-injection framework:
 - Pagination ordering is stable for equal timestamps.
 - Active overlay wins over stale catalog and deletion overlay hides stale rows.
 - Queue overflow produces reconciliation and eventual convergence.
-
-### Compatibility export tests
-
-- `meta.json` and `content.txt` report the same source revision.
-- Content generation remains streaming and memory-bounded.
-- Rapid revisions coalesce to the latest output.
-- A stale worker cannot overwrite a newer valid export.
-- Crash before rename leaves the previous complete file.
-- Crash after rename leaves the new complete file.
-- Disk full or permissions failure records a bounded warning only.
-- Missing/malformed/stale exports do not affect list, search, resume, or dispatch.
-- Symlinked targets are rejected safely.
 
 ### Transcript cache tests
 
@@ -1426,7 +1279,7 @@ Use subprocess kill points around:
 
 1. Before transaction begin.
 2. After history insert.
-3. After descriptor/search insert.
+3. After record/search insert.
 4. After ready-turn insert.
 5. After WAL commit before receipt publication.
 6. After receipt before engine send.
@@ -1435,7 +1288,6 @@ Use subprocess kill points around:
 9. Before terminal commit.
 10. After terminal commit.
 11. During catalog upsert.
-12. During each compatibility atomic-write boundary.
 
 For every case, reopen through the real session UI path and assert transcript,
 turn state, search, listing status, and absence of automatic provider resend.
@@ -1445,8 +1297,8 @@ turn state, search, listing status, and absence of automatic provider resend.
 ### Enter
 
 - One `submit_turn` transaction is attributable to a normal Enter.
-- Zero sidecar writes, catalog writes, full-history invariant scans, full search
-  blob builds, or full transcript clones occur in the barrier.
+- Zero catalog writes, full-history invariant scans, full search blob builds, or
+  full transcript clones occur in the barrier.
 - Work is proportional to changed canonical suffix bytes/rows plus SQLite commit
   and transactional index work, not unchanged transcript size.
 - Release medians for the existing 50K short-row and 2K x 8 KiB Enter workloads
@@ -1467,17 +1319,9 @@ turn state, search, listing status, and absence of automatic provider resend.
 - Projection lag converges to zero after the worker drains, absent a persistent
   external error.
 
-### Compatibility exports
-
-- Export latency and bytes are absent from Enter timing.
-- `content.txt` peak additional memory remains bounded by one SQLite row, writer
-  buffers, and fixed exporter state.
-- A 500 MiB export may take linear time but cannot block catalog projection,
-  Enter, search, or canonical shutdown.
-
 ### Active memory
 
-- Hydrated, descriptor-window, and render-cache retained bytes stay within their
+- Hydrated, record-window, and render-cache retained bytes stay within their
   configured budgets except explicit measured pins/oversize debt.
 - After idle dematerialization, full-content retained memory does not grow with
   total committed transcript bytes.
@@ -1496,8 +1340,8 @@ turn state, search, listing status, and absence of automatic provider resend.
   new result is faster. For sub-5 ms operations, use the larger of 5 percent or a
   0.6 ms fixed-cost floor, and require the 500 MiB scaling case to remain within 5
   percent or improve.
-- SubmitTurn search work scales with changed descriptors only.
-- Search results at a committed revision agree with transcript descriptors at
+- SubmitTurn search work scales with changed records only.
+- Search results at a committed revision agree with transcript records at
   that revision.
 
 ## Observability
@@ -1510,7 +1354,7 @@ Add bounded metrics without session IDs, user text, prompts, or secrets:
 - `persist:submit_turn:transaction_ms`
 - `persist:submit_turn:transactions`
 - `persist:submit_turn:history_rows`
-- `persist:submit_turn:descriptor_rows`
+- `persist:submit_turn:record_rows`
 - `persist:submit_turn:index_rows`
 - `persist:submit_turn:dispatch_after_receipt_ms`
 - `persist:turn:ready_to_running_ms`
@@ -1525,14 +1369,6 @@ Add bounded metrics without session IDs, user text, prompts, or secrets:
 - catalog query duration and returned row count
 - rebuild and integrity-failure counts
 
-### Compatibility export metrics
-
-- pending distinct sessions and overflow count
-- metadata/content duration and output bytes
-- coalesced revisions and stale-write skips
-- failures by bounded failure class
-- source revision lag
-
 ### Transcript memory metrics
 
 - live, stored, and hydrated block counts
@@ -1540,7 +1376,7 @@ Add bounded metrics without session IDs, user text, prompts, or secrets:
 - configured budget, pinned bytes, and oversize debt
 - eviction count/bytes and hydration count/bytes/duration
 - dematerialized count/bytes per idle slice
-- SQLite descriptor rows read per viewport/search/reveal
+- SQLite record rows read per viewport/search/reveal
 
 Existing perf instrumentation can host hot-path counters. Long-lived status should
 use the existing metrics system. Do not add high-cardinality labels.
@@ -1548,7 +1384,6 @@ use the existing metrics system. Do not add high-cardinality labels.
 ## Documentation updates during implementation
 
 - This plan remains the architecture source until implementation completes.
-- Update `docs/compat.md` with the exact compatibility entry in Phase 4.
 - Update `docs/storage-architecture-plan.md` to mark superseded sections and the
   implemented foundation accurately.
 - Update `docs/transcript-layout-benchmarks.md` with final Enter, catalog, search,
@@ -1569,13 +1404,13 @@ following:
 1. One `session.db` remains the canonical source for each session.
 2. Enter waits for one dedicated canonical SubmitTurn transaction and a durable
    receipt, then dispatches exactly once in process.
-3. The submitted message, descriptor, search rows, revision, and `ready` turn
+3. The submitted message, record, search rows, revision, and `ready` turn
    state commit atomically.
 4. Ready/running recovery is deterministic, visible, and never auto-resends.
 5. Session listing reads the rebuildable root catalog and overlays live state.
 6. Catalog work is asynchronous, revisioned, bounded, and repairable.
-7. `meta.json` and `content.txt` are tagged compatibility exports only.
-8. No sidecar or catalog operation remains in the Enter barrier.
+7. No per-session derived metadata or transcript sidecar exists.
+8. No catalog operation remains in the Enter barrier.
 9. Search indexing remains transactionally consistent.
 10. Committed old transcript content dematerializes under explicit byte budgets.
 11. Hydration is bounded, evictable, and behaviorally equivalent to full

@@ -26,7 +26,7 @@ cmd.picker = nil
 cmd.register = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
+--- Schedule the slash-command line `line` (with or without leading `/`) as if the user had typed it. The app executes it after the current Lua callback returns. Errors are surfaced as in-app notifications.
 ---@type fun(line: string): nil
 cmd.run = nil
 

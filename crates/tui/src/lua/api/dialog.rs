@@ -31,11 +31,11 @@ pub(crate) struct LuaDockedDialog {
 impl mlua::UserData for LuaDockedDialog {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("close", |_, this, ()| {
-            crate::lua::with_app(|app| app.close_docked_dialog(this.id));
+            crate::lua::with_ui_host(|host| host.close_docked_dialog(this.id));
             Ok(())
         });
         methods.add_method("toggle_expanded", |_, this, ()| {
-            crate::lua::with_app(|app| app.toggle_docked_dialog_expanded(this.id));
+            crate::lua::with_ui_host(|host| host.toggle_docked_dialog_expanded(this.id));
             Ok(())
         });
         methods.add_function(
@@ -80,22 +80,19 @@ fn install_modal_key(
         .0
         .clone();
     let callback = crate::lua::register_callback_handle(&shared, lua, func)?;
-    crate::lua::with_app(|app| {
-        let previous = app.ui.modal_set_keymap(
+    crate::lua::with_ui_host(|host| {
+        host.set_modal_keymap(
             modal,
             key,
             crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(callback)),
         );
-        crate::lua::drop_displaced_lua_handle(app, previous);
     });
     Ok(LuaReg::new(move || {
-        let mut removed = false;
-        crate::lua::with_app(|app| {
-            let previous = app.ui.modal_clear_keymap(modal, key);
-            removed = previous.is_some();
-            crate::lua::drop_displaced_lua_handle(app, previous);
-        });
-        removed
+        crate::lua::app_ref::defer_registered_lua_operation(
+            &shared,
+            callback,
+            crate::lua::app_ref::DeferredLuaOperation::ModalKeymap { modal, key },
+        )
     }))
 }
 
@@ -126,8 +123,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let max_height = optional_constraint(&opts, "max_height")?;
             let blocks_agent = opts.get::<bool>("blocks_agent").unwrap_or(false);
             let resizable = opts.get::<Option<bool>>("resizable")?.unwrap_or(true);
-            let (id, modal) = crate::lua::with_app(|app| {
-                app.open_docked_dialog(
+            let (id, modal) = crate::lua::with_ui_host(|host| {
+                host.open_docked_dialog(
                     layout,
                     height,
                     min_height,

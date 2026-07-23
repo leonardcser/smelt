@@ -502,7 +502,7 @@ mod tests {
                 content: "hello world".into(),
             }
         );
-        assert_eq!(history.status(history.order[0]), Status::Done);
+        assert_eq!(history.status(history.order[0]), Some(Status::Done));
     }
 
     #[test]
@@ -547,7 +547,7 @@ mod tests {
                 content: "thinking...".into(),
             }
         );
-        assert_eq!(history.status(history.order[0]), Status::Done);
+        assert_eq!(history.status(history.order[0]), Some(Status::Done));
     }
 
     #[test]
@@ -651,7 +651,7 @@ mod tests {
                 content: "```rust\nfn main() {}\n```".into(),
             }
         );
-        assert_eq!(history.status(history.order[0]), Status::Done);
+        assert_eq!(history.status(history.order[0]), Some(Status::Done));
     }
 
     #[test]
@@ -821,7 +821,7 @@ mod tests {
                 content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
             }
         );
-        assert_eq!(history.status(history.order[0]), Status::Done);
+        assert_eq!(history.status(history.order[0]), Some(Status::Done));
     }
 
     #[test]
@@ -866,7 +866,7 @@ mod tests {
             }
         );
         assert!(matches!(block_at(&history, 1), Block::ToolCall { .. }));
-        assert_eq!(history.status(history.order[0]), Status::Streaming);
+        assert_eq!(history.status(history.order[0]), Some(Status::Streaming));
     }
 
     #[test]
@@ -881,7 +881,7 @@ mod tests {
             Instant::now(),
         );
         let tool_block_id = history.order[0];
-        assert_eq!(history.status(tool_block_id), Status::Streaming);
+        assert_eq!(history.status(tool_block_id), Some(Status::Streaming));
         parser.finish_tool(
             &mut history,
             "c1",
@@ -890,7 +890,7 @@ mod tests {
             None,
             Instant::now(),
         );
-        assert_eq!(history.status(tool_block_id), Status::Done);
+        assert_eq!(history.status(tool_block_id), Some(Status::Done));
     }
 
     #[test]
@@ -974,7 +974,7 @@ mod tests {
         parser.start_exec(&mut history, "ls".into());
         assert_eq!(history.len(), 1);
         let exec_id = history.order[0];
-        assert_eq!(history.status(exec_id), Status::Streaming);
+        assert_eq!(history.status(exec_id), Some(Status::Streaming));
         parser.append_exec_output(&mut history, "file.txt");
         assert_eq!(
             block_at(&history, 0),
@@ -984,7 +984,7 @@ mod tests {
             }
         );
         parser.finalize_exec(&mut history);
-        assert_eq!(history.status(exec_id), Status::Done);
+        assert_eq!(history.status(exec_id), Some(Status::Done));
     }
 
     // -- Turn flush ---------------------------------------------------
@@ -1001,7 +1001,7 @@ mod tests {
                 content: "partial".into()
             }
         );
-        assert_eq!(history.status(history.order[0]), Status::Done);
+        assert_eq!(history.status(history.order[0]), Some(Status::Done));
     }
 
     #[test]
@@ -1016,7 +1016,7 @@ mod tests {
                 content: "```rust\npartial".into(),
             }
         );
-        assert_eq!(history.status(history.order[0]), Status::Done);
+        assert_eq!(history.status(history.order[0]), Some(Status::Done));
     }
 
     // -- Chunk boundary stress ----------------------------------------
@@ -1139,7 +1139,7 @@ mod tests {
             }
             block => panic!("expected draft block, got {block:?}"),
         }
-        assert_eq!(history.status(id), Status::Streaming);
+        assert_eq!(history.status(id), Some(Status::Streaming));
     }
 
     #[test]
@@ -1168,7 +1168,7 @@ mod tests {
             block_at(&history, 0),
             Block::ToolCall { call_id, name, .. } if call_id == "call-1" && name == "bash"
         ));
-        assert_eq!(history.status(id), Status::Streaming);
+        assert_eq!(history.status(id), Some(Status::Streaming));
         assert_eq!(
             history.tool_state("call-1").map(|state| state.status),
             Some(ToolStatus::Pending)

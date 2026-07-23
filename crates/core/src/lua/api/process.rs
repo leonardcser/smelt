@@ -2,6 +2,7 @@
 
 use mlua::prelude::*;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -147,8 +148,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     (core.processes.clone(), core.clock.instant_now())
                 })
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
+                let cwd = shared_spawn.evaluation_cwd();
                 let shell = current_shell_spec(&shared_spawn);
-                let child = process::spawn_shell_child(&command, &shell)
+                let child = process::spawn_shell_child(&command, &shell, &cwd)
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
                 let id = registry.child_id(&child);
                 registry.spawn(id.clone(), &command, child, now);
@@ -169,7 +171,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 Option<mlua::Table>,
             )|
                   -> LuaResult<()> {
-                let parsed = parse_run_options(opts.as_ref())?;
+                let runtime_cwd = s.evaluation_cwd();
+                let parsed = parse_run_options(opts.as_ref(), &runtime_cwd)?;
                 let args = args.unwrap_or_default();
                 let cancel = crate::lua::current_task_cancel().unwrap_or_default();
                 let sink = s.resume_sink();
@@ -200,11 +203,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &["task_id", "call_id", "command", "timeout_ms", "background_on_timeout"],
             move |_, (task_id, call_id, command, timeout_ms, background_on_timeout): (u64, String, String, u64, bool)| -> LuaResult<()> {
                 let (injector, registry, now) = crate::host::try_with_core(|core| {
-                    (core.engine.injector(), core.processes.clone(), core.clock.instant_now())
+                    (
+                        core.engine.injector(),
+                        core.processes.clone(),
+                        core.clock.instant_now(),
+                    )
                 })
                     .ok_or_else(|| {
                         mlua::Error::external("process.run_streaming: app unavailable")
                     })?;
+                let cwd = shared_run_streaming.evaluation_cwd();
                 let sink = shared_run_streaming.resume_sink();
                 let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
@@ -223,6 +231,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         process::StreamConfig {
                             timeout,
                             shell,
+                            cwd,
                             cancel: cancel.clone(),
                             detach: Some(detach),
                             detach_on_timeout: background_on_timeout,
@@ -297,9 +306,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
-fn parse_run_options(opts: Option<&mlua::Table>) -> LuaResult<process::Options> {
+fn parse_run_options(
+    opts: Option<&mlua::Table>,
+    runtime_cwd: &Path,
+) -> LuaResult<process::Options> {
     let Some(t) = opts else {
-        return Ok(process::Options::default());
+        return Ok(process::Options {
+            cwd: runtime_cwd.to_path_buf(),
+            env: HashMap::new(),
+            timeout: None,
+            stdin: None,
+        });
     };
 
     let mut env = HashMap::new();
@@ -310,8 +327,20 @@ fn parse_run_options(opts: Option<&mlua::Table>) -> LuaResult<process::Options> 
         }
     }
 
+    let cwd = t
+        .get::<Option<String>>("cwd")?
+        .map(PathBuf::from)
+        .map(|cwd| {
+            if cwd.is_absolute() {
+                cwd
+            } else {
+                runtime_cwd.join(cwd)
+            }
+        })
+        .unwrap_or_else(|| runtime_cwd.to_path_buf());
+
     Ok(process::Options {
-        cwd: t.get::<Option<String>>("cwd")?,
+        cwd,
         env,
         timeout: t
             .get::<Option<u64>>("timeout_secs")?

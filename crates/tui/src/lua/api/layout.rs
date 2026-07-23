@@ -68,7 +68,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return the current terminal size as `{ width, height }` in cells. Useful for choosing between compact and wide overlay layouts without relying on any particular window's current rect.",
         &[],
         |lua, ()| -> LuaResult<LuaUiSize> {
-            let (width, height) = crate::lua::try_with_app(|app| (app.last_width, app.last_height))
+            let (width, height) = crate::lua::try_with_platform_host(|host| host.ui_size())
                 .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)));
             let out = lua.create_table()?;
             out.set("width", width)?;
@@ -110,11 +110,7 @@ replace earlier ones.",
                 if let Ok(mut slot) = s.main_layout_composer.lock() {
                     *slot = handle;
                 }
-                if s.core.external_effects_active() {
-                    let _ = crate::lua::try_with_app(|app| {
-                        app.refresh_main_layout();
-                    });
-                }
+                s.request_layout_refresh();
                 Ok(())
             },
         )?;

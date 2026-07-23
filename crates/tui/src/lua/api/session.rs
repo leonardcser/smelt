@@ -322,7 +322,7 @@ pub(super) fn register(
         "Return the current session title, or `nil` when it has not been set.",
         &[],
         |_, ()| -> LuaResult<Option<String>> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.title.clone()).unwrap_or_default())
+            Ok(crate::lua::try_with_session_host(|host| host.session_title()).unwrap_or_default())
         },
     )?;
     title.fn_(
@@ -330,9 +330,9 @@ pub(super) fn register(
         "Set the session title. When `slug` is omitted, one is derived from the title.",
         &["title", "slug"],
         |_, (title, slug): (String, Option<String>)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
+            crate::lua::with_session_host(|host| {
                 let slug = slug.unwrap_or_else(|| engine::provider::slugify(&title));
-                app.set_session_title(title, slug, None);
+                host.set_session_title(title, slug, None);
             });
             Ok(())
         },
@@ -342,7 +342,9 @@ pub(super) fn register(
         "Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.",
         &["title", "slug", "history_len"],
         |_, (title, slug, history_len): (String, String, usize)| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.set_session_title(title, slug, Some(history_len)));
+            crate::lua::with_session_host(|host| {
+                host.set_session_title(title, slug, Some(history_len));
+            });
             Ok(())
         },
     )?;
@@ -355,7 +357,7 @@ pub(super) fn register(
         "Return the current session slug, or `nil` when it has not been set.",
         &[],
         |_, ()| -> LuaResult<Option<String>> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.slug.clone()).unwrap_or_default())
+            Ok(crate::lua::try_with_session_host(|host| host.session_slug()).unwrap_or_default())
         },
     )?;
     let cwd_context = shared.core_arc();
@@ -365,7 +367,10 @@ pub(super) fn register(
         &[],
         move |_, ()| {
             if cwd_context.external_effects_active() {
-                Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default())
+                Ok(
+                    crate::lua::try_with_session_host(|host| host.workspace_cwd())
+                        .unwrap_or_default(),
+                )
             } else {
                 Ok(cwd_context.evaluation_cwd().to_string_lossy().into_owned())
             }
@@ -382,7 +387,7 @@ pub(super) fn register(
                     "smelt.session.context_note: name must be non-empty".into(),
                 ));
             }
-            crate::lua::try_with_app(|app| app.set_context_note(name, text));
+            crate::lua::try_with_session_host(|host| host.set_context_note(name, text));
             Ok(())
         },
     )?;
@@ -402,23 +407,10 @@ pub(super) fn register(
                 .and_then(|t| t.get::<Option<String>>("base").ok().flatten())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let cwd = crate::lua::try_with_app(|app| std::path::PathBuf::from(&app.cwd))
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let worktree_root = crate::lua::try_with_app(|app| {
-                std::path::PathBuf::from(&app.core.config.settings.worktree_root)
+            let (info, pending) = crate::lua::with_session_host(|host| {
+                host.enter_worktree(name.as_str(), base.as_deref())
             })
-            .unwrap_or_else(|| std::path::PathBuf::from(".worktrees"));
-            let info = smelt_core::worktree::enter_or_create(
-                &cwd,
-                smelt_core::worktree::WorktreeSpec {
-                    name: Some(name.as_str()),
-                    base: base.as_deref(),
-                    root: Some(worktree_root.as_path()),
-                },
-            )
             .map_err(mlua::Error::external)?;
-            let (_, pending) = crate::lua::with_app(|app| app.change_cwd(info.path.clone()))
-                .map_err(mlua::Error::external)?;
             let out = lua.create_table()?;
             out.set("name", info.name)?;
             out.set("branch", info.branch)?;
@@ -435,12 +427,12 @@ pub(super) fn register(
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                let cwd = std::path::Path::new(&app.cwd);
-                let root = std::path::Path::new(&app.core.config.settings.worktree_root);
-                let worktrees = smelt_core::worktree::list_managed(cwd, Some(root))
-                    .map_err(mlua::Error::external)?;
-                for (i, worktree) in worktrees.iter().enumerate() {
+            if let Some(worktrees) = crate::lua::try_with_session_host(|host| host.managed_worktrees()) {
+                for (i, worktree) in worktrees
+                    .map_err(mlua::Error::external)?
+                    .iter()
+                    .enumerate()
+                {
                     let row = lua.create_table()?;
                     row.set("name", worktree.name.as_str())?;
                     row.set("branch", worktree.branch.as_str())?;
@@ -449,9 +441,6 @@ pub(super) fn register(
                     row.set("current", worktree.current)?;
                     out.set(i + 1, row)?;
                 }
-                Ok(())
-            }) {
-                result?;
             }
             Ok(out)
         },
@@ -462,8 +451,8 @@ pub(super) fn register(
         &["path"],
         |lua, path: String| -> LuaResult<mlua::Table> {
             let path = std::path::PathBuf::from(path.trim());
-            let (cwd, pending) =
-                crate::lua::with_app(|app| app.change_cwd(path)).map_err(mlua::Error::external)?;
+            let (cwd, pending) = crate::lua::with_session_host(|host| host.change_cwd(path))
+                .map_err(mlua::Error::external)?;
             let out = lua.create_table()?;
             out.set("cwd", cwd)?;
             out.set("pending", pending)?;
@@ -475,7 +464,7 @@ pub(super) fn register(
         "Currently-assembled system prompt sent on the next turn. Reflects the configured base prompt, skills, and instructions. Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.",
         &[],
         |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| app.assemble_system_prompt()).unwrap_or_default())
+            Ok(crate::lua::try_with_session_host(|host| host.system_prompt()).unwrap_or_default())
         },
     )?;
     m.fn_(
@@ -483,10 +472,7 @@ pub(super) fn register(
         "Cumulative session cost in USD across every model call this session has made.",
         &[],
         |_, ()| -> LuaResult<f64> {
-            Ok(
-                crate::lua::try_with_app(|app| app.core.session.session_cost_usd)
-                    .unwrap_or_default(),
-            )
+            Ok(crate::lua::try_with_session_host(|host| host.session_cost()).unwrap_or_default())
         },
     )?;
     m.fn_(
@@ -494,8 +480,7 @@ pub(super) fn register(
         "Cumulative token usage across every turn this session has made. Returns a table with `input` (non-cached input), `output`, `cache_read`, `cache_write`, `cached_input`, `input_total`, `reasoning` (output detail), `standard_total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let usage = crate::lua::try_with_app(|app| app.core.session.session_usage.clone())
-                .unwrap_or_default();
+            let usage = crate::lua::try_with_session_host(|host| host.session_usage()).unwrap_or_default();
             usage_to_lua(lua, &usage)
         },
     )?;
@@ -504,7 +489,7 @@ pub(super) fn register(
         "Enable or disable accelerated inference for the current session.",
         &["enabled"],
         |_, enabled: bool| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.set_fast_mode(enabled));
+            crate::lua::with_session_host(|host| host.set_fast_mode(enabled));
             Ok(())
         },
     )?;
@@ -514,48 +499,42 @@ pub(super) fn register(
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                let context_stale = app
-                    .core
-                    .session
-                    .display_context_tokens_stale(&app.active_context_token_identity());
-                let active = app.core.config.active_model();
+            if let Some(status) = crate::lua::try_with_session_host(|host| host.session_status()) {
+                let active = status.active_model.as_ref();
                 out.set("model", active.map(|model| model.key.as_str()))?;
                 out.set(
                     "provider",
                     active.map(|model| model.provider_type.as_str()),
                 )?;
                 out.set("api_base", active.map(|model| model.api_base.as_str()))?;
-                out.set("cost", app.core.session.session_cost_usd)?;
+                out.set("cost", status.cost)?;
 
-                let pending_reasoning = app.reasoning_effort_pending();
-                let pending_mode = app.mode_pending();
                 let mode = lua.create_table()?;
-                mode.set("name", app.core.config.mode.as_str())?;
-                mode.set("pending", pending_mode)?;
-                mode.set("marker", if pending_mode { "*" } else { "" })?;
+                mode.set("name", status.mode)?;
+                mode.set("pending", status.mode_pending)?;
+                mode.set("marker", if status.mode_pending { "*" } else { "" })?;
                 out.set("mode", mode)?;
 
                 let reasoning = lua.create_table()?;
-                reasoning.set("effort", app.core.config.reasoning_effort.label())?;
-                reasoning.set("pending", pending_reasoning)?;
-                reasoning.set("marker", if pending_reasoning { "*" } else { "" })?;
+                reasoning.set("effort", status.reasoning)?;
+                reasoning.set("pending", status.reasoning_pending)?;
+                reasoning.set(
+                    "marker",
+                    if status.reasoning_pending { "*" } else { "" },
+                )?;
                 out.set("reasoning", reasoning)?;
 
                 let fast = lua.create_table()?;
-                fast.set("supported", app.fast_mode_supported())?;
-                fast.set("active", app.fast_mode_active())?;
+                fast.set("supported", status.fast_supported)?;
+                fast.set("active", status.fast_active)?;
                 out.set("fast", fast)?;
 
                 let context = lua.create_table()?;
-                context.set("tokens", app.core.session.display_context_tokens())?;
-                context.set("window", app.core.config.context_window)?;
-                context.set("stale", context_stale)?;
-                context.set("marker", if context_stale { "?" } else { "" })?;
+                context.set("tokens", status.context_tokens)?;
+                context.set("window", status.context_window)?;
+                context.set("stale", status.context_stale)?;
+                context.set("marker", if status.context_stale { "?" } else { "" })?;
                 out.set("context", context)?;
-                Ok(())
-            }) {
-                result?;
             }
             Ok(out)
         },
@@ -565,8 +544,10 @@ pub(super) fn register(
         "Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Use `status().context` for stale markers; stale counts are display-only and are not used as authoritative request baselines.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.display_context_tokens())
-                .unwrap_or_default())
+            Ok(
+                crate::lua::try_with_session_host(|host| host.session_context_tokens())
+                    .unwrap_or_default(),
+            )
         },
     )?;
     m.fn_(
@@ -574,7 +555,7 @@ pub(super) fn register(
         "Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
-            Ok(crate::lua::try_with_app(|app| app.core.config.context_window).unwrap_or_default())
+            Ok(crate::lua::try_with_runtime_host(|host| host.context_window()).unwrap_or_default())
         },
     )?;
     m.fn_(
@@ -582,7 +563,10 @@ pub(super) fn register(
         "Unix-epoch timestamp (milliseconds) at which this session was started.",
         &[],
         |_, ()| -> LuaResult<u64> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.created_at_ms).unwrap_or_default())
+            Ok(
+                crate::lua::try_with_session_host(|host| host.session_created_at_ms())
+                    .unwrap_or_default(),
+            )
         },
     )?;
     m.fn_(
@@ -591,58 +575,47 @@ pub(super) fn register(
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                let session = &app.core.session;
-                out.set("id", session.id.as_str())?;
-                out.set("dir", app.current_session_dir().display().to_string())?;
-                out.set("ephemeral", app.ephemeral())?;
-                out.set("title", session.title.as_deref())?;
-                out.set("slug", session.slug.as_deref())?;
-                out.set("first_user_message", session.first_user_message.as_deref())?;
-                out.set("parent_id", session.parent_id.as_deref())?;
-                out.set("created_at_ms", session.created_at_ms)?;
-                out.set("updated_at_ms", session.updated_at_ms)?;
-                out.set("cwd", app.cwd.as_str())?;
-                out.set("session_cwd", session.cwd.as_deref())?;
-                let active = app.core.config.active_model();
+            if let Some(info) = crate::lua::try_with_session_host(|host| host.session_info()) {
+                out.set("id", info.id)?;
+                out.set("dir", info.dir.display().to_string())?;
+                out.set("ephemeral", info.ephemeral)?;
+                out.set("title", info.title)?;
+                out.set("slug", info.slug)?;
+                out.set("first_user_message", info.first_user_message)?;
+                out.set("parent_id", info.parent_id)?;
+                out.set("created_at_ms", info.created_at_ms)?;
+                out.set("updated_at_ms", info.updated_at_ms)?;
+                out.set("cwd", info.cwd)?;
+                out.set("session_cwd", info.session_cwd)?;
+                let active = info.active_model.as_ref();
                 out.set("model", active.map(|model| model.key.as_str()))?;
                 out.set(
                     "provider",
                     active.map(|model| model.provider_type.as_str()),
                 )?;
                 out.set("api_base", active.map(|model| model.api_base.as_str()))?;
-                out.set("mode", app.core.config.mode.as_str())?;
-                out.set("reasoning", app.core.config.reasoning_effort.label())?;
-                out.set("context_tokens", session.display_context_tokens())?;
+                out.set("mode", info.mode)?;
+                out.set("reasoning", info.reasoning)?;
+                out.set("context_tokens", info.context_tokens)?;
+                out.set("context_tokens_stale", info.context_tokens_stale)?;
+                out.set("context_window", info.context_window)?;
+                out.set("cost", info.cost)?;
+                out.set("history_count", info.history_count)?;
+                out.set("message_count", info.message_count)?;
                 out.set(
-                    "context_tokens_stale",
-                    session.display_context_tokens_stale(&app.active_context_token_identity()),
+                    "message_count_approximate",
+                    info.message_count_approximate,
                 )?;
-                out.set("context_window", app.core.config.context_window)?;
-                out.set("cost", session.session_cost_usd)?;
-                let history_count = app.session_history_len();
-                out.set("history_count", history_count)?;
-                if app.session_document.live_session.is_some() {
-                    out.set("message_count", history_count)?;
-                    out.set("message_count_approximate", true)?;
-                } else {
-                    out.set("message_count", protocol::history_to_messages(&session.history).len())?;
-                    out.set("message_count_approximate", false)?;
-                }
-                out.set("turn_count", app.user_turns().len())?;
-
-                out.set("tokens", usage_to_lua(lua, &session.session_usage)?)?;
+                out.set("turn_count", info.turn_count)?;
+                out.set("tokens", usage_to_lua(lua, &info.usage)?)?;
 
                 let worktree = lua.create_table()?;
-                worktree.set("managed", app.cwd_managed_worktree)?;
-                worktree.set("project", app.cwd_project.as_str())?;
-                worktree.set("branch", app.cwd_branch.as_str())?;
-                worktree.set("name", app.cwd_worktree.as_str())?;
-                worktree.set("path", app.cwd_worktree_path.as_str())?;
+                worktree.set("managed", info.managed_worktree)?;
+                worktree.set("project", info.project)?;
+                worktree.set("branch", info.branch)?;
+                worktree.set("name", info.worktree)?;
+                worktree.set("path", info.worktree_path)?;
                 out.set("worktree", worktree)?;
-                Ok(())
-            }) {
-                result?;
             }
             Ok(out)
         },
@@ -651,15 +624,17 @@ pub(super) fn register(
         "id",
         "Stable session id (matches the on-disk session filename).",
         &[],
-        |_, ()| Ok(crate::lua::try_with_app(|app| app.core.session.id.clone()).unwrap_or_default()),
+        |_, ()| Ok(crate::lua::try_with_session_host(|host| host.session_id()).unwrap_or_default()),
     )?;
     m.fn_(
         "dir",
         "Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
         &[],
         |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| app.current_session_dir().display().to_string())
-                .unwrap_or_default())
+            Ok(
+                crate::lua::try_with_session_host(|host| host.current_session_dir().display().to_string())
+                    .unwrap_or_default(),
+            )
         },
     )?;
     m.fn_(
@@ -673,22 +648,21 @@ pub(super) fn register(
             let summary = spec.get::<String>("summary")?;
             let first_live_message_index = spec.get::<usize>("first_live_message_index")?;
             let tokens_before = spec.get::<Option<u32>>("tokens_before")?;
-            let guard = spec.get::<Option<mlua::Table>>("guard")?;
-            let installed = crate::lua::with_app(|app| {
-                if let Some(guard) = guard {
-                    let turn_id = guard.get::<Option<u64>>("turn_id").ok().flatten();
-                    let cancel_generation = guard.get::<u64>("cancel_generation").ok();
-                    if cancel_generation != Some(app.cancel_generation)
-                        || app.active_agent_turn_id() != turn_id
-                    {
-                        return false;
-                    }
-                }
-                app.install_context_checkpoint(
+            let guard = spec
+                .get::<Option<mlua::Table>>("guard")?
+                .map(|guard| {
+                    (
+                        guard.get::<Option<u64>>("turn_id").ok().flatten(),
+                        guard.get::<u64>("cancel_generation").ok(),
+                    )
+                });
+            let installed = crate::lua::with_session_host(|host| {
+                host.install_context_checkpoint(
                     kind,
                     summary,
                     first_live_message_index,
                     tokens_before,
+                    guard,
                 )
             });
             Ok(installed.then_some(true))
@@ -708,18 +682,18 @@ pub(super) fn register(
             let since_index = opt_field::<usize>(&arg, "since_index")?;
             let limit = opt_field::<usize>(&arg, "limit")?;
             let all = opt_field::<bool>(&arg, "all")?.unwrap_or(false);
-            let history = crate::lua::try_with_app(|app| {
-                let len = app.session_history_len();
+            let history = crate::lua::try_with_session_host(|host| {
+                let len = host.session_history_len();
                 if all {
-                    return app.session_history_range(0..len);
+                    return host.session_history_range(0..len);
                 }
                 let limit = limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1);
                 if let Some(since_index) = since_index {
                     let start = since_index.saturating_sub(1).min(len);
                     let end = start.saturating_add(limit).min(len);
-                    app.session_history_range(start..end)
+                    host.session_history_range(start..end)
                 } else {
-                    app.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
+                    host.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
                 }
             })
             .unwrap_or_default();
@@ -754,7 +728,7 @@ pub(super) fn register(
         "Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let messages = crate::lua::try_with_app(|app| app.model_history_messages())
+            let messages = crate::lua::try_with_session_host(|host| host.model_history_messages())
                 .unwrap_or_default();
             messages_to_lua(lua, &messages)
         },
@@ -769,17 +743,17 @@ pub(super) fn register(
             let limit = opt_field::<usize>(&opts, "limit")?
                 .unwrap_or(DEFAULT_LUA_SESSION_LIMIT)
                 .max(1);
-            let history = crate::lua::try_with_app(|app| {
-                let len = app.session_history_len();
+            let history = crate::lua::try_with_session_host(|host| {
+                let len = host.session_history_len();
                 if all {
-                    return app.session_history_range(0..len);
+                    return host.session_history_range(0..len);
                 }
                 if let Some(since_index) = since_index {
                     let start = since_index.saturating_sub(1).min(len);
                     let end = start.saturating_add(limit).min(len);
-                    app.session_history_range(start..end)
+                    host.session_history_range(start..end)
                 } else {
-                    app.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
+                    host.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
                 }
             })
             .unwrap_or_default();
@@ -794,17 +768,17 @@ pub(super) fn register(
             let all = opt_field::<bool>(&opts, "all")?.unwrap_or(false);
             let since_index = opt_field::<usize>(&opts, "since_index")?;
             let limit = opt_field::<usize>(&opts, "limit")?;
-            match crate::lua::try_with_app(|app| {
-                let len = app.session_history_len();
+            match crate::lua::try_with_session_host(|host| {
+                let len = host.session_history_len();
                 let history = if all {
-                    app.session_history_range(0..len)
+                    host.session_history_range(0..len)
                 } else if let Some(since_index) = since_index {
                     let limit = limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1);
                     let start = since_index.saturating_sub(1).min(len);
                     let end = start.saturating_add(limit).min(len);
-                    app.session_history_range(start..end)
+                    host.session_history_range(start..end)
                 } else {
-                    app.session_history_tail(
+                    host.session_history_tail(
                         limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1),
                         Some(DEFAULT_LUA_SESSION_MAX_BYTES),
                     )
@@ -821,7 +795,7 @@ pub(super) fn register(
         "Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let turns = crate::lua::try_with_app(|app| app.user_turns()).unwrap_or_default();
+            let turns = crate::lua::try_with_session_host(|host| host.user_turns()).unwrap_or_default();
             let out = lua.create_table()?;
             for (i, (block_idx, text)) in turns.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -841,7 +815,9 @@ pub(super) fn register(
             let restore_vim_insert = opts
                 .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
                 .unwrap_or(false);
-            crate::lua::with_app(|app| app.rewind_to_block(block_idx, restore_vim_insert));
+            crate::lua::with_session_host(|host| {
+                host.rewind_to_block(block_idx, restore_vim_insert);
+            });
             Ok(())
         },
     )?;
@@ -853,8 +829,8 @@ pub(super) fn register(
             let restore_vim_insert = opts
                 .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
                 .unwrap_or(false);
-            Ok(crate::lua::with_app(|app| {
-                app.rewind_active_user_turn_if_no_output(restore_vim_insert)
+            Ok(crate::lua::with_session_host(|host| {
+                host.rewind_active_user_turn_if_no_output(restore_vim_insert)
             }))
         },
     )?;
@@ -864,9 +840,9 @@ pub(super) fn register(
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let current_id =
-                crate::lua::try_with_core(|core| core.session.id.clone()).unwrap_or_default();
+                crate::lua::try_with_session_host(|host| host.session_id()).unwrap_or_default();
             let Some(opts) = opts else {
-                let entries = smelt_core::session::list_session_entries_result()
+                let entries = crate::lua::with_session_host(|host| host.list_session_entries())
                     .map_err(|error| mlua::Error::RuntimeError(error.to_string()))?;
                 return session_entries_to_lua(lua, entries, &current_id);
             };
@@ -891,14 +867,13 @@ pub(super) fn register(
                     )))
                 }
             };
-            let page = smelt_core::session::list_session_page_result(
-                smelt_core::session::SessionListQuery {
-                    limit: opts.get::<Option<u32>>("limit")?.unwrap_or(200),
-                    cursor,
-                    cwd: opts.get("cwd")?,
-                    availability,
-                },
-            )
+            let query = smelt_core::session::SessionListQuery {
+                limit: opts.get::<Option<u32>>("limit")?.unwrap_or(200),
+                cursor,
+                cwd: opts.get("cwd")?,
+                availability,
+            };
+            let page = crate::lua::with_session_host(|host| host.list_session_page(query))
             .map_err(|error| mlua::Error::RuntimeError(error.to_string()))?;
             let result = lua.create_table()?;
             result.set(
@@ -932,7 +907,10 @@ pub(super) fn register(
         "Explicitly retry the latest unsaved generation after session persistence becomes blocked. Returns true when the retry request is accepted. No automatic retry timer is used.",
         &[],
         |_, ()| -> LuaResult<bool> {
-            Ok(crate::lua::try_with_app(|app| app.retry_blocked_persistence()).unwrap_or(false))
+            Ok(
+                crate::lua::try_with_session_host(|host| host.retry_blocked_persistence())
+                    .unwrap_or(false),
+            )
         },
     )?;
     m.fn_(
@@ -940,7 +918,7 @@ pub(super) fn register(
         "Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.load_session_by_id(&id));
+            crate::lua::with_session_host(|host| host.load_session_by_id(&id));
             Ok(())
         },
     )?;
@@ -949,7 +927,7 @@ pub(super) fn register(
         "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
         &["id"],
         |_, id: String| -> LuaResult<Option<String>> {
-            Ok(smelt_core::session::load_search_blob(&id))
+            Ok(crate::lua::with_session_host(|host| host.session_search_blob(&id)))
         },
     )?;
     m.fn_(
@@ -957,7 +935,7 @@ pub(super) fn register(
         "Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.",
         &["ids"],
         |lua, ids: Vec<String>| -> LuaResult<mlua::Table> {
-            let pairs = smelt_core::session::load_search_blobs(ids);
+            let pairs = crate::lua::with_session_host(|host| host.session_search_blobs(ids));
             let out = lua.create_table()?;
             for (id, blob) in pairs {
                 out.set(id, blob)?;
@@ -989,61 +967,48 @@ pub(super) fn register(
                 .ok()
                 .map(|ts| format!("{id}:{ts}"));
 
-            let rendered = crate::lua::with_app(|app| {
+            let (mut cached_view, execution, sessions) = crate::lua::with_session_host(|host| {
                 let _perf = smelt_perf::perf::begin("session:render_preview_into:app");
-                let mut cached_key = cache_key_hint.clone();
-                let mut cached_view = cached_key
-                    .as_deref()
-                    .and_then(|key| app.resume_preview_cache.take(key));
-                smelt_perf::perf::record_value(
-                    "session:render_preview_into:cache_hit",
-                    u64::from(cached_view.is_some()),
-                );
-
-                if cached_view.is_none() {
-                    let cache_key = cache_key_hint.clone().unwrap_or_else(|| id.clone());
-                    cached_key = Some(cache_key.clone());
-                    let transcript =
-                        crate::app::history::load_transcript_tail_from_sqlite_id(&id, width, height)
-                            .or_else(|| {
-                                crate::app::history::materialize_full_transcript_read_only(
-                                    &app.lua, &id,
-                                )
-                            });
-                    if let Some(transcript) = transcript {
-                        let mut view = crate::app::transcript::TranscriptDocument::from_loaded_transcript(transcript);
-                        view.set_inline_options(app.inline_options());
-                        cached_view = Some(view);
-                    }
-                }
-
-                let cache_key = cached_key?;
-                let mut view = cached_view?;
-                view.set_inline_options(app.inline_options());
-                let scroll_target = scroll_top
-                    .map(crate::content::transcript_buf::ScrollTarget::visible_row)
-                    .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
-                let theme = app.ui.theme().clone();
-                let plan = view.plan_projection_measured(
-                    &app.lua,
-                    width,
-                    &theme,
-                    scroll_target,
-                    height,
-                );
-                let out = {
-                    let target = app.ui.buf_mut(buf.id)?;
-                    view.project_planned(&app.lua, target, &theme, plan)
-                };
-                if let Some(win) = win.and_then(|w| app.ui.win_mut(w.id)) {
-                    win.apply_materialized_rows(out);
-                    win.pin_scroll(out.clamped_scroll);
-                }
-                app.resume_preview_cache.store(cache_key, view);
-                Some((out.total_rows, out.clamped_scroll))
+                host.take_session_preview(cache_key_hint.as_deref())
             });
+            smelt_perf::perf::record_value(
+                "session:render_preview_into:cache_hit",
+                u64::from(cached_view.is_some()),
+            );
+            let cache_key = cache_key_hint.unwrap_or_else(|| id.clone());
 
-            let Some((total_rows, scroll_top)) = rendered else {
+            if cached_view.is_none() {
+                let transcript = crate::app::history::load_transcript_tail_from_sqlite_id(
+                    &sessions, &id, width, height,
+                )
+                .or_else(|| {
+                    crate::app::history::materialize_full_transcript_read_only(
+                        &sessions, &execution, &id,
+                    )
+                });
+                if let Some(transcript) = transcript {
+                    cached_view = Some(
+                        crate::app::transcript::TranscriptDocument::from_loaded_transcript(
+                            transcript,
+                        ),
+                    );
+                }
+            }
+
+            let Some(view) = cached_view else {
+                return Ok(None);
+            };
+            let Some((total_rows, scroll_top)) = crate::lua::with_session_host(|host| {
+                host.render_session_preview(crate::lua::app_ref::SessionPreviewRender {
+                    cache_key,
+                    view,
+                    width,
+                    height,
+                    scroll_top,
+                    buffer: buf.id,
+                    window: win.map(|win| win.id),
+                })
+            }) else {
                 return Ok(None);
             };
             let out = lua.create_table()?;
@@ -1057,17 +1022,8 @@ pub(super) fn register(
         "Delete the persisted session with `id`. Refuses to delete the currently active session.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let target = smelt_core::session::resolve_prefix(&id)
-                    .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
-                if target.as_str() == app.core.session.id {
-                    return Err(mlua::Error::RuntimeError(
-                        "cannot delete the active session".into(),
-                    ));
-                }
-                smelt_core::session::delete(target.as_str())
-                    .map_err(|err| mlua::Error::RuntimeError(err.to_string()))
-            })
+            crate::lua::with_session_host(|host| host.delete_session(&id))
+                .map_err(mlua::Error::RuntimeError)
         },
     )?;
     m.fn_(
@@ -1075,7 +1031,7 @@ pub(super) fn register(
         "Fork the current session: clone its messages into a new session id and switch to it. Useful for branching off an experiment without losing the original timeline.",
         &[],
         |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.fork_session());
+            crate::lua::with_session_host(|host| host.fork_session());
             Ok(())
         },
     )?;
@@ -1084,15 +1040,12 @@ pub(super) fn register(
         "Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.",
         &[],
         |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                engine::log::entry(
-                    engine::log::Level::Info,
-                    "agent_stop",
-                    &serde_json::json!({ "reason": "user_cancel_and_clear" }),
-                );
-                app.reset_session();
-                app.agent = None;
-            });
+            engine::log::entry(
+                engine::log::Level::Info,
+                "agent_stop",
+                &serde_json::json!({ "reason": "user_cancel_and_clear" }),
+            );
+            crate::lua::with_session_host(|host| host.reset_session());
             Ok(())
         },
     )?;

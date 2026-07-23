@@ -18,13 +18,15 @@ pub(super) fn register(
         "Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only.",
         Tier::UiHost,
     )?;
+    let preview_context = std::sync::Arc::clone(&shared.core);
     m.internal_fn(
         "preview_data",
         "Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.",
         &["args"],
-        |lua, args: mlua::Table| -> LuaResult<Option<mlua::Table>> {
-            let args = lua_table_to_json_map(&args)
+        move |lua, args: mlua::Table| -> LuaResult<Option<mlua::Table>> {
+            let mut args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.preview_data: {e}")))?;
+            resolve_notebook_path(&mut args, &preview_context);
             let Some(data) = smelt_core::notebook::preview_render_data(&args) else {
                 return Ok(None);
             };
@@ -55,31 +57,42 @@ pub(super) fn register(
         },
     )?;
 
+    let read_context = std::sync::Arc::clone(&shared.core);
     m.fn_(
         "read",
         "Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure, matching the output the built-in `read_file` tool produces.",
         &["path", "offset", "limit"],
-        |_, (path, offset, limit): (String, u64, u64)| -> LuaResult<(Option<String>, Option<String>)> {
-
-            match smelt_core::notebook::render_notebook_text(&path, offset as usize, limit as usize)
-            {
+        move |_, (path, offset, limit): (String, u64, u64)| -> LuaResult<(Option<String>, Option<String>)> {
+            let path = read_context.resolve_project_path(path);
+            match smelt_core::notebook::render_notebook_text(
+                &path.to_string_lossy(),
+                offset as usize,
+                limit as usize,
+            ) {
                 Ok(s) => Ok((Some(s), None)),
                 Err(err) => Ok((None, Some(err))),
             }
-
         },
     )?;
 
+    let apply_context = std::sync::Arc::clone(&shared.core);
     m.fn_(
         "apply_edit",
         "Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.",
         &["args"],
-        |lua, args: mlua::Table| -> LuaResult<(Option<mlua::Value>, Option<String>)> {
-
-            let args_map = lua_table_to_json_map(&args)
+        move |lua, args: mlua::Table| -> LuaResult<(Option<mlua::Value>, Option<String>)> {
+            let mut args_map = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
-            let result = crate::lua::try_with_app(|app| {
-                smelt_core::notebook::apply_edit(&args_map, &app.core.files)
+            resolve_notebook_path(&mut args_map, &apply_context);
+            let cwd = apply_context.evaluation_cwd();
+            let home = apply_context.runtime_home();
+            let result = crate::lua::try_with_platform_host(|host| {
+                smelt_core::notebook::apply_edit_with_roots(
+                    &args_map,
+                    &host.file_cache(),
+                    &cwd,
+                    &home,
+                )
             });
             match result {
                 Some(Ok(outcome)) => {
@@ -99,11 +112,13 @@ pub(super) fn register(
     )?;
 
     {
+        let context = std::sync::Arc::clone(&shared.core);
         let sink = shared.core.resume_sink();
         m.private_fn(
             "__start_read",
             &["task_id", "path", "offset", "limit"],
             move |_, (task_id, path, offset, limit): (u64, String, u64, u64)| -> LuaResult<()> {
+                let path = context.resolve_project_path(path);
                 sink.clone().spawn_blocking_resolve(
                     task_id,
                     move || match std::fs::read_to_string(&path) {
@@ -113,7 +128,9 @@ pub(super) fn register(
                             limit as usize,
                         ) {
                             Ok(content) => {
-                                let mtime_ms = smelt_core::fs::file_mtime_ms(&path).unwrap_or(0);
+                                let mtime_ms =
+                                    smelt_core::fs::file_mtime_ms(&path.to_string_lossy())
+                                        .unwrap_or(0);
                                 serde_json::json!({
                                     "content": content,
                                     "raw": raw,
@@ -131,15 +148,19 @@ pub(super) fn register(
     }
 
     {
+        let context = std::sync::Arc::clone(&shared.core);
         let sink = shared.core.resume_sink();
         m.private_fn(
             "__start_apply_edit",
             &["task_id", "args"],
             move |_, (task_id, args): (u64, mlua::Table)| -> LuaResult<()> {
-                let args_map = lua_table_to_json_map(&args).map_err(|e| {
+                let mut args_map = lua_table_to_json_map(&args).map_err(|e| {
                     LuaError::RuntimeError(format!("notebook.apply_edit_async: {e}"))
                 })?;
-                let files = crate::lua::try_with_app(|app| app.core.files.clone());
+                resolve_notebook_path(&mut args_map, &context);
+                let cwd = context.evaluation_cwd();
+                let home = context.runtime_home();
+                let files = crate::lua::try_with_platform_host(|host| host.file_cache());
                 let Some(files) = files else {
                     sink.resolve_json(
                         task_id,
@@ -161,7 +182,9 @@ pub(super) fn register(
                     } else {
                         None
                     };
-                    match smelt_core::notebook::apply_edit(&args_map, &files) {
+                    match smelt_core::notebook::apply_edit_with_roots(
+                        &args_map, &files, &cwd, &home,
+                    ) {
                         Ok(outcome) => serde_json::json!({
                             "message": outcome.message,
                             "metadata": outcome.metadata,
@@ -175,6 +198,23 @@ pub(super) fn register(
     }
 
     Ok(())
+}
+
+fn resolve_notebook_path(
+    args: &mut HashMap<String, serde_json::Value>,
+    context: &smelt_core::lua::LuaShared,
+) {
+    let Some(path) = args
+        .get("notebook_path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let path = context.resolve_project_path(path);
+    args.insert(
+        "notebook_path".into(),
+        serde_json::Value::String(path.to_string_lossy().into_owned()),
+    );
 }
 
 fn notebook_to_lua(lua: &Lua, nb: &notebook::Notebook) -> LuaResult<mlua::Table> {

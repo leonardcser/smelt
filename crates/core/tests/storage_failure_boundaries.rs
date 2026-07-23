@@ -3,6 +3,8 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use smelt_test_support::ProcessEnvironmentGuard;
+
 const PROBE_DB: &str = "SMELT_CORE_STORAGE_PROBE_DB";
 const PROBE_READY: &str = "SMELT_CORE_STORAGE_PROBE_READY";
 const PROBE_RELEASE: &str = "SMELT_CORE_STORAGE_PROBE_RELEASE";
@@ -29,7 +31,8 @@ fn storage_owner_probe() {
 #[test]
 fn delete_refuses_session_owned_by_another_process() {
     let state = tempfile::tempdir().expect("state dir");
-    std::env::set_var("XDG_STATE_HOME", state.path());
+    let environment = ProcessEnvironmentGuard::capture();
+    environment.set_var("XDG_STATE_HOME", state.path());
     let id = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let session_dir = smelt_core::session::dir_for_id(id);
     let mut session = smelt_core::session::Session::new(1, PathBuf::from("/tmp"));

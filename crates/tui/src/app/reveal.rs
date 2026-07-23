@@ -62,14 +62,14 @@ impl TuiApp {
             return;
         };
         let trace_reveal = leaf == crate::app::TRANSCRIPT_WIN
-            && self.session_document.transcript.scroll_trace_enabled();
+            && self.conversation.transcript().scroll_trace_enabled();
         if trace_reveal {
-            let anchor = self.session_document.transcript.trace_anchor_at_row(
+            let anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport_width,
                 position.row,
             );
-            self.session_document.transcript.record_scroll_trace_event(
+            self.conversation.record_transcript_scroll_trace_event(
                 "reveal_before",
                 json!({
                     "position_row": position.row,
@@ -141,7 +141,7 @@ impl TuiApp {
         if let Some((intent, window_scroll_before)) = trace_before {
             let (label, scroll_intent) = match intent {
                 RevealScrollIntent::Position => {
-                    let anchor = self.session_document.transcript.trace_anchor_at_row(
+                    let anchor = self.conversation.transcript_trace_anchor_at_row(
                         &self.lua,
                         viewport_width,
                         position.row,
@@ -153,12 +153,12 @@ impl TuiApp {
         }
 
         if trace_reveal {
-            let anchor = self.session_document.transcript.trace_anchor_at_row(
+            let anchor = self.conversation.transcript_trace_anchor_at_row(
                 &self.lua,
                 viewport_width,
                 position.row,
             );
-            self.session_document.transcript.record_scroll_trace_event(
+            self.conversation.record_transcript_scroll_trace_event(
                 "reveal_after",
                 json!({
                     "position_row": position.row,

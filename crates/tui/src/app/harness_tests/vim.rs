@@ -1,16 +1,13 @@
 use super::*;
 
 fn user_blocks(app: &mut TestApp) -> Vec<(String, Vec<String>)> {
-    let ids = app.app.session_document.transcript.history().order.clone();
-    assert!(
-        app.app
-            .session_document
-            .transcript
-            .pin_operation_blocks(&ids),
-        "test inspection should hydrate canonical transcript blocks"
-    );
-    let blocks = {
-        let history = app.app.session_document.transcript.history();
+    let ids = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .order
+        .clone();
+    app.with_pinned_transcript_blocks(&ids, |history| {
         history
             .order
             .iter()
@@ -22,19 +19,12 @@ fn user_blocks(app: &mut TestApp) -> Vec<(String, Vec<String>)> {
                 _ => None,
             })
             .collect()
-    };
-    app.app
-        .session_document
-        .transcript
-        .unpin_operation_blocks(&ids);
-    blocks
+    })
+    .expect("test inspection should hydrate canonical transcript blocks")
 }
 
 fn insert_image(app: &mut TestApp, label: &str, data_url: &str) {
-    let mut ctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
-    app.app
-        .input
-        .insert_image(&mut ctx, label.to_string(), data_url.to_string());
+    app.insert_image_attachment(label.to_string(), data_url.to_string());
 }
 
 #[test]
@@ -95,13 +85,34 @@ fn vim_insert_double_esc_rewinds_active_user_turn_before_output() {
 }
 
 #[test]
+fn empty_reasoning_does_not_count_as_assistant_output() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.start_submitted_turn("wrong prompt");
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::ReasoningPartFinished {
+            id: "summary".into(),
+            kind: protocol::ReasoningKind::Summary,
+            title: Some("  ".into()),
+            content: "\n\t".into(),
+        },
+    ));
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+
+    let after_second = app.state();
+    assert!(!after_second.agent_running);
+    assert_eq!(after_second.prompt_text, "wrong prompt");
+    assert!(user_blocks(&mut app).is_empty());
+}
+
+#[test]
 fn vim_insert_double_esc_only_cancels_after_assistant_output() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.start_submitted_turn("keep prompt");
-    app.app
-        .dispatch_engine_event(protocol::EngineEvent::TextDelta {
-            delta: "started".into(),
-        });
+    app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+        delta: "started".into(),
+    });
 
     app.press(KeyCode::Esc);
     assert!(app.agent_running(), "first Esc is the local Vim action");
@@ -143,57 +154,24 @@ fn vim_insert_double_esc_unqueues_messages_on_second_press() {
 #[test]
 fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
     let mut app = TestApp::builder().with_vim(true).build();
-    let buf = app
-        .app
-        .ui
-        .buf_create(crate::smelt_edit::BufCreateOpts::default());
-    {
-        let buf = app.app.ui.buf_mut(buf).expect("overlay buffer");
-        buf.readonly = true;
-        buf.set_all_lines(vec!["alpha beta".into(), "gamma".into()]);
-    }
-
-    let leaf = app
-        .app
-        .ui
-        .win_open_split(
-            buf,
-            crate::smelt_edit::SplitConfig {
-                region: "dialog".into(),
-                gutters: Default::default(),
-            },
-        )
-        .expect("overlay leaf");
-    if let Some(win) = app.app.ui.win_mut(leaf) {
-        win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
-        win.set_vim_enabled(true);
-    }
-    app.app.ui.overlay_open(
-        crate::smelt_edit::Overlay::new(
-            crate::smelt_edit::LayoutTree::leaf(leaf),
-            crate::smelt_edit::layout::Anchor::ScreenCenter,
-        )
-        .with_size((40, 5))
-        .modal(true),
-    );
+    let leaf = app.open_readonly_overlay_fixture(vec!["alpha beta".into(), "gamma".into()], None);
     app.render_silent();
 
     app.type_char('v');
     app.type_char('e');
     app.type_char('y');
 
-    assert_eq!(app.app.core.clipboard.kill_ring.current(), "alpha");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
     assert_eq!(
-        app.app.core.clipboard.kill_ring.last_clipboard_write(),
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
         Some("alpha")
     );
     assert_eq!(
-        app.app.ui.win(leaf).expect("overlay window").vim_mode(),
+        app.ui_probe().win(leaf).expect("overlay window").vim_mode(),
         VimMode::Normal
     );
     assert!(
-        app.app
-            .ui
+        app.ui_probe()
             .win(leaf)
             .expect("overlay window")
             .byte_yank_flash_until()
@@ -204,8 +182,7 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
     app.render_silent();
 
     assert!(
-        !app.app
-            .ui
+        !app.ui_probe()
             .win(leaf)
             .expect("overlay window")
             .range_layer(crate::smelt_edit::RangeLayer::YankFlash)
@@ -219,8 +196,7 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
     app.render_silent();
 
     assert!(
-        app.app
-            .ui
+        app.ui_probe()
             .win(leaf)
             .expect("overlay window")
             .range_layer(crate::smelt_edit::RangeLayer::YankFlash)
@@ -228,8 +204,7 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
         "expired overlay yank flash should clear like transcript flashes"
     );
     assert!(
-        app.app
-            .ui
+        app.ui_probe()
             .win(leaf)
             .expect("overlay window")
             .byte_yank_flash_until()
@@ -388,7 +363,7 @@ fn vim_visual_line_enter_carries_only_selected_attachments() {
         app.state().prompt_text,
         format!("keep {}", crate::input::ATTACHMENT_MARKER)
     );
-    assert_eq!(app.app.prompt_buf().attachment_ids.len(), 1);
+    assert_eq!(app.prompt_attachment_count(), 1);
 }
 
 #[test]
@@ -431,7 +406,7 @@ fn vim_visual_ctrl_q_with_image_leaves_prompt_unchanged() {
 
     assert_eq!(app.queued_message_count(), 0);
     assert_eq!(app.state().prompt_text, prompt);
-    assert_eq!(app.app.prompt_buf().attachment_ids.len(), 1);
+    assert_eq!(app.prompt_attachment_count(), 1);
     assert_eq!(app.state().vim_mode, VimMode::VisualLine);
     assert!(!app.actions().iter().any(|action| matches!(
         action,
@@ -561,8 +536,8 @@ fn vim_yy_yank_flash_expires_after_tick() {
     app.type_char('y');
     app.type_char('y');
 
-    let now = app.app.core.clock.instant_now();
-    let flash = app.app.core.clipboard.kill_ring.yank_flash_range(now);
+    let now = app.core_probe().clock.instant_now();
+    let flash = app.core_probe().clipboard.kill_ring.yank_flash_range(now);
     assert!(
         flash.is_some(),
         "yank flash range should be active right after yy"
@@ -571,8 +546,8 @@ fn vim_yy_yank_flash_expires_after_tick() {
     // Advance past the 200ms flash window. If the clock chain is wired
     // correctly, the flash deadline now sits in the virtual past.
     app.feed_one(SourceEvent::Tick(300));
-    let now = app.app.core.clock.instant_now();
-    let flash = app.app.core.clipboard.kill_ring.yank_flash_range(now);
+    let now = app.core_probe().clock.instant_now();
+    let flash = app.core_probe().clipboard.kill_ring.yank_flash_range(now);
     assert!(
         flash.is_none(),
         "flash should expire after Tick past the window"

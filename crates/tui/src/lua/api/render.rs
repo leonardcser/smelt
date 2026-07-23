@@ -79,10 +79,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, (buf, content, opts): (LuaBuf, String, Option<LuaRenderTextOpts>)| -> LuaResult<()> {
             let hl_group = opts.as_ref().and_then(|opts| opts.hl_group.as_deref());
             let width_opt = opts.as_ref().and_then(|opts| opts.width).filter(|w| *w > 0);
-            crate::lua::with_app(|app| {
-                let theme_snap = app.ui.theme().clone();
+            crate::lua::with_ui_host(|host| host.with_ui(|ui| {
+                let theme_snap = ui.theme().clone();
                 let width = width_opt.unwrap_or_else(|| crate::content::term_width() as u16);
-                if let Some(buf) = app.ui.buf_mut(buf.id) {
+                if let Some(buf) = ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let max_cols = (width as usize).saturating_sub(3);
                         let hl = hl_group.map(intern);
@@ -107,7 +107,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         sink.pop_style();
                     });
                 }
-            });
+            }));
             Ok(())
         },
     )?;
@@ -117,10 +117,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks.",
         &["buf", "source"],
         |_, (buf, source): (LuaBuf, String)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let theme_snap = app.ui.theme().clone();
+            crate::lua::with_ui_host(|host| host.with_ui(|ui| {
+                let theme_snap = ui.theme().clone();
                 let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(buf.id) {
+                if let Some(buf) = ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         crate::content::display_renderers::render_markdown_inner(
                             sink,
@@ -132,7 +132,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         );
                     });
                 }
-            });
+            }));
             Ok(())
         },
     )?;
@@ -145,10 +145,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let content = opts.content;
             let lang = opts.lang;
             let path = opts.path;
-            crate::lua::with_app(|app| {
-                let theme_snap = app.ui.theme().clone();
+            crate::lua::with_ui_host(|host| host.with_ui(|ui| {
+                let theme_snap = ui.theme().clone();
                 let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(buf.id) {
+                if let Some(buf) = ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let lang_token = lang.as_deref().unwrap_or_else(|| {
                             path.as_deref()
@@ -159,7 +159,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         print_code_lines(sink, &content, lang_token);
                     });
                 }
-            });
+            }));
             Ok(())
         },
     )?;
@@ -181,8 +181,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         .map(str::to_string)
                 },
             );
-            crate::lua::with_app(|app| {
-                render_split_into_pair(app, left.id, right.id, &old, &new, ext.as_deref());
+            crate::lua::with_ui_host(|host| {
+                host.with_ui(|ui| {
+                    render_split_into_pair(ui, left.id, right.id, &old, &new, ext.as_deref());
+                });
             });
             Ok(())
         },
@@ -192,22 +194,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 }
 
 fn render_split_into_pair(
-    app: &mut crate::app::TuiApp,
+    ui: &mut crate::smelt_edit::Ui,
     left_id: BufId,
     right_id: BufId,
     old: &str,
     new: &str,
     ext: Option<&str>,
 ) {
-    let theme = app.ui.theme().clone();
+    let theme = ui.theme().clone();
     let width = crate::content::term_width() as u16;
     let plan = compute_split_diff(old, new);
-    if let Some(buf) = app.ui.buf_mut(left_id) {
+    if let Some(buf) = ui.buf_mut(left_id) {
         render_into_buffer(buf, width, &theme, |sink| {
             print_split_diff_side(sink, &plan, ext, SplitSide::Left);
         });
     }
-    if let Some(buf) = app.ui.buf_mut(right_id) {
+    if let Some(buf) = ui.buf_mut(right_id) {
         render_into_buffer(buf, width, &theme, |sink| {
             print_split_diff_side(sink, &plan, ext, SplitSide::Right);
         });

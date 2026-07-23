@@ -15,7 +15,7 @@
 //!   coordinates. Each tick advances by the configured content-row amount until
 //!   a real content boundary is reached.
 //! - Scrollbar clicks and drags are coarse far-seek intents. They may use stable
-//!   unloaded descriptor estimates to choose an initial descriptor window, but
+//!   unloaded record estimates to choose an initial record window, but
 //!   the resolved viewport must be re-anchored to exact materialized content
 //!   before text, selection, actions, or hit testing are exposed.
 //! - Tail-follow is a mode, not a request for the latest numeric total row. It
@@ -29,7 +29,7 @@
 //!   must leave the top visible content anchor stable unless the user supplied a
 //!   new intent or the viewport reached a real boundary.
 //!
-//! Trace records intentionally use descriptor indices, row anchors, block ids,
+//! Trace records intentionally use record indices, row anchors, block ids,
 //! counts, and optional timings. They must not contain transcript text.
 
 use std::ops::Range;
@@ -60,7 +60,7 @@ pub(crate) enum TranscriptScrollIntent {
         match_end_byte_col: usize,
     },
     RevealBlock {
-        descriptor_index: usize,
+        record_index: usize,
         block_id: BlockId,
         row_offset: RowIndex,
         screen_padding_top: RowIndex,
@@ -112,13 +112,13 @@ impl TranscriptScrollIntent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TranscriptDescriptorTraceRange {
+pub(crate) struct TranscriptRecordTraceRange {
     pub(crate) start: usize,
     pub(crate) end: usize,
 }
 
-impl TranscriptDescriptorTraceRange {
-    pub(crate) fn from_store_range(range: &Range<smelt_store::TranscriptDescriptorIndex>) -> Self {
+impl TranscriptRecordTraceRange {
+    pub(crate) fn from_store_range(range: &Range<smelt_store::TranscriptRecordOffset>) -> Self {
         Self {
             start: range.start.get(),
             end: range.end.get(),
@@ -146,7 +146,7 @@ pub(crate) enum TranscriptTraceAnchor {
     Tail,
     Content {
         virtual_row: RowIndex,
-        descriptor_index: usize,
+        record_index: usize,
         block_id: BlockId,
         node_id: RenderNodeId,
         row_offset: RowIndex,
@@ -208,13 +208,13 @@ pub(crate) struct TranscriptScrollTraceFrame {
     pub(crate) window_scroll_after_input: RowIndex,
     pub(crate) viewport_anchor_before: Option<TranscriptTraceAnchor>,
     pub(crate) projection_target: TranscriptProjectionTargetTrace,
-    pub(crate) active_descriptor_range_before: Option<TranscriptDescriptorTraceRange>,
+    pub(crate) active_record_range_before: Option<TranscriptRecordTraceRange>,
     pub(crate) prefix_estimate_before: RowIndex,
     pub(crate) suffix_estimate_before: RowIndex,
     pub(crate) exact_observation_count: usize,
     pub(crate) resolved_scroll_top: RowIndex,
     pub(crate) viewport_anchor_after: Option<TranscriptTraceAnchor>,
-    pub(crate) active_descriptor_range_after: Option<TranscriptDescriptorTraceRange>,
+    pub(crate) active_record_range_after: Option<TranscriptRecordTraceRange>,
     pub(crate) materialized_range: TranscriptRowTraceRange,
     pub(crate) placeholder_rows_visible: bool,
     pub(crate) first_visible_content_anchor: Option<TranscriptVisibleContentAnchor>,
@@ -236,7 +236,7 @@ pub(crate) struct TranscriptScrollTraceFrameStart {
     pub(crate) input: TranscriptScrollTraceRenderInput,
     pub(crate) viewport_anchor_before: Option<TranscriptTraceAnchor>,
     pub(crate) projection_target: TranscriptProjectionTargetTrace,
-    pub(crate) active_descriptor_range_before: Option<TranscriptDescriptorTraceRange>,
+    pub(crate) active_record_range_before: Option<TranscriptRecordTraceRange>,
     pub(crate) prefix_estimate_before: RowIndex,
     pub(crate) suffix_estimate_before: RowIndex,
     pub(crate) exact_observation_count: usize,
@@ -248,7 +248,7 @@ impl TranscriptScrollTraceFrameStart {
         self,
         resolved_scroll_top: RowIndex,
         viewport_anchor_after: Option<TranscriptTraceAnchor>,
-        active_descriptor_range_after: Option<TranscriptDescriptorTraceRange>,
+        active_record_range_after: Option<TranscriptRecordTraceRange>,
         materialized_range: Range<RowIndex>,
         placeholder_rows_visible: bool,
         first_visible_content_anchor: Option<TranscriptVisibleContentAnchor>,
@@ -263,13 +263,13 @@ impl TranscriptScrollTraceFrameStart {
             window_scroll_after_input: self.input.window_scroll_after_input,
             viewport_anchor_before: self.viewport_anchor_before,
             projection_target: self.projection_target,
-            active_descriptor_range_before: self.active_descriptor_range_before,
+            active_record_range_before: self.active_record_range_before,
             prefix_estimate_before: self.prefix_estimate_before,
             suffix_estimate_before: self.suffix_estimate_before,
             exact_observation_count: self.exact_observation_count,
             resolved_scroll_top,
             viewport_anchor_after,
-            active_descriptor_range_after,
+            active_record_range_after,
             materialized_range: materialized_range.into(),
             placeholder_rows_visible,
             first_visible_content_anchor,
@@ -398,13 +398,13 @@ fn trace_frame_json(frame: &TranscriptScrollTraceFrame) -> serde_json::Value {
         "window_scroll_after_input": frame.window_scroll_after_input,
         "viewport_anchor_before": trace_option_debug(frame.viewport_anchor_before),
         "projection_target": format!("{:?}", frame.projection_target),
-        "active_descriptor_range_before": frame.active_descriptor_range_before.map(trace_descriptor_range_json),
+        "active_record_range_before": frame.active_record_range_before.map(trace_record_range_json),
         "prefix_estimate_before": frame.prefix_estimate_before,
         "suffix_estimate_before": frame.suffix_estimate_before,
         "exact_observation_count": frame.exact_observation_count,
         "resolved_scroll_top": frame.resolved_scroll_top,
         "viewport_anchor_after": trace_option_debug(frame.viewport_anchor_after),
-        "active_descriptor_range_after": frame.active_descriptor_range_after.map(trace_descriptor_range_json),
+        "active_record_range_after": frame.active_record_range_after.map(trace_record_range_json),
         "materialized_range": trace_row_range_json(frame.materialized_range),
         "placeholder_rows_visible": frame.placeholder_rows_visible,
         "first_visible_content_anchor": frame.first_visible_content_anchor.map(trace_visible_anchor_json),
@@ -418,7 +418,7 @@ fn trace_frame_json(frame: &TranscriptScrollTraceFrame) -> serde_json::Value {
     })
 }
 
-fn trace_descriptor_range_json(range: TranscriptDescriptorTraceRange) -> serde_json::Value {
+fn trace_record_range_json(range: TranscriptRecordTraceRange) -> serde_json::Value {
     json!({ "start": range.start, "end": range.end })
 }
 

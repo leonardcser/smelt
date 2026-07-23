@@ -37,8 +37,10 @@ pub(crate) fn split_editor_command(raw: &str) -> (OsString, Vec<OsString>) {
 }
 
 /// Stage `text` into a tempfile and build an [`EditorRequest`].
-pub(crate) fn prepare(text: &str) -> io::Result<EditorRequest> {
-    let tmp = tempfile::Builder::new().suffix(".md").tempfile()?;
+pub(crate) fn prepare(text: &str, runtime_dir: &std::path::Path) -> io::Result<EditorRequest> {
+    let tmp = tempfile::Builder::new()
+        .suffix(".md")
+        .tempfile_in(runtime_dir)?;
     std::fs::write(tmp.path(), text)?;
     let (program, mut args) = editor_command_from_env();
     args.push(tmp.path().as_os_str().to_os_string());
@@ -98,8 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn prepare_writes_text_and_appends_path() {
-        let req = prepare("hello\nworld\n").expect("prepare");
+    fn prepare_writes_text_in_runtime_dir_and_appends_path() {
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let req = prepare("hello\nworld\n", runtime_dir.path()).expect("prepare");
+        assert!(req.tmp.path().starts_with(runtime_dir.path()));
         let on_disk = std::fs::read_to_string(req.tmp.path()).expect("read tmp");
         assert_eq!(on_disk, "hello\nworld\n");
         let last = req.args.last().expect("at least the path arg");
@@ -108,7 +112,7 @@ mod tests {
 
     #[test]
     fn finalize_reads_file_on_success() {
-        let req = prepare("first").expect("prepare");
+        let req = prepare("first", &std::env::temp_dir()).expect("prepare");
         std::fs::write(req.tmp.path(), "second").expect("write");
         let status = std::process::Command::new("true").status();
         assert_eq!(finalize(req, status).as_deref(), Ok("second"));
@@ -116,7 +120,7 @@ mod tests {
 
     #[test]
     fn finalize_reports_spawn_error() {
-        let req = prepare("x").expect("prepare");
+        let req = prepare("x", &std::env::temp_dir()).expect("prepare");
         let err = io::Error::new(io::ErrorKind::NotFound, "no such binary");
         let msg = finalize(req, Err(err)).expect_err("expected error");
         assert!(msg.contains("no such binary"), "{msg}");

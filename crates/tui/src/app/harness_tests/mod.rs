@@ -19,7 +19,6 @@ mod process_status;
 mod prompt;
 mod resources;
 mod search;
-mod transcript_bench;
 mod vim;
 
 fn ask_messages(cmds: Vec<protocol::UiCommand>) -> Vec<(String, Vec<protocol::Message>)> {
@@ -58,32 +57,11 @@ fn drive_lua_tasks(app: &mut TestApp) {
 }
 
 fn respond_ask_with_text(app: &mut TestApp, id: u64, text: &str) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app
-        .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-            id,
-            message: Some(protocol::Message::assistant(
-                Some(protocol::Content::text(text)),
-                None,
-                None,
-            )),
-            error: None,
-        });
-    app.app.drive_lua_tasks();
+    app.respond_ask_with_text(id, text);
 }
 
 fn respond_ask_with_error(app: &mut TestApp, id: u64, kind: protocol::EngineAskErrorKind) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app
-        .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-            id,
-            message: None,
-            error: Some(protocol::EngineAskError {
-                kind,
-                message: kind.as_str().to_string(),
-            }),
-        });
-    app.app.drive_lua_tasks();
+    app.respond_ask_with_error(id, kind);
 }
 
 fn respond_pending_ask_with_text(app: &mut TestApp, text: &str) {
@@ -91,33 +69,17 @@ fn respond_pending_ask_with_text(app: &mut TestApp, text: &str) {
 }
 
 fn publish_input_submit(app: &mut TestApp, text: &str) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app.bump_epoch("input_epoch");
-    app.app
-        .core
-        .signals
-        .emit_dyn("input_submit", std::rc::Rc::new(text.to_string()));
-    app.app.pump_lua();
+    app.bump_epoch("input_epoch");
+    app.publish_input_submit(text);
 }
 
 fn publish_turn_end(app: &mut TestApp) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app.core.signals.emit_dyn(
-        "turn_end",
-        std::rc::Rc::new(smelt_core::signals::TurnEnd {
-            cancelled: false,
-            continuation_token: None,
-            error_kind: None,
-            retry_at_ms: None,
-        }),
-    );
-    app.app.pump_lua();
+    app.publish_turn_end_for_probe();
 }
 
 fn publish_history_delta(app: &mut TestApp, kind: &str) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app.publish_history_delta(kind);
-    app.app.pump_lua();
+    app.publish_history_delta(kind);
+    app.pump_lua();
 }
 
 fn engine_ask_ids(cmds: Vec<protocol::UiCommand>) -> Vec<u64> {
@@ -130,52 +92,31 @@ fn engine_ask_ids(cmds: Vec<protocol::UiCommand>) -> Vec<u64> {
 }
 
 fn respond_pending_ask_with_tool_call(app: &mut TestApp, call_id: &str, name: &str) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app
-        .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-            id: app.pending_ask_id().expect("pending ask id"),
-            message: Some(protocol::Message::assistant(
-                None,
-                None,
-                Some(vec![protocol::ToolCall::new(
-                    call_id.into(),
-                    protocol::FunctionCall {
-                        name: name.into(),
-                        arguments: "{}".into(),
-                    },
-                )]),
-            )),
-            error: None,
-        });
-    app.app.drive_lua_tasks();
+    let id = app.pending_ask_id().expect("pending ask id");
+    app.respond_ask_with_tool_call(id, call_id, name);
 }
 
 fn stub_btw_ui(app: &mut TestApp) {
-    let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app
-        .lua
-        .lua
-        .load(
-            r#"
-                smelt.buf.new = function()
-                  return {
-                    source = function() end,
-                    styled = function() end,
-                  }
-                end
-                smelt.transcript.stream = function()
-                  return {
-                    append = function() end,
-                    finish = function() end,
-                    reset = function() end,
-                  }
-                end
-                smelt.dialog.content = function() return {} end
-                smelt.dialog.open = function() end
-                "#,
-        )
-        .exec()
-        .expect("stub /btw ui");
+    app.exec_lua_entry(
+        r#"
+            smelt.buf.new = function()
+              return {
+                source = function() end,
+                styled = function() end,
+              }
+            end
+            smelt.transcript.stream = function()
+              return {
+                append = function() end,
+                finish = function() end,
+                reset = function() end,
+              }
+            end
+            smelt.dialog.content = function() return {} end
+            smelt.dialog.open = function() end
+            "#,
+    )
+    .expect("stub /btw ui");
 }
 
 // ── Resource invariants: per-event allocation tracking ────────────
@@ -210,9 +151,7 @@ fn open_test_picker(app: &mut TestApp, labels: &[&str], selected: usize) -> WinI
         .iter()
         .map(|s| crate::picker::PickerItem::new(*s))
         .collect();
-    let _guard = crate::lua::install_app_ptr(&mut app.app);
-    crate::picker::open(
-        &mut app.app,
+    app.open_picker(
         items,
         selected,
         crate::picker::PickerPlacement::ScreenCenter,
@@ -224,10 +163,10 @@ fn open_test_picker(app: &mut TestApp, labels: &[&str], selected: usize) -> WinI
 }
 
 fn picker_buffer_lines(app: &TestApp, leaf: WinId) -> Vec<String> {
-    let Some(buf_id) = app.app.ui.win(leaf).map(|w| w.buf) else {
+    let Some(buf_id) = app.ui_probe().win(leaf).map(|w| w.buf) else {
         return Vec::new();
     };
-    let Some(buf) = app.app.ui.buf(buf_id) else {
+    let Some(buf) = app.ui_probe().buf(buf_id) else {
         return Vec::new();
     };
     (0..buf.line_count())
@@ -245,19 +184,12 @@ fn picker_buffer_lines(app: &TestApp, leaf: WinId) -> Vec<String> {
 // ── Vim mode transitions ────────────────────────────────────────
 
 fn prompt_content_cell(app: &mut TestApp) -> (u16, u16) {
-    app.app.render_normal();
-    let vp = app
-        .app
-        .ui
-        .win(crate::app::PROMPT_WIN)
-        .and_then(|w| w.viewport)
-        .expect("prompt viewport after render");
-    let pad_left = app
-        .app
-        .ui
-        .win(crate::app::PROMPT_WIN)
-        .map(|w| w.config.gutters.pad_left)
-        .unwrap_or_default();
+    app.render();
+    let prompt = app
+        .window_snapshot(crate::app::PROMPT_WIN)
+        .expect("prompt window after render");
+    let vp = prompt.viewport.expect("prompt viewport after render");
+    let pad_left = prompt.gutter_pad_left;
     (
         vp.rect.top,
         vp.rect
@@ -269,64 +201,58 @@ fn prompt_content_cell(app: &mut TestApp) -> (u16, u16) {
 
 fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {
     let mut app = TestApp::builder().with_vim(vim).build();
-    app.app.handle_resize(80, 16);
+    app.set_terminal_size(80, 16);
     for i in 0..rows {
-        app.app
-            .push_block(smelt_core::transcript_model::Block::Text {
-                content: format!("row {i:03} alpha beta"),
-            });
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("row {i:03} alpha beta"),
+        });
     }
     app.render_silent();
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
-    win.set_vim_enabled(vim);
-    win.set_vim_mode(VimMode::Normal);
+    app.focus_transcript();
+    app.configure_transcript_vim(vim, VimMode::Normal);
     app
 }
 
 fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
-    app.app
-        .transcript_win()
-        .row_cursor()
+    app.transcript_window()
+        .row_cursor
         .expect("row-document transcript cursor")
         .row
 }
 
 fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
-    let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
-    win.scroll_row_total(buf)
+    app.transcript_window()
+        .viewport
+        .map(|viewport| viewport.total_rows)
+        .unwrap_or_default()
 }
 
 fn execute_transcript_viewer_command(
     app: &mut TestApp,
     command: crate::smelt_edit::DocumentCommand,
 ) {
-    let win = app.app.transcript_win();
-    let buf_id = win.buf;
-    let viewport_rows = win
+    let viewport_rows = app
+        .transcript_window()
         .viewport
-        .map(|v| v.rect.height)
+        .map(|viewport| viewport.rect.height)
         .expect("transcript viewport");
-    let now = app.app.core.clock.instant_now();
-    let (win, buf) = app
-        .app
-        .ui
-        .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
-    let win = win.expect("transcript window");
-    let buf = buf.expect("transcript buffer");
-    win.execute_document_view_command(buf, command, viewport_rows, now);
+    let now = app.core_probe().clock.instant_now();
+    app.execute_document_view_command_for_win(
+        crate::app::TRANSCRIPT_WIN,
+        command,
+        viewport_rows,
+        now,
+    );
 }
 
 fn seek_transcript_viewport_to_row(app: &mut TestApp, row: crate::smelt_edit::RowIndex) {
-    let before = app.app.transcript_win().scroll_top();
-    app.app.record_transcript_scroll_intent(
+    let before = app.transcript_window().scroll_top;
+    app.record_transcript_scroll_intent(
         "test_seek",
         crate::app::transcript_scroll_trace::TranscriptScrollIntent::ApproximateRowSeek(row),
         before,
     );
-    app.app.transcript_win_mut().pin_scroll(row);
+    app.pin_transcript_scroll(row);
     app.render_silent();
 }
 
@@ -337,7 +263,7 @@ fn pin_transcript_top_to_line_containing(
     for row in 0..transcript_total_rows(app) {
         seek_transcript_viewport_to_row(app, row);
         if transcript_viewport_top_line(app).contains(needle) {
-            return app.app.transcript_win().scroll_top();
+            return app.transcript_window().scroll_top;
         }
     }
     panic!(
@@ -368,15 +294,15 @@ fn move_transcript_cursor_to_row(app: &mut TestApp, row: crate::smelt_edit::RowI
 }
 
 fn transcript_viewport_top_line(app: &TestApp) -> String {
-    let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    let win = app.transcript_window();
+    let buf = app.ui_probe().buf(win.buf).expect("transcript buffer");
     let local_row = win.local_visual_row(win.scroll_top()) as usize;
     buf.get_line(local_row).unwrap_or_default().to_string()
 }
 
 fn transcript_viewport_lines(app: &TestApp) -> Vec<String> {
-    let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    let win = app.transcript_window();
+    let buf = app.ui_probe().buf(win.buf).expect("transcript buffer");
     let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0) as usize;
     let start = win.local_visual_row(win.scroll_top()) as usize;
     (start..start.saturating_add(viewport_rows).min(buf.line_count()))
@@ -385,8 +311,8 @@ fn transcript_viewport_lines(app: &TestApp) -> Vec<String> {
 }
 
 fn transcript_buffer_lines(app: &TestApp, count: usize) -> Vec<String> {
-    let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    let win = app.transcript_window();
+    let buf = app.ui_probe().buf(win.buf).expect("transcript buffer");
     (0..count.min(buf.line_count()))
         .map(|i| buf.get_line(i).unwrap_or_default().to_string())
         .collect()
@@ -430,8 +356,8 @@ async fn compaction_prepare_probe_completes_and_preserves_turn() {
 // the ones that should be reaped (anonymous overlays).
 
 fn read_overlay_title(app: &TestApp, name: &str) -> Option<String> {
-    let id = app.app.ui.named_overlay(name)?;
-    let ov = app.app.ui.overlay(id)?;
+    let id = app.ui_probe().named_overlay(name)?;
+    let ov = app.ui_probe().overlay(id)?;
     Some(
         ov.layout
             .chrome()
@@ -466,8 +392,8 @@ fn read_overlay_title(app: &TestApp, name: &str) -> Option<String> {
 // Find the single anonymous paint id (no name binding) currently
 // registered. Used by paint-reload tests to track the throwaway
 // slot across `/reload` without needing Lua-side reflection.
-fn find_anon_paint(app: &crate::app::TuiApp) -> crate::smelt_edit::layout::PaintId {
-    let reg = &app.paint_registry;
+fn find_anon_paint(app: &TestApp) -> crate::smelt_edit::layout::PaintId {
+    let reg = app.paint_registry_probe();
     let named: std::collections::HashSet<crate::smelt_edit::layout::PaintId> = ["probe.named"]
         .iter()
         .filter_map(|n| reg.id_by_name(n))
@@ -508,36 +434,26 @@ fn find_anon_paint(app: &crate::app::TuiApp) -> crate::smelt_edit::layout::Paint
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary_instruction() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.context_window = Some(100);
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.set_context_window(Some(100));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.push_assistant_text("a1");
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u2")));
 
-    let full_history = protocol::history_to_messages(&app.app.model_history());
+    let full_history = protocol::history_to_messages(&app.model_history());
     let expected_prefix = &full_history[..2];
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages: engine::PreparedRequestMessages::model_only(full_history.clone()),
-                estimated_tokens: 200,
-                reply: tx,
-            });
+        app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            messages: engine::PreparedRequestMessages::model_only(full_history.clone()),
+            estimated_tokens: 200,
+            reply: tx,
+        });
     }
 
     let asks = ask_messages(app.drain_engine_sends());
     assert_eq!(asks.len(), 1, "compaction should issue one EngineAsk");
     let (system, messages) = &asks[0];
-    assert_eq!(system, &app.app.assemble_system_prompt());
+    assert_eq!(system, &app.assemble_system_prompt());
     assert_eq!(
             &messages[..expected_prefix.len()],
             expected_prefix,
@@ -569,33 +485,23 @@ async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_prepare_request_keeps_active_turn_guard_current() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.context_window = Some(100);
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.set_context_window(Some(100));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.push_assistant_text("a1");
-    app.app
-        .core
-        .session
-        .history
-        .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u2")));
     app.start_turn(42);
 
-    let full_history = protocol::history_to_messages(&app.app.model_history());
+    let full_history = protocol::history_to_messages(&app.model_history());
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages: engine::PreparedRequestMessages::model_only(full_history),
-                estimated_tokens: 200,
-                reply: tx,
-            });
+        app.dispatch_host_call(engine::HostCall::PrepareRequest {
+            messages: engine::PreparedRequestMessages::model_only(full_history),
+            estimated_tokens: 200,
+            reply: tx,
+        });
     }
 
-    assert_eq!(app.app.working.phase_label(), Some("compacting"));
+    assert_eq!(app.working_probe().phase_label(), Some("compacting"));
     assert_eq!(ask_messages(app.drain_engine_sends()).len(), 1);
 
     respond_pending_ask_with_text(&mut app, "# Goal\nok");
@@ -612,7 +518,7 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
         replacement_text.as_deref(),
         Some(expected.text_content().as_ref())
     );
-    assert_eq!(app.app.working.phase_label(), Some("working"));
+    assert_eq!(app.working_probe().phase_label(), Some("working"));
     assert!(app.agent_running());
 }
 
@@ -628,12 +534,10 @@ async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
     ];
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
-                messages: messages.clone(),
-                reply: tx,
-            });
+        app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+            messages: messages.clone(),
+            reply: tx,
+        });
     }
 
     let first = ask_messages(app.drain_engine_sends());
@@ -646,16 +550,14 @@ async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
     );
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-                id: app.pending_ask_id().expect("pending ask id"),
-                message: None,
-                error: Some(protocol::EngineAskError {
-                    kind: protocol::EngineAskErrorKind::ContextWindow,
-                    message: "too large".into(),
-                }),
-            });
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id: app.pending_ask_id().expect("pending ask id"),
+            message: None,
+            error: Some(protocol::EngineAskError {
+                kind: protocol::EngineAskErrorKind::ContextWindow,
+                message: "too large".into(),
+            }),
+        });
     }
 
     let second = ask_messages(app.drain_engine_sends());
@@ -684,12 +586,10 @@ async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
     ];
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
-                messages: messages.clone(),
-                reply: tx,
-            });
+        app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+            messages: messages.clone(),
+            reply: tx,
+        });
     }
 
     let first = ask_messages(app.drain_engine_sends());
@@ -727,25 +627,21 @@ async fn compaction_context_limit_returns_none_when_no_earlier_boundary_fits() {
     let messages = vec![user_message("u1"), user_message("u2")];
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
-                messages,
-                reply: tx,
-            });
+        app.dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+            messages,
+            reply: tx,
+        });
     }
 
     {
-        let _g = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-                id: app.pending_ask_id().expect("pending ask id"),
-                message: None,
-                error: Some(protocol::EngineAskError {
-                    kind: protocol::EngineAskErrorKind::ContextWindow,
-                    message: "too large".into(),
-                }),
-            });
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id: app.pending_ask_id().expect("pending ask id"),
+            message: None,
+            error: Some(protocol::EngineAskError {
+                kind: protocol::EngineAskErrorKind::ContextWindow,
+                message: "too large".into(),
+            }),
+        });
     }
 
     assert!(matches!(

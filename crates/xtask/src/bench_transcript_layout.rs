@@ -17,9 +17,12 @@ fn take_positive_usize_arg(iter: &mut impl Iterator<Item = String>, name: &str) 
 }
 
 fn transcript_bench_env(env: Vec<(&'static str, String)>) -> Vec<(String, String)> {
-    env.into_iter()
+    let mut env = env
+        .into_iter()
         .map(|(key, value)| (key.to_string(), value))
-        .collect()
+        .collect::<Vec<_>>();
+    env.push(("SMELT_TRANSCRIPT_BENCH_TARGET".into(), "1".into()));
+    env
 }
 
 fn run_tui_bench(
@@ -32,9 +35,10 @@ fn run_tui_bench(
         package: "smelt-tui",
         test_filter,
         release,
-        features: &["harness"],
+        features: &["harness", "transcript-bench"],
         env: transcript_bench_env(env),
         bench_name,
+        ignored: false,
     });
 }
 
@@ -237,7 +241,7 @@ pub fn run(args: Vec<String>) {
 fn print_usage() {
     eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
-    eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
+    eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
     eprintln!();
     eprintln!("workloads: mixed_10mib, mixed_50mib, markdown_4mib, tool_output_4mib, tiny_blocks_1mib, huge_blocks_4mib");

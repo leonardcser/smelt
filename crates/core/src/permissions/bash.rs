@@ -37,14 +37,19 @@ struct GlobPathAnalysis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellState {
     cwd: PathResolution,
+    home: PathBuf,
     variables: HashMap<String, Option<String>>,
 }
 
 impl ShellState {
-    fn new(cwd: &Path) -> Self {
+    fn new(cwd: &Path, home: &Path) -> Self {
         Self {
             cwd: workspace::resolve_filesystem_path(cwd),
-            variables: HashMap::new(),
+            home: home.to_path_buf(),
+            variables: HashMap::from([(
+                "HOME".to_string(),
+                Some(home.to_string_lossy().into_owned()),
+            )]),
         }
     }
 
@@ -244,12 +249,20 @@ const MAX_SHELL_NESTING: usize = 32;
 const LOOP_UNROLL_LIMIT: usize = 4;
 
 pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnalysis {
+    analyze_shell_command_in(command, base_dir, &engine::paths::home_dir())
+}
+
+pub(super) fn analyze_shell_command_in(
+    command: &str,
+    base_dir: &Path,
+    home: &Path,
+) -> ShellAnalysis {
     let mut analysis = ShellAnalysis {
         risk: ShellRisk::ReadOnly,
         paths: Vec::new(),
         opaque_commands: Vec::new(),
     };
-    let initial_state = ShellState::new(base_dir);
+    let initial_state = ShellState::new(base_dir, home);
     let initial_states = vec![initial_state.clone()];
     let Ok(program) = shell_parse::parse(command) else {
         record_unknown_shell(command, &initial_state.cwd, &mut analysis);
@@ -810,7 +823,11 @@ fn merge_shell_states(states: &[ShellState]) -> ShellState {
             (name, value)
         })
         .collect();
-    ShellState { cwd, variables }
+    ShellState {
+        cwd,
+        home: first.home.clone(),
+        variables,
+    }
 }
 
 fn apply_assignments(state: &mut ShellState, words: &[ShellWord]) {
@@ -2320,7 +2337,7 @@ fn expand_shell_tilde(value: &str, state: &ShellState) -> Option<String> {
     let home = match head {
         "~" => state.variable("HOME").map(|home| {
             if home.is_empty() {
-                engine::paths::home_dir().to_string_lossy().into_owned()
+                state.home.to_string_lossy().into_owned()
             } else {
                 home
             }

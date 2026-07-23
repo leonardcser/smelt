@@ -2,25 +2,20 @@ use super::*;
 
 fn searchable_transcript_app() -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(80, 16);
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
-    win.set_vim_enabled(true);
-    win.set_vim_mode(VimMode::Normal);
+    app.set_terminal_size(80, 16);
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
     app
 }
 
-fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) -> TestApp {
-    let mut app = TestApp::builder()
-        .with_vim(true)
-        .build_with_test_home_guard(guard);
-    app.app.handle_resize(80, 16);
-    let session_id = app.app.core.session.id.clone();
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
+fn sparse_display_only_search_app() -> TestApp {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 16);
+    let session_id = app.session_snapshot().id.clone();
+    let session_dir = app.core_probe().sessions.dir_for_id(&session_id);
     std::fs::create_dir_all(&session_dir).unwrap();
     let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     session.id = session_id.clone();
     session.history = (0..200)
         .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
@@ -35,16 +30,16 @@ fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) ->
                 199 => "tail needle".to_string(),
                 _ => format!("block {idx}"),
             };
-            test_descriptor_record(idx, &content)
+            test_block_record(idx, &content)
         })
         .collect::<Vec<_>>();
-    db.apply_transcript_descriptor_fixture(&records).unwrap();
+    db.apply_transcript_record_fixture(&records).unwrap();
     drop(db);
 
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)
         .expect("display-only transcript tail");
     session.history.clear();
-    app.app.load_store_backed_session(
+    app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             session,
             loaded,
@@ -52,20 +47,14 @@ fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) ->
             receipt.current,
         ),
     );
-    app.app.app_focus = AppFocus::Content;
-    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-    let win = app.app.transcript_win_mut();
-    win.set_vim_enabled(true);
-    win.set_vim_mode(VimMode::Normal);
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
     app.render_silent();
     app
 }
 
-fn test_descriptor_record(
-    block_idx: u64,
-    content: &str,
-) -> smelt_store::TranscriptDescriptorRecord {
-    smelt_store::TranscriptDescriptorRecord {
+fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTranscriptBlock {
+    smelt_store::StoredTranscriptBlock {
         block_idx,
         history_idx: None,
         kind: "text".to_string(),
@@ -75,11 +64,9 @@ fn test_descriptor_record(
         estimated_text_bytes: content.len() as u64,
         preview_text: content.to_string(),
         indexed_text: content.to_string(),
-        descriptor_json: serde_json::to_string(
-            &smelt_core::transcript_model::TranscriptBlockDescriptor::Text {
-                content: content.to_string(),
-            },
-        )
+        block_json: serde_json::to_string(&smelt_core::Block::Text {
+            content: content.to_string(),
+        })
         .unwrap(),
         origin_json: Some(
             serde_json::to_string(&smelt_core::BlockOrigin::History(block_idx as usize)).unwrap(),
@@ -101,10 +88,8 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     app.render_silent();
 
     let first_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -115,10 +100,8 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     app.type_char('n');
     app.render_silent();
     let next_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -133,8 +116,7 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
 
 #[test]
 fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
-    let guard = test_home_guard();
-    let mut app = sparse_display_only_search_app(&guard);
+    let mut app = sparse_display_only_search_app();
     app.type_char('G');
 
     app.type_char('/');
@@ -143,17 +125,14 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     app.render_silent();
 
     let tail_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
         .rows()
         .unwrap();
     let tail_row = app
-        .app
         .transcript_rows_and_breaks_range(tail_match.start.row, 1)
         .into_text_rows()
         .pop()
@@ -166,10 +145,8 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     app.type_char('n');
     app.render_silent();
     let early_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -178,7 +155,6 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     assert!(early_match.start.row < tail_match.start.row);
     assert_eq!(transcript_row_cursor_row(&app), early_match.start.row);
     let early_row = app
-        .app
         .transcript_rows_and_breaks_range(early_match.start.row, 1)
         .into_text_rows()
         .pop()
@@ -191,8 +167,7 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
 
 #[test]
 fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
-    let guard = test_home_guard();
-    let mut app = sparse_display_only_search_app(&guard);
+    let mut app = sparse_display_only_search_app();
     app.type_char('G');
 
     app.type_char('/');
@@ -200,10 +175,8 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let tail_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -213,10 +186,8 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     app.type_char('N');
     app.render_silent();
     let early_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -225,7 +196,6 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     assert!(early_match.start.row < tail_match.start.row);
     assert_eq!(transcript_row_cursor_row(&app), early_match.start.row);
     let early_row = app
-        .app
         .transcript_rows_and_breaks_range(early_match.start.row, 1)
         .into_text_rows()
         .pop()
@@ -238,8 +208,7 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
 
 #[test]
 fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
-    let guard = test_home_guard();
-    let mut app = sparse_display_only_search_app(&guard);
+    let mut app = sparse_display_only_search_app();
     app.type_char('g');
     app.type_char('g');
 
@@ -248,17 +217,14 @@ fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let early_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
         .rows()
         .unwrap();
     let early_row = app
-        .app
         .transcript_rows_and_breaks_range(early_match.start.row, 1)
         .into_text_rows()
         .pop()
@@ -271,10 +237,8 @@ fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
     app.type_char('n');
     app.render_silent();
     let tail_match = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -287,7 +251,6 @@ fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
     app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), early_match.start.row);
     let row = app
-        .app
         .transcript_rows_and_breaks_range(early_match.start.row, 1)
         .into_text_rows()
         .pop()
@@ -329,10 +292,8 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
     app.render_silent();
 
     let match_row = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -341,11 +302,11 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
         .start
         .row;
     assert_eq!(transcript_row_cursor_row(&app), match_row);
-    assert_eq!(app.app.transcript_win().scroll_top(), match_row - 1);
+    assert_eq!(app.transcript_window().scroll_top, match_row - 1);
 
     app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), match_row);
-    assert_eq!(app.app.transcript_win().scroll_top(), match_row - 1);
+    assert_eq!(app.transcript_window().scroll_top, match_row - 1);
 }
 
 #[test]
@@ -360,10 +321,8 @@ fn transcript_search_jump_keeps_match_above_bottom_overlay() {
     app.render_silent();
 
     let match_row = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -372,21 +331,20 @@ fn transcript_search_jump_keeps_match_above_bottom_overlay() {
         .start
         .row;
     let viewport_rows = app
-        .app
-        .transcript_win()
+        .transcript_window()
         .viewport
         .map(|v| v.rect.height as crate::smelt_edit::RowIndex)
         .unwrap_or(1);
     assert_eq!(transcript_row_cursor_row(&app), match_row);
     assert_eq!(
-        app.app.transcript_win().scroll_top(),
+        app.transcript_window().scroll_top,
         match_row.saturating_sub(viewport_rows.saturating_sub(2))
     );
 
     app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), match_row);
     assert_eq!(
-        app.app.transcript_win().scroll_top(),
+        app.transcript_window().scroll_top,
         match_row.saturating_sub(viewport_rows.saturating_sub(2))
     );
 }
@@ -399,7 +357,7 @@ fn transcript_reveal_api_keeps_cursor_below_top_padding() {
     assert!(app.run_lua("smelt.win.transcript():reveal(10, { top_padding = 1 })"));
 
     assert_eq!(transcript_row_cursor_row(&app), 10);
-    assert_eq!(app.app.transcript_win().scroll_top(), 9);
+    assert_eq!(app.transcript_window().scroll_top, 9);
 }
 
 #[test]
@@ -411,14 +369,13 @@ fn transcript_reveal_api_keeps_cursor_above_bottom_padding() {
     assert!(app.run_lua("smelt.win.transcript():reveal(90, { bottom_padding = 1 })"));
 
     let viewport_rows = app
-        .app
-        .transcript_win()
+        .transcript_window()
         .viewport
         .map(|v| v.rect.height as crate::smelt_edit::RowIndex)
         .unwrap_or(1);
     assert_eq!(transcript_row_cursor_row(&app), 90);
     assert_eq!(
-        app.app.transcript_win().scroll_top(),
+        app.transcript_window().scroll_top,
         90u64.saturating_sub(viewport_rows.saturating_sub(2))
     );
 }
@@ -449,13 +406,12 @@ fn transcript_search_paints_visible_matches_and_nohl_aliases_clear() {
         run_cmdline(&mut app, command);
         app.render_silent();
 
-        let win = app.app.transcript_win();
+        let win = app.transcript_window();
         assert!(
-            win.range_layer(crate::smelt_edit::RangeLayer::Search)
-                .is_empty(),
+            win.search_ranges.is_empty(),
             "{command} should clear search highlights"
         );
-        assert!(app.app.search.session.is_none());
+        assert!(app.overlays_probe().search_session().is_none());
     }
 }
 
@@ -466,11 +422,9 @@ fn transcript_search_paints_visible_matches_and_esc_clears() {
 
     app.press(KeyCode::Esc);
     app.render_silent();
-    let win = app.app.transcript_win();
-    assert!(win
-        .range_layer(crate::smelt_edit::RangeLayer::Search)
-        .is_empty());
-    assert!(app.app.search.session.is_none());
+    let win = app.transcript_window();
+    assert!(win.search_ranges.is_empty());
+    assert!(app.overlays_probe().search_session().is_none());
 }
 
 fn start_visible_transcript_search(app: &mut TestApp) {
@@ -481,10 +435,9 @@ fn start_visible_transcript_search(app: &mut TestApp) {
     app.press(KeyCode::Enter);
     app.render_silent();
 
-    let win = app.app.transcript_win();
+    let win = app.transcript_window();
     assert!(
-        !win.range_layer(crate::smelt_edit::RangeLayer::Search)
-            .is_empty(),
+        !win.search_ranges.is_empty(),
         "submitted search should paint visible matches"
     );
 }
@@ -498,10 +451,9 @@ fn run_cmdline(app: &mut TestApp, command: &str) {
 #[test]
 fn transcript_search_finds_compacted_divider_label() {
     let mut app = searchable_transcript_app();
-    app.app
-        .push_block(smelt_core::transcript_model::Block::Compacted {
-            summary: "archived earlier turns".into(),
-        });
+    app.push_transcript_block(smelt_core::transcript_model::Block::Compacted {
+        summary: "archived earlier turns".into(),
+    });
     app.render_silent();
 
     app.type_char('/');
@@ -509,15 +461,12 @@ fn transcript_search_finds_compacted_divider_label() {
     app.press(KeyCode::Enter);
 
     let range = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .and_then(|session| session.current_range())
         .and_then(|range| range.rows())
         .expect("compacted divider search match");
     let row = app
-        .app
         .transcript_rows_and_breaks_range(range.start.row, 1)
         .into_text_rows()
         .pop()
@@ -528,14 +477,12 @@ fn transcript_search_finds_compacted_divider_label() {
 #[test]
 fn transcript_search_includes_selectable_compacted_separator_chrome() {
     let mut app = searchable_transcript_app();
-    app.app
-        .push_block(smelt_core::transcript_model::Block::Compacted {
-            summary: "archived earlier turns".into(),
-        });
+    app.push_transcript_block(smelt_core::transcript_model::Block::Compacted {
+        summary: "archived earlier turns".into(),
+    });
     app.render_silent();
 
     let row = app
-        .app
         .transcript_rows_and_breaks_range(0, 1)
         .into_text_rows()
         .pop()
@@ -547,10 +494,8 @@ fn transcript_search_includes_selectable_compacted_separator_chrome() {
     app.press(KeyCode::Enter);
 
     assert!(app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .and_then(|session| session.current_range())
         .is_some());
 }
@@ -560,13 +505,13 @@ fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
     let mut app = searchable_transcript_app();
     let mut args = std::collections::HashMap::new();
     args.insert("pattern".to_string(), serde_json::json!("needle"));
-    app.app.start_tool(
+    app.start_tool(
         "glob-call-1".into(),
         "glob".into(),
         protocol::StyledLines::from_plain("**/*.rs"),
         args,
     );
-    app.app.finish_tool(
+    app.finish_tool(
         "glob-call-1",
         smelt_core::transcript_model::ToolStatus::Ok,
         Some(Box::new(smelt_core::transcript_model::ToolOutput {
@@ -585,15 +530,12 @@ fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
     app.press(KeyCode::Enter);
 
     let range = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .and_then(|session| session.current_range())
         .and_then(|range| range.rows())
         .expect("collapsed tool detail search match");
     let row = app
-        .app
         .transcript_rows_and_breaks_range(range.start.row, 1)
         .into_text_rows()
         .pop()
@@ -614,10 +556,8 @@ fn backward_search_starts_from_previous_match() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let current_row = app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .current_range()
         .unwrap()
@@ -638,39 +578,8 @@ fn backward_search_starts_from_previous_match() {
 #[test]
 fn overlay_viewer_search_targets_focused_overlay() {
     let mut app = TestApp::builder().with_vim(true).build();
-    let buf = app
-        .app
-        .ui
-        .buf_create(crate::smelt_edit::BufCreateOpts::default());
-    {
-        let buf = app.app.ui.buf_mut(buf).expect("overlay buffer");
-        buf.readonly = true;
-        buf.set_all_lines(vec!["alpha beta".into(), "gamma delta".into()]);
-    }
-
-    let leaf = app
-        .app
-        .ui
-        .win_open_split(
-            buf,
-            crate::smelt_edit::SplitConfig {
-                region: "dialog".into(),
-                gutters: Default::default(),
-            },
-        )
-        .expect("overlay leaf");
-    if let Some(win) = app.app.ui.win_mut(leaf) {
-        win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
-        win.set_vim_enabled(true);
-    }
-    app.app.ui.overlay_open(
-        crate::smelt_edit::Overlay::new(
-            crate::smelt_edit::LayoutTree::leaf(leaf),
-            crate::smelt_edit::layout::Anchor::ScreenCenter,
-        )
-        .with_size((40, 5))
-        .modal(true),
-    );
+    let leaf =
+        app.open_readonly_overlay_fixture(vec!["alpha beta".into(), "gamma delta".into()], None);
     app.render_silent();
 
     app.type_char('/');
@@ -678,13 +587,13 @@ fn overlay_viewer_search_targets_focused_overlay() {
     app.type_text("gamma");
     app.press(KeyCode::Enter);
 
-    let win = app.app.ui.win(leaf).expect("overlay window");
-    let buf = app.app.ui.buf(win.buf).expect("overlay buffer");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
+    let buf = app.ui_probe().buf(win.buf).expect("overlay buffer");
     assert_eq!(buf.display_byte_pos(win.cpos()), (1, 0));
-    assert_eq!(app.app.search.session.as_ref().unwrap().target, leaf);
+    assert_eq!(app.overlays_probe().search_session().unwrap().target, leaf);
 
     app.render_silent();
-    let win = app.app.ui.win(leaf).expect("overlay window");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
     let buf_id = win.buf;
     assert!(
         win.range_layer(crate::smelt_edit::RangeLayer::Search)
@@ -693,13 +602,9 @@ fn overlay_viewer_search_targets_focused_overlay() {
         "focused overlay search should paint visible matches"
     );
 
-    app.app
-        .ui
-        .buf_mut(buf_id)
-        .expect("overlay buffer")
-        .set_all_lines(vec!["gamma moved".into(), "no match".into()]);
+    app.set_window_lines(leaf, vec!["gamma moved".into(), "no match".into()]);
     app.render_silent();
-    let win = app.app.ui.win(leaf).expect("overlay window");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
     let ranges = win.range_layer(crate::smelt_edit::RangeLayer::Search);
     assert!(
         ranges.iter().any(|range| range.line == 0),
@@ -710,80 +615,31 @@ fn overlay_viewer_search_targets_focused_overlay() {
         "stale search ranges should not survive buffer rewrites"
     );
 
-    app.app
-        .ui
-        .buf_mut(buf_id)
-        .expect("overlay buffer")
-        .set_all_lines(vec!["gamma first".into(), "gamma second".into()]);
-    app.app
-        .ui
-        .win_mut(leaf)
-        .expect("overlay window")
-        .set_cpos(0);
+    app.set_window_lines(leaf, vec!["gamma first".into(), "gamma second".into()]);
+    app.set_window_cursor(leaf, 0);
     app.type_char('n');
-    let win = app.app.ui.win(leaf).expect("overlay window");
-    let buf = app.app.ui.buf(buf_id).expect("overlay buffer");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
+    let buf = app.ui_probe().buf(buf_id).expect("overlay buffer");
     assert_eq!(buf.display_byte_pos(win.cpos()), (0, 0));
 }
 
 #[test]
 fn viewer_search_ignores_non_selectable_spans() {
     let mut app = TestApp::builder().with_vim(true).build();
-    let buf = app
-        .app
-        .ui
-        .buf_create(crate::smelt_edit::BufCreateOpts::default());
-    {
-        let buf = app.app.ui.buf_mut(buf).expect("overlay buffer");
-        buf.readonly = true;
-        buf.set_all_lines(vec!["chrome real".into()]);
-        buf.add_highlight_group_with_meta(
-            0,
-            0,
-            6,
-            smelt_buffer::theme::intern("Normal"),
-            crate::smelt_edit::SpanMeta::unselectable(),
-        );
-    }
-
-    let leaf = app
-        .app
-        .ui
-        .win_open_split(
-            buf,
-            crate::smelt_edit::SplitConfig {
-                region: "dialog".into(),
-                gutters: Default::default(),
-            },
-        )
-        .expect("overlay leaf");
-    if let Some(win) = app.app.ui.win_mut(leaf) {
-        win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
-        win.set_vim_enabled(true);
-    }
-    app.app.ui.overlay_open(
-        crate::smelt_edit::Overlay::new(
-            crate::smelt_edit::LayoutTree::leaf(leaf),
-            crate::smelt_edit::layout::Anchor::ScreenCenter,
-        )
-        .with_size((40, 5))
-        .modal(true),
-    );
+    let leaf = app.open_readonly_overlay_fixture(vec!["chrome real".into()], Some(6));
     app.render_silent();
 
     app.type_char('/');
     app.type_text("chrome");
     app.press(KeyCode::Enter);
     assert!(app
-        .app
-        .search
-        .session
-        .as_ref()
+        .overlays_probe()
+        .search_session()
         .unwrap()
         .full_matches()
         .is_empty());
     app.render_silent();
-    let win = app.app.ui.win(leaf).expect("overlay window");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
     assert!(win
         .range_layer(crate::smelt_edit::RangeLayer::Search)
         .is_empty());
@@ -791,14 +647,14 @@ fn viewer_search_ignores_non_selectable_spans() {
     app.type_char('/');
     app.type_text("real");
     app.press(KeyCode::Enter);
-    let session = app.app.search.session.as_ref().unwrap();
+    let session = app.overlays_probe().search_session().unwrap();
     assert_eq!(session.full_matches().len(), 1);
     assert_eq!(
         session.full_matches()[0].rows().unwrap().start.byte_col,
         "chrome ".len()
     );
     app.render_silent();
-    let win = app.app.ui.win(leaf).expect("overlay window");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
     assert!(
         !win.range_layer(crate::smelt_edit::RangeLayer::Search)
             .is_empty(),

@@ -129,7 +129,7 @@ impl PersistenceCause {
             | smelt_store::SessionCommitFailure::IdentityMismatch { .. }
             | smelt_store::SessionCommitFailure::StaleBase { .. }
             | smelt_store::SessionCommitFailure::InvalidHistorySuffix { .. }
-            | smelt_store::SessionCommitFailure::InvalidDescriptorSuffix { .. }
+            | smelt_store::SessionCommitFailure::InvalidTranscriptRecordSuffix { .. }
             | smelt_store::SessionCommitFailure::InvalidSideTableSuffix { .. }
             | smelt_store::SessionCommitFailure::InvalidSideTableRow { .. }
             | smelt_store::SessionCommitFailure::InvalidTurn { .. }
@@ -400,7 +400,7 @@ fn approximate_intent_size(intent: &SessionSaveIntent) -> usize {
         serialized_size(&intent.metadata),
         serialized_size(&intent.history),
         serialized_size(&intent.side_tables),
-        serialized_size(&intent.descriptors),
+        serialized_size(&intent.records),
     ]
     .into_iter()
     .fold(0, usize::saturating_add)
@@ -491,6 +491,7 @@ pub(crate) struct SessionPersistence {
 
 impl SessionPersistence {
     pub(crate) fn spawn(
+        sessions: smelt_core::session::SessionStorage,
         session_id: smelt_core::session_id::SessionId,
         epoch: SessionEpoch,
         generation: PersistenceGeneration,
@@ -530,6 +531,7 @@ impl SessionPersistence {
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     persistence_actor(
+                        sessions,
                         worker_session_id,
                         epoch,
                         generation,
@@ -1416,6 +1418,7 @@ impl StatusPublisher {
 }
 
 struct PersistenceActor {
+    sessions: smelt_core::session::SessionStorage,
     session_id: smelt_core::session_id::SessionId,
     epoch: SessionEpoch,
     latest: Arc<Mutex<LatestIntentState>>,
@@ -1442,6 +1445,7 @@ struct PersistenceActor {
 
 #[allow(clippy::too_many_arguments)]
 fn persistence_actor(
+    sessions: smelt_core::session::SessionStorage,
     session_id: smelt_core::session_id::SessionId,
     epoch: SessionEpoch,
     generation: PersistenceGeneration,
@@ -1458,7 +1462,7 @@ fn persistence_actor(
         status,
         wake: status_wake,
     };
-    let session_dir = smelt_core::session::session_dir(&session_id);
+    let session_dir = sessions.session_dir(&session_id);
     let Some(root) = session_dir.parent() else {
         let cause = PersistenceCause::invariant("session directory has no storage root");
         publisher.publish_state(PersistenceState::Stopped {
@@ -1533,6 +1537,7 @@ fn persistence_actor(
     });
     let worker_session_id = session_id.as_str().to_string();
     let mut actor = PersistenceActor {
+        sessions,
         session_id,
         epoch,
         latest,
@@ -1557,12 +1562,7 @@ fn persistence_actor(
         commit_barrier: None,
     };
     if let Some(recovery) = startup_recovery.as_ref() {
-        smelt_core::session::request_session_catalog_projection(
-            &worker_session_id,
-            recovery.session.current.revision,
-        );
-        // COMPAT(session-derived-sidecar-exports): recovery schedules the shared exporter.
-        smelt_core::session::request_session_compatibility_export(
+        actor.sessions.request_session_catalog_projection(
             &worker_session_id,
             recovery.session.current.revision,
         );
@@ -2007,7 +2007,7 @@ impl PersistenceActor {
             metadata: intent.metadata.clone(),
             history: intent.history.clone(),
             side_tables: intent.side_tables.clone(),
-            descriptors: intent.descriptors.clone(),
+            transcript_records: intent.records.clone(),
         }
     }
 
@@ -2450,18 +2450,8 @@ impl PersistenceActor {
             drop(publication_perf);
         }
         record_save_receipt(&receipt);
-        smelt_core::session::publish_session_catalog_commit(
-            command,
-            &receipt,
-            schedule_projections,
-        );
-        if schedule_projections {
-            // COMPAT(session-derived-sidecar-exports): schedule the shared exporter after commit.
-            smelt_core::session::request_session_compatibility_export(
-                &receipt.session_id,
-                receipt.current.revision,
-            );
-        }
+        self.sessions
+            .publish_session_catalog_commit(command, &receipt, schedule_projections);
         Ok(receipt)
     }
 }
@@ -2471,17 +2461,17 @@ fn validate_receipt(
     receipt: smelt_store::SaveReceipt,
 ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
     let advanced_revision = command.expected.revision.checked_add(1);
-    let expected_descriptor_len = match &command.descriptors {
-        Some(descriptors) => descriptors
+    let expected_record_len = match &command.transcript_records {
+        Some(records) => records
             .start
             .get()
-            .checked_add(descriptors.records.len() as u64)
-            .map(smelt_store::DescriptorLen::new)
-            .ok_or_else(|| PersistenceCause::invariant("descriptor length overflow"))?,
-        None => command.expected.descriptor_len,
+            .checked_add(records.records.len() as u64)
+            .map(smelt_store::TranscriptRecordCount::new)
+            .ok_or_else(|| PersistenceCause::invariant("record length overflow"))?,
+        None => command.expected.transcript_record_count,
     };
     let current_shape_matches = receipt.current.history_len == command.history.final_len
-        && receipt.current.descriptor_len == expected_descriptor_len;
+        && receipt.current.transcript_record_count == expected_record_len;
     let revision_matches = receipt.current.revision == command.expected.revision
         || advanced_revision == Some(receipt.current.revision);
     if receipt.session_id != command.session_id
@@ -2490,11 +2480,11 @@ fn validate_receipt(
         || !revision_matches
     {
         return Err(PersistenceCause::invariant(format!(
-            "malformed save receipt: expected session {}, previous head {:?}, history length {}, descriptor length {}, and unchanged or singly advanced revision; got {:?}",
+            "malformed save receipt: expected session {}, previous head {:?}, history length {}, record length {}, and unchanged or singly advanced revision; got {:?}",
             command.session_id,
             command.expected,
             command.history.final_len.get(),
-            expected_descriptor_len.get(),
+            expected_record_len.get(),
             receipt
         )));
     }
@@ -2513,13 +2503,13 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
             "immutable session identity mismatch: stored {stored:?}, attempted {attempted:?}"
         ),
         smelt_store::SessionCommitFailure::StaleBase { expected, current } => format!(
-            "stale store head: expected revision/history/descriptors {}/{}/{}, current {}/{}/{}",
+            "stale store head: expected revision/history/records {}/{}/{}, current {}/{}/{}",
             expected.revision.get(),
             expected.history_len.get(),
-            expected.descriptor_len.get(),
+            expected.transcript_record_count.get(),
             current.revision.get(),
             current.history_len.get(),
-            current.descriptor_len.get()
+            current.transcript_record_count.get()
         ),
         smelt_store::SessionCommitFailure::InvalidHistorySuffix {
             start,
@@ -2531,9 +2521,9 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
             final_len.get(),
             item_count
         ),
-        smelt_store::SessionCommitFailure::InvalidDescriptorSuffix { start, current_len } => {
+        smelt_store::SessionCommitFailure::InvalidTranscriptRecordSuffix { start, current_len } => {
             format!(
-                "invalid descriptor suffix: start {}, current_len {}",
+                "invalid record suffix: start {}, current_len {}",
                 start.get(),
                 current_len.get()
             )
@@ -2602,15 +2592,15 @@ fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
         receipt.current.history_len.get(),
     );
     smelt_perf::perf::record_value(
-        "persist:write:descriptor_len",
-        receipt.current.descriptor_len.get(),
+        "persist:write:record_len",
+        receipt.current.transcript_record_count.get(),
     );
 }
 
 #[cfg(any(test, feature = "harness"))]
-pub(crate) fn write_transcript_descriptor_suffix(
+pub(crate) fn write_transcript_record_suffix(
     session_dir: &std::path::Path,
-    start_descriptor_idx: usize,
+    start_record_idx: usize,
     records: &[smelt_core::TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
     let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
@@ -2618,23 +2608,23 @@ pub(crate) fn write_transcript_descriptor_suffix(
         .iter()
         .enumerate()
         .map(|(offset, record)| {
-            let descriptor_idx = start_descriptor_idx + offset;
+            let record_idx = start_record_idx + offset;
             let record = smelt_core::TranscriptBlockRecordWithId {
-                block_id: smelt_core::BlockId::new(descriptor_idx as u64),
+                block_id: smelt_core::BlockId::new(record_idx as u64),
                 record: record.clone(),
             };
-            smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
-                descriptor_idx,
+            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                record_idx,
                 record.block_id.get(),
                 &record.record,
             )
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
-    db.apply_transcript_descriptor_suffix_fixture(start_descriptor_idx, &rows)
+    db.apply_transcript_record_suffix_fixture(start_record_idx, &rows)
         .map(|_| ())
         .map_err(|failure| {
             smelt_store::StoreError::Integrity(format!(
-                "transcript descriptor fixture commit failed: {failure:?}"
+                "transcript record fixture commit failed: {failure:?}"
             ))
         })
 }
@@ -2647,6 +2637,7 @@ mod tests {
 
     fn actor() -> SessionPersistence {
         SessionPersistence::spawn(
+            smelt_core::session::SessionStorage::new(smelt_core::config::state_dir()),
             smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap(),
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
@@ -2695,7 +2686,7 @@ mod tests {
                 metadata_snapshots: Vec::new(),
                 context_snapshots: Vec::new(),
             },
-            descriptors: None,
+            records: None,
         }
     }
 
@@ -3483,7 +3474,7 @@ mod tests {
             metadata: intent(1, &[]).metadata,
             history: intent(1, &[]).history,
             side_tables: intent(1, &[]).side_tables,
-            descriptors: None,
+            transcript_records: None,
         };
         let no_op = smelt_store::SaveReceipt {
             session_id: SESSION_ID.into(),

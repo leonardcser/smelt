@@ -32,9 +32,9 @@ pub(crate) enum EngineOutputDrainOutcome {
     FrameBoundary,
 }
 
-fn prepare_transcript_window(
+pub(super) fn prepare_transcript_window(
     transcript: &mut crate::app::transcript::TranscriptDocument,
-    lua: &crate::lua::LuaGeneration,
+    lua: &smelt_core::lua::runtime::LuaRuntime,
     theme: &std::sync::Arc<crate::smelt_edit::Theme>,
     ui: &mut crate::smelt_edit::Ui,
     request: crate::smelt_edit::MaterializeRequest,
@@ -145,20 +145,22 @@ impl TuiApp {
         let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();
         let mut transcript_search_range_after_projection = None;
+        let lua = self.lua.execution();
         let prepared_transcript = {
-            let transcript = &mut self.session_document.transcript;
-            let lua = &self.lua;
+            let core = &mut self.core;
+            let conversation = &mut self.conversation;
             let ui = &mut self.ui;
-            ui.prepare_split_window_with(crate::app::TRANSCRIPT_WIN, |ui, request| {
-                prepare_transcript_window(
-                    transcript,
-                    lua,
-                    &theme,
-                    ui,
-                    request,
-                    render_now,
-                    &mut transcript_search_range_after_projection,
-                );
+            smelt_core::host::scope_core(core, || {
+                ui.prepare_split_window_with(crate::app::TRANSCRIPT_WIN, |ui, request| {
+                    conversation.prepare_transcript_window(
+                        &lua,
+                        &theme,
+                        ui,
+                        request,
+                        render_now,
+                        &mut transcript_search_range_after_projection,
+                    );
+                })
             })
         };
         let transcript_visible = prepared_transcript.is_some();
@@ -201,13 +203,13 @@ impl TuiApp {
             )
         };
         let state = crate::app::TranscriptViewState {
-            session_id: self.core.session.id.clone(),
+            session_id: self.conversation.session().id.clone(),
             navigation_generation: self
-                .session_document
-                .transcript
+                .conversation
+                .transcript()
                 .history()
                 .navigation_generation(),
-            anchor: self.session_document.transcript.current_navigation_anchor(),
+            anchor: self.conversation.transcript().current_navigation_anchor(),
             width,
             height,
             content_width,
@@ -218,24 +220,11 @@ impl TuiApp {
             focused,
             cursor_viewport_row: cursor,
         };
-        if self
-            .committed_transcript_view
-            .as_ref()
-            .is_some_and(|view| view.state == state)
-        {
-            return;
-        }
-        let revision = self
-            .committed_transcript_view
-            .as_ref()
-            .map(|view| view.revision.wrapping_add(1))
-            .unwrap_or(1);
-        self.committed_transcript_view =
-            Some(crate::app::CommittedTranscriptView { revision, state });
+        self.conversation.commit_transcript_view(state);
     }
 
     fn dispatch_committed_transcript_view(&mut self) {
-        let Some(view) = self.committed_transcript_view.clone() else {
+        let Some(view) = self.conversation.committed_transcript_view() else {
             return;
         };
         let callbacks = self
@@ -255,15 +244,14 @@ impl TuiApp {
                     .map(|payload| (callback, payload))
             })
             .collect();
-        let _guard = crate::lua::install_app_ptr(self);
-        for (callback, payload) in prepared {
-            if let Err(error) = callback.call::<()>(payload) {
-                crate::lua::try_with_app(|app| {
-                    app.lua
-                        .record_error(format!("transcript view watcher: {error}"));
-                });
+        let lua = self.lua.execution();
+        crate::lua::scope_app(self, move || {
+            for (callback, payload) in prepared {
+                if let Err(error) = callback.call::<()>(payload) {
+                    lua.record_error(format!("transcript view watcher: {error}"));
+                }
             }
-        }
+        });
     }
 
     pub(crate) fn render_normal(&mut self) {
@@ -402,29 +390,19 @@ impl TuiApp {
         self.render_requested_transient_frame_to(out)
     }
 
-    pub(crate) fn max_auto_prompt_input_rows_for(term_h: u16) -> u16 {
-        (term_h / 2).max(1)
-    }
-
-    pub(crate) fn max_manual_prompt_input_rows_for(term_h: u16) -> u16 {
-        ((term_h as u32 * 7) / 10).max(1) as u16
-    }
-
     pub(crate) fn refresh_main_layout(&mut self) -> (layout::Rect, u16) {
+        if smelt_core::host::host_access_active() {
+            self.lua.shared().request_layout_refresh();
+            return (self.layout.prompt, self.layout.viewport_rows());
+        }
+        let applying_deferred_layout = self.lua.shared().take_layout_refresh();
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
-        let ghost = self
-            .placeholders
-            .get(&crate::app::PROMPT_WIN)
-            .map(String::as_str);
+        let ghost = self.prompt.placeholder_text(crate::app::PROMPT_WIN);
         let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width, ghost);
         // Auto-height keeps the transcript usable; a deliberate manual resize
         // can claim more room for prompt review without taking the full screen.
-        let input_rows = match self.prompt_input_rows_override {
-            Some(rows) => rows.clamp(1, Self::max_manual_prompt_input_rows_for(term_h)),
-            None => wrapped_rows.clamp(1, Self::max_auto_prompt_input_rows_for(term_h)),
-        };
-        self.prompt_input_rows = input_rows;
+        let input_rows = self.prompt.resolve_height(wrapped_rows, term_h);
         let tree = self
             .invoke_lua_layout_composer(term_w, term_h, input_rows)
             .unwrap_or_else(|| self.fallback_main_layout(term_w, term_h, input_rows));
@@ -433,6 +411,29 @@ impl TuiApp {
         // Prompt-docked pickers size themselves to the headroom above the
         // prompt chrome; recompute them whenever the main layout changes.
         crate::picker::sync_layouts(self);
+        if applying_deferred_layout {
+            let requested_focus = self.lua.shared().take_focus_after_layout();
+            let focused_as_requested =
+                requested_focus.is_some_and(|focus| self.ui.set_focus(focus));
+            if !focused_as_requested {
+                if let Some(modal) = self.ui.active_modal() {
+                    let focus = self.ui.focus();
+                    let focused_in_modal = self
+                        .ui
+                        .modal_leaves(modal)
+                        .is_some_and(|leaves| focus.is_some_and(|focus| leaves.contains(&focus)));
+                    if !focused_in_modal {
+                        self.ui.focus_active_modal();
+                    }
+                } else if self.ui.focus().is_none() {
+                    let focus = match self.app_focus {
+                        crate::app::AppFocus::Prompt => crate::app::PROMPT_WIN,
+                        crate::app::AppFocus::Content => crate::app::TRANSCRIPT_WIN,
+                    };
+                    self.ui.set_focus(focus);
+                }
+            }
+        }
         let prompt_rect = if self.has_docked_dialog() {
             // Keep the hidden prompt's parser/cursor projection current without
             // mounting it in the root layout. This makes restoration lossless.
@@ -458,7 +459,7 @@ impl TuiApp {
         self.ui.sync_scroll_links();
 
         let queued_owned: Vec<String> = if show_queued {
-            self.queued_inputs.display_texts()
+            self.prompt.queued_texts()
         } else {
             Vec::new()
         };
@@ -481,9 +482,7 @@ impl TuiApp {
         // this frame already reflects the pause.
         self.set_agent_blocked_paused(self.ui.active_modal_blocks_agent());
         let now = self.core.clock.instant_now();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::SyncActiveToolElapsed { now },
-        );
+        self.conversation.sync_active_tool_elapsed(now);
         self.sync_transcript_renderer_generation();
 
         // Commit transcript projection before Lua observers run. Plugins receive
@@ -535,35 +534,27 @@ impl TuiApp {
 
         // Transcript content was materialized by the committed-view phase. The
         // paint pass still prepares other row-backed windows and applies search.
-        let notification = &mut self.notification;
+        let overlays = &mut self.overlays;
         let paint_registry = &self.paint_registry;
-        let lua = &self.lua;
         let render_now = self.core.clock.instant_now();
-        let search_session = self
-            .search
-            .session
-            .as_ref()
+        let search_session = overlays
+            .search_session()
             .map(crate::app::search::SearchRenderSession::from);
-        let ui = &mut self.ui;
-        let _ = ui.render_with_prepared_splits_and_paints(
-            out,
+        let mut paint_jobs = Vec::new();
+        let mut frame = self.ui.paint_frame_with_prepared_splits_and_paints(
             prepared_transcript,
             |ui, request| {
-                if let Some(notification) = notification
-                    .as_mut()
-                    .filter(|notification| notification.win == request.win)
+                let width = request.content_width as usize;
+                if let Some((kind, summary)) =
+                    overlays.notification_needs_render(request.win, width)
                 {
-                    let width = request.content_width as usize;
-                    if width != notification.rendered_width {
-                        crate::app::TuiApp::write_notification_buf(
-                            ui,
-                            request.buf,
-                            notification.kind,
-                            &notification.summary,
-                            width,
-                        );
-                        notification.rendered_width = width;
-                    }
+                    crate::app::TuiApp::write_notification_buf(
+                        ui,
+                        request.buf,
+                        kind,
+                        &summary,
+                        width,
+                    );
                 }
             },
             |ui, request| {
@@ -581,10 +572,19 @@ impl TuiApp {
             },
             |id, slice, ctx| {
                 if let Some(handle_id) = paint_registry.lookup(id) {
-                    crate::lua::paint::invoke_paint(lua, handle_id, slice, ctx);
+                    paint_jobs.push((handle_id, slice.grid_rect(), ctx.clone()));
                 }
             },
         );
+
+        let lua = self.lua.execution();
+        for (handle_id, area, ctx) in paint_jobs {
+            let mut slice = frame.slice_mut(area);
+            crate::lua::scope_app(self, || {
+                crate::lua::paint::invoke_paint(&lua, handle_id, &mut slice, &ctx);
+            });
+        }
+        let _ = self.ui.flush_prepared_frame(out, frame);
     }
 
     /// Compute which pane owns the cursor this frame.
@@ -595,10 +595,10 @@ impl TuiApp {
         let cmdline_active = self.well_known.cmdline.is_some();
         let suppress = cmdline_active || transient_ui_owns_cursor;
         let has_prompt_cursor = !suppress
-            && self.term_focused
+            && self.platform.terminal_is_focused()
             && matches!(self.app_focus, crate::app::AppFocus::Prompt);
         let has_transcript_cursor = !suppress
-            && self.term_focused
+            && self.platform.terminal_is_focused()
             && matches!(self.app_focus, crate::app::AppFocus::Content);
         (has_prompt_cursor, has_transcript_cursor)
     }
@@ -622,14 +622,14 @@ impl TuiApp {
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
             pctx.buf.ensure_rendered_at(content_width);
             let inp = prompt_buf::InputLeafInput {
-                input: &self.input,
+                input: self.prompt.render_input(),
                 win: pctx.win,
                 clipboard: &self.core.clipboard,
                 now,
             };
             prompt_buf::sync_prompt_overlays(&inp, pctx.buf);
             pctx.win.ensure_layout(pctx.buf, content_width);
-            self.input
+            self.prompt
                 .sync_display_coords(&mut pctx, prompt_rect.height);
             pctx.win.scroll_left = 0;
             pctx.win.pending_recenter = false;
@@ -708,12 +708,12 @@ impl TuiApp {
                 .ok()?;
             let _ = state.set("dialog", layout);
         }
-        let result: mlua::Result<mlua::AnyUserData> = func.call((state,));
+        let result: mlua::Result<mlua::AnyUserData> =
+            crate::lua::scope_app(self, move || func.call((state,)));
         let ud = match result {
             Ok(ud) => ud,
             Err(e) => {
-                self.lua
-                    .record_error(format!("smelt.ui.layout composer: {e}"));
+                self.record_lua_error(format!("smelt.ui.layout composer: {e}"));
                 return None;
             }
         };
@@ -725,13 +725,13 @@ impl TuiApp {
         let (active_stage_count, total_stage_count) = node.dialog_stage_counts(dialog);
         match dialog {
             Some(_) if active_stage_count != 1 || total_stage_count != 1 => {
-                self.lua.record_error(format!(
+                self.record_lua_error(format!(
                     "smelt.ui.layout composer must include only the active dialog stage exactly once (found {active_stage_count} active, {total_stage_count} total); using the safe fallback layout"
                 ));
                 return None;
             }
             None if total_stage_count != 0 => {
-                self.lua.record_error(
+                self.record_lua_error(
                     "smelt.ui.layout composer included a dialog stage when no dialog is active; using the safe fallback layout"
                         .into(),
                 );
@@ -741,11 +741,10 @@ impl TuiApp {
         }
 
         let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
-        match crate::lua::api::overlay_layout::build_layout_tree(self, &node, &mut window_leaves) {
+        match crate::lua::ui_ops::build_layout_tree(self, &node, &mut window_leaves) {
             Ok((_constraint, tree)) => Some(tree),
             Err(e) => {
-                self.lua
-                    .record_error(format!("smelt.ui.layout composer tree: {e}"));
+                self.record_lua_error(format!("smelt.ui.layout composer tree: {e}"));
                 None
             }
         }
@@ -787,9 +786,9 @@ impl TuiApp {
                 continue;
             }
             let win_ud = crate::lua::api::win::LuaWin { id: win_id };
-            if let Err(e) = func.call::<()>((win_ud,)) {
-                self.lua
-                    .record_error(format!("win renderer for {win_id:?}: {e}"));
+            let result = crate::lua::scope_app(self, move || func.call::<()>((win_ud,)));
+            if let Err(e) = result {
+                self.record_lua_error(format!("win renderer for {win_id:?}: {e}"));
             }
         }
     }

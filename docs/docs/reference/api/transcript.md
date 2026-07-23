@@ -118,7 +118,7 @@ fun(row: integer): table?
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ descriptor_index, block_id, role, first_row, rows, first_line }`.
+Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ record_index, block_id, role, first_row, rows, first_line }`.
 
 ## `smelt.transcript.loaded_blocks_expensive`
 
@@ -128,7 +128,7 @@ fun(): table
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
+Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded record window; prefer `visible_blocks()` when possible.
 
 ## `smelt.transcript.loaded_text_expensive`
 
@@ -138,7 +138,7 @@ fun(): string
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active descriptor window loaded. Prefer `rows(start, count)` for bounded display reads.
+Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active record window loaded. Prefer `rows(start, count)` for bounded display reads.
 
 ## `smelt.transcript.node_at_row`
 
@@ -221,7 +221,7 @@ fun(): table
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
+Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
 
 ## `smelt.transcript.watch_view`
 

@@ -80,9 +80,7 @@ impl mlua::UserData for LuaPicker {
         methods.add_method("win", |_, this, ()| Ok(super::win::LuaWin { id: this.win }));
 
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                app.close_overlay_leaf(this.win);
-            });
+            crate::lua::with_ui_host(|host| host.close_overlay_leaf(this.win));
             Ok(())
         });
 
@@ -94,17 +92,8 @@ impl mlua::UserData for LuaPicker {
              -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaPicker>()?;
                 let sel = selected.map(|i| i.max(0) as usize).unwrap_or(0);
-                crate::lua::with_app(|app| -> Result<(), String> {
-                    let mut items = Vec::new();
-                    for v in items_tbl.sequence_values::<mlua::Value>() {
-                        let value = v.map_err(|e| e.to_string())?;
-                        let it = crate::lua::ui_ops::parse_picker_item(app, &value)?;
-                        items.push(it);
-                    }
-                    crate::picker::set_items(app, this.win, items, sel);
-                    Ok(())
-                })
-                .map_err(LuaError::RuntimeError)?;
+                crate::lua::with_ui_host(|host| host.set_picker_items(this.win, &items_tbl, sel))
+                    .map_err(LuaError::RuntimeError)?;
                 Ok(this_ud)
             },
         );
@@ -117,16 +106,14 @@ impl mlua::UserData for LuaPicker {
                 match idx {
                     Some(i) => {
                         let index = if i < 0 { 0 } else { i as usize };
-                        crate::lua::with_app(|app| {
-                            crate::picker::set_selected(app, this.win, index);
+                        crate::lua::with_ui_host(|host| {
+                            host.set_picker_selected(this.win, index);
                         });
                         Ok(mlua::Value::UserData(this_ud))
                     }
                     None => {
-                        let i = crate::lua::try_with_app(|app| {
-                            crate::picker::selected_index(app, this.win)
-                        })
-                        .flatten();
+                        let i = crate::lua::try_with_ui_host(|host| host.picker_selected(this.win))
+                            .flatten();
                         Ok(match i {
                             Some(v) => mlua::Value::Integer(v as i64),
                             None => mlua::Value::Nil,
@@ -141,8 +128,8 @@ impl mlua::UserData for LuaPicker {
             "move",
             |_, (this_ud, delta): (mlua::AnyUserData, i64)| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaPicker>()?;
-                crate::lua::with_app(|app| {
-                    crate::picker::move_selected(app, this.win, delta as isize);
+                crate::lua::with_ui_host(|host| {
+                    host.move_picker_selected(this.win, delta as isize);
                 });
                 Ok(this_ud)
             },
@@ -177,7 +164,7 @@ The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `s
         "Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.",
         &["opts"],
         |_, (opts,): (LuaPickerNewOpts,)| -> LuaResult<LuaPicker> {
-            let win = crate::lua::with_app(|app| crate::lua::ui_ops::open_picker(app, opts.0))
+            let win = crate::lua::with_ui_host(|host| host.open_picker(opts.0))
                 .map_err(|e| LuaError::RuntimeError(format!("picker: {e}")))?;
             Ok(LuaPicker { win })
         },

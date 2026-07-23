@@ -164,7 +164,11 @@ mod tests {
                 timeout: 30_000,
             },
         };
-        let server = Arc::new(McpServer::new("demo".into(), config));
+        let server = Arc::new(McpServer::new(
+            "demo".into(),
+            config,
+            std::env::current_dir().unwrap(),
+        ));
         server.set_tools(vec![McpToolDef {
             server_name: "demo".into(),
             tool_name: "read".into(),
