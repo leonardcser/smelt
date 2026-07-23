@@ -167,7 +167,7 @@ pub struct LuaAskResponseFormat {
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskError")]
 pub struct LuaAskErrorTable {
-    /// One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cancelled" | "other"`.
+    /// One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cyber_policy" | "cancelled" | "other"`.
     pub kind: String,
     /// Human-readable single-line description (newlines collapsed to spaces).
     pub message: String,

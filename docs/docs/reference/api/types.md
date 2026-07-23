@@ -231,7 +231,7 @@ Typed error table delivered to `on_response` when the underlying provider call f
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `kind` | `string` | yes | One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cancelled" | "other"`. |
+| `kind` | `string` | yes | One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cyber_policy" | "cancelled" | "other"`. |
 | `message` | `string` | yes | Human-readable single-line description (newlines collapsed to spaces). |
 
 ### `smelt.engine.AskMessage`

@@ -15,6 +15,8 @@ pub enum ProviderError {
     Auth(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("{message}")]
+    CyberPolicy { message: String },
     #[error("server error {status}: {body}")]
     Server { status: u16, body: String },
     #[error("network error: {0}")]
@@ -42,6 +44,110 @@ fn is_quota_error_body(body: &str) -> bool {
         || lower.contains("quota exhausted")
 }
 
+const CYBER_POLICY_ERROR_CODE: &str = "cyber_policy";
+const CYBER_POLICY_FALLBACK_MESSAGE: &str =
+    "This request has been flagged for possible cybersecurity risk.";
+
+pub(crate) struct OpenAiErrorPayload<'a> {
+    code: &'a str,
+    kind: &'a str,
+    message: &'a str,
+    resets_at: Option<u64>,
+}
+
+impl<'a> OpenAiErrorPayload<'a> {
+    pub(crate) fn from_value(error: &'a serde_json::Value) -> Self {
+        Self {
+            code: error["code"].as_str().unwrap_or(""),
+            kind: error["type"].as_str().unwrap_or(""),
+            message: error["message"].as_str().unwrap_or(""),
+            resets_at: json_as_u64(&error["resets_at"]),
+        }
+    }
+
+    fn from_message(message: &'a str) -> Self {
+        Self {
+            code: "",
+            kind: "",
+            message,
+            resets_at: None,
+        }
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        self.message
+    }
+}
+
+fn is_cyber_policy_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("flagged for possible cybersecurity risk")
+        || lower.contains("flagged for potentially high-risk cyber activity")
+}
+
+fn cyber_policy_error(message: &str) -> ProviderError {
+    let message = if message.trim().is_empty() {
+        CYBER_POLICY_FALLBACK_MESSAGE
+    } else {
+        message
+    };
+    ProviderError::CyberPolicy {
+        message: message.to_string(),
+    }
+}
+
+pub(crate) fn classify_openai_error(
+    error: &OpenAiErrorPayload<'_>,
+    retry_after: Option<Duration>,
+    now_secs: u64,
+) -> Option<ProviderError> {
+    if error.code == "rate_limit_exceeded" {
+        let retry_after = retry_after.or_else(|| parse_retry_from_body(error.message));
+        Some(rate_limit_error(error.resets_at, retry_after, now_secs))
+    } else if error.code == "insufficient_quota"
+        || error.code == "billing_not_active"
+        || error.kind == "usage_limit_reached"
+        || is_quota_error_body(error.message)
+    {
+        Some(ProviderError::QuotaExceeded {
+            body: error.message.to_string(),
+            resets_at: error
+                .resets_at
+                .or_else(|| retry_after.map(|delay| now_secs + delay.as_secs())),
+        })
+    } else if error.code == "context_length_exceeded" {
+        Some(ProviderError::InvalidResponse(error.message.to_string()))
+    } else if error.code == CYBER_POLICY_ERROR_CODE || is_cyber_policy_message(error.message) {
+        Some(cyber_policy_error(error.message))
+    } else {
+        None
+    }
+}
+
+fn classify_openai_error_body(
+    body: &str,
+    retry_after: Option<Duration>,
+    now_secs: u64,
+) -> Option<ProviderError> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error = value
+        .as_ref()
+        .map(|value| value.get("error").unwrap_or(value));
+    let payload = error.map_or_else(
+        || OpenAiErrorPayload::from_message(body),
+        OpenAiErrorPayload::from_value,
+    );
+    if let Some(error) = classify_openai_error(&payload, retry_after, now_secs) {
+        return Some(error);
+    }
+    error?;
+    classify_openai_error(
+        &OpenAiErrorPayload::from_message(body),
+        retry_after,
+        now_secs,
+    )
+}
+
 const MAX_AUTO_RATE_LIMIT_DELAY: Duration = Duration::from_secs(10 * 60);
 
 pub fn rate_limit_error(
@@ -62,9 +168,10 @@ pub fn retry_delay_for(
 ) -> Option<Duration> {
     let backoff = backoff_delay(attempt);
     match err {
-        ProviderError::Network(_) | ProviderError::Server { .. } | ProviderError::Stream(_) => {
-            Some(retry_after.map_or(backoff, |delay| delay.max(backoff)))
-        }
+        ProviderError::Network(_)
+        | ProviderError::CyberPolicy { .. }
+        | ProviderError::Server { .. }
+        | ProviderError::Stream(_) => Some(retry_after.map_or(backoff, |delay| delay.max(backoff))),
         ProviderError::RateLimited {
             resets_at: Some(epoch),
         } => {
@@ -137,6 +244,9 @@ impl ProviderError {
         retry_after: Option<Duration>,
         now_secs: u64,
     ) -> Self {
+        if let Some(error) = classify_openai_error_body(&body, retry_after, now_secs) {
+            return error;
+        }
         let is_quota = is_quota_error_body(&body);
 
         match code {
@@ -199,4 +309,51 @@ pub fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
         .ok()
         .filter(|&s| s > 0.0)
         .map(Duration::from_secs_f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_cyber_policy_code_preserves_provider_message() {
+        let error = ProviderError::from_http(
+            400,
+            serde_json::json!({
+                "error": {
+                    "code": "cyber_policy",
+                    "message": "This request was flagged."
+                }
+            })
+            .to_string(),
+            None,
+        );
+
+        assert!(matches!(
+            error,
+            ProviderError::CyberPolicy { message } if message == "This request was flagged."
+        ));
+    }
+
+    #[test]
+    fn http_cyber_policy_message_is_classified_without_code() {
+        let message = "This content was flagged for possible cybersecurity risk.";
+        let error = ProviderError::from_http(400, message.to_string(), None);
+
+        assert!(matches!(
+            error,
+            ProviderError::CyberPolicy { message: actual } if actual == message
+        ));
+    }
+
+    #[test]
+    fn cyber_policy_without_message_uses_fallback() {
+        let error = ProviderError::from_http(
+            400,
+            serde_json::json!({"error": {"code": "cyber_policy"}}).to_string(),
+            None,
+        );
+
+        assert_eq!(error.to_string(), CYBER_POLICY_FALLBACK_MESSAGE);
+    }
 }

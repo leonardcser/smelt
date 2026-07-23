@@ -47,10 +47,7 @@ pub use error::{
     parse_retry_after, parse_retry_from_body, rate_limit_error, retry_delay_for, unix_secs,
 };
 #[cfg(not(feature = "test-support"))]
-pub(crate) use error::{
-    backoff_delay, json_as_u64, parse_retry_after, parse_retry_from_body, rate_limit_error,
-    retry_delay_for,
-};
+pub(crate) use error::{parse_retry_after, retry_delay_for};
 pub use error::{quota_exceeded_message, unix_now, ProviderError};
 pub use event::{ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent};
 #[cfg(not(feature = "test-support"))]

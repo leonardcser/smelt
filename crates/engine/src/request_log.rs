@@ -193,6 +193,7 @@ fn provider_error_to_log_error(
         ProviderError::QuotaExceeded { .. } => ("quota", http_status),
         ProviderError::Auth(_) => ("auth", http_status),
         ProviderError::NotFound(_) => ("not_found", http_status),
+        ProviderError::CyberPolicy { .. } => ("cyber_policy", http_status),
         ProviderError::Server { status, .. } => ("server", Some(*status)),
         ProviderError::Network(_) => ("network", http_status),
         ProviderError::Stream(_) => ("stream", http_status),

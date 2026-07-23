@@ -1,8 +1,9 @@
+use crate::error::{classify_openai_error, OpenAiErrorPayload};
 use crate::sse;
 use crate::{
-    json_as_u64, non_empty, non_empty_blocks, parse_retry_from_body, rate_limit_error, unix_now,
-    CancellationToken, CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError,
-    ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
+    non_empty, non_empty_blocks, unix_now, CancellationToken, CompletedReasoningPart, ModelConfig,
+    ParsedResponse, ProviderError, ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent,
+    ToolDefinition,
 };
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
@@ -648,29 +649,15 @@ fn apply_sse_event(
         }
         "response.failed" => {
             if let Some(error) = ev.get("response").and_then(|r| r.get("error")) {
-                let code = error["code"].as_str().unwrap_or("");
-                let err_type = error["type"].as_str().unwrap_or("");
-                let message = error["message"].as_str().unwrap_or("");
-                let resets_at = json_as_u64(&error["resets_at"]);
-                if code == "rate_limit_exceeded" {
-                    let retry_after = parse_retry_from_body(message);
-                    state.error = Some(rate_limit_error(resets_at, retry_after, now_secs));
-                } else if code == "insufficient_quota"
-                    || code == "billing_not_active"
-                    || err_type == "usage_limit_reached"
-                {
-                    state.error = Some(ProviderError::QuotaExceeded {
-                        body: message.to_string(),
-                        resets_at,
-                    });
-                } else if code == "context_length_exceeded" {
-                    state.error = Some(ProviderError::InvalidResponse(message.to_string()));
-                } else {
-                    state.error = Some(ProviderError::Server {
-                        status: 0,
-                        body: message.to_string(),
-                    });
-                }
+                let error = OpenAiErrorPayload::from_value(error);
+                state.error = Some(
+                    classify_openai_error(&error, None, now_secs).unwrap_or_else(|| {
+                        ProviderError::Server {
+                            status: 0,
+                            body: error.message().to_string(),
+                        }
+                    }),
+                );
             }
         }
         "response.incomplete" => {
@@ -1944,6 +1931,45 @@ mod tests {
         assert!(matches!(
             state.error.unwrap(),
             ProviderError::InvalidResponse(_)
+        ));
+    }
+
+    #[test]
+    fn sse_failed_cyber_policy_code_preserves_message() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {
+                    "code": "cyber_policy",
+                    "message": "This request has been flagged for possible cybersecurity risk."
+                }}
+            }),
+        );
+        assert!(matches!(
+            state.error.unwrap(),
+            ProviderError::CyberPolicy { message }
+                if message == "This request has been flagged for possible cybersecurity risk."
+        ));
+    }
+
+    #[test]
+    fn sse_failed_cyber_policy_message_is_classified_without_code() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {
+                    "code": "unknown",
+                    "message": "This content was flagged for possible cybersecurity risk."
+                }}
+            }),
+        );
+        assert!(matches!(
+            state.error.unwrap(),
+            ProviderError::CyberPolicy { .. }
         ));
     }
 

@@ -234,6 +234,44 @@ pub fn models_entry_matches(entry: &Value, model: &str) -> bool {
     eq("id") || eq("display_name")
 }
 
+const MAX_CYBER_POLICY_RETRIES: usize = 3;
+
+#[derive(Default)]
+struct RetryState {
+    request_attempt: usize,
+    standard_retries: usize,
+    cyber_policy_retries: usize,
+}
+
+impl RetryState {
+    fn schedule_provider_retry(
+        &mut self,
+        error: &ProviderError,
+        standard_retry_limit: usize,
+        retry_after: Option<Duration>,
+        now_secs: u64,
+    ) -> Option<Duration> {
+        let is_cyber_policy = matches!(error, ProviderError::CyberPolicy { .. });
+        let (retry_attempt, retry_limit) = if is_cyber_policy {
+            (self.cyber_policy_retries, MAX_CYBER_POLICY_RETRIES)
+        } else {
+            (self.standard_retries, standard_retry_limit)
+        };
+        if retry_attempt >= retry_limit {
+            return None;
+        }
+
+        let delay = retry_delay_for(error, retry_attempt, retry_after, now_secs)?;
+        if is_cyber_policy {
+            self.cyber_policy_retries += 1;
+        } else {
+            self.standard_retries += 1;
+        }
+        self.request_attempt += 1;
+        Some(delay)
+    }
+}
+
 impl ProviderClient {
     async fn chat_http(
         &self,
@@ -269,7 +307,9 @@ impl ProviderClient {
             }
         };
 
-        for attempt in 0..=max_retries {
+        let mut retry_state = RetryState::default();
+        loop {
+            let attempt = retry_state.request_attempt;
             let request_start = std::time::Instant::now();
             let mut req = {
                 let _perf = smelt_perf::perf::begin("provider:request:serialize_json");
@@ -317,8 +357,12 @@ impl ProviderClient {
                             http_status: None,
                             error_body: None,
                         });
-                        if attempt < max_retries {
-                            let delay = crate::backoff_delay(attempt);
+                        if let Some(delay) = retry_state.schedule_provider_retry(
+                            &err,
+                            max_retries,
+                            None,
+                            unix_now(),
+                        ) {
                             emit_retry(opts, delay, attempt);
                             tokio::time::sleep(delay).await;
                             continue;
@@ -342,12 +386,12 @@ impl ProviderClient {
                     error_body: Some(&text),
                 });
 
-                if attempt < max_retries {
-                    if let Some(delay) = retry_delay_for(&err, attempt, retry_after, unix_now()) {
-                        emit_retry(opts, delay, attempt);
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
+                if let Some(delay) =
+                    retry_state.schedule_provider_retry(&err, max_retries, retry_after, unix_now())
+                {
+                    emit_retry(opts, delay, attempt);
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
                 return Err(err);
             }
@@ -398,22 +442,6 @@ impl ProviderClient {
 
             let (parsed, raw, status) = match parsed_result {
                 (Ok(parsed), raw, status, _) => (parsed, raw, status),
-                (Err(err), _, status, error_body) if attempt < max_stream_retries => {
-                    emit_attempt(AttemptEvent {
-                        attempt: attempt as u32,
-                        elapsed_ms: request_start.elapsed().as_millis() as u64,
-                        result: Err(&err),
-                        raw_response: None,
-                        http_status: status,
-                        error_body: error_body.as_deref(),
-                    });
-                    let Some(delay) = retry_delay_for(&err, attempt, None, unix_now()) else {
-                        return Err(err);
-                    };
-                    emit_retry(opts, delay, attempt);
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
                 (Err(err), _, status, error_body) => {
                     emit_attempt(AttemptEvent {
                         attempt: attempt as u32,
@@ -423,6 +451,16 @@ impl ProviderClient {
                         http_status: status,
                         error_body: error_body.as_deref(),
                     });
+                    if let Some(delay) = retry_state.schedule_provider_retry(
+                        &err,
+                        max_stream_retries,
+                        None,
+                        unix_now(),
+                    ) {
+                        emit_retry(opts, delay, attempt);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
                     return Err(err);
                 }
             };
@@ -450,8 +488,6 @@ impl ProviderClient {
             });
             return Ok(response);
         }
-
-        Err(ProviderError::MaxRetries)
     }
 }
 
@@ -760,6 +796,7 @@ mod tests {
     use super::*;
     use protocol::{Content, Role};
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn user_msg(text: &str) -> Message {
         Message {
@@ -798,43 +835,202 @@ mod tests {
         );
     }
 
-    async fn capture_codex_request(fast_mode: bool) -> (Value, Vec<u32>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended before body");
+            request.extend_from_slice(&chunk[..read]);
+        }
+        (
+            headers,
+            request[header_end..header_end + content_length].to_vec(),
+        )
+    }
 
+    async fn spawn_sse_responses(
+        event: String,
+        preceding_server_errors: usize,
+        response_count: usize,
+    ) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let total_responses = preceding_server_errors + response_count;
+        let server = tokio::spawn(async move {
+            for response_index in 0..total_responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_http_request(&mut stream).await;
+                let response = if response_index < preceding_server_errors {
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 9\r\nconnection: close\r\n\r\ntemporary".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        event.len(),
+                        event
+                    )
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            total_responses
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    async fn request_openai_stream(
+        api_base: &str,
+        opts: &ChatOptions<'_>,
+    ) -> Result<ChatResponse, ProviderError> {
+        let messages = [user_msg("test")];
+        fn ignore_delta(_: ProviderStreamEvent<'_>) {}
+        let opts = ChatOptions {
+            cancel: opts.cancel,
+            on_retry: opts.on_retry,
+            on_delta: Some(&ignore_delta),
+            on_attempt: opts.on_attempt,
+        };
+        ProviderClient::new(reqwest::Client::new())
+            .chat(
+                ChatRequest {
+                    provider: ChatProvider::api_key(ProviderKind::OpenAi, "key"),
+                    api_base,
+                    model: "gpt-test",
+                    messages: &messages,
+                    tools: &[],
+                    effort: ReasoningEffort::Off,
+                    config: &ModelConfig::default(),
+                    cache: CacheConfig::default(),
+                    response_format: None,
+                    fast_mode: false,
+                },
+                &opts,
+            )
+            .await
+    }
+
+    fn cyber_policy_event(message: &str) -> String {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "cyber_policy",
+                        "message": message,
+                    }
+                }
+            })
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cyber_policy_sse_is_classified_and_retried_three_times() {
+        const MESSAGE: &str = "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
+        let (api_base, server) = spawn_sse_responses(cyber_policy_event(MESSAGE), 0, 4).await;
+        let cancel = CancellationToken::new();
+        let retries = std::sync::Mutex::new(Vec::new());
+        let attempt_errors = std::sync::Mutex::new(Vec::new());
+        let on_retry = |delay, attempt| retries.lock().unwrap().push((delay, attempt));
+        let on_attempt = |info: RequestAttemptInfo<'_>| {
+            if let Err(error) = info.result {
+                attempt_errors.lock().unwrap().push(error.to_string());
+            }
+        };
+        let mut opts = ChatOptions::new(&cancel);
+        opts.on_retry = Some(&on_retry);
+        opts.on_attempt = Some(&on_attempt);
+
+        let error = match request_openai_stream(&api_base, &opts).await {
+            Err(error) => error,
+            Ok(_) => panic!("cyber policy response unexpectedly succeeded"),
+        };
+
+        assert_eq!(server.await.unwrap(), 4);
+        assert!(matches!(error, ProviderError::CyberPolicy { .. }));
+        assert_eq!(attempt_errors.into_inner().unwrap(), vec![MESSAGE; 4]);
+        assert_eq!(
+            retries.into_inner().unwrap(),
+            vec![
+                (Duration::from_millis(500), 1),
+                (Duration::from_secs(1), 2),
+                (Duration::from_secs(2), 3),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cyber_policy_retry_budget_is_independent_of_earlier_server_errors() {
+        const MESSAGE: &str = "This content was flagged for possible cybersecurity risk.";
+        let (api_base, server) = spawn_sse_responses(cyber_policy_event(MESSAGE), 1, 4).await;
+        let cancel = CancellationToken::new();
+        let retries = std::sync::Mutex::new(Vec::new());
+        let attempt_errors = std::sync::Mutex::new(Vec::new());
+        let on_retry = |delay, attempt| retries.lock().unwrap().push((delay, attempt));
+        let on_attempt = |info: RequestAttemptInfo<'_>| {
+            if let Err(error) = info.result {
+                attempt_errors.lock().unwrap().push(error.to_string());
+            }
+        };
+        let mut opts = ChatOptions::new(&cancel);
+        opts.on_retry = Some(&on_retry);
+        opts.on_attempt = Some(&on_attempt);
+
+        let error = match request_openai_stream(&api_base, &opts).await {
+            Err(error) => error,
+            Ok(_) => panic!("cyber policy response unexpectedly succeeded"),
+        };
+
+        assert_eq!(server.await.unwrap(), 5);
+        assert!(matches!(error, ProviderError::CyberPolicy { .. }));
+        assert_eq!(
+            attempt_errors.into_inner().unwrap(),
+            vec![
+                "server error 500: temporary",
+                MESSAGE,
+                MESSAGE,
+                MESSAGE,
+                MESSAGE,
+            ]
+        );
+        assert_eq!(
+            retries.into_inner().unwrap(),
+            vec![
+                (Duration::from_millis(500), 1),
+                (Duration::from_millis(500), 2),
+                (Duration::from_secs(1), 3),
+                (Duration::from_secs(2), 4),
+            ]
+        );
+    }
+
+    async fn capture_codex_request(fast_mode: bool) -> (Value, Vec<u32>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            let header_end = loop {
-                let read = stream.read(&mut chunk).await.unwrap();
-                assert!(read > 0, "request ended before headers");
-                request.extend_from_slice(&chunk[..read]);
-                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                    break index + 4;
-                }
-            };
-            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let (headers, body) = read_http_request(&mut stream).await;
             assert_eq!(
                 headers.lines().next(),
                 Some("POST /codex/responses HTTP/1.1")
             );
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap();
-            while request.len() < header_end + content_length {
-                let read = stream.read(&mut chunk).await.unwrap();
-                assert!(read > 0, "request ended before body");
-                request.extend_from_slice(&chunk[..read]);
-            }
-            let body =
-                serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let body = serde_json::from_slice(&body).unwrap();
             let event = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",

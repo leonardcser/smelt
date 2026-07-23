@@ -124,6 +124,7 @@ const ENGINE_ASK_ERROR_KINDS: &[EngineAskErrorKind] = &[
     EngineAskErrorKind::Quota,
     EngineAskErrorKind::InvalidResponse,
     EngineAskErrorKind::ContextWindow,
+    EngineAskErrorKind::CyberPolicy,
     EngineAskErrorKind::Cancelled,
     EngineAskErrorKind::Other,
 ];

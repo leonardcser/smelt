@@ -30,6 +30,7 @@ pub enum EngineAskErrorKind {
     Quota,
     InvalidResponse,
     ContextWindow,
+    CyberPolicy,
     Cancelled,
     Other,
 }
@@ -42,6 +43,7 @@ impl EngineAskErrorKind {
             EngineAskErrorKind::Quota => "quota",
             EngineAskErrorKind::InvalidResponse => "invalid_response",
             EngineAskErrorKind::ContextWindow => "context_window",
+            EngineAskErrorKind::CyberPolicy => "cyber_policy",
             EngineAskErrorKind::Cancelled => "cancelled",
             EngineAskErrorKind::Other => "other",
         }

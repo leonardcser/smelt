@@ -564,6 +564,7 @@ fn classify_provider_error(e: &ProviderError) -> EngineAskErrorKind {
     match e {
         ProviderError::Cancelled => EngineAskErrorKind::Cancelled,
         ProviderError::QuotaExceeded { .. } => EngineAskErrorKind::Quota,
+        ProviderError::CyberPolicy { .. } => EngineAskErrorKind::CyberPolicy,
         ProviderError::Network(_) | ProviderError::Stream(_) => EngineAskErrorKind::Network,
         ProviderError::RateLimited { .. } => EngineAskErrorKind::RateLimited,
         ProviderError::Server { .. } => {
@@ -3312,6 +3313,18 @@ mod tests {
         writer.join().unwrap();
 
         assert_eq!(history.items, vec![item]);
+    }
+
+    #[test]
+    fn classify_provider_error_preserves_cyber_policy() {
+        let err = ProviderError::CyberPolicy {
+            message: "flagged".into(),
+        };
+
+        assert_eq!(
+            classify_provider_error(&err),
+            EngineAskErrorKind::CyberPolicy
+        );
     }
 
     #[test]
