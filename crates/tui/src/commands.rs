@@ -580,7 +580,9 @@ impl TuiApp {
             }
             return;
         };
-        let Some(api_key) = self.resolve_api_key_for_env(&active.api_key_env) else {
+        let Ok(api_key) =
+            crate::app::agent::lookup_api_key(&active.api_key_env, |key| std::env::var(key))
+        else {
             return;
         };
         let target = crate::app::ContextWindowTarget::from_active(&active);

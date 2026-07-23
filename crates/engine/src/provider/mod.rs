@@ -44,6 +44,35 @@ type EngineChatResponse = ChatResponse;
 
 const MANAGED_MODEL_CACHE_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManagedModelRefreshError {
+    Retryable(String),
+    Terminal(String),
+    Unauthenticated(String),
+}
+
+impl ManagedModelRefreshError {
+    pub(crate) fn retryable(message: impl Into<String>) -> Self {
+        Self::Retryable(message.into())
+    }
+
+    pub(crate) fn terminal(message: impl Into<String>) -> Self {
+        Self::Terminal(message.into())
+    }
+
+    pub(crate) fn unauthenticated(message: impl Into<String>) -> Self {
+        Self::Unauthenticated(message.into())
+    }
+
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::Terminal(message) | Self::Unauthenticated(message) => {
+                message
+            }
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ManagedModelCache<T> {
     schema_version: u32,
@@ -105,8 +134,16 @@ pub(crate) mod test_http {
     pub(crate) async fn spawn_json_response(
         body: impl Into<String>,
     ) -> (String, tokio::task::JoinHandle<String>) {
+        spawn_http_response("200 OK", body).await
+    }
+
+    pub(crate) async fn spawn_http_response(
+        status: impl Into<String>,
+        body: impl Into<String>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        let status = status.into();
         let body = body.into();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -140,7 +177,7 @@ pub(crate) mod test_http {
             }
             let req = String::from_utf8_lossy(&buf).to_string();
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(resp.as_bytes()).await.unwrap();

@@ -1,5 +1,5 @@
 use crate::config::{Config, ResolvedModel};
-use engine::auth::{AuthProvider, ManagedModelsRefreshOutcome};
+use engine::auth::{AuthProvider, ManagedModelsRefreshFailure, ManagedModelsRefreshOutcome};
 use protocol::ModelMetadata;
 use std::collections::BTreeMap;
 
@@ -64,8 +64,10 @@ pub struct ManagedProviderModels {
     pub last_error: Option<String>,
     next_request_id: u64,
     retry_count: u8,
+    retryable: bool,
     in_flight: Option<RefreshToken>,
     credential_fingerprint: Option<u64>,
+    rejected_credential_fingerprint: Option<u64>,
     cache_snapshot: Vec<ModelMetadata>,
 }
 
@@ -90,6 +92,21 @@ impl ManagedProviderModels {
         self.in_flight.map(|token| token.request_id)
     }
 
+    fn record_failure(
+        &mut self,
+        status: ManagedModelsStatus,
+        failure: ManagedModelsRefreshFailure,
+    ) {
+        self.status = status;
+        self.retryable = failure.is_retryable();
+        self.retry_count = if self.retryable {
+            self.retry_count.saturating_add(1)
+        } else {
+            0
+        };
+        self.last_error = Some(failure.message().to_string());
+    }
+
     fn new(provider: AuthProvider, desired: bool, desired_revision: u64) -> Self {
         let (credential_fingerprint, mut models) = engine::auth::cached_model_snapshot(provider);
         let authenticated = credential_fingerprint.is_some();
@@ -110,8 +127,10 @@ impl ManagedProviderModels {
             last_error: None,
             next_request_id: 0,
             retry_count: 0,
+            retryable: false,
             in_flight: None,
             credential_fingerprint,
+            rejected_credential_fingerprint: None,
         }
     }
 }
@@ -152,8 +171,10 @@ impl ManagedModels {
                         last_error: None,
                         next_request_id: 0,
                         retry_count: 0,
+                        retryable: false,
                         in_flight: None,
                         credential_fingerprint: None,
+                        rejected_credential_fingerprint: None,
                         cache_snapshot: Vec::new(),
                     },
                 )
@@ -179,6 +200,14 @@ impl ManagedModels {
             .providers
             .get_mut(&provider)
             .expect("every managed provider has state");
+        let rejected =
+            fingerprint.is_some() && fingerprint == state.rejected_credential_fingerprint;
+        let fingerprint = if rejected { None } else { fingerprint };
+        if rejected {
+            cached_models.clear();
+        } else if fingerprint.is_some() {
+            state.rejected_credential_fingerprint = None;
+        }
         if state.credential_fingerprint == fingerprint {
             if state.cache_snapshot == cached_models {
                 return false;
@@ -195,6 +224,7 @@ impl ManagedModels {
                 ManagedModelsStatus::Unauthenticated
             };
             state.retry_count = 0;
+            state.retryable = false;
             state.last_error = None;
             return true;
         }
@@ -205,6 +235,7 @@ impl ManagedModels {
         state.models = cached_models;
         state.in_flight = None;
         state.retry_count = 0;
+        state.retryable = false;
         state.last_error = None;
         state.status = if state.authenticated {
             ManagedModelsStatus::Cached
@@ -223,12 +254,17 @@ impl ManagedModels {
                 .get_mut(&provider)
                 .expect("every managed provider has state");
             if state.desired != desired {
-                if desired && state.authenticated {
-                    state.status = ManagedModelsStatus::Cached;
-                }
                 state.desired = desired;
                 state.desired_revision = desired_revision;
                 state.in_flight = None;
+                state.retry_count = 0;
+                state.retryable = false;
+                state.last_error = None;
+                state.status = if state.authenticated {
+                    ManagedModelsStatus::Cached
+                } else {
+                    ManagedModelsStatus::Unauthenticated
+                };
                 changed = true;
             }
         }
@@ -298,45 +334,46 @@ impl ManagedModels {
             } => {
                 normalize_models(&mut models);
                 state.models = models;
+                state.retry_count = 0;
+                state.retryable = false;
                 if let Some(warning) = cache_warning {
                     state.status = ManagedModelsStatus::Degraded;
-                    state.retry_count = state.retry_count.saturating_add(1);
                     state.last_error = Some(warning);
                 } else {
                     state.cache_snapshot = state.models.clone();
                     state.status = ManagedModelsStatus::Fresh;
-                    state.retry_count = 0;
                     state.last_error = None;
                 }
             }
             ManagedModelsRefreshOutcome::CachedFallback {
                 mut models,
-                warning,
+                failure,
             } => {
                 normalize_models(&mut models);
                 state.cache_snapshot = models.clone();
                 if state.models.is_empty() {
                     state.models = models;
                 }
-                state.status = ManagedModelsStatus::Degraded;
-                state.retry_count = state.retry_count.saturating_add(1);
-                state.last_error = Some(warning);
+                state.record_failure(ManagedModelsStatus::Degraded, failure);
             }
-            ManagedModelsRefreshOutcome::Unauthenticated => {
+            ManagedModelsRefreshOutcome::Unauthenticated(error) => {
                 state.authenticated = false;
                 state.auth_revision = state.auth_revision.wrapping_add(1);
+                state.rejected_credential_fingerprint = Some(token.credential_fingerprint);
                 state.credential_fingerprint = None;
                 state.status = ManagedModelsStatus::Unauthenticated;
                 state.retry_count = 0;
-                state.last_error = None;
+                state.retryable = false;
+                state.last_error = Some(error);
             }
             ManagedModelsRefreshOutcome::CredentialsChanged => {
                 state.status = ManagedModelsStatus::Cached;
+                state.retry_count = 0;
+                state.retryable = false;
+                state.last_error = None;
             }
-            ManagedModelsRefreshOutcome::Failed(error) => {
-                state.status = ManagedModelsStatus::Failed;
-                state.retry_count = state.retry_count.saturating_add(1);
-                state.last_error = Some(error);
+            ManagedModelsRefreshOutcome::Failed(failure) => {
+                state.record_failure(ManagedModelsStatus::Failed, failure);
             }
         }
         Some(state.models != previous_models || state.authenticated != previous_authenticated)
@@ -344,10 +381,12 @@ impl ManagedModels {
 
     pub fn retry_delay(&self, provider: AuthProvider) -> Option<std::time::Duration> {
         let state = self.provider(provider);
-        if !matches!(
-            state.status,
-            ManagedModelsStatus::Degraded | ManagedModelsStatus::Failed
-        ) || state.retry_count > 3
+        if !state.retryable
+            || !matches!(
+                state.status,
+                ManagedModelsStatus::Degraded | ManagedModelsStatus::Failed
+            )
+            || state.retry_count > 3
         {
             return None;
         }
@@ -370,6 +409,7 @@ impl ManagedModels {
             || !state.authenticated
             || state.auth_revision != auth_revision
             || state.desired_revision != desired_revision
+            || !state.retryable
             || !matches!(
                 state.status,
                 ManagedModelsStatus::Degraded | ManagedModelsStatus::Failed
@@ -651,7 +691,12 @@ mod tests {
         state.models = vec![metadata("retained")];
         let token = managed.begin_refreshes().pop().expect("second refresh");
         assert_eq!(
-            managed.apply(token, ManagedModelsRefreshOutcome::Failed("offline".into())),
+            managed.apply(
+                token,
+                ManagedModelsRefreshOutcome::Failed(ManagedModelsRefreshFailure::Retryable(
+                    "offline".into(),
+                ))
+            ),
             Some(false)
         );
         assert_eq!(
@@ -667,7 +712,7 @@ mod tests {
                 token,
                 ManagedModelsRefreshOutcome::CachedFallback {
                     models: vec![metadata("fallback")],
-                    warning: "temporary outage".into(),
+                    failure: ManagedModelsRefreshFailure::Retryable("temporary outage".into()),
                 },
             ),
             Some(false)
@@ -681,6 +726,113 @@ mod tests {
             managed.provider(AuthProvider::Codex).status,
             ManagedModelsStatus::Degraded
         );
+    }
+
+    #[test]
+    fn only_retryable_refresh_failures_schedule_retries() {
+        let (mut managed, token) = refreshing_models();
+        assert_eq!(
+            managed.apply(
+                token,
+                ManagedModelsRefreshOutcome::Failed(ManagedModelsRefreshFailure::Retryable(
+                    "offline".into(),
+                )),
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            managed.retry_delay(AuthProvider::Codex),
+            Some(std::time::Duration::from_secs(1))
+        );
+
+        assert!(managed.activate_retry(
+            AuthProvider::Codex,
+            token.auth_revision,
+            token.desired_revision
+        ));
+        let terminal_token = managed.begin_refreshes().pop().expect("terminal refresh");
+        assert_eq!(
+            managed.apply(
+                terminal_token,
+                ManagedModelsRefreshOutcome::Failed(ManagedModelsRefreshFailure::Terminal(
+                    "bad request".into(),
+                )),
+            ),
+            Some(false)
+        );
+        assert_eq!(managed.retry_delay(AuthProvider::Codex), None);
+    }
+
+    #[test]
+    fn unauthenticated_refresh_failure_stops_retries_and_clears_authentication() {
+        let (mut managed, token) = refreshing_models();
+
+        assert_eq!(
+            managed.apply(
+                token,
+                ManagedModelsRefreshOutcome::Unauthenticated(
+                    "refresh token was revoked; run `smelt auth`".into(),
+                ),
+            ),
+            Some(true)
+        );
+
+        let state = managed.provider(AuthProvider::Codex);
+        assert!(!state.authenticated);
+        assert_eq!(state.status, ManagedModelsStatus::Unauthenticated);
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("refresh token was revoked; run `smelt auth`")
+        );
+        assert_eq!(managed.retry_delay(AuthProvider::Codex), None);
+        assert!(managed.begin_refreshes().is_empty());
+
+        assert!(!managed.apply_auth_snapshot(
+            AuthProvider::Codex,
+            Some(token.credential_fingerprint()),
+            vec![metadata("rejected-cache")],
+        ));
+        assert!(!managed.provider(AuthProvider::Codex).authenticated);
+        assert!(managed.apply_auth_snapshot(
+            AuthProvider::Codex,
+            Some(token.credential_fingerprint().wrapping_add(1)),
+            vec![metadata("new-account-cache")],
+        ));
+        assert!(managed.provider(AuthProvider::Codex).authenticated);
+    }
+
+    #[test]
+    fn disable_and_reenable_resets_refresh_failure_state() {
+        let (mut managed, token) = refreshing_models();
+        managed.apply(
+            token,
+            ManagedModelsRefreshOutcome::Failed(ManagedModelsRefreshFailure::Retryable(
+                "offline".into(),
+            )),
+        );
+        assert!(managed.retry_delay(AuthProvider::Codex).is_some());
+
+        let disabled = Config::default();
+        let enabled = Config {
+            providers: vec![crate::config::ProviderConfig {
+                name: Some("codex".into()),
+                provider_type: Some("codex".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(managed.sync_desired(&disabled, token.desired_revision + 1));
+        let disabled_state = managed.provider(AuthProvider::Codex);
+        assert_eq!(disabled_state.last_error, None);
+        assert_eq!(managed.retry_delay(AuthProvider::Codex), None);
+
+        assert!(managed.sync_desired(&enabled, token.desired_revision + 2));
+        let next = managed
+            .begin_refreshes()
+            .pop()
+            .expect("new desired refresh");
+        assert_eq!(next.desired_revision, token.desired_revision + 2);
+        assert_eq!(managed.provider(AuthProvider::Codex).last_error, None);
     }
 
     #[test]

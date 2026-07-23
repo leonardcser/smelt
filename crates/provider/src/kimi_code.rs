@@ -393,6 +393,43 @@ pub struct OAuthResponse {
     pub json: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KimiRequestError {
+    Retryable(String),
+    Terminal(String),
+    Unauthenticated(String),
+}
+
+impl KimiRequestError {
+    fn retryable(message: String) -> Self {
+        Self::Retryable(message)
+    }
+
+    fn terminal(message: String) -> Self {
+        Self::Terminal(message)
+    }
+
+    fn unauthenticated(message: String) -> Self {
+        Self::Unauthenticated(message)
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Retryable(message) | Self::Terminal(message) | Self::Unauthenticated(message) => {
+                message
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for KimiRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for KimiRequestError {}
+
 pub struct OAuthFormRequest {
     pub url: String,
     pub body: String,
@@ -570,7 +607,7 @@ pub async fn refresh_access_token(
     client: &reqwest::Client,
     env: &KimiAuthEnv,
     refresh_token: &str,
-) -> Result<KimiCodeTokens, String> {
+) -> Result<KimiCodeTokens, KimiRequestError> {
     let resp = post_form(
         client,
         env,
@@ -581,11 +618,40 @@ pub async fn refresh_access_token(
             ("refresh_token", refresh_token),
         ],
     )
-    .await?;
+    .await
+    .map_err(KimiRequestError::retryable)?;
     if resp.status != 200 {
-        return Err(oauth_error(&resp, "Token refresh failed"));
+        return Err(refresh_error(&resp));
     }
-    token_from_response_at(&resp.json, (env.now)())
+    token_from_response_at(&resp.json, (env.now)()).map_err(KimiRequestError::terminal)
+}
+
+fn refresh_error(resp: &OAuthResponse) -> KimiRequestError {
+    let message = oauth_error(resp, "Token refresh failed");
+    let error_code = resp.json["error"].as_str().unwrap_or_default();
+    let detail = message.to_ascii_lowercase();
+    let invalid_refresh_token = detail.contains("refresh token")
+        && ["invalid", "expired", "revoked", "reused"]
+            .iter()
+            .any(|word| detail.contains(word));
+
+    if resp.status == 401
+        || matches!(
+            error_code,
+            "invalid_grant" | "invalid_token" | "expired_token" | "invalid_refresh_token"
+        )
+        || invalid_refresh_token
+    {
+        KimiRequestError::unauthenticated(message)
+    } else if retryable_status(resp.status) {
+        KimiRequestError::retryable(message)
+    } else {
+        KimiRequestError::terminal(message)
+    }
+}
+
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || status >= 500
 }
 
 pub struct AuthenticatedResponse {
@@ -660,24 +726,30 @@ pub async fn fetch_models_with_token(
     client: &reqwest::Client,
     env: &KimiAuthEnv,
     token: &str,
-) -> Result<Vec<KimiCodeModelInfo>, String> {
+) -> Result<Vec<KimiCodeModelInfo>, KimiRequestError> {
     let resp = apply_default_headers(client.get(format!("{}/models", env.api_base)), &env.headers)
         .bearer_auth(token)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("Kimi Code models request failed: {e}"))?;
+        .map_err(|e| {
+            KimiRequestError::retryable(format!("Kimi Code models request failed: {e}"))
+        })?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "Kimi Code models endpoint rejected credentials (HTTP {status}): {body}"
-        ));
+        let message = format!("Kimi Code models request failed (HTTP {status}): {body}");
+        return Err(if status == 401 {
+            KimiRequestError::unauthenticated(message)
+        } else if retryable_status(status) {
+            KimiRequestError::retryable(message)
+        } else {
+            KimiRequestError::terminal(message)
+        });
     }
-    let json = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("Kimi Code models response was invalid JSON: {e}"))?;
+    let json = resp.json::<serde_json::Value>().await.map_err(|e| {
+        KimiRequestError::terminal(format!("Kimi Code models response was invalid JSON: {e}"))
+    })?;
     Ok(parse_models_response(&json))
 }
 
@@ -847,6 +919,41 @@ mod tests {
             device_poll_decision(&expired, 5).unwrap(),
             DevicePollDecision::Expired
         );
+    }
+
+    #[test]
+    fn refresh_errors_distinguish_invalid_credentials_from_transient_failures() {
+        let invalid_grant = OAuthResponse {
+            status: 400,
+            body: String::new(),
+            json: serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "refresh token was revoked"
+            }),
+        };
+        let rate_limited = OAuthResponse {
+            status: 429,
+            body: "try later".into(),
+            json: serde_json::Value::Null,
+        };
+        let bad_request = OAuthResponse {
+            status: 400,
+            body: "unsupported client configuration".into(),
+            json: serde_json::Value::Null,
+        };
+
+        assert!(matches!(
+            refresh_error(&invalid_grant),
+            KimiRequestError::Unauthenticated(_)
+        ));
+        assert!(matches!(
+            refresh_error(&rate_limited),
+            KimiRequestError::Retryable(_)
+        ));
+        assert!(matches!(
+            refresh_error(&bad_request),
+            KimiRequestError::Terminal(_)
+        ));
     }
 
     #[test]

@@ -11,6 +11,12 @@ impl EnvVarGuard {
         unsafe { std::env::set_var(name, value) };
         Self { name, previous }
     }
+
+    fn remove(name: &'static str) -> Self {
+        let previous = std::env::var_os(name);
+        unsafe { std::env::remove_var(name) };
+        Self { name, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -166,6 +172,27 @@ fn model_switch_marks_missing_credentials_unavailable() {
         assert(status.reason == "missing_credentials")
         "#,
     ));
+}
+
+#[test]
+fn context_window_discovery_does_not_repeat_missing_credentials_error() {
+    const KEY_ENV: &str = "SMELT_TEST_CONTEXT_WINDOW_MISSING_KEY_6A41E2";
+    let environment_guard = test_environment_guard();
+    let _key = EnvVarGuard::remove(KEY_ENV);
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    app.app.core.config.active_model_mut().unwrap().api_key_env = KEY_ENV.into();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app.context_window_tx = Some(tx);
+    app.app.http_client = Some(engine::HttpClient::new());
+
+    app.app.refresh_context_window();
+    app.app.refresh_context_window();
+
+    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    assert!(messages
+        .entries()
+        .iter()
+        .all(|entry| !entry.full.contains("required for API authentication")));
 }
 
 #[test]
@@ -662,6 +689,167 @@ async fn installing_the_runtime_http_client_starts_managed_refreshes() {
             .status,
         smelt_core::ManagedModelsStatus::Refreshing
     );
+}
+
+#[tokio::test]
+async fn managed_model_refresh_notifications_follow_error_and_revision_lifecycle() {
+    let environment_guard = test_environment_guard();
+    let _tokens = EnvVarGuard::set(
+        "SMELT_CODEX_TOKENS",
+        r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at":9999999999,"account_id":"test-account","last_refresh":0}"#,
+    );
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    assert!(app.run_lua(
+        r#"
+        smelt.provider.register("codex", {
+            type = "codex",
+            api_base = "https://example.invalid",
+            models = {},
+        })
+        "#,
+    ));
+    app.app.reconcile_committed_lua_runtime().unwrap();
+    app.app.handle_managed_auth_checked(vec![(
+        engine::auth::AuthProvider::Codex,
+        engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
+        Vec::new(),
+    )]);
+    let provider = engine::auth::AuthProvider::Codex;
+    let first = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("first refresh token");
+
+    app.app.handle_managed_models_refresh(
+        first,
+        engine::auth::ManagedModelsRefreshOutcome::Failed(
+            engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
+        ),
+    );
+    assert!(app.app.managed_models.activate_retry(
+        provider,
+        first.auth_revision,
+        first.desired_revision
+    ));
+    let second = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("retry refresh token");
+    app.app.handle_managed_models_refresh(
+        second,
+        engine::auth::ManagedModelsRefreshOutcome::Failed(
+            engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
+        ),
+    );
+
+    assert!(app.app.managed_models.activate_retry(
+        provider,
+        second.auth_revision,
+        second.desired_revision
+    ));
+    let changed_error = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("changed-error refresh token");
+    app.app.handle_managed_models_refresh(
+        changed_error,
+        engine::auth::ManagedModelsRefreshOutcome::Failed(
+            engine::auth::ManagedModelsRefreshFailure::Retryable("different failure".into()),
+        ),
+    );
+
+    assert!(app.app.managed_models.activate_retry(
+        provider,
+        changed_error.auth_revision,
+        changed_error.desired_revision
+    ));
+    let success = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("successful refresh token");
+    app.app.handle_managed_models_refresh(
+        success,
+        engine::auth::ManagedModelsRefreshOutcome::Fresh {
+            models: Vec::new(),
+            cache_warning: None,
+        },
+    );
+    assert!(app.app.managed_models.apply_auth_snapshot(
+        provider,
+        engine::auth::credential_fingerprint(provider),
+        vec![protocol::ModelMetadata {
+            id: "cached-after-success".into(),
+            display_name: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_reasoning: None,
+            supports_fast_mode: None,
+            input_modalities: None,
+        }],
+    ));
+    let after_success = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("post-success refresh token");
+    app.app.handle_managed_models_refresh(
+        after_success,
+        engine::auth::ManagedModelsRefreshOutcome::Failed(
+            engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
+        ),
+    );
+
+    let enabled_config = smelt_core::config::Config {
+        providers: vec![smelt_core::config::ProviderConfig {
+            name: Some("codex".into()),
+            provider_type: Some("codex".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    assert!(app.app.managed_models.sync_desired(
+        &smelt_core::config::Config::default(),
+        after_success.desired_revision + 1,
+    ));
+    assert!(app
+        .app
+        .managed_models
+        .sync_desired(&enabled_config, after_success.desired_revision + 2,));
+    let after_reenable = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("re-enabled refresh token");
+    app.app.handle_managed_models_refresh(
+        after_reenable,
+        engine::auth::ManagedModelsRefreshOutcome::Failed(
+            engine::auth::ManagedModelsRefreshFailure::Retryable("same failure".into()),
+        ),
+    );
+
+    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    let repeated = messages
+        .entries()
+        .iter()
+        .filter(|entry| entry.full == "Codex model refresh: same failure")
+        .count();
+    let changed = messages
+        .entries()
+        .iter()
+        .filter(|entry| entry.full == "Codex model refresh: different failure")
+        .count();
+    assert_eq!(repeated, 3);
+    assert_eq!(changed, 1);
 }
 
 #[test]

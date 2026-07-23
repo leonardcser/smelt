@@ -63,6 +63,24 @@ impl AuthProvider {
 pub type AuthModelInfo = protocol::ModelMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedModelsRefreshFailure {
+    Retryable(String),
+    Terminal(String),
+}
+
+impl ManagedModelsRefreshFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Retryable(message) | Self::Terminal(message) => message,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedModelsRefreshOutcome {
     Fresh {
         models: Vec<AuthModelInfo>,
@@ -70,11 +88,11 @@ pub enum ManagedModelsRefreshOutcome {
     },
     CachedFallback {
         models: Vec<AuthModelInfo>,
-        warning: String,
+        failure: ManagedModelsRefreshFailure,
     },
-    Unauthenticated,
+    Unauthenticated(String),
     CredentialsChanged,
-    Failed(String),
+    Failed(ManagedModelsRefreshFailure),
 }
 
 /// Login method for providers that support multiple flows.
@@ -116,6 +134,12 @@ pub fn logout(provider: AuthProvider) {
         AuthProvider::Codex => provider::codex::delete_tokens(),
         AuthProvider::Copilot => provider::copilot::delete_tokens(),
         AuthProvider::KimiCode => provider::kimi_code::logout(),
+    }
+}
+
+pub fn discard_credentials_if_current(provider: AuthProvider, expected_fingerprint: u64) {
+    if credential_fingerprint(provider) == Some(expected_fingerprint) {
+        logout(provider);
     }
 }
 
@@ -331,7 +355,11 @@ pub async fn refresh_model_info_outcome_for(
                 models,
                 provider::codex::save_models_cache_for,
             ),
-            Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
+            Err(error) => model_refresh_failure(
+                kind,
+                expected_fingerprint,
+                provider::ManagedModelRefreshError::retryable(error),
+            ),
         },
         AuthProvider::Copilot => match provider::copilot::fetch_models_fresh(client).await {
             Ok(models) => finish_model_refresh(
@@ -340,7 +368,11 @@ pub async fn refresh_model_info_outcome_for(
                 models,
                 provider::copilot::save_models_cache_for,
             ),
-            Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
+            Err(error) => model_refresh_failure(
+                kind,
+                expected_fingerprint,
+                provider::ManagedModelRefreshError::retryable(error),
+            ),
         },
         AuthProvider::KimiCode => match provider::kimi_code::fetch_models_fresh(client).await {
             Ok(models) => finish_model_refresh(
@@ -379,7 +411,7 @@ where
 fn model_refresh_failure(
     kind: AuthProvider,
     expected_fingerprint: u64,
-    error: String,
+    error: provider::ManagedModelRefreshError,
 ) -> ManagedModelsRefreshOutcome {
     let Some(account_fingerprint) = model_cache_account_fingerprint(kind) else {
         return ManagedModelsRefreshOutcome::CredentialsChanged;
@@ -387,14 +419,22 @@ fn model_refresh_failure(
     if short_fingerprint(&account_fingerprint) != Some(expected_fingerprint) {
         return ManagedModelsRefreshOutcome::CredentialsChanged;
     }
+    let failure = match error {
+        provider::ManagedModelRefreshError::Retryable(message) => {
+            ManagedModelsRefreshFailure::Retryable(message)
+        }
+        provider::ManagedModelRefreshError::Terminal(message) => {
+            ManagedModelsRefreshFailure::Terminal(message)
+        }
+        provider::ManagedModelRefreshError::Unauthenticated(message) => {
+            return ManagedModelsRefreshOutcome::Unauthenticated(message);
+        }
+    };
     let models = cached_model_info_for(kind, &account_fingerprint);
     if models.is_empty() {
-        ManagedModelsRefreshOutcome::Failed(error)
+        ManagedModelsRefreshOutcome::Failed(failure)
     } else {
-        ManagedModelsRefreshOutcome::CachedFallback {
-            models,
-            warning: error,
-        }
+        ManagedModelsRefreshOutcome::CachedFallback { models, failure }
     }
 }
 

@@ -3,7 +3,7 @@ use crate::paths::{cache_dir, state_dir};
 use std::path::{Path, PathBuf};
 
 use rand::RngExt;
-use smelt_provider::kimi_code::{self as kimi_protocol, KimiHeaders};
+use smelt_provider::kimi_code::{self as kimi_protocol, KimiHeaders, KimiRequestError};
 use smelt_provider::kimi_code::{KimiCodeModelInfo, KimiCodeTokens, ManagedUsageReport};
 
 use smelt_provider::unix_now;
@@ -224,8 +224,9 @@ async fn access_token_with_env(
         return Ok(tokens.access_token);
     }
 
-    let fresh =
-        kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token).await?;
+    let fresh = kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token)
+        .await
+        .map_err(|error| error.to_string())?;
     let token = fresh.access_token.clone();
     save_tokens_to(&fresh, &env.token_store)?;
     Ok(token)
@@ -324,20 +325,52 @@ pub(crate) fn save_models_cache_for(
 
 pub(crate) async fn fetch_models_fresh(
     client: &reqwest::Client,
-) -> Result<Vec<KimiCodeModelInfo>, String> {
+) -> Result<Vec<KimiCodeModelInfo>, super::ManagedModelRefreshError> {
     fetch_models_fresh_with_env(client, &EngineKimiEnv::production()).await
 }
 
 async fn fetch_models_fresh_with_env(
     client: &reqwest::Client,
     env: &EngineKimiEnv,
-) -> Result<Vec<KimiCodeModelInfo>, String> {
-    let token = access_token_with_env(client, env).await?;
-    kimi_protocol::fetch_models_with_token(client, &env.protocol, &token).await
+) -> Result<Vec<KimiCodeModelInfo>, super::ManagedModelRefreshError> {
+    let Some(tokens) = load_tokens_from(&env.token_store) else {
+        return Err(super::ManagedModelRefreshError::unauthenticated(
+            "not logged in to Kimi Code",
+        ));
+    };
+    let token = if tokens.expires_at > (env.protocol.now)().saturating_add(60) {
+        tokens.access_token
+    } else {
+        let fresh =
+            kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token)
+                .await
+                .map_err(managed_refresh_error)?;
+        let token = fresh.access_token.clone();
+        save_tokens_to(&fresh, &env.token_store)
+            .map_err(super::ManagedModelRefreshError::terminal)?;
+        token
+    };
+    kimi_protocol::fetch_models_with_token(client, &env.protocol, &token)
+        .await
+        .map_err(managed_refresh_error)
+}
+
+fn managed_refresh_error(error: KimiRequestError) -> super::ManagedModelRefreshError {
+    match error {
+        KimiRequestError::Retryable(message) => super::ManagedModelRefreshError::retryable(message),
+        KimiRequestError::Terminal(message) => super::ManagedModelRefreshError::terminal(message),
+        KimiRequestError::Unauthenticated(message) => {
+            super::ManagedModelRefreshError::unauthenticated(format!(
+                "{message}; run `smelt auth` to sign in again"
+            ))
+        }
+    }
 }
 
 pub async fn fetch_model_info(client: &reqwest::Client) -> Result<Vec<KimiCodeModelInfo>, String> {
-    let models = fetch_models_fresh(client).await?;
+    let models = fetch_models_fresh(client)
+        .await
+        .map_err(super::ManagedModelRefreshError::into_message)?;
     if let Err(error) = save_models_cache(&models) {
         log::entry(
             log::Level::Warn,
@@ -365,7 +398,7 @@ pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::test_http::spawn_json_response;
+    use crate::provider::test_http::{spawn_http_response, spawn_json_response};
 
     fn fixed_now() -> u64 {
         1_000
@@ -455,6 +488,44 @@ mod tests {
         let saved = std::fs::read_to_string(&env.token_store.file_path).unwrap();
         assert!(saved.contains("fresh-access"), "{saved}");
         assert!(saved.contains("fresh-refresh"), "{saved}");
+    }
+
+    #[tokio::test]
+    async fn invalid_refresh_grant_is_an_unauthenticated_model_refresh_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (host, task) = spawn_http_response(
+            "400 Bad Request",
+            r#"{"error":"invalid_grant","error_description":"refresh token was revoked"}"#,
+        )
+        .await;
+        let env = test_env(
+            host,
+            tmp.path().join("tokens.json"),
+            tmp.path().join("models.json"),
+        );
+        let tokens = KimiCodeTokens {
+            access_token: "expired-access".to_string(),
+            refresh_token: "revoked-refresh".to_string(),
+            expires_at: fixed_now().saturating_sub(1),
+            scope: String::new(),
+            token_type: kimi_protocol::default_bearer(),
+        };
+        save_tokens_to(&tokens, &env.token_store).unwrap();
+
+        let error = fetch_models_fresh_with_env(&reqwest::Client::new(), &env)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::super::ManagedModelRefreshError::Unauthenticated(message)
+                if message.contains("run `smelt auth`")
+        ));
+        let request = task.await.unwrap();
+        assert!(
+            request.contains("refresh_token=revoked-refresh"),
+            "{request}"
+        );
     }
 
     #[test]

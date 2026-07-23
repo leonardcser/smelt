@@ -113,6 +113,13 @@ pub(crate) struct ManagedProviderStatusSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManagedModelRefreshNotification {
+    pub(crate) auth_revision: u64,
+    pub(crate) desired_revision: u64,
+    pub(crate) message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelStatusSnapshot {
     pub(crate) current: Option<String>,
     pub(crate) requested: Option<String>,
@@ -315,6 +322,8 @@ pub struct TuiApp {
     app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     pub(crate) managed_models: smelt_core::ManagedModels,
+    managed_model_refresh_notifications:
+        HashMap<engine::auth::AuthProvider, ManagedModelRefreshNotification>,
     next_managed_auth_check: Instant,
     managed_auth_check_in_flight: bool,
     pub(crate) context_tokens_updated_this_turn: bool,
@@ -1702,6 +1711,7 @@ impl TuiApp {
             app_event_tx,
             app_event_rx,
             managed_models,
+            managed_model_refresh_notifications: HashMap::new(),
             next_managed_auth_check,
             managed_auth_check_in_flight: false,
             context_tokens_updated_this_turn: false,

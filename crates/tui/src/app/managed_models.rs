@@ -84,9 +84,44 @@ impl TuiApp {
             &outcome,
             engine::auth::ManagedModelsRefreshOutcome::CredentialsChanged
         );
+        let refresh_succeeded = matches!(
+            &outcome,
+            engine::auth::ManagedModelsRefreshOutcome::Fresh {
+                cache_warning: None,
+                ..
+            }
+        );
+        let credentials_rejected = matches!(
+            &outcome,
+            engine::auth::ManagedModelsRefreshOutcome::Unauthenticated(_)
+        );
+        let warning = match &outcome {
+            engine::auth::ManagedModelsRefreshOutcome::Fresh {
+                cache_warning: Some(warning),
+                ..
+            }
+            | engine::auth::ManagedModelsRefreshOutcome::Unauthenticated(warning) => {
+                Some(warning.clone())
+            }
+            engine::auth::ManagedModelsRefreshOutcome::CachedFallback { failure, .. }
+            | engine::auth::ManagedModelsRefreshOutcome::Failed(failure) => {
+                Some(failure.message().to_string())
+            }
+            engine::auth::ManagedModelsRefreshOutcome::Fresh {
+                cache_warning: None,
+                ..
+            }
+            | engine::auth::ManagedModelsRefreshOutcome::CredentialsChanged => None,
+        };
         let Some(catalog_changed) = self.managed_models.apply(token, outcome) else {
             return;
         };
+        if credentials_rejected {
+            engine::auth::discard_credentials_if_current(
+                token.provider,
+                token.credential_fingerprint(),
+            );
+        }
         if credentials_changed {
             self.next_managed_auth_check = self.core.clock.instant_now();
         }
@@ -97,21 +132,32 @@ impl TuiApp {
             }
         }
         let state = self.managed_models.provider(token.provider);
-        let warning = matches!(
-            state.status,
-            smelt_core::ManagedModelsStatus::Degraded | smelt_core::ManagedModelsStatus::Failed
-        )
-        .then(|| state.last_error.clone())
-        .flatten();
         let retry = self
             .managed_models
             .retry_delay(token.provider)
             .map(|delay| (delay, state.auth_revision, state.desired_revision));
+        if refresh_succeeded {
+            self.managed_model_refresh_notifications
+                .remove(&token.provider);
+        }
         if let Some(error) = warning {
-            self.notify_warn(format!(
-                "{} model refresh: {error}",
-                managed_provider_label(token.provider)
-            ));
+            let notification = crate::app::ManagedModelRefreshNotification {
+                auth_revision: token.auth_revision,
+                desired_revision: token.desired_revision,
+                message: error.clone(),
+            };
+            if self
+                .managed_model_refresh_notifications
+                .get(&token.provider)
+                != Some(&notification)
+            {
+                self.managed_model_refresh_notifications
+                    .insert(token.provider, notification);
+                self.notify_warn(format!(
+                    "{} model refresh: {error}",
+                    managed_provider_label(token.provider)
+                ));
+            }
         }
         if let Some((delay, auth_revision, desired_revision)) = retry {
             let tx = self.app_event_tx.clone();
