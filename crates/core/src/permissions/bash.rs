@@ -21,6 +21,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_GLOB_ENTRIES: usize = 4096;
+const MAX_BRACE_EXPANSIONS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ShellAnalysis {
@@ -85,6 +86,7 @@ struct ShellWord {
     expanded: Option<String>,
     has_glob: bool,
     embedded_commands: Vec<String>,
+    alternatives: Vec<ShellWord>,
 }
 
 impl ShellWord {
@@ -98,11 +100,17 @@ impl ShellWord {
             Some(value) => Some(value.strip_prefix(prefix)?.to_string()),
             None => None,
         };
+        let alternatives = self
+            .alternatives
+            .iter()
+            .map(|word| word.strip_literal_prefix(prefix))
+            .collect::<Option<Vec<_>>>()?;
         Some(Self {
             raw,
             expanded,
             has_glob: self.has_glob,
             embedded_commands: self.embedded_commands.clone(),
+            alternatives,
         })
     }
 
@@ -116,6 +124,14 @@ impl ShellWord {
             .as_ref()
             .and_then(|expanded| expanded.split_once('=').map(|(_, value)| value.to_string()));
         Some((name.to_string(), value))
+    }
+
+    fn into_expanded_words(self) -> Vec<Self> {
+        if self.alternatives.is_empty() {
+            vec![self]
+        } else {
+            self.alternatives
+        }
     }
 }
 
@@ -139,12 +155,30 @@ struct WordExpansion {
 }
 
 fn shell_word(raw: &str, state: &ShellState) -> ShellWord {
+    let brace_expansion = shell_parse::brace_expansion(raw, MAX_BRACE_EXPANSIONS);
+    let mut word = shell_word_without_brace_expansion(raw, state);
+    match brace_expansion {
+        shell_parse::BraceExpansion::Absent => {}
+        shell_parse::BraceExpansion::Expanded(expanded) => {
+            word.expanded = None;
+            word.alternatives = expanded
+                .into_iter()
+                .map(|expanded| shell_word_without_brace_expansion(&expanded, state))
+                .collect();
+        }
+        shell_parse::BraceExpansion::Unresolved => word.expanded = None,
+    }
+    word
+}
+
+fn shell_word_without_brace_expansion(raw: &str, state: &ShellState) -> ShellWord {
     let Some(pieces) = shell_parse::parse_word(raw) else {
         return ShellWord {
             raw: raw.to_string(),
             expanded: None,
             has_glob: false,
             embedded_commands: Vec::new(),
+            alternatives: Vec::new(),
         };
     };
     let mut expansion = WordExpansion {
@@ -154,10 +188,10 @@ fn shell_word(raw: &str, state: &ShellState) -> ShellWord {
     expand_word_pieces(raw, &pieces, state, false, &mut expansion);
     ShellWord {
         raw: expansion.raw,
-        expanded: (expansion.resolved && !shell_parse::has_brace_expansion(raw))
-            .then_some(expansion.expanded),
+        expanded: expansion.resolved.then_some(expansion.expanded),
         has_glob: expansion.has_glob,
         embedded_commands: expansion.embedded_commands,
+        alternatives: Vec::new(),
     }
 }
 
@@ -402,7 +436,7 @@ fn eval_simple_command(
         if let Some(word) = &command.word_or_name {
             let word = shell_word(&word.value, &state);
             analyze_embedded_commands(&word, &state, analysis, depth);
-            command_words.words.push(word);
+            command_words.words.extend(word.into_expanded_words());
         }
         if let Some(suffix) = &command.suffix {
             for item in &suffix.0 {
@@ -455,15 +489,20 @@ fn analyze_simple_item(
         CommandPrefixOrSuffixItem::Word(word) => {
             let word = shell_word(&word.value, state);
             analyze_embedded_commands(&word, state, analysis, depth);
-            command_words.words.push(word);
+            command_words.words.extend(word.into_expanded_words());
         }
         CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
-            let word = shell_word(&word.value, state);
-            analyze_embedded_commands(&word, state, analysis, depth);
+            let analyzed = shell_word(&word.value, state);
+            analyze_embedded_commands(&analyzed, state, analysis, depth);
             if is_prefix {
-                command_words.assignments.push(word);
+                let assignment = if analyzed.alternatives.is_empty() {
+                    analyzed
+                } else {
+                    shell_word_without_brace_expansion(&word.value, state)
+                };
+                command_words.assignments.push(assignment);
             } else {
-                command_words.words.push(word);
+                command_words.words.extend(analyzed.into_expanded_words());
             }
         }
         CommandPrefixOrSuffixItem::ProcessSubstitution(_, command) => {
@@ -698,6 +737,12 @@ fn analyze_embedded_commands(
     analysis: &mut ShellAnalysis,
     depth: usize,
 ) {
+    if !word.alternatives.is_empty() {
+        for alternative in &word.alternatives {
+            analyze_embedded_commands(alternative, state, analysis, depth);
+        }
+        return;
+    }
     for command in &word.embedded_commands {
         analyze_embedded_command(command, state, analysis, depth);
     }
@@ -899,6 +944,7 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
                 expanded: state.variable("OLDPWD"),
                 has_glob: false,
                 embedded_commands: Vec::new(),
+                alternatives: Vec::new(),
             })
         } else if !options_done && word.raw().starts_with('-') {
             None
@@ -911,6 +957,7 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
         expanded: state.variable("HOME"),
         has_glob: false,
         embedded_commands: Vec::new(),
+        alternatives: Vec::new(),
     });
     let previous_cwd = state.cwd.clone();
     let (effects, target) = directory_operand_effects(&target, &state.cwd, PathAccess::Unknown);
@@ -1049,7 +1096,11 @@ fn command_spec(command: &str) -> CommandSpec {
     use OperandPolicy::*;
 
     match command {
-        "rm" | "rmdir" | "mv" | "chmod" | "chown" => CommandSpec {
+        "rm" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Destructive),
+            operands: Specialized(rm_paths),
+        },
+        "rmdir" | "mv" | "chmod" | "chown" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::Destructive),
             operands: UnknownOperands,
         },
@@ -1750,6 +1801,42 @@ fn find_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
     out
 }
 
+fn rm_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
+    let mut recursive = false;
+    let mut options_done = false;
+    let mut operands = Vec::new();
+    for word in words.iter().skip(1) {
+        let value = word.raw();
+        if !options_done && value == "--" {
+            options_done = true;
+        } else if !options_done && value.starts_with('-') {
+            recursive |= value == "--recursive"
+                || value.strip_prefix('-').is_some_and(|short| {
+                    !short.starts_with('-') && short.chars().any(|ch| matches!(ch, 'r' | 'R'))
+                });
+        } else {
+            operands.push(word);
+        }
+    }
+
+    let target_kind = if recursive {
+        PathTargetKind::Directory
+    } else {
+        PathTargetKind::Unknown
+    };
+    let mut out = Vec::new();
+    for word in operands {
+        push_path(
+            &mut out,
+            word,
+            cwd,
+            PathAccess::Unknown,
+            target_kind.clone(),
+        );
+    }
+    out
+}
+
 fn mkdir_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
     let mut out = Vec::new();
     let mut i = 1;
@@ -2037,6 +2124,12 @@ fn push_path(
     access: PathAccess,
     target_kind: PathTargetKind,
 ) {
+    if !word.alternatives.is_empty() {
+        for alternative in &word.alternatives {
+            push_path(out, alternative, cwd, access.clone(), target_kind.clone());
+        }
+        return;
+    }
     if is_shell_stream_word(word) {
         return;
     }
@@ -2207,6 +2300,13 @@ fn directory_operand_effects(
     cwd: &PathResolution,
     access: PathAccess,
 ) -> (Vec<PathEffect>, Option<PathResolution>) {
+    if !word.alternatives.is_empty() {
+        let mut effects = Vec::new();
+        for alternative in &word.alternatives {
+            effects.extend(directory_operand_effects(alternative, cwd, access.clone()).0);
+        }
+        return (effects, None);
+    }
     if word.has_glob {
         return match glob_path_effects(word, cwd, access.clone(), PathTargetKind::Directory) {
             Some(mut analysis) => {
@@ -2292,6 +2392,7 @@ fn unresolved_path_effect(
             expanded: None,
             has_glob: false,
             embedded_commands: word.embedded_commands.clone(),
+            alternatives: Vec::new(),
         },
         cwd,
         access,

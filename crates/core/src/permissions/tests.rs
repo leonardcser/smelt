@@ -985,6 +985,40 @@ fn shell_strips_quotes_around_paths() {
     );
 }
 
+#[test]
+fn shell_expands_brace_list_paths() {
+    assert_eq!(
+        extract_paths_from_command(concat!(
+            "rm -rf /tmp/smelt-startup-duplicate-repro && ",
+            "mkdir -p /tmp/smelt-startup-duplicate-repro/{config,state,cache,data,home}"
+        )),
+        vec![
+            "/tmp/smelt-startup-duplicate-repro",
+            "/tmp/smelt-startup-duplicate-repro/config",
+            "/tmp/smelt-startup-duplicate-repro/state",
+            "/tmp/smelt-startup-duplicate-repro/cache",
+            "/tmp/smelt-startup-duplicate-repro/data",
+            "/tmp/smelt-startup-duplicate-repro/home",
+        ]
+    );
+}
+
+#[test]
+fn shell_expands_nested_empty_and_quoted_brace_lists() {
+    assert_eq!(
+        extract_paths_from_command("cat /tmp/{a,b}{1,2} /tmp/{,backup} 'quoted/{a,b}'"),
+        vec![
+            "/tmp/a1",
+            "/tmp/a2",
+            "/tmp/b1",
+            "/tmp/b2",
+            "/tmp/",
+            "/tmp/backup",
+            "quoted/{a,b}",
+        ]
+    );
+}
+
 // --- is_in_workspace ---
 
 #[test]
@@ -1391,6 +1425,33 @@ fn workspace_path_shell_uses_pre_command_values_for_prefix_assignments() {
 }
 
 #[test]
+fn workspace_path_shell_respects_brace_assignment_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let prefix_assignment = format!("OUT={{inside,{}}}; cat \"$OUT/secret\"", outside.display());
+    let args = args_with("command", &prefix_assignment);
+    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Allow);
+
+    let export_argument = format!(
+        "export OUT={{inside,{}}}; cat \"$OUT/secret\"",
+        outside.display()
+    );
+    let args = args_with("command", &export_argument);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
+#[test]
 fn workspace_path_shell_tracks_pwd_assignments() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -1624,6 +1685,26 @@ fn workspace_path_checks_embedded_command_paths() {
     );
 }
 
+#[test]
+fn workspace_path_checks_embedded_commands_in_brace_alternatives() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", "echo {a,b}$(cat ../outside/secret.txt)");
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn workspace_path_checks_pipelines_inside_command_substitutions() {
@@ -1669,15 +1750,174 @@ fn workspace_path_unresolved_named_tilde_fails_closed() {
 }
 
 #[test]
-fn workspace_path_brace_expansion_fails_closed() {
+fn workspace_path_brace_expansion_checks_each_alternative() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(workspace.join("src/secret.txt"), "inside").unwrap();
+    std::fs::write(outside.join("secret.txt"), "outside").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", "cat {src,../outside}/secret.txt");
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_unsupported_brace_sequence_fails_closed() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let p = perms_with_workspace(workspace.to_str().unwrap());
 
-    let args = args_with("command", "cat {src,../outside}/secret.txt");
+    let args = args_with("command", "cat /tmp/smelt-part-{01..03}.txt");
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
 
-    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(Path::new("/"))
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_oversized_brace_expansion_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = format!("cat /tmp/file-{}", "{a,b}".repeat(9));
+
+    let args = args_with("command", &command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(Path::new("/"))
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_brace_expanded_rm_option_targets_the_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with(
+        "command",
+        &format!("rm {{-rf,{}}}", outside.to_string_lossy()),
+    );
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_brace_expansion_checks_variable_derived_alternatives() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = format!(
+        "OUTSIDE={}; python {{$OUTSIDE,plain}}",
+        outside.join("secret.py").display()
+    );
+
+    let args = args_with("command", &command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_recursive_rm_targets_the_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    for option in ["-rf", "-R", "--recursive"] {
+        let args = args_with("command", &format!("rm {option} {}", outside.display()));
+        let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+        assert_eq!(
+            outcome.missing_requirements,
+            vec![PermissionRequirement::PathPrefix {
+                dir: resolved_filesystem_path(&outside)
+            }],
+            "option={option}"
+        );
+    }
+}
+
+#[test]
+fn workspace_path_non_recursive_rm_targets_the_file_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    let file = outside.join("secret.txt");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(&file, "secret").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", &format!("rm {}", file.display()));
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_rm_stops_parsing_options_after_double_dash() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    let file = outside.join("-rf");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(&file, "secret").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", &format!("cd {} && rm -- -rf", outside.display()));
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
 }
 
 #[test]
@@ -2379,14 +2619,14 @@ fn yolo_outside_workspace_dialog_offers_dir_not_command_pattern() {
     assert_eq!(
         outcome.missing_requirements,
         vec![PermissionRequirement::PathPrefix {
-            dir: canonical_abs("/tmp")
+            dir: canonical_abs("/tmp/foo")
         }]
     );
     let options = p.approval_options("bash", &["rm *".to_string()], &outcome);
     assert_eq!(
         options.grant_sets,
         vec![vec![PermissionGrant::PathPrefix {
-            dir: canonical_abs("/tmp")
+            dir: canonical_abs("/tmp/foo")
         }]]
     );
 }

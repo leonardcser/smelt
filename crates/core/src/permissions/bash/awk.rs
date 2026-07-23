@@ -327,6 +327,7 @@ impl Analyzer<'_> {
             expanded: Some(value.to_string()),
             has_glob: false,
             embedded_commands: Vec::new(),
+            alternatives: Vec::new(),
         };
         self.push_path(&word, access);
     }

@@ -72,6 +72,43 @@ app_story!(bash_lua_doc_validation_permission_targets_tmp, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_brace_expansion_permission_targets_directory, |ctx| {
+    ctx.set_viewport(120, 30);
+    ctx.restrict_permissions_to_cwd();
+    ctx.approve_tool_for_session("bash");
+    ctx.request_permission(
+        "bash",
+        args([
+            (
+                "command",
+                json!(concat!(
+                    "rm -rf /tmp/smelt-startup-duplicate-repro && ",
+                    "mkdir -p /tmp/smelt-startup-duplicate-repro/{config,state,cache,data,home}"
+                )),
+            ),
+            (
+                "description",
+                json!("Reset startup reproduction directories"),
+            ),
+        ]),
+        vec![],
+    );
+
+    let frame = ctx.frame_text();
+    assert!(
+        frame.contains("allow /tmp/smelt-startup-duplicate-repro for this session"),
+        "expected a reproduction-directory session grant: {frame}"
+    );
+    assert!(
+        !frame.contains("allow /tmp for this session"),
+        "must not offer a broader /tmp session grant: {frame}"
+    );
+    assert!(
+        !frame.contains("allow / for this session"),
+        "must not offer a root session grant: {frame}"
+    );
+});
+
 app_story!(bash_awk_program_is_not_offered_as_path_approval, |ctx| {
     ctx.set_viewport(120, 30);
     ctx.restrict_permissions_to_cwd();

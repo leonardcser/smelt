@@ -23,15 +23,71 @@ pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>>
     word::parse_heredoc(word, &ParserOptions::default()).ok()
 }
 
-pub(super) fn has_brace_expansion(word: &str) -> bool {
-    word::parse_brace_expansions(word, &ParserOptions::default())
-        .ok()
-        .flatten()
-        .is_some_and(|parts| {
-            parts
-                .iter()
-                .any(|part| matches!(part, word::BraceExpressionOrText::Expr(_)))
-        })
+pub(super) enum BraceExpansion {
+    Absent,
+    Expanded(Vec<String>),
+    Unresolved,
+}
+
+pub(super) fn brace_expansion(word: &str, limit: usize) -> BraceExpansion {
+    let parts = match word::parse_brace_expansions(word, &ParserOptions::default()) {
+        Ok(Some(parts)) => parts,
+        Ok(None) => return BraceExpansion::Absent,
+        Err(_) => return BraceExpansion::Unresolved,
+    };
+    if !parts
+        .iter()
+        .any(|part| matches!(part, word::BraceExpressionOrText::Expr(_)))
+    {
+        return BraceExpansion::Absent;
+    }
+    match expand_brace_parts(&parts, limit) {
+        Some(expanded) => BraceExpansion::Expanded(expanded),
+        None => BraceExpansion::Unresolved,
+    }
+}
+
+fn expand_brace_parts(parts: &[word::BraceExpressionOrText], limit: usize) -> Option<Vec<String>> {
+    let mut expanded = vec![String::new()];
+    for part in parts {
+        match part {
+            word::BraceExpressionOrText::Text(text) => {
+                for value in &mut expanded {
+                    value.push_str(text);
+                }
+            }
+            word::BraceExpressionOrText::Expr(expression) => {
+                let mut alternatives = Vec::new();
+                for member in expression {
+                    let word::BraceExpressionMember::Child(child) = member else {
+                        // Sequence expansion carries formatting semantics such as zero padding.
+                        // Leave it unresolved rather than approximate a different path.
+                        return None;
+                    };
+                    alternatives.extend(expand_brace_parts(child, limit)?);
+                    if alternatives.len() > limit {
+                        return None;
+                    }
+                }
+
+                let result_len = expanded.len().checked_mul(alternatives.len())?;
+                if result_len > limit {
+                    return None;
+                }
+                expanded = expanded
+                    .into_iter()
+                    .flat_map(|prefix| {
+                        alternatives.iter().map(move |alternative| {
+                            let mut value = prefix.clone();
+                            value.push_str(alternative);
+                            value
+                        })
+                    })
+                    .collect();
+            }
+        }
+    }
+    Some(expanded)
 }
 
 pub(super) fn embedded_commands(pieces: &[WordPieceWithSource]) -> Vec<&str> {
