@@ -572,11 +572,11 @@ has made a listed stage unnecessary while preserving stronger invariants.
   reach through `TestApp` to `TuiApp`; direct access remains available only to focused
   unit tests beside the owning application modules. Mutating setup and lifecycle work
   stays inside named harness operations.
-- The post-reflection gate passes all 4,780 workspace tests with 2 skipped, including
+- The post-reflection gate passes all 4,807 workspace tests with 2 skipped, including
   the complete storybook binary. The 33 focused MCP tests, engine normalization
   regressions, Lua capability-host tests, and 30 permission storybook scenarios pass.
   Warnings-denied workspace clippy, formatting, and diff whitespace checks pass.
-  Coverage passes the 80% line gate with 84.39% regions, 83.78% functions, and 85.07%
-  lines. Debug and `release-fast` builds pass, all 17 fuzz targets compile, all 83
+  Coverage passes the 80% line gate with 84.54% regions, 83.87% functions, and 85.21%
+  lines. Debug and `release-fast` builds pass, all 17 fuzz targets compile, all 88
   tracked regression seeds replay successfully, and Lua documentation generation
-  remains current at 84 modules, 460 functions, 91 classes, and 13 aliases.
+  remains current at 85 modules, 460 functions, 92 classes, and 13 aliases.

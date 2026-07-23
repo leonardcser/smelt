@@ -1642,7 +1642,11 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn replace_transcript(&mut self, transcript: Transcript) {
+        let session_dir = self.records.session_dir.clone();
         self.replace_loaded_transcript(LoadedTranscript::full(transcript));
+        if let Some(session_dir) = session_dir {
+            self.set_session_dir(session_dir);
+        }
     }
 
     pub(crate) fn replace_loaded_transcript(&mut self, loaded: LoadedTranscript) {
@@ -5510,6 +5514,30 @@ mod document_tests {
         assert_eq!(document.compacted_record_len, 0);
         assert!(document.history_mut().dematerialize_live(first_id, stored) > 0);
         assert_eq!(document.history().persisted_block_count(), records.len());
+        assert!(document.ensure_hydrated_ids(&[first_id]));
+        assert!(
+            matches!(document.history().block(first_id), Some(Block::Text { content }) if content == "block 0")
+        );
+    }
+
+    #[test]
+    fn transcript_replacement_preserves_session_store_for_hydration() {
+        let mut rebuilt = fixed_transcript(3);
+        let records = rebuilt.history.block_records();
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        rebuilt.history.clear_record_dirty();
+        let first_id = rebuilt.history.order[0];
+        let stored = rebuilt
+            .history
+            .stored_ref_for_materialized(first_id, 0)
+            .unwrap();
+        assert!(rebuilt.history.dematerialize_live(first_id, stored) > 0);
+
+        let mut document = TranscriptDocument::new();
+        document.set_session_dir(dir.path().to_path_buf());
+        document.replace_transcript(rebuilt);
+
         assert!(document.ensure_hydrated_ids(&[first_id]));
         assert!(
             matches!(document.history().block(first_id), Some(Block::Text { content }) if content == "block 0")
