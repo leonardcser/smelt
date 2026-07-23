@@ -29,6 +29,9 @@ pub(crate) struct ConversationRuntime {
     document: TuiSessionDocument,
     committed_transcript_view: Option<CommittedTranscriptView>,
     parser: smelt_core::content::stream_parser::StreamParser,
+    /// Earliest canonical suffix whose transcript projection must be rebuilt
+    /// after live stream-parser blocks finish.
+    pending_transcript_history_rebuild_from: Option<usize>,
     draft_tools: ToolDraftController,
     resume_preview_cache: ResumePreviewCache,
     shared_session: Arc<Mutex<Option<SharedSessionState>>>,
@@ -57,6 +60,7 @@ impl ConversationRuntime {
             document: TuiSessionDocument::new(transcript),
             committed_transcript_view: None,
             parser: smelt_core::content::stream_parser::StreamParser::new(),
+            pending_transcript_history_rebuild_from: None,
             draft_tools: ToolDraftController::default(),
             resume_preview_cache,
             shared_session,
@@ -907,6 +911,25 @@ impl ConversationRuntime {
         .applied
     }
 
+    pub(crate) fn pending_transcript_history_rebuild_from(&self) -> Option<usize> {
+        self.pending_transcript_history_rebuild_from
+    }
+
+    pub(crate) fn defer_transcript_history_rebuild_from(&mut self, first_index: usize) {
+        self.pending_transcript_history_rebuild_from = Some(
+            self.pending_transcript_history_rebuild_from
+                .map_or(first_index, |pending| pending.min(first_index)),
+        );
+    }
+
+    pub(crate) fn clear_pending_transcript_history_rebuild(&mut self) {
+        self.pending_transcript_history_rebuild_from = None;
+    }
+
+    pub(crate) fn has_live_transcript_blocks(&self) -> bool {
+        self.parser.has_live_transcript_blocks()
+    }
+
     pub(crate) fn replace_transcript_from_history(
         &mut self,
         transcript: smelt_core::content::transcript::Transcript,
@@ -914,6 +937,7 @@ impl ConversationRuntime {
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::ReplaceFromHistory { transcript },
         );
+        self.clear_pending_transcript_history_rebuild();
     }
 
     pub(crate) fn truncate_transcript(&mut self, block_index: usize) {
@@ -924,6 +948,7 @@ impl ConversationRuntime {
 
     pub(crate) fn clear_transcript(&mut self) {
         self.clear_pending_history_appends();
+        self.clear_pending_transcript_history_rebuild();
         self.apply_transcript_mutation(super::session_document::TranscriptMutation::Clear);
         self.parser.clear();
     }

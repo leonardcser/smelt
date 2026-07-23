@@ -104,6 +104,14 @@ impl StreamParser {
         self.tool_drafts.clear();
     }
 
+    pub fn has_live_transcript_blocks(&self) -> bool {
+        self.active_thinking.is_active()
+            || self.active_text.is_active()
+            || self.stream_exec_id.is_some()
+            || !self.active_tools.is_empty()
+            || !self.tool_drafts.is_empty()
+    }
+
     pub fn has_active_exec(&self) -> bool {
         self.stream_exec_id.is_some()
     }

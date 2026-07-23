@@ -861,6 +861,55 @@ fn request_permission_auto_denies_when_applied_turn_mode_denies() {
 }
 
 #[test]
+fn canonical_history_rebuild_waits_for_pending_permission_tool() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_submitted_turn("prompt");
+    let turn_id = app.current_turn_id().expect("submitted turn is active");
+
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            request_id: 12,
+            call_id: "call-12".into(),
+            tool_name: "test_tool".into(),
+            args: std::collections::HashMap::new(),
+            approval_patterns: Vec::new(),
+            summary: protocol::StyledLines::from_plain("test tool"),
+        },
+    ));
+    assert_eq!(app.pending_tool_call_ids(), vec!["call-12"]);
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::HistoryUpdated {
+        turn_id,
+        update: protocol::CanonicalHistoryDelta::new(0, Vec::new()),
+    }));
+
+    assert_eq!(
+        app.app
+            .conversation
+            .pending_transcript_history_rebuild_from(),
+        Some(0)
+    );
+    app.assert_invariants();
+
+    app.resolve_first_confirm(false, Some("skip".into()));
+    assert!(app.pending_tool_call_ids().is_empty());
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::HistoryUpdated {
+        turn_id,
+        update: protocol::CanonicalHistoryDelta::new(0, Vec::new()),
+    }));
+
+    assert_eq!(
+        app.app
+            .conversation
+            .pending_transcript_history_rebuild_from(),
+        None
+    );
+    assert_eq!(app.transcript_block_count(), 0);
+    app.assert_invariants();
+}
+
+#[test]
 fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);

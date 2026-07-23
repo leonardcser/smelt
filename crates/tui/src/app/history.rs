@@ -793,19 +793,43 @@ impl TuiApp {
             }
         }
         debug_assert_eq!(self.session_history_len(), final_len);
-        if history_changed
-            && !record_links_match_history_suffix(
-                self.conversation.transcript().history(),
-                dirty_from,
-                &history[common_len..],
-            )
-        {
-            let mut session = self.conversation.session().clone();
-            session.history = self.session_history_range(0..final_len);
-            if session.history.len() == final_len {
-                let transcript = build_transcript_from_session(&self.lua, &session);
+
+        let rebuild_from = match (
+            self.conversation.pending_transcript_history_rebuild_from(),
+            history_changed,
+        ) {
+            (Some(pending), true) => Some(pending.min(dirty_from)),
+            (Some(pending), false) => Some(pending),
+            (None, true) => Some(dirty_from),
+            (None, false) => None,
+        };
+        if let Some(rebuild_from) = rebuild_from {
+            let loaded_history;
+            let history_suffix = if history_changed && rebuild_from == dirty_from {
+                &history[common_len..]
+            } else {
+                loaded_history = self.session_history_range(rebuild_from..final_len);
+                loaded_history.as_slice()
+            };
+            let links_match = history_suffix.len() == final_len.saturating_sub(rebuild_from)
+                && record_links_match_history_suffix(
+                    self.conversation.transcript().history(),
+                    rebuild_from,
+                    history_suffix,
+                );
+            if links_match {
+                self.conversation.clear_pending_transcript_history_rebuild();
+            } else if self.conversation.has_live_transcript_blocks() {
                 self.conversation
-                    .replace_transcript_from_history(transcript);
+                    .defer_transcript_history_rebuild_from(rebuild_from);
+            } else {
+                let mut session = self.conversation.session().clone();
+                session.history = self.session_history_range(0..final_len);
+                if session.history.len() == final_len {
+                    let transcript = build_transcript_from_session(&self.lua, &session);
+                    self.conversation
+                        .replace_transcript_from_history(transcript);
+                }
             }
         }
         for item in applied_items {

@@ -1,0 +1,34 @@
+{
+  "_about": "Regression for a smelt_loop crash where an authoritative history update rebuilt the transcript while a permission dialog was pending, deleting the live tool state still referenced by the active turn.",
+  "_fix": "Defer canonical transcript reconstruction while the stream parser owns live transcript blocks, then revalidate the full canonical suffix once reconstruction is safe.",
+  "vim": true,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "engine_request_permission",
+      "data": {
+        "req_id": 103,
+        "call_id": 39,
+        "tool_name": "",
+        "summary": "",
+        "args": {
+          "O```(\u00005*smelt": "",
+          "``(\u00005*smelt": "",
+          "": ""
+        }
+      }
+    },
+    {
+      "kind": "engine_messages",
+      "data": {
+        "msg_count": 0
+      }
+    }
+  ]
+}
