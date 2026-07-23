@@ -4794,7 +4794,10 @@ mod tests {
         .unwrap();
 
         let paths = LuaLoadPaths {
+            home: tmp.path().join("home"),
             config_dir,
+            state_root: tmp.path().join("state"),
+            cache_root: tmp.path().join("cache"),
             runtime_override: None,
             development_runtime: None,
             project_cwd: None,
