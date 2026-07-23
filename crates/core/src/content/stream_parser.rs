@@ -482,6 +482,12 @@ mod tests {
         (StreamParser::new(), BlockHistory::new())
     }
 
+    fn block_at(history: &BlockHistory, index: usize) -> &Block {
+        history
+            .materialized_block_at(index)
+            .expect("materialized test block")
+    }
+
     // -- Text streaming -----------------------------------------------
 
     #[test]
@@ -491,7 +497,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "hello world".into(),
             }
@@ -508,7 +514,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "hello world".into(),
             }
@@ -533,7 +539,7 @@ mod tests {
         parser.flush_streaming_thinking(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
@@ -552,7 +558,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 2);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
@@ -561,7 +567,7 @@ mod tests {
             }
         );
         assert_eq!(
-            history.block_at(1),
+            block_at(&history, 1),
             &Block::Text {
                 content: "text".into()
             }
@@ -578,7 +584,7 @@ mod tests {
 
         assert_eq!(history.len(), 2);
         assert_eq!(
-            history.block_at(1),
+            block_at(&history, 1),
             &Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
@@ -596,7 +602,7 @@ mod tests {
         parser.append_streaming_thinking(&mut history, "`rust\nfn main() {}");
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
@@ -621,7 +627,7 @@ mod tests {
         assert_eq!(history.len(), 0);
         parser.append_streaming_thinking(&mut history, "\n");
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
@@ -640,7 +646,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```rust\nfn main() {}\n```".into(),
             }
@@ -657,7 +663,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```rust\nfn main() {}\n```".into(),
             }
@@ -671,7 +677,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```py\nprint(1)\nprint(2)\n```".into(),
             }
@@ -688,7 +694,7 @@ mod tests {
 
         parser.append_streaming_text(&mut history, "\nfn main() {}");
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```rust\nfn main() {}".into(),
             }
@@ -700,7 +706,7 @@ mod tests {
         let (mut parser, mut history) = setup();
         parser.append_streaming_text(&mut history, "```rust\nfn main() {}\n");
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```rust\nfn main() {}".into(),
             }
@@ -709,7 +715,7 @@ mod tests {
         for chunk in ["`", "`", "`", "   "] {
             parser.append_streaming_text(&mut history, chunk);
             assert_eq!(
-                history.block_at(0),
+                block_at(&history, 0),
                 &Block::Text {
                     content: "```rust\nfn main() {}".into(),
                 }
@@ -718,7 +724,7 @@ mod tests {
 
         parser.append_streaming_text(&mut history, "\nafter");
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```rust\nfn main() {}\n```   \nafter".into(),
             }
@@ -735,7 +741,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "````markdown\n```rust\nfn main() {}\n```\n````".into(),
             }
@@ -749,7 +755,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "````markdown\n`````text\ninside\n`````\n````".into(),
             }
@@ -763,7 +769,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "````\n```` text\ninside\n````".into(),
             }
@@ -777,7 +783,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "````\ninside\n`````\nafter".into(),
             }
@@ -794,7 +800,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "````\n```\n```\n````\n````\n```\nnested code block\n```\n````".into(),
             }
@@ -810,7 +816,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
             }
@@ -833,7 +839,7 @@ mod tests {
         assert_eq!(history.len(), 0);
         parser.append_streaming_text(&mut history, "\n");
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
             }
@@ -854,12 +860,12 @@ mod tests {
         );
         assert_eq!(history.len(), 2);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "before tool".into(),
             }
         );
-        assert!(matches!(history.block_at(1), Block::ToolCall { .. }));
+        assert!(matches!(block_at(&history, 1), Block::ToolCall { .. }));
         assert_eq!(history.status(history.order[0]), Status::Streaming);
     }
 
@@ -971,7 +977,7 @@ mod tests {
         assert_eq!(history.status(exec_id), Status::Streaming);
         parser.append_exec_output(&mut history, "file.txt");
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Exec {
                 command: "ls".into(),
                 output: "file.txt".into(),
@@ -990,7 +996,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "partial".into()
             }
@@ -1005,7 +1011,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "```rust\npartial".into(),
             }
@@ -1024,7 +1030,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "line1\nline2".into(),
             }
@@ -1040,7 +1046,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "| a | b |\n|-----|\n| 1 | 2 |".into(),
             }
@@ -1056,13 +1062,13 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 2);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: "first paragraph".into(),
             }
         );
         assert_eq!(
-            history.block_at(1),
+            block_at(&history, 1),
             &Block::Text {
                 content: "second paragraph".into(),
             }
@@ -1081,7 +1087,7 @@ mod tests {
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(0),
+            block_at(&history, 0),
             &Block::Text {
                 content: full.into()
             }
@@ -1118,7 +1124,7 @@ mod tests {
 
         assert_eq!(history.len(), 1);
         assert_eq!(history.order[0], id);
-        match history.block_at(0) {
+        match block_at(&history, 0) {
             Block::ToolDraft {
                 stream_id,
                 call_id,
@@ -1159,7 +1165,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history.order[0], id);
         assert!(matches!(
-            history.block_at(0),
+            block_at(&history, 0),
             Block::ToolCall { call_id, name, .. } if call_id == "call-1" && name == "bash"
         ));
         assert_eq!(history.status(id), Status::Streaming);

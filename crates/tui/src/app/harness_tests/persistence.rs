@@ -256,6 +256,59 @@ fn descriptor_only_save_advances_canonical_revision_once() {
 }
 
 #[test]
+fn reasoning_summary_event_merges_durably_compacted_tail() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    app.start_turn(42);
+    app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartFinished {
+        id: "summary-1".into(),
+        kind: protocol::ReasoningKind::Summary,
+        title: Some("Inspecting the report".into()),
+        content: String::new(),
+    }));
+    app.app.save_session_and_flush();
+
+    while app.app.session_document.transcript.drain_compaction_slice() {}
+    let original_id = app.app.session_document.transcript.history().order[0];
+    assert!(!app
+        .app
+        .session_document
+        .transcript
+        .history()
+        .is_materialized(original_id));
+    app.app.session_document.transcript.set_memory_budget(
+        crate::app::transcript::TranscriptMemoryBudget {
+            hydrated_blocks: 1,
+            ..Default::default()
+        },
+    );
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartFinished {
+        id: "summary-2".into(),
+        kind: protocol::ReasoningKind::Summary,
+        title: Some("Planning the fix".into()),
+        content: "The stored tail remains mergeable.".into(),
+    }));
+
+    let history = app.app.session_document.transcript.history();
+    assert_eq!(history.len(), 1);
+    let id = history.last_block_id().expect("merged summary block id");
+    let block = history.block(id).expect("materialized merged summary");
+    assert_eq!(id, original_id);
+    assert!(matches!(
+        block,
+        Block::Thinking {
+            title: Some(title),
+            summary_titles,
+            content,
+            kind: protocol::ReasoningKind::Summary,
+        } if title == "Planning the fix"
+            && summary_titles == &["Inspecting the report", "Planning the fix"]
+            && content == "The stored tail remains mergeable."
+    ));
+}
+
+#[test]
 fn descriptor_resave_preserves_semantic_history_links() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);

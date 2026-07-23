@@ -168,22 +168,11 @@ impl TuiApp {
         }
 
         self.flush_streaming_thinking();
-        let previous = self
+        let Some(previous) = self
             .session_document
             .transcript
-            .history()
-            .last_block()
-            .and_then(|(id, block)| match block {
-                Block::Thinking {
-                    title,
-                    summary_titles,
-                    content,
-                    kind: protocol::ReasoningKind::Summary,
-                } => Some((id, title.clone(), summary_titles.clone(), content.clone())),
-                _ => None,
-            });
-
-        let Some((id, previous_title, mut summary_titles, previous_content)) = previous else {
+            .promote_last_reasoning_summary()
+        else {
             self.push_block(Block::Thinking {
                 summary_titles: title.iter().cloned().collect(),
                 title,
@@ -192,6 +181,10 @@ impl TuiApp {
             });
             return;
         };
+        let id = previous.id;
+        let previous_title = previous.title;
+        let mut summary_titles = previous.summary_titles;
+        let previous_content = previous.content;
 
         if let Some(title) = title.as_ref() {
             if summary_titles.last() != Some(title) {

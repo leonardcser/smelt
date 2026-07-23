@@ -580,14 +580,20 @@ mod tests {
     }
 
     fn text_at(history: &BlockHistory, index: usize) -> &str {
-        match history.block_at(index) {
+        match history
+            .materialized_block_at(index)
+            .expect("materialized test block")
+        {
             Block::Text { content } => content,
             block => panic!("expected text block, got {block:?}"),
         }
     }
 
     fn thinking_at(history: &BlockHistory, index: usize) -> &str {
-        match history.block_at(index) {
+        match history
+            .materialized_block_at(index)
+            .expect("materialized test block")
+        {
             Block::Thinking { content, .. } => content,
             block => panic!("expected thinking block, got {block:?}"),
         }

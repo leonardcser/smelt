@@ -1153,6 +1153,13 @@ impl TranscriptExtentIndex {
     }
 }
 
+pub(crate) struct ReasoningSummarySnapshot {
+    pub(crate) id: BlockId,
+    pub(crate) title: Option<String>,
+    pub(crate) summary_titles: Vec<String>,
+    pub(crate) content: String,
+}
+
 pub(crate) struct TranscriptDocument {
     content: TranscriptContentState,
     descriptors: TranscriptDescriptorState,
@@ -1858,6 +1865,36 @@ impl TranscriptDocument {
         }
         self.hydration.unpin_operation(ids);
         self.enforce_hydrated_budget();
+    }
+
+    pub(crate) fn promote_last_reasoning_summary(&mut self) -> Option<ReasoningSummarySnapshot> {
+        let id = self.history().last_block_id()?;
+        if self.history().block_kind(id) != Some("thinking") {
+            return None;
+        }
+        if !self.pin_operation_blocks(&[id]) {
+            return None;
+        }
+        let summary = match self.history().block(id) {
+            Some(Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind: protocol::ReasoningKind::Summary,
+            }) => Some(ReasoningSummarySnapshot {
+                id,
+                title: title.clone(),
+                summary_titles: summary_titles.clone(),
+                content: content.clone(),
+            }),
+            _ => None,
+        };
+        if summary.is_some() {
+            let promoted = self.content.transcript.history.promote_hydrated(id);
+            debug_assert!(promoted, "materialized reasoning summary can be promoted");
+        }
+        self.unpin_operation_blocks(&[id]);
+        summary
     }
 
     pub(crate) fn pin_descriptor_suffix_for_save(&mut self) -> Result<Vec<BlockId>, String> {

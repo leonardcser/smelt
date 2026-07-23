@@ -284,6 +284,12 @@ mod tests {
         }
     }
 
+    fn block_at(history: &BlockHistory, index: usize) -> &Block {
+        history
+            .materialized_block_at(index)
+            .expect("materialized test block")
+    }
+
     #[test]
     fn new_creates_empty_transcript() {
         let t = Transcript::new();
@@ -311,7 +317,7 @@ mod tests {
         t.push(Block::Text {
             content: "  hello  ".into(),
         });
-        match t.history.block_at(0) {
+        match block_at(&t.history, 0) {
             Block::Text { content } => assert_eq!(content, "hello"),
             _ => panic!("expected Text"),
         }
@@ -348,7 +354,7 @@ mod tests {
             content: String::new(),
         });
         assert_eq!(
-            t.history.block_at(0),
+            block_at(&t.history, 0),
             &Block::Thinking {
                 title: Some("Checking files".into()),
                 summary_titles: vec!["Checking files".into()],
@@ -374,7 +380,7 @@ mod tests {
             image_labels: vec![],
             command: false,
         });
-        match t.history.block_at(0) {
+        match block_at(&t.history, 0) {
             Block::User { text, .. } => assert_eq!(text, "  question  "),
             _ => panic!("expected User"),
         }

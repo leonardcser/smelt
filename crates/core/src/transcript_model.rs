@@ -2592,14 +2592,26 @@ impl BlockHistory {
         self.hydrated_ids.len()
     }
 
-    pub fn block_at(&self, i: usize) -> &Block {
-        self.block(self.order[i])
-            .expect("block id in transcript order")
+    pub fn block_id_at(&self, i: usize) -> Option<BlockId> {
+        let id = self.order.get(i).copied()?;
+        assert!(
+            self.entries.contains_key(&id),
+            "block id in transcript order"
+        );
+        Some(id)
     }
 
-    pub fn last_block(&self) -> Option<(BlockId, &Block)> {
-        let id = *self.order.last()?;
-        Some((id, self.block(id).expect("block id in transcript order")))
+    pub fn materialized_block_at(&self, i: usize) -> Option<&Block> {
+        self.block(self.block_id_at(i)?)
+    }
+
+    pub fn last_block_id(&self) -> Option<BlockId> {
+        let id = self.order.last().copied()?;
+        assert!(
+            self.entries.contains_key(&id),
+            "block id in transcript order"
+        );
+        Some(id)
     }
 
     pub fn has_history_origin_at_or_after(&self, before_history_index: usize) -> bool {
@@ -3477,6 +3489,17 @@ mod tests {
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(0)));
         assert_ne!(history.content_hash(id), 0);
         assert!(history.block(id).is_none());
+        assert_eq!(history.last_block_id(), Some(id));
+        assert!(history.materialized_block_at(0).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "block id in transcript order")]
+    fn materialized_block_at_rejects_dangling_order_id() {
+        let mut history = BlockHistory::new();
+        history.order.push(BlockId::new(42));
+
+        let _ = history.materialized_block_at(0);
     }
 
     #[test]

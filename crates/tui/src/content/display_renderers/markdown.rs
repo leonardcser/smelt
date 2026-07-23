@@ -1329,8 +1329,8 @@ mod tests {
         fn rendered_rows(history: &smelt_core::transcript_model::BlockHistory) -> Vec<String> {
             let mut rows = Vec::new();
             for index in 0..history.len() {
-                if let smelt_core::transcript_model::Block::Text { content } =
-                    history.block_at(index)
+                if let Some(smelt_core::transcript_model::Block::Text { content }) =
+                    history.materialized_block_at(index)
                 {
                     let block = render_test(80, |sink| {
                         render_markdown_inner(sink, content, 80, "", false, None);
