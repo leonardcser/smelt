@@ -297,6 +297,34 @@ fn descriptor_records_cover_history<'a>(
     })
 }
 
+fn descriptor_links_match_history_suffix(
+    history: &BlockHistory,
+    first_index: usize,
+    items: &[HistoryItem],
+) -> bool {
+    let Some(block_index) = history.first_block_index_for_history_origin_at_or_after(first_index)
+    else {
+        return true;
+    };
+    history
+        .descriptor_records_from(block_index)
+        .into_iter()
+        .all(|record| {
+            let Some(smelt_core::BlockOrigin::History(history_index)) = record.origin else {
+                return true;
+            };
+            if history_index < first_index {
+                return true;
+            }
+            items.get(history_index - first_index).is_some_and(|item| {
+                protocol::transcript_descriptor_kind_matches_history_item(
+                    record.descriptor.kind(),
+                    item,
+                )
+            })
+        })
+}
+
 fn fallback_transcript_index_for_history_index(
     history: &[HistoryItem],
     history_index: usize,
@@ -559,6 +587,36 @@ mod tests {
     }
 
     #[test]
+    fn transcript_links_require_matching_history_projection() {
+        let mut transcript = Transcript::new();
+        transcript.push_with_origin(
+            Block::User {
+                text: "submitted command".into(),
+                image_labels: vec![],
+                command: true,
+            },
+            smelt_core::BlockOrigin::History(0),
+        );
+        let user = vec![HistoryItem::user(Content::text("submitted command"))];
+        assert!(descriptor_links_match_history_suffix(
+            &transcript.history,
+            0,
+            &user
+        ));
+
+        let assistant = vec![HistoryItem::Assistant(protocol::AssistantStep::terminal(
+            Some(Content::text("replacement")),
+            None,
+            Vec::new(),
+        ))];
+        assert!(!descriptor_links_match_history_suffix(
+            &transcript.history,
+            0,
+            &assistant
+        ));
+    }
+
+    #[test]
     fn transcript_coverage_ignores_unrendered_context_notes() {
         let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session
@@ -718,13 +776,32 @@ impl TuiApp {
             .count();
         let dirty_from = first_index.saturating_add(common_len);
         let final_len = first_index.saturating_add(history.len());
-        if dirty_from < current_len || common_len < history.len() {
+        let history_changed = dirty_from < current_len || common_len < history.len();
+        if history_changed {
             self.session_truncate_from(dirty_from);
             for item in history.iter().skip(common_len).cloned() {
                 self.session_append_history(item);
             }
         }
         debug_assert_eq!(self.session_history_len(), final_len);
+        if history_changed
+            && !descriptor_links_match_history_suffix(
+                self.session_document.transcript.history(),
+                dirty_from,
+                &history[common_len..],
+            )
+        {
+            let mut session = self.core.session.clone();
+            session.history = self.session_history_range(0..final_len);
+            if session.history.len() == final_len {
+                let transcript = build_transcript_from_session(&self.lua, &session);
+                self.apply_session_document_mutation(
+                    crate::app::session_document::SessionMutation::ReplaceTranscriptFromHistory {
+                        transcript,
+                    },
+                );
+            }
+        }
         for item in applied_items {
             self.commit_pending_history_append(&item);
         }
