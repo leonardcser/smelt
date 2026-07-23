@@ -17,6 +17,16 @@ enum GlobalLuaKeymapRoute {
     Skip,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatefulViewerKeyDispatch {
+    NotApplicable,
+    Consumed,
+    Passthrough {
+        vim_dispatched_for: crate::smelt_edit::WinId,
+        global_keymap_checked: bool,
+    },
+}
+
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
 
@@ -1192,9 +1202,8 @@ impl TuiApp {
     /// focused. Tiers fire in order; the first to return `Consumed` wins:
     ///
     /// - Tier 1: specific keymap on the focused leaf (`win_set_keymap`).
-    /// - Tier 1b: vim-owned bare Esc on the focused overlay viewer.
-    /// - Tier 1c: overlay-scoped keymap (`overlay_set_keymap`) on the overlay
-    ///   containing the focused leaf.
+    /// - Tier 1b: stateful Vim input on the focused transient viewer.
+    /// - Tier 1c: modal- or overlay-scoped keymap on the focused container.
     /// - Tier 2: global Lua keymap (`smelt.keymap.set("", chord, fn)`).
     /// - Tier 3: vim viewer keys on the focused leaf.
     /// - Tier 4: per-window catch-all fallback (`win_set_key_fallback`).
@@ -1225,12 +1234,18 @@ impl TuiApp {
             }
         }
 
-        // Tier 1b: bare Esc that belongs to Vim (Visual mode or a pending
-        // Normal-mode sequence) must beat modal-level <Esc> keymaps, which
-        // may otherwise close the transient surface from idle Normal mode.
-        if self.transient_viewer_vim_owns_escape(k) && self.dispatch_transient_viewer_key(k) {
-            return Status::Consumed;
-        }
+        // Tier 1b: explicit Visual mappings can override viewer defaults;
+        // otherwise Visual/VisualLine mode and pending Normal-mode sequences
+        // belong to Vim before container shortcuts.
+        let stateful_dispatch = self.dispatch_stateful_transient_viewer_key(k);
+        let (vim_dispatched_for, global_keymap_checked) = match stateful_dispatch {
+            StatefulViewerKeyDispatch::Consumed => return Status::Consumed,
+            StatefulViewerKeyDispatch::Passthrough {
+                vim_dispatched_for,
+                global_keymap_checked,
+            } => (Some(vim_dispatched_for), global_keymap_checked),
+            StatefulViewerKeyDispatch::NotApplicable => (None, false),
+        };
 
         // Tier 1c: modal- and overlay-scoped keymaps shared by every leaf in
         // their container.
@@ -1256,15 +1271,22 @@ impl TuiApp {
         }
 
         // Tier 2: global Lua keymap (single-chord lookup only - overlays
-        // don't participate in the chord-buffering path).
-        if self.dispatch_single_global_lua_keymap(k) {
+        // don't participate in the chord-buffering path). Visual mode checked
+        // this tier before Vim so explicit remaps can override viewer defaults.
+        if !global_keymap_checked && self.dispatch_single_global_lua_keymap(k) {
             return Status::Consumed;
         }
 
-        // Tier 3: vim viewer keys for vim-enabled read-only transient leaves.
-        // Run before per-window catch-alls so generic dialog/list fallbacks do
-        // not swallow Normal/Visual-mode motions and yanks.
-        if self.dispatch_transient_viewer_key(k) {
+        // Tier 3: viewer fallbacks for the focused transient leaf. A key that
+        // already passed through stateful Vim skips the Vim engine here so each
+        // terminal key is evaluated by Vim at most once.
+        let viewer_consumed = if vim_dispatched_for.is_some_and(|win| self.ui.focus() == Some(win))
+        {
+            self.dispatch_transient_viewer_fallback_key(k)
+        } else {
+            self.dispatch_transient_viewer_key(k)
+        };
+        if viewer_consumed {
             return Status::Consumed;
         }
 
@@ -1307,25 +1329,41 @@ impl TuiApp {
         self.ui.dispatch_paste_fallback(content, &mut lua_invoke)
     }
 
-    fn transient_viewer_vim_owns_escape(&self, k: KeyEvent) -> bool {
-        if k.code != KeyCode::Esc || k.modifiers != KeyModifiers::NONE {
-            return false;
-        }
+    fn dispatch_stateful_transient_viewer_key(&mut self, k: KeyEvent) -> StatefulViewerKeyDispatch {
         let Some(win_id) = self.ui.focus() else {
-            return false;
+            return StatefulViewerKeyDispatch::NotApplicable;
         };
         if self.ui.overlay_for_leaf(win_id).is_none() && self.ui.focused_modal().is_none() {
-            return false;
+            return StatefulViewerKeyDispatch::NotApplicable;
         }
         let Some(win) = self.ui.win(win_id) else {
-            return false;
+            return StatefulViewerKeyDispatch::NotApplicable;
         };
-        win.vim_enabled()
-            && win.surface().is_readonly_text()
-            && (matches!(
-                win.vim_mode(),
-                crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine
-            ) || !win.vim_state().is_idle())
+        if !win.vim_enabled() || !win.surface().is_readonly_text() {
+            return StatefulViewerKeyDispatch::NotApplicable;
+        }
+        let visual = match win.vim_mode() {
+            crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine => true,
+            crate::smelt_edit::VimMode::Normal if !win.vim_state().is_idle() => false,
+            crate::smelt_edit::VimMode::Normal | crate::smelt_edit::VimMode::Insert => {
+                return StatefulViewerKeyDispatch::NotApplicable;
+            }
+        };
+
+        if visual && self.dispatch_single_global_lua_keymap(k) {
+            return StatefulViewerKeyDispatch::Consumed;
+        }
+        if matches!(
+            self.dispatch_viewer_vim_key(win_id, k),
+            crate::smelt_edit::Status::Consumed
+        ) {
+            StatefulViewerKeyDispatch::Consumed
+        } else {
+            StatefulViewerKeyDispatch::Passthrough {
+                vim_dispatched_for: win_id,
+                global_keymap_checked: visual,
+            }
+        }
     }
 
     /// Transient-focus key cascade tier 3. Wraps the shared
@@ -1362,6 +1400,85 @@ impl TuiApp {
         )
     }
 
+    fn dispatch_transient_viewer_fallback_key(&mut self, k: KeyEvent) -> bool {
+        let Some(win) = self.ui.focus() else {
+            return false;
+        };
+        matches!(
+            self.dispatch_window_viewer_fallback_key(win, k),
+            crate::smelt_edit::Status::Consumed
+        )
+    }
+
+    fn viewer_key_context(
+        &self,
+        win_id: crate::smelt_edit::WinId,
+    ) -> Option<(crate::smelt_edit::BufId, u16, bool)> {
+        let win = self.ui.win(win_id)?;
+        let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0);
+        if viewport_rows == 0 {
+            return None;
+        }
+        let buf_id = win.buf;
+        if self.ui.buf(buf_id)?.lines().is_empty() {
+            return None;
+        }
+        Some((
+            buf_id,
+            viewport_rows,
+            win.vim_enabled() && win.surface().is_readonly_text(),
+        ))
+    }
+
+    fn dispatch_viewer_vim_key(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        k: KeyEvent,
+    ) -> crate::smelt_edit::Status {
+        use crate::smelt_edit::Status;
+        let Some((buf_id, viewport_rows, uses_vim)) = self.viewer_key_context(win_id) else {
+            return Status::Ignored;
+        };
+        if !uses_vim {
+            return Status::Ignored;
+        }
+
+        match self
+            .ui
+            .win_mut(win_id)
+            .expect("viewer window")
+            .handle_viewer_key(k)
+        {
+            crate::smelt_edit::DocumentKeyResult::Command(command) => {
+                self.execute_viewer_command(win_id, buf_id, command, viewport_rows)
+            }
+            crate::smelt_edit::DocumentKeyResult::Consumed => Status::Consumed,
+            crate::smelt_edit::DocumentKeyResult::Passthrough => Status::Ignored,
+        }
+    }
+
+    fn dispatch_viewer_buffer_key(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        k: KeyEvent,
+    ) -> crate::smelt_edit::Status {
+        let Some((buf_id, viewport_rows, _)) = self.viewer_key_context(win_id) else {
+            return crate::smelt_edit::Status::Ignored;
+        };
+        self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
+    }
+
+    fn dispatch_window_viewer_fallback_key(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        k: KeyEvent,
+    ) -> crate::smelt_edit::Status {
+        if self.handle_search_key_for_target(win_id, k) {
+            return crate::smelt_edit::Status::Consumed;
+        }
+        self.dispatch_viewer_buffer_key(win_id, k)
+    }
+
     /// Unified viewer-key dispatcher shared between transcript, overlay leaves,
     /// and any future scrollable read-only window. Resolution order:
     ///   1. Viewer Vim engine for `readonly_text` surfaces - handles motions,
@@ -1386,42 +1503,10 @@ impl TuiApp {
         if self.handle_search_key_for_target(win_id, k) {
             return Status::Consumed;
         }
-        let (vim_enabled, readonly_text, buf_id, viewport_rows) = match self.ui.win(win_id) {
-            Some(w) => (
-                w.vim_enabled(),
-                w.surface().is_readonly_text(),
-                w.buf,
-                w.viewport.map(|v| v.rect.height).unwrap_or(0),
-            ),
-            None => return Status::Ignored,
-        };
-        if viewport_rows == 0 {
-            return Status::Ignored;
+        if matches!(self.dispatch_viewer_vim_key(win_id, k), Status::Consumed) {
+            return Status::Consumed;
         }
-        let buf_empty = self
-            .ui
-            .buf(buf_id)
-            .map(|b| b.lines().is_empty())
-            .unwrap_or(true);
-        if buf_empty {
-            return Status::Ignored;
-        }
-
-        if vim_enabled && readonly_text {
-            let result = {
-                let win = self.ui.win_mut(win_id).expect("window");
-                win.handle_viewer_key(k)
-            };
-            match result {
-                crate::smelt_edit::DocumentKeyResult::Command(command) => {
-                    return self.execute_viewer_command(win_id, buf_id, command, viewport_rows);
-                }
-                crate::smelt_edit::DocumentKeyResult::Consumed => return Status::Consumed,
-                crate::smelt_edit::DocumentKeyResult::Passthrough => {}
-            }
-        }
-
-        self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
+        self.dispatch_viewer_buffer_key(win_id, k)
     }
 
     fn execute_viewer_command(

@@ -420,6 +420,167 @@ fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
 }
 
 #[test]
+fn vim_session_dialog_visual_yank_beats_copy_all_keymap() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(r#"smelt.cmd.run("session")"#));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("session dialog focused");
+    app.type_char('v');
+    app.type_char('e');
+    assert_eq!(
+        app.app.ui.win(win_id).expect("session window").vim_mode(),
+        VimMode::Visual
+    );
+
+    app.type_char('y');
+
+    assert_eq!(app.app.core.clipboard.kill_ring.current(), "session");
+    assert_eq!(
+        app.app.ui.win(win_id).expect("session window").vim_mode(),
+        VimMode::Normal
+    );
+    assert!(
+        app.app.ui.active_modal().is_some(),
+        "visual yank must not close the session dialog"
+    );
+
+    app.type_char('y');
+    assert!(
+        app.app
+            .ui
+            .win(win_id)
+            .expect("session window")
+            .vim_state()
+            .is_idle(),
+        "normal-mode y must retain the dialog's copy-all shortcut"
+    );
+}
+
+#[test]
+fn vim_visual_viewer_owned_keys_preempt_dialog_keymaps() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha beta", "gamma" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+          keymaps = {
+            { key = "l", on_press = function(ctx) ctx.close() end },
+            { key = "q", on_press = function(ctx) ctx.close() end },
+          },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    app.type_char('v');
+    app.type_char('l');
+
+    assert!(
+        app.app.ui.active_modal().is_some(),
+        "a Vim-owned Visual key must not reach the dialog keymap"
+    );
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::Visual
+    );
+
+    app.type_char('q');
+    assert!(
+        app.app.ui.active_modal().is_none(),
+        "a Visual key Vim passes through must reach the dialog keymap"
+    );
+}
+
+#[test]
+fn vim_visual_global_keymap_overrides_viewer_default() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        smelt.keymap.set("v", "l", function()
+          smelt.dialog.current().close()
+        end)
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha beta", "gamma" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    app.type_char('v');
+    app.type_char('l');
+
+    assert!(
+        app.app.ui.active_modal().is_none(),
+        "an explicit global Visual mapping must override the viewer default"
+    );
+}
+
+#[test]
+fn vim_pending_viewer_sequence_preempts_dialog_keymap() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        smelt.keymap.set("n", "q", function()
+          smelt.dialog.current().close()
+        end)
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha beta", "gamma" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+          keymaps = {
+            { key = "q", on_press = function(ctx) ctx.close() end },
+          },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    app.type_char('z');
+    assert!(
+        !app.app
+            .ui
+            .win(win_id)
+            .expect("window")
+            .vim_state()
+            .is_idle(),
+        "z should start a pending Vim sequence"
+    );
+
+    app.type_char('q');
+
+    assert!(
+        app.app.ui.active_modal().is_some(),
+        "pending Vim input must not reach the dialog keymap"
+    );
+    assert!(
+        app.app
+            .ui
+            .win(win_id)
+            .expect("window")
+            .vim_state()
+            .is_idle(),
+        "invalid pending input should cancel the Vim sequence"
+    );
+}
+
+#[test]
 fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
     let mut app = TestApp::builder().with_vim(true).build();
     assert!(app.run_lua(
