@@ -29,6 +29,55 @@ fn assert_safe_dialog_fallback(app: &TestApp) {
 }
 
 #[test]
+fn splash_paint_stays_below_global_overlays() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    assert_eq!(app.bring_up_lua("launch", true), None);
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ name = "test.paint_order.buf" })
+        local lines = {}
+        for _ = 1, 12 do lines[#lines + 1] = string.rep("X", 30) end
+        buf:lines(lines)
+        local win = smelt.win.new(buf, {
+          name = "test.paint_order.win",
+          scrollbar = false,
+        })
+        smelt.overlay.new({
+          name = "test.paint_order.overlay",
+          layout = smelt.ui.layout.leaf(win),
+          anchor = "center",
+          width = 30,
+          height = 12,
+          z = 100,
+        })
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    let overlay_win = app
+        .ui_probe()
+        .named_win("test.paint_order.win")
+        .expect("overlay window");
+    let overlay_rect = app
+        .ui_probe()
+        .win(overlay_win)
+        .and_then(|win| win.viewport.map(|viewport| viewport.rect))
+        .expect("overlay viewport");
+
+    for row in overlay_rect.top..overlay_rect.bottom() {
+        let cells: Vec<char> = frame.rows[row as usize].chars().collect();
+        assert!(
+            cells[overlay_rect.left as usize..overlay_rect.right() as usize]
+                .iter()
+                .all(|cell| *cell == 'X'),
+            "splash paint escaped its transcript layer into the overlay:\n{}",
+            frame.text()
+        );
+    }
+}
+
+#[test]
 fn root_dialog_replaces_composer_and_restores_prompt_state() {
     let mut app = TestApp::builder().build();
     app.type_text("draft response");

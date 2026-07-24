@@ -4,7 +4,7 @@
 //! stack. Methods called outside a paint callback return a clean Lua error.
 
 use crate::smelt_edit::layout::PaintId;
-use crate::smelt_edit::{DrawContext, GridSlice};
+use crate::smelt_edit::{DrawContext, Grid, GridSlice, Rect};
 use mlua::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
 use smelt_core::lua::doc::record_class;
@@ -116,6 +116,10 @@ impl PaintRegistry {
         self.handles.contains_key(&id)
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
     /// Count of named paint slots. Anonymous slots have no entry in
     /// `names`, so this excludes them - exactly what reload-survival
     /// post-checks want. Harness-only: production code reads names
@@ -194,9 +198,82 @@ impl PaintSurface for GridSlice<'_> {
     }
 }
 
+/// Off-screen output from one Lua paint callback. Untouched cells remain
+/// transparent when the layer is composited at its layout position.
+pub(crate) struct PaintLayer {
+    grid: Grid,
+    touched: Vec<bool>,
+}
+
+impl PaintLayer {
+    fn new(width: u16, height: u16) -> Self {
+        Self {
+            grid: Grid::new(width, height),
+            touched: vec![false; width as usize * height as usize],
+        }
+    }
+
+    fn mark_rect(&mut self, rect: Rect) {
+        let right = rect.right().min(self.grid.width());
+        let bottom = rect.bottom().min(self.grid.height());
+        for row in rect.top.min(self.grid.height())..bottom {
+            for col in rect.left.min(self.grid.width())..right {
+                self.touched[row as usize * self.grid.width() as usize + col as usize] = true;
+            }
+        }
+    }
+
+    pub(crate) fn composite_into(&self, slice: &mut GridSlice<'_>) {
+        let width = self.grid.width().min(slice.width());
+        let height = self.grid.height().min(slice.height());
+        for row in 0..height {
+            for col in 0..width {
+                if !self.touched[row as usize * self.grid.width() as usize + col as usize] {
+                    continue;
+                }
+                let cell = self.grid.cell(col, row);
+                if cell.symbol != '\0' {
+                    slice.set(col, row, cell.symbol, cell.style);
+                }
+            }
+        }
+    }
+}
+
+impl PaintSurface for PaintLayer {
+    fn width(&self) -> u16 {
+        self.grid.width()
+    }
+
+    fn height(&self) -> u16 {
+        self.grid.height()
+    }
+
+    fn set(&mut self, col: u16, row: u16, symbol: char, style: crate::smelt_edit::Style) {
+        if col >= self.grid.width() || row >= self.grid.height() {
+            return;
+        }
+        self.grid.set(col, row, symbol, style);
+        self.mark_rect(Rect::new(row, col, 1, 1));
+        if col + 1 < self.grid.width() && self.grid.cell(col + 1, row).symbol == '\0' {
+            self.mark_rect(Rect::new(row, col + 1, 1, 1));
+        }
+    }
+
+    fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style) {
+        let end = self.grid.put_str(col, row, text, style);
+        self.mark_rect(Rect::new(row, col, end.saturating_sub(col), 1));
+    }
+
+    fn fill(&mut self, rect: Rect, symbol: char, style: crate::smelt_edit::Style) {
+        self.grid.fill(rect, symbol, style);
+        self.mark_rect(rect);
+    }
+}
+
 scoped_thread_local!(static mut CURRENT_SLICE: for<'a> &'a mut dyn PaintSurface);
 
-fn scope_slice<R>(slice: &mut GridSlice<'_>, body: impl FnOnce() -> R) -> R {
+fn scope_slice<R>(slice: &mut dyn PaintSurface, body: impl FnOnce() -> R) -> R {
     CURRENT_SLICE.set(slice, body)
 }
 
@@ -288,12 +365,24 @@ fn build_ctx_table(lua: &Lua, ctx: &DrawContext) -> LuaResult<mlua::Table> {
     Ok(t)
 }
 
-/// Fire the Lua paint callback for `handle_id`. Errors are recorded rather than
-/// propagated - a broken painter skips the leaf for the frame without crashing the renderer.
-pub(crate) fn invoke_paint(
+/// Render one Lua paint callback into a transparent off-screen layer. Errors are
+/// recorded rather than propagated - a broken painter leaves the layer empty.
+pub(crate) fn render_paint(
     runtime: &super::LuaExecution,
     handle_id: u64,
-    slice: &mut GridSlice<'_>,
+    width: u16,
+    height: u16,
+    ctx: &DrawContext,
+) -> PaintLayer {
+    let mut layer = PaintLayer::new(width, height);
+    invoke_paint(runtime, handle_id, &mut layer, ctx);
+    layer
+}
+
+fn invoke_paint(
+    runtime: &super::LuaExecution,
+    handle_id: u64,
+    surface: &mut dyn PaintSurface,
     ctx: &DrawContext,
 ) {
     let lua = &runtime.lua;
@@ -324,7 +413,7 @@ pub(crate) fn invoke_paint(
         }
     };
     let _perf = smelt_perf::perf::begin("lua:paint");
-    scope_slice(slice, || {
+    scope_slice(surface, || {
         if let Err(e) = func.call::<()>((ud, ctx_tbl)) {
             runtime.record_error(format!("smelt.paint: {e}"));
         }
@@ -373,6 +462,36 @@ mod tests {
     fn with_slice_errors_outside_paint() {
         let r: LuaResult<()> = with_slice(|_| ());
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn paint_layer_preserves_untouched_cells_and_applies_explicit_blanks() {
+        let mut layer = PaintLayer::new(3, 1);
+        PaintSurface::set(&mut layer, 1, 0, ' ', crate::smelt_edit::Style::default());
+        let mut grid = Grid::new(3, 1);
+        grid.fill(
+            Rect::new(0, 0, 3, 1),
+            'X',
+            crate::smelt_edit::Style::default(),
+        );
+
+        layer.composite_into(&mut grid.slice_mut(Rect::new(0, 0, 3, 1)));
+
+        assert_eq!(grid.cell(0, 0).symbol, 'X');
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
+        assert_eq!(grid.cell(2, 0).symbol, 'X');
+    }
+
+    #[test]
+    fn paint_layer_composites_wide_glyphs_with_valid_continuations() {
+        let mut layer = PaintLayer::new(4, 1);
+        PaintSurface::put_str(&mut layer, 1, 0, "語", crate::smelt_edit::Style::default());
+        let mut grid = Grid::new(4, 1);
+
+        layer.composite_into(&mut grid.slice_mut(Rect::new(0, 0, 4, 1)));
+
+        assert_eq!(grid.cell(1, 0).symbol, '語');
+        assert_eq!(grid.cell(2, 0).symbol, '\0');
     }
 
     #[test]

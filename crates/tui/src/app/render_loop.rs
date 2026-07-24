@@ -533,57 +533,92 @@ impl TuiApp {
         let _p = smelt_perf::perf::begin("compositor:render_flush");
 
         // Transcript content was materialized by the committed-view phase. The
-        // paint pass still prepares other row-backed windows and applies search.
-        let overlays = &mut self.overlays;
-        let paint_registry = &self.paint_registry;
-        let render_now = self.core.clock.instant_now();
-        let search_session = overlays
-            .search_session()
-            .map(crate::app::search::SearchRenderSession::from);
-        let mut paint_jobs = Vec::new();
-        let mut frame = self.ui.paint_frame_with_prepared_splits_and_paints(
-            prepared_transcript,
-            |ui, request| {
-                let width = request.content_width as usize;
-                if let Some((kind, summary)) =
-                    overlays.notification_needs_render(request.win, width)
-                {
-                    crate::app::TuiApp::write_notification_buf(
-                        ui,
-                        request.buf,
-                        kind,
-                        &summary,
-                        width,
-                    );
+        // prepare pass still materializes other row-backed windows and applies search.
+        let prepared_frame = {
+            let overlays = &mut self.overlays;
+            let render_now = self.core.clock.instant_now();
+            let search_session = overlays
+                .search_session()
+                .map(crate::app::search::SearchRenderSession::from);
+            self.ui.prepare_frame_with_prepared_splits(
+                prepared_transcript,
+                |ui, request| {
+                    let width = request.content_width as usize;
+                    if let Some((kind, summary)) =
+                        overlays.notification_needs_render(request.win, width)
+                    {
+                        crate::app::TuiApp::write_notification_buf(
+                            ui,
+                            request.buf,
+                            kind,
+                            &summary,
+                            width,
+                        );
+                    }
+                },
+                |ui, request| {
+                    let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
+                    let (Some(win), Some(buf)) = (win, buf) else {
+                        return;
+                    };
+                    if !win.has_materialized_rows() {
+                        win.sync_yank_flash_layer(buf, request.rect.height, render_now);
+                    }
+                    win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
+                    if let Some(search) =
+                        search_session.as_ref().filter(|s| s.target == request.win)
+                    {
+                        search.apply_to_window(win, buf, request.rect.height);
+                    }
+                },
+            )
+        };
+
+        // Lua paint callbacks need a scoped app host, which cannot alias the UI
+        // borrow held by the compositor. Render them into transparent layers from
+        // the prepared frame, then insert each layer by its stable painter slot.
+        let paint_jobs: Vec<_> = if self.paint_registry.is_empty() {
+            Vec::new()
+        } else {
+            prepared_frame
+                .paint_leaves()
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, leaf)| {
+                    self.paint_registry
+                        .lookup(leaf.id)
+                        .map(|handle| (slot, handle))
+                })
+                .collect()
+        };
+        let mut prepared_paints: Vec<Option<crate::lua::paint::PaintLayer>> =
+            std::iter::repeat_with(|| None)
+                .take(prepared_frame.paint_leaves().len())
+                .collect();
+        if !paint_jobs.is_empty() {
+            let lua = self.lua.execution();
+            crate::lua::scope_app(self, || {
+                for (slot, handle) in paint_jobs {
+                    let leaf = &prepared_frame.paint_leaves()[slot];
+                    prepared_paints[slot] = Some(crate::lua::paint::render_paint(
+                        &lua,
+                        handle,
+                        leaf.rect.width,
+                        leaf.rect.height,
+                        &leaf.context,
+                    ));
                 }
-            },
-            |ui, request| {
-                let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
-                let (Some(win), Some(buf)) = (win, buf) else {
-                    return;
-                };
-                if !win.has_materialized_rows() {
-                    win.sync_yank_flash_layer(buf, request.rect.height, render_now);
-                }
-                win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
-                if let Some(search) = search_session.as_ref().filter(|s| s.target == request.win) {
-                    search.apply_to_window(win, buf, request.rect.height);
-                }
-            },
-            |id, slice, ctx| {
-                if let Some(handle_id) = paint_registry.lookup(id) {
-                    paint_jobs.push((handle_id, slice.grid_rect(), ctx.clone()));
+            });
+        }
+
+        let frame = self.ui.paint_prepared_frame_with_paints(
+            prepared_frame,
+            |slot, _id, slice, _context| {
+                if let Some(layer) = prepared_paints[slot].take() {
+                    layer.composite_into(slice);
                 }
             },
         );
-
-        let lua = self.lua.execution();
-        for (handle_id, area, ctx) in paint_jobs {
-            let mut slice = frame.slice_mut(area);
-            crate::lua::scope_app(self, || {
-                crate::lua::paint::invoke_paint(&lua, handle_id, &mut slice, &ctx);
-            });
-        }
         let _ = self.ui.flush_prepared_frame(out, frame);
     }
 

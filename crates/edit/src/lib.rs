@@ -170,6 +170,44 @@ pub fn display_actions_for_spans(spans: &[smelt_buffer::buffer::Span]) -> Vec<Di
 
 use std::collections::HashMap;
 
+/// One host-painted leaf from a prepared frame.
+pub struct PreparedPaintLeaf {
+    pub id: PaintId,
+    pub rect: Rect,
+    pub context: DrawContext,
+}
+
+/// Resolved frame geometry and painter-order operations.
+///
+/// Hosts may render [`Self::paint_leaves`] off-screen, then pass this plan back
+/// to [`Ui::paint_prepared_frame_with_paints`] without resolving layout again.
+pub struct PreparedFrame {
+    commands: Vec<PreparedFrameCommand>,
+    paint_leaves: Vec<PreparedPaintLeaf>,
+    theme: std::sync::Arc<Theme>,
+}
+
+impl PreparedFrame {
+    pub fn paint_leaves(&self) -> &[PreparedPaintLeaf] {
+        &self.paint_leaves
+    }
+}
+
+enum PreparedFrameCommand {
+    Clear(Rect),
+    Chrome {
+        area: Rect,
+        chrome: layout::Chrome,
+        context: layout::ChromePaintCtx,
+    },
+    Window {
+        win: WinId,
+        rect: Rect,
+        context: DrawContext,
+    },
+    Paint(usize),
+}
+
 pub struct Ui {
     bufs: HashMap<BufId, Buffer>,
     wins: HashMap<WinId, Window>,
@@ -2549,8 +2587,8 @@ impl Ui {
     pub fn paint_frame_with_prepared_splits_and_paints<I, P, D, F>(
         &mut self,
         prepared_splits: I,
-        mut prepare: P,
-        mut after_layout: D,
+        prepare: P,
+        after_layout: D,
         mut paint: F,
     ) -> Grid
     where
@@ -2559,30 +2597,47 @@ impl Ui {
         D: FnMut(&mut Ui, PreparedWindowRequest),
         F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
     {
-        let mut prepared_splits: std::collections::HashMap<WinId, PreparedWindowRequest> =
-            prepared_splits
-                .into_iter()
-                .map(|request| (request.win, request))
-                .collect();
-        let resolved = self.resolve_overlays(None);
-        let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
+        let prepared =
+            self.prepare_frame_with_prepared_splits(prepared_splits, prepare, after_layout);
+        self.paint_prepared_frame_with_paints(prepared, |_, id, slice, context| {
+            paint(id, slice, context);
+        })
+    }
+
+    /// Materialize windows and resolve one immutable frame plan.
+    pub fn prepare_frame_with_prepared_splits<I, P, D>(
+        &mut self,
+        prepared_splits: I,
+        mut prepare: P,
+        mut after_layout: D,
+    ) -> PreparedFrame
+    where
+        I: IntoIterator<Item = PreparedWindowRequest>,
+        P: FnMut(&mut Ui, MaterializeRequest),
+        D: FnMut(&mut Ui, PreparedWindowRequest),
+    {
+        let mut prepared_splits: HashMap<WinId, PreparedWindowRequest> = prepared_splits
             .into_iter()
-            .map(|(id, rect, ov)| (id, rect, ov.clone()))
+            .map(|request| (request.win, request))
             .collect();
-        let resolved_decorations = self.resolve_decorations();
-        let resolved_decorations: Vec<(DecorationId, WinId, Rect, Decoration)> =
-            resolved_decorations
-                .into_iter()
-                .map(|(id, owner, rect, dec)| (id, owner, rect, dec.clone()))
-                .collect();
+        let resolved: Vec<(OverlayId, Rect, Overlay)> = self
+            .resolve_overlays(None)
+            .into_iter()
+            .map(|(id, rect, overlay)| (id, rect, overlay.clone()))
+            .collect();
+        let resolved_decorations: Vec<(DecorationId, WinId, Rect, Decoration)> = self
+            .resolve_decorations()
+            .into_iter()
+            .map(|(id, owner, rect, decoration)| (id, owner, rect, decoration.clone()))
+            .collect();
         let split_rects = self.resolve_splits();
         let painted_splits: Vec<(WinId, Rect)> = self
             .splits()
             .leaves_in_order()
             .into_iter()
-            .filter_map(|p| {
-                let win = WinId(p.0);
-                split_rects.get(&win).map(|r| (win, *r))
+            .filter_map(|paint| {
+                let win = WinId(paint.0);
+                split_rects.get(&win).map(|rect| (win, *rect))
             })
             .collect();
         let mut prepared_windows = Vec::new();
@@ -2606,93 +2661,100 @@ impl Ui {
             after_layout(self, request);
         }
         self.refresh_docked_surface_rects();
-        let focus = self.focus;
-        let active_cursor = self.active_cursor_leaf();
-        let cursor_shape = self.cursor_shape;
-        let wins = &self.wins;
-        let bufs = &self.bufs;
+
         let term_size = self.surface.terminal_size();
-        let splits_tree = self.splits().clone();
-        let term_w = self.surface.terminal_size().0;
-        let term_h = self.surface.terminal_size().1;
-        let theme_arc = std::sync::Arc::clone(self.surface.theme());
-        let theme_for_compositor = std::sync::Arc::clone(&theme_arc);
+        let theme = std::sync::Arc::clone(self.surface.theme());
         let active_resize = self.chrome_drag.and_then(|drag| match drag.action {
             overlay::ChromeAction::Resize(edges) => Some((drag.owner, resize_chrome_ctx(edges))),
             overlay::ChromeAction::None | overlay::ChromeAction::Move => None,
         });
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        let mut builder = PreparedFrameBuilder {
+            commands: Vec::new(),
+            paint_leaves: Vec::new(),
+            wins: &self.wins,
+            bufs: &self.bufs,
+            focus: self.focus,
+            active_cursor: self.active_cursor_leaf(),
+            cursor_shape: self.cursor_shape,
+            term_size,
+            theme: &theme,
+        };
+        collect_root_frame_commands(
+            self.splits(),
+            Rect::new(0, 0, term_size.0, term_size.1),
+            &sizer,
+            &resolved_decorations,
+            active_resize,
+            &mut builder,
+        );
+        for (id, rect, overlay) in &resolved {
+            builder.commands.push(PreparedFrameCommand::Clear(*rect));
+            let root_chrome = active_resize
+                .and_then(|(owner, context)| {
+                    (owner == overlay::ChromeOwner::Overlay(*id)).then_some(context)
+                })
+                .unwrap_or_default();
+            collect_layout_frame_commands(
+                &overlay.layout,
+                *rect,
+                &sizer,
+                root_chrome,
+                &mut builder,
+            );
+        }
+        PreparedFrame {
+            commands: builder.commands,
+            paint_leaves: builder.paint_leaves,
+            theme,
+        }
+    }
+
+    /// Paint a previously resolved frame without consulting layout again.
+    pub fn paint_prepared_frame_with_paints<F>(
+        &mut self,
+        prepared: PreparedFrame,
+        mut paint: F,
+    ) -> Grid
+    where
+        F: FnMut(usize, PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
+        let PreparedFrame {
+            commands,
+            paint_leaves,
+            theme,
+        } = prepared;
+        let wins = &self.wins;
+        let bufs = &self.bufs;
+        let compositor_theme = std::sync::Arc::clone(&theme);
         self.surface
             .compositor_mut()
-            .paint_frame(&theme_for_compositor, move |grid, _theme| {
-                let theme = &theme_arc;
-                let mut dispatch = |id: PaintId,
-                                    area: Rect,
-                                    grid: &mut Grid,
-                                    theme: &std::sync::Arc<Theme>,
-                                    term_size: (u16, u16)| {
-                    let win_id = WinId(id.0);
-                    if let Some(win) = wins.get(&win_id) {
-                        if let Some(buf) = bufs.get(&win.buf) {
-                            let mut slice = grid.slice_mut(area);
-                            let focused = focus == Some(win_id);
-                            // Exactly one leaf paints a block cursor per frame:
-                            // the active cursor leaf (drag-active → focus). Others
-                            // receive `Hidden` regardless of focus.
-                            let owns_cursor = active_cursor == Some(win_id);
-                            let ctx = DrawContext {
-                                terminal_width: term_size.0,
-                                terminal_height: term_size.1,
-                                focused,
-                                cursor_shape: if owns_cursor && !win.hide_cursor {
-                                    cursor_shape
-                                } else {
-                                    CursorShape::Hidden
-                                },
-                                theme: std::sync::Arc::clone(theme),
-                                vim_mode: win.vim_mode(),
+            .paint_frame(&compositor_theme, move |grid, _| {
+                for command in commands {
+                    match command {
+                        PreparedFrameCommand::Clear(area) => grid.clear(area),
+                        PreparedFrameCommand::Chrome {
+                            area,
+                            chrome,
+                            context,
+                        } => layout::paint_chrome_with(grid, area, &chrome, &theme, context),
+                        PreparedFrameCommand::Window { win, rect, context } => {
+                            let Some(window) = wins.get(&win) else {
+                                continue;
                             };
-                            win.render(buf, &mut slice, &ctx);
-                            return;
+                            let Some(buffer) = bufs.get(&window.buf) else {
+                                continue;
+                            };
+                            window.render(buffer, &mut grid.slice_mut(rect), &context);
+                        }
+                        PreparedFrameCommand::Paint(slot) => {
+                            let leaf = &paint_leaves[slot];
+                            paint(slot, leaf.id, &mut grid.slice_mut(leaf.rect), &leaf.context);
                         }
                     }
-                    let mut slice = grid.slice_mut(area);
-                    let ctx = DrawContext {
-                        terminal_width: term_size.0,
-                        terminal_height: term_size.1,
-                        focused: false,
-                        cursor_shape: CursorShape::Hidden,
-                        theme: std::sync::Arc::clone(theme),
-                        vim_mode: VimMode::default(),
-                    };
-                    paint(id, &mut slice, &ctx);
-                };
-                let sizer = UiLeafSizer { wins, bufs };
-                let tree_ctx = LayoutPaintCtx {
-                    term_size,
-                    sizer: &sizer,
-                    decorations: &resolved_decorations,
-                    active_resize,
-                };
-                paint_layout_tree_with_decorations(
-                    grid,
-                    theme,
-                    &splits_tree,
-                    Rect::new(0, 0, term_w, term_h),
-                    &tree_ctx,
-                    &mut dispatch,
-                );
-                for (id, rect, overlay) in &resolved {
-                    let chrome_ctx = active_resize
-                        .and_then(|(owner, ctx)| {
-                            (owner == overlay::ChromeOwner::Overlay(*id)).then_some(ctx)
-                        })
-                        .unwrap_or_default();
-                    let overlay_ctx = OverlayPaintCtx {
-                        root_chrome: chrome_ctx,
-                        term_size,
-                        sizer: &sizer,
-                    };
-                    paint_overlay(grid, theme, *rect, overlay, &overlay_ctx, &mut dispatch);
                 }
             })
     }
@@ -3885,119 +3947,130 @@ fn resolve_decoration_size(
     (w.min(cap.0), h.min(cap.1))
 }
 
-struct OverlayPaintCtx<'a> {
-    root_chrome: layout::ChromePaintCtx,
+struct PreparedFrameBuilder<'a> {
+    commands: Vec<PreparedFrameCommand>,
+    paint_leaves: Vec<PreparedPaintLeaf>,
+    wins: &'a HashMap<WinId, Window>,
+    bufs: &'a HashMap<BufId, Buffer>,
+    focus: Option<WinId>,
+    active_cursor: Option<WinId>,
+    cursor_shape: CursorShape,
     term_size: (u16, u16),
-    sizer: &'a dyn layout::LeafSizer,
+    theme: &'a std::sync::Arc<Theme>,
 }
 
-/// Paint one resolved overlay: clear the rect (overlays are opaque) then walk its layout tree.
-fn paint_overlay(
-    grid: &mut Grid,
-    theme: &std::sync::Arc<Theme>,
-    area: Rect,
-    overlay: &Overlay,
-    ctx: &OverlayPaintCtx<'_>,
-    paint: &mut PaintDispatch,
-) {
-    grid.clear(area);
-    smelt_term::paint_layout_tree_with_options(
-        grid,
-        theme,
-        &overlay.layout,
-        area,
-        ctx.term_size,
-        smelt_term::PaintLayoutOptions {
-            sizer: ctx.sizer,
-            root_chrome: ctx.root_chrome,
-        },
-        paint,
-    );
-}
-
-fn paint_decoration(
-    grid: &mut Grid,
-    theme: &std::sync::Arc<Theme>,
-    area: Rect,
-    decoration: &Decoration,
-    term_size: (u16, u16),
-    sizer: &dyn layout::LeafSizer,
-    paint: &mut PaintDispatch,
-) {
-    grid.clear(area);
-    smelt_term::paint_layout_tree_with(
-        grid,
-        theme,
-        &decoration.layout,
-        area,
-        term_size,
-        sizer,
-        paint,
-    );
-}
-
-struct LayoutPaintCtx<'a> {
-    term_size: (u16, u16),
-    sizer: &'a dyn layout::LeafSizer,
-    decorations: &'a [(DecorationId, WinId, Rect, Decoration)],
-    active_resize: Option<(overlay::ChromeOwner, layout::ChromePaintCtx)>,
-}
-
-fn paint_root_container_chrome(
-    grid: &mut Grid,
-    theme: &std::sync::Arc<Theme>,
-    area: Rect,
-    chrome: &layout::Chrome,
-    active_resize: Option<(overlay::ChromeOwner, layout::ChromePaintCtx)>,
-) {
-    let chrome_ctx = active_resize
-        .and_then(|(owner, ctx)| {
-            chrome
-                .container
-                .is_some_and(|id| owner == overlay::ChromeOwner::Container(id))
-                .then_some(ctx)
-        })
-        .unwrap_or_default();
-    layout::paint_chrome_with(grid, area, chrome, theme, chrome_ctx);
-}
-
-fn paint_layout_tree_with_decorations(
-    grid: &mut Grid,
-    theme: &std::sync::Arc<Theme>,
-    node: &LayoutTree,
-    area: Rect,
-    ctx: &LayoutPaintCtx<'_>,
-    paint: &mut PaintDispatch,
-) {
-    match node {
-        LayoutTree::Leaf { id, chrome, .. } => {
-            paint_root_container_chrome(grid, theme, area, chrome, ctx.active_resize);
-            let inner = layout::inset_for_chrome(area, chrome);
-            paint(*id, inner, grid, theme, ctx.term_size);
-            let owner = WinId(id.0);
-            for (_decoration_id, decoration_owner, decoration_rect, decoration) in ctx.decorations {
-                if *decoration_owner == owner {
-                    paint_decoration(
-                        grid,
-                        theme,
-                        *decoration_rect,
-                        decoration,
-                        ctx.term_size,
-                        ctx.sizer,
-                        paint,
-                    );
-                }
-            }
+impl PreparedFrameBuilder<'_> {
+    fn push_leaf(&mut self, id: PaintId, rect: Rect) {
+        let win_id = WinId(id.0);
+        if let Some(win) = self
+            .wins
+            .get(&win_id)
+            .filter(|win| self.bufs.contains_key(&win.buf))
+        {
+            let owns_cursor = self.active_cursor == Some(win_id);
+            self.commands.push(PreparedFrameCommand::Window {
+                win: win_id,
+                rect,
+                context: DrawContext {
+                    terminal_width: self.term_size.0,
+                    terminal_height: self.term_size.1,
+                    focused: self.focus == Some(win_id),
+                    cursor_shape: if owns_cursor && !win.hide_cursor {
+                        self.cursor_shape
+                    } else {
+                        CursorShape::Hidden
+                    },
+                    theme: std::sync::Arc::clone(self.theme),
+                    vim_mode: win.vim_mode(),
+                },
+            });
+            return;
         }
-        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
-            paint_root_container_chrome(grid, theme, area, chrome, ctx.active_resize);
-            let vertical = matches!(node, LayoutTree::Vbox { .. });
-            let (_, rects) = layout::layout_box_children(items, chrome, area, vertical, ctx.sizer);
-            for ((_, child), &rect) in items.iter().zip(rects.iter()) {
-                paint_layout_tree_with_decorations(grid, theme, child, rect, ctx, paint);
-            }
-        }
+
+        let slot = self.paint_leaves.len();
+        self.paint_leaves.push(PreparedPaintLeaf {
+            id,
+            rect,
+            context: DrawContext {
+                terminal_width: self.term_size.0,
+                terminal_height: self.term_size.1,
+                focused: false,
+                cursor_shape: CursorShape::Hidden,
+                theme: std::sync::Arc::clone(self.theme),
+                vim_mode: VimMode::default(),
+            },
+        });
+        self.commands.push(PreparedFrameCommand::Paint(slot));
     }
+}
+
+fn collect_layout_frame_commands(
+    tree: &LayoutTree,
+    area: Rect,
+    sizer: &dyn layout::LeafSizer,
+    root_chrome: layout::ChromePaintCtx,
+    builder: &mut PreparedFrameBuilder<'_>,
+) {
+    smelt_term::walk_layout_tree_with(tree, area, sizer, |operation| match operation {
+        smelt_term::LayoutPaintOp::Chrome { area, chrome, root } => {
+            builder.commands.push(PreparedFrameCommand::Chrome {
+                area,
+                chrome: chrome.clone(),
+                context: if root {
+                    root_chrome
+                } else {
+                    layout::ChromePaintCtx::empty()
+                },
+            })
+        }
+        smelt_term::LayoutPaintOp::Leaf { id, rect } => builder.push_leaf(id, rect),
+    });
+}
+
+fn collect_root_frame_commands(
+    tree: &LayoutTree,
+    area: Rect,
+    sizer: &dyn layout::LeafSizer,
+    decorations: &[(DecorationId, WinId, Rect, Decoration)],
+    active_resize: Option<(overlay::ChromeOwner, layout::ChromePaintCtx)>,
+    builder: &mut PreparedFrameBuilder<'_>,
+) {
+    smelt_term::walk_layout_tree_with(tree, area, sizer, |operation| match operation {
+        smelt_term::LayoutPaintOp::Chrome { area, chrome, .. } => {
+            let context = active_resize
+                .and_then(|(owner, context)| {
+                    chrome
+                        .container
+                        .is_some_and(|id| owner == overlay::ChromeOwner::Container(id))
+                        .then_some(context)
+                })
+                .unwrap_or_default();
+            builder.commands.push(PreparedFrameCommand::Chrome {
+                area,
+                chrome: chrome.clone(),
+                context,
+            });
+        }
+        smelt_term::LayoutPaintOp::Leaf { id, rect } => {
+            builder.push_leaf(id, rect);
+            let owner = WinId(id.0);
+            for (_decoration_id, decoration_owner, decoration_rect, decoration) in decorations {
+                if *decoration_owner != owner {
+                    continue;
+                }
+                builder
+                    .commands
+                    .push(PreparedFrameCommand::Clear(*decoration_rect));
+                collect_layout_frame_commands(
+                    &decoration.layout,
+                    *decoration_rect,
+                    sizer,
+                    layout::ChromePaintCtx::empty(),
+                    builder,
+                );
+            }
+        }
+    });
 }
 
 /// Looks up each window leaf's natural size from its buffer's current
@@ -4277,6 +4350,41 @@ mod tests {
         ui.flush_prepared_frame(&mut Vec::new(), frame).unwrap();
 
         assert!(ui.flushed_snapshot().text().contains('X'));
+    }
+
+    #[test]
+    fn prepared_frame_freezes_paint_geometry_and_context() {
+        let mut ui = make_ui();
+        let paint_id = PaintId(1u64 << 32);
+        let overlay_id = ui.overlay_open(
+            Overlay::new(LayoutTree::leaf(paint_id), layout::Anchor::ScreenCenter)
+                .with_size((4, 2)),
+        );
+        let prepared =
+            ui.prepare_frame_with_prepared_splits(std::iter::empty(), |_, _| {}, |_, _| {});
+        let leaf = prepared
+            .paint_leaves()
+            .first()
+            .expect("prepared paint leaf");
+        let planned_rect = leaf.rect;
+        assert_eq!((planned_rect.width, planned_rect.height), (4, 2));
+        assert_eq!(
+            (leaf.context.terminal_width, leaf.context.terminal_height),
+            ui.terminal_size()
+        );
+        assert!(std::sync::Arc::ptr_eq(&leaf.context.theme, ui.theme()));
+
+        let overlay = ui.overlay_mut(overlay_id).expect("overlay");
+        overlay.width = Constraint::Length(20);
+        overlay.height = Constraint::Length(10);
+        let mut painted_rects = Vec::new();
+        let _frame = ui.paint_prepared_frame_with_paints(prepared, |slot, id, slice, _context| {
+            assert_eq!(slot, 0);
+            assert_eq!(id, paint_id);
+            painted_rects.push(slice.grid_rect());
+        });
+
+        assert_eq!(painted_rects, [planned_rect]);
     }
 
     #[test]

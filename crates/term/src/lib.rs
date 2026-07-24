@@ -53,6 +53,57 @@ pub struct PaintLayoutOptions<'a> {
     pub root_chrome: layout::ChromePaintCtx,
 }
 
+/// One resolved operation from a [`LayoutTree`] walk.
+#[derive(Clone, Copy)]
+pub enum LayoutPaintOp<'a> {
+    Chrome {
+        area: Rect,
+        chrome: &'a layout::Chrome,
+        root: bool,
+    },
+    Leaf {
+        id: PaintId,
+        rect: Rect,
+    },
+}
+
+/// Resolve `node` once and visit chrome and leaves in painter order.
+pub fn walk_layout_tree_with<'a>(
+    node: &'a LayoutTree,
+    area: Rect,
+    sizer: &dyn layout::LeafSizer,
+    mut visit: impl FnMut(LayoutPaintOp<'a>),
+) {
+    walk_layout_tree_inner(node, area, sizer, 0, &mut visit);
+}
+
+fn walk_layout_tree_inner<'a>(
+    node: &'a LayoutTree,
+    area: Rect,
+    sizer: &dyn layout::LeafSizer,
+    depth: usize,
+    visit: &mut impl FnMut(LayoutPaintOp<'a>),
+) {
+    let root = depth == 0;
+    match node {
+        LayoutTree::Leaf { id, chrome, .. } => {
+            visit(LayoutPaintOp::Chrome { area, chrome, root });
+            visit(LayoutPaintOp::Leaf {
+                id: *id,
+                rect: layout::inset_for_chrome(area, chrome),
+            });
+        }
+        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
+            visit(LayoutPaintOp::Chrome { area, chrome, root });
+            let vertical = matches!(node, LayoutTree::Vbox { .. });
+            let (_, rects) = layout::layout_box_children(items, chrome, area, vertical, sizer);
+            for ((_, child), &rect) in items.iter().zip(rects.iter()) {
+                walk_layout_tree_inner(child, rect, sizer, depth + 1, visit);
+            }
+        }
+    }
+}
+
 /// Walk `node` against `area`, paint chrome on containers, and dispatch
 /// each resolved leaf rect to `paint`. `Fit` constraints use the default
 /// `NoopSizer` (contribute `0`); use `paint_layout_tree_with` to drive
@@ -112,48 +163,15 @@ pub fn paint_layout_tree_with_options(
     options: PaintLayoutOptions<'_>,
     paint: &mut PaintDispatch,
 ) {
-    let mut walk = PaintLayoutWalk {
-        theme,
-        term_size,
-        options,
-        paint,
-    };
-    paint_layout_tree_inner(grid, node, area, 0, &mut walk);
-}
-
-struct PaintLayoutWalk<'a, 'b> {
-    theme: &'a std::sync::Arc<Theme>,
-    term_size: (u16, u16),
-    options: PaintLayoutOptions<'a>,
-    paint: &'a mut PaintDispatch<'b>,
-}
-
-fn paint_layout_tree_inner(
-    grid: &mut Grid,
-    node: &LayoutTree,
-    area: Rect,
-    depth: usize,
-    walk: &mut PaintLayoutWalk<'_, '_>,
-) {
-    let chrome_ctx = if depth == 0 {
-        walk.options.root_chrome
-    } else {
-        layout::ChromePaintCtx::empty()
-    };
-    match node {
-        LayoutTree::Leaf { id, chrome, .. } => {
-            layout::paint_chrome_with(grid, area, chrome, walk.theme, chrome_ctx);
-            let inner = layout::inset_for_chrome(area, chrome);
-            (walk.paint)(*id, inner, grid, walk.theme, walk.term_size);
+    walk_layout_tree_with(node, area, options.sizer, |op| match op {
+        LayoutPaintOp::Chrome { area, chrome, root } => {
+            let ctx = if root {
+                options.root_chrome
+            } else {
+                layout::ChromePaintCtx::empty()
+            };
+            layout::paint_chrome_with(grid, area, chrome, theme, ctx);
         }
-        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
-            layout::paint_chrome_with(grid, area, chrome, walk.theme, chrome_ctx);
-            let vertical = matches!(node, LayoutTree::Vbox { .. });
-            let (_, rects) =
-                layout::layout_box_children(items, chrome, area, vertical, walk.options.sizer);
-            for ((_, child), &rect) in items.iter().zip(rects.iter()) {
-                paint_layout_tree_inner(grid, child, rect, depth + 1, walk);
-            }
-        }
-    }
+        LayoutPaintOp::Leaf { id, rect } => paint(id, rect, grid, theme, term_size),
+    });
 }
