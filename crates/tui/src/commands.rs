@@ -833,6 +833,28 @@ mod tests {
         app
     }
 
+    #[test]
+    fn self_queued_lua_command_stops_at_flush_limit() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.run_lua_result(
+            r#"
+                _G.fuzz_command_runs = 0
+                smelt.cmd.register("fuzz.self_queue", function()
+                    _G.fuzz_command_runs = _G.fuzz_command_runs + 1
+                    smelt.cmd.run("fuzz.self_queue")
+                end)
+                smelt.cmd.run("fuzz.self_queue")
+            "#,
+        )
+        .expect("run self-queued command");
+
+        assert_eq!(
+            app.lua_int_global("fuzz_command_runs"),
+            Some(crate::lua::MAX_PENDING_LUA_COMMANDS as i64)
+        );
+        assert!(app.app.lua.shared().drain_commands().is_empty());
+    }
+
     fn set_active_model(
         app: &mut crate::app::TuiApp,
         model: &str,

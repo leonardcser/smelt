@@ -1,0 +1,17 @@
+{
+  "_about": "Regression for a lua_loop stack overflow caused by a command that queues itself through smelt.cmd.run. Nested callback flushing recursively started a fresh deferred-command drain, so each invocation reset the work limit instead of returning to the bounded outer drain.",
+  "_fix": "Keep deferred Lua command draining non-reentrant so self-queued commands are processed iteratively and stop at the per-flush command limit.",
+  "ops": [
+    {
+      "CmdRegister": {
+        "name_slot": 0,
+        "handler_kind": 148
+      }
+    },
+    {
+      "CmdInvoke": {
+        "name_slot": 0
+      }
+    }
+  ]
+}

@@ -100,11 +100,18 @@ impl TuiApp {
     }
 
     fn drain_lua_commands(&mut self) {
+        // Running a command flushes Lua callbacks before returning. A command
+        // that queues another command must return to this outer drain instead
+        // of recursively starting a fresh drain with a reset work budget.
+        if !self.lua.shared().try_begin_command_drain() {
+            return;
+        }
+
         let mut remaining = crate::lua::MAX_PENDING_LUA_COMMANDS;
         loop {
             let commands = self.lua.shared().drain_commands();
             if commands.is_empty() {
-                return;
+                break;
             }
             let overflowed = commands.len() > remaining;
             for line in commands.into_iter().take(remaining) {
@@ -119,9 +126,11 @@ impl TuiApp {
                         crate::lua::MAX_PENDING_LUA_COMMANDS
                     ));
                 }
-                return;
+                break;
             }
         }
+
+        self.lua.shared().end_command_drain();
     }
 
     /// Drive cell subscribers + invocation queue + task inbox to a fixpoint.

@@ -360,6 +360,7 @@ pub(crate) struct LuaShared {
     pub(crate) core: Arc<smelt_core::lua::LuaShared>,
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
     pending_commands: Mutex<std::collections::VecDeque<String>>,
+    command_drain_active: AtomicBool,
     layout_refresh_pending: AtomicBool,
     pending_focus: Mutex<Option<crate::smelt_edit::WinId>>,
     pub(crate) transcript_view_watchers: Arc<TranscriptViewWatchers>,
@@ -390,6 +391,7 @@ impl LuaShared {
             core,
             pending_invocations: Mutex::new(Vec::new()),
             pending_commands: Mutex::new(std::collections::VecDeque::new()),
+            command_drain_active: AtomicBool::new(false),
             layout_refresh_pending: AtomicBool::new(false),
             pending_focus: Mutex::new(None),
             transcript_view_watchers: Arc::new(TranscriptViewWatchers::default()),
@@ -417,6 +419,14 @@ impl LuaShared {
             .lock()
             .map(|mut commands| commands.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn try_begin_command_drain(&self) -> bool {
+        !self.command_drain_active.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn end_command_drain(&self) {
+        self.command_drain_active.store(false, Ordering::Release);
     }
 
     pub(crate) fn request_layout_refresh(&self) {
