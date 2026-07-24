@@ -1860,6 +1860,16 @@ impl ConversationRuntime {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_persistence_commit_barrier(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        self.persistence
+            .as_ref()
+            .expect("persistence actor is running")
+            .install_commit_barrier()
+    }
+
     pub(crate) fn append_request_audit(
         &self,
         session_dir: &std::path::Path,

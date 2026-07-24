@@ -427,6 +427,21 @@ impl SparseTranscriptRecords {
         true
     }
 
+    fn truncate(&mut self, total_count: usize) -> usize {
+        let total_count = self
+            .total_count
+            .map_or(total_count, |current| current.min(total_count));
+        let end = smelt_store::TranscriptRecordOffset::new(total_count);
+        self.total_count = Some(total_count);
+        self.records.retain(|index, _| *index < end);
+        self.lru.retain(|index| *index < end);
+        for range in &mut self.loaded_ranges {
+            range.end = range.end.min(end);
+        }
+        self.loaded_ranges.retain(|range| range.start < range.end);
+        total_count
+    }
+
     fn add_loaded_range(&mut self, range: Range<smelt_store::TranscriptRecordOffset>) {
         if range.start >= range.end {
             return;
@@ -1169,6 +1184,24 @@ impl TranscriptRecordState {
 
     fn records_for_active_range(&self) -> Vec<StoredBlockWithId> {
         self.sparse.records_for_range(self.active_range())
+    }
+
+    fn global_record_index(&self, local_record_index: usize) -> usize {
+        self.active_range
+            .as_ref()
+            .map_or(local_record_index, |range| {
+                range.start.get().saturating_add(local_record_index)
+            })
+    }
+
+    fn truncate(&mut self, total_count: usize) {
+        let total_count = self.sparse.truncate(total_count);
+        self.active_range = self.active_range.take().and_then(|mut range| {
+            range.end = range
+                .end
+                .min(smelt_store::TranscriptRecordOffset::new(total_count));
+            (range.start < range.end).then_some(range)
+        });
     }
 }
 
@@ -5151,11 +5184,7 @@ impl TranscriptDocument {
             0
         };
         let record_start_idx = if records_persisted {
-            self.records
-                .active_range
-                .as_ref()
-                .map(|range| range.start.get().saturating_add(local_record_start_idx))
-                .unwrap_or(local_record_start_idx)
+            self.records.global_record_index(local_record_start_idx)
         } else {
             0
         };
@@ -5377,7 +5406,20 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
+        let history = &self.content.transcript.history;
+        let record_len = if block_idx < history.len() {
+            self.records.total_count().map(|_| {
+                self.records
+                    .global_record_index(history.record_index_for_order_index(block_idx))
+            })
+        } else {
+            None
+        };
         self.content.transcript.truncate_to(block_idx);
+        if let Some(record_len) = record_len {
+            self.records.truncate(record_len);
+            self.extent_index.clear_persisted_record_estimates();
+        }
     }
 }
 
@@ -9312,6 +9354,63 @@ mod tests {
                 Some(smelt_core::BlockOrigin::History(2)),
             ]
         );
+    }
+
+    #[test]
+    fn transcript_truncation_updates_sparse_record_extent_immediately() {
+        let slice = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(34),
+            100,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (34..37).map(test_record_record).collect(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = super::LoadedTranscript::from_record_slice(slice, dir.path().to_path_buf())
+            .expect("loaded sparse window");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+
+        document.truncate_to(3);
+        assert_eq!(document.record_total_count(), Some(100));
+
+        document.truncate_to(1);
+        assert_eq!(document.record_total_count(), Some(35));
+        assert_eq!(document.loaded_record_ranges().len(), 1);
+        assert_eq!(document.loaded_record_ranges()[0].start.get(), 34);
+        assert_eq!(document.loaded_record_ranges()[0].end.get(), 35);
+    }
+
+    #[test]
+    fn transcript_truncation_does_not_extend_sparse_extent_for_dirty_tail() {
+        let slice = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(98),
+            100,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (98..100).map(test_record_record).collect(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = super::LoadedTranscript::from_record_slice(slice, dir.path().to_path_buf())
+            .expect("loaded sparse tail");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+        document.push(smelt_core::Block::Text {
+            content: "retained dirty tail".into(),
+        });
+        document.push(smelt_core::Block::Text {
+            content: "truncated dirty tail".into(),
+        });
+
+        document.truncate_to(3);
+
+        assert_eq!(document.record_total_count(), Some(100));
+        assert_eq!(document.loaded_record_ranges().len(), 1);
+        assert_eq!(document.loaded_record_ranges()[0].start.get(), 98);
+        assert_eq!(document.loaded_record_ranges()[0].end.get(), 100);
+        assert!(matches!(
+            document.record_save_suffix(true, None),
+            super::TranscriptRecordSaveSuffix::Suffix {
+                record_start_idx: 100,
+                records,
+            } if records.len() == 1
+        ));
     }
 
     #[test]

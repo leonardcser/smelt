@@ -3921,14 +3921,15 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn sparse_rewind_hydrates_exact_multiline_target_and_persists_the_same_prefix() {
-        const TARGET_HISTORY_INDEX: usize = 20;
+    fn sparse_rewind_race_rejects_stale_window_and_persists_new_tail() {
+        const TARGET_HISTORY_INDEX: usize = 13;
+        const FAR_HISTORY_INDEX: usize = 1_000;
         let expected = "exact first line\nexact second line\nexact final line";
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.conversation.replace_history_for_harness(
-            (0usize..600)
+            (0usize..1_200)
                 .map(|index| {
-                    if index.is_multiple_of(2) {
+                    if index == TARGET_HISTORY_INDEX || index.is_multiple_of(2) {
                         user(if index == TARGET_HISTORY_INDEX {
                             expected
                         } else {
@@ -3959,6 +3960,23 @@ mod checkpoint_tests {
                     && app.app.conversation.transcript().history().block_kind(*id) == Some("user")
             })
             .expect("rewind target block");
+        let far_id = app
+            .app
+            .conversation
+            .transcript()
+            .history()
+            .order
+            .iter()
+            .copied()
+            .find(|id| {
+                app.app
+                    .conversation
+                    .transcript()
+                    .history()
+                    .block_origin(*id)
+                    == Some(smelt_core::BlockOrigin::History(FAR_HISTORY_INDEX))
+            })
+            .expect("far sparse block");
         app.app.save_session_and_flush();
 
         let session_dir = app
@@ -3966,6 +3984,13 @@ mod checkpoint_tests {
             .core
             .sessions
             .dir_for(app.app.conversation.session());
+        let expected_record_prefix = smelt_store::SessionReader::open_existing(&session_dir)
+            .and_then(|reader| reader.read_all_transcript_records())
+            .expect("read original transcript records")
+            .into_iter()
+            .take(TARGET_HISTORY_INDEX)
+            .collect::<Vec<_>>();
+        assert_eq!(expected_record_prefix.len(), TARGET_HISTORY_INDEX);
         let loaded = load_transcript_tail_from_sqlite_dir(session_dir.clone(), 100, 32)
             .expect("load sparse transcript");
         app.app.clear_transcript();
@@ -4023,11 +4048,60 @@ mod checkpoint_tests {
                     })
             }));
 
-        app.app.save_session_and_flush();
-        let head = smelt_store::SessionReader::open_existing(&session_dir)
-            .and_then(|reader| reader.store_head())
-            .expect("read rewound store head");
+        let (commit_started, release_commit) =
+            app.app.conversation.install_persistence_commit_barrier();
+        app.save_session();
+        commit_started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("truncating save reaches the commit barrier");
+        assert!(!app
+            .app
+            .conversation
+            .activate_transcript_search_record_window(100, far_id.get(), 32));
+        app.push_transcript_block(Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
+            content: "newer generation while truncation is in flight".into(),
+        });
+        app.save_session();
+        release_commit.send(()).expect("release truncating save");
+        let outcome = app.flush_persist();
+        assert!(
+            matches!(
+                outcome,
+                crate::persist::PersistenceFlushOutcome::Durable { .. }
+            ),
+            "newer save should converge after truncation: {outcome:?}"
+        );
+        assert!(
+            app.overlays_probe().notification().is_none(),
+            "save race should not surface a persistence failure: {:?}",
+            app.overlays_probe().notification()
+        );
+        let reader =
+            smelt_store::SessionReader::open_existing(&session_dir).expect("open rewound session");
+        let head = reader.store_head().expect("read rewound store head");
         assert_eq!(head.history_len.get() as usize, TARGET_HISTORY_INDEX);
+        assert_eq!(
+            head.transcript_record_count.get() as usize,
+            TARGET_HISTORY_INDEX + 1
+        );
+        let records = reader
+            .read_all_transcript_records()
+            .expect("read rewound transcript records");
+        assert_eq!(records.len(), TARGET_HISTORY_INDEX + 1);
+        assert_eq!(
+            &records[..TARGET_HISTORY_INDEX],
+            expected_record_prefix.as_slice()
+        );
+        let tail = records.last().expect("new transcript tail");
+        assert_eq!(tail.history_idx, None);
+        assert!(
+            tail.preview_text
+                .contains("newer generation while truncation is in flight"),
+            "unexpected transcript tail: {tail:#?}"
+        );
     }
 
     #[test]

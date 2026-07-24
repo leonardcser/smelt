@@ -1300,7 +1300,7 @@ impl SessionPersistence {
     }
 
     #[cfg(test)]
-    fn install_commit_barrier(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    pub(crate) fn install_commit_barrier(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
         let (started, waiting) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let (installed, acknowledged) = mpsc::channel();
