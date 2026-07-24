@@ -1719,10 +1719,18 @@ impl ConversationRuntime {
                 .map(smelt_store::TurnId::get),
         );
         if let Some(recovery) = startup.recovery {
-            let acknowledged = self.document.acknowledge(
+            let acknowledgement = crate::persist::PersistenceAcknowledgement {
                 epoch,
-                self.document.generation(),
-                &recovery.session,
+                generation: self.document.generation(),
+                record_projection:
+                    super::session_document::SessionRecordSaveProjection::persisted_head(
+                        recovery.session.current,
+                    ),
+                previous: recovery.session.previous,
+                receipt: recovery.session,
+            };
+            let acknowledged = self.document.acknowledge(
+                &acknowledgement,
                 &self.session.id,
                 self.history_len(),
                 self.session.checkpoint.as_ref(),
@@ -1751,7 +1759,6 @@ impl ConversationRuntime {
         let mut acknowledged_session_id = None;
         if let Some(acknowledgement) = status.acknowledgement.as_ref() {
             if self.document.acknowledge_convergence(
-                status.epoch,
                 acknowledgement,
                 &self.session.id,
                 self.history_len(),
@@ -1914,6 +1921,9 @@ impl ConversationRuntime {
             std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             policy,
         );
+        if let Some(acknowledgement) = outcome.acknowledgement.as_ref() {
+            self.apply_persistence_acknowledgement(acknowledgement);
+        }
         if outcome.durable < outcome.target && outcome.omitted.is_none() {
             return Err(outcome.cause.map_or_else(
                 || {
@@ -1924,16 +1934,6 @@ impl ConversationRuntime {
                 },
                 |cause| cause.message,
             ));
-        }
-        if let Some(receipt) = outcome.receipt.as_ref() {
-            self.document.acknowledge(
-                epoch,
-                outcome.durable,
-                receipt,
-                &self.session.id,
-                self.history_len(),
-                self.session.checkpoint.as_ref(),
-            );
         }
         self.document.unbind_persistence(epoch);
         self.persistence = None;
@@ -1975,12 +1975,7 @@ impl ConversationRuntime {
                 },
                 std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             )?;
-        if !self.apply_canonical_acknowledgement(
-            acknowledgement.epoch,
-            acknowledgement.generation,
-            acknowledgement.previous,
-            &acknowledgement.receipt.session,
-        ) {
+        if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
             return Err(crate::persist::PersistenceCause::invariant(
                 "turn submission receipt did not match the session document",
             ));
@@ -2043,12 +2038,7 @@ impl ConversationRuntime {
                 },
                 std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             )?;
-        if !self.apply_canonical_acknowledgement(
-            acknowledgement.epoch,
-            acknowledgement.generation,
-            acknowledgement.previous,
-            &acknowledgement.receipt.session,
-        ) {
+        if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
             return Err(crate::persist::PersistenceCause::invariant(
                 "turn transition receipt did not match the session document",
             ));
@@ -2056,28 +2046,19 @@ impl ConversationRuntime {
         Ok(acknowledgement)
     }
 
-    fn apply_canonical_acknowledgement(
+    fn apply_persistence_acknowledgement(
         &mut self,
-        epoch: crate::persist::SessionEpoch,
-        generation: super::session_document::PersistenceGeneration,
-        previous: smelt_store::StoreHead,
-        receipt: &smelt_store::SaveReceipt,
+        acknowledgement: &crate::persist::PersistenceAcknowledgement,
     ) -> bool {
-        let acknowledgement = crate::persist::PersistenceAcknowledgement {
-            generation,
-            previous,
-            receipt: receipt.clone(),
-        };
         let applied = self.document.acknowledge_convergence(
-            epoch,
-            &acknowledgement,
+            acknowledgement,
             &self.session.id,
             self.history_len(),
             self.session.checkpoint.as_ref(),
         );
         if applied {
             if let Some(persistence) = self.persistence.as_ref() {
-                persistence.confirm_acknowledgement(&acknowledgement);
+                persistence.confirm_acknowledgement(acknowledgement);
             }
         }
         applied

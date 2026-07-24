@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::app::session_document::{PersistenceGeneration, SessionSaveIntent};
+use crate::app::session_document::{
+    PersistenceGeneration, SessionRecordSaveProjection, SessionSaveIntent,
+};
 
 const CONTROL_CAPACITY: usize = 64;
 const MAX_PENDING_AUDITS: usize = 64;
@@ -188,7 +190,9 @@ fn persistence_state_durable(state: &PersistenceState) -> PersistenceGeneration 
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PersistenceAcknowledgement {
+    pub(crate) epoch: SessionEpoch,
     pub(crate) generation: PersistenceGeneration,
+    pub(crate) record_projection: SessionRecordSaveProjection,
     pub(crate) previous: smelt_store::StoreHead,
     pub(crate) receipt: smelt_store::SaveReceipt,
 }
@@ -246,7 +250,7 @@ pub(crate) struct PersistenceCloseOutcome {
     pub(crate) target: PersistenceGeneration,
     pub(crate) durable: PersistenceGeneration,
     pub(crate) omitted: Option<PersistenceGeneration>,
-    pub(crate) receipt: Option<smelt_store::SaveReceipt>,
+    pub(crate) acknowledgement: Option<PersistenceAcknowledgement>,
     pub(crate) cause: Option<PersistenceCause>,
 }
 
@@ -280,17 +284,13 @@ pub(crate) struct TurnTransitionIntent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SubmitTurnAcknowledgement {
-    pub(crate) epoch: SessionEpoch,
-    pub(crate) generation: PersistenceGeneration,
-    pub(crate) previous: smelt_store::StoreHead,
+    pub(crate) persistence: PersistenceAcknowledgement,
     pub(crate) receipt: smelt_store::SubmitTurnReceipt,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TurnTransitionAcknowledgement {
-    pub(crate) epoch: SessionEpoch,
-    pub(crate) generation: PersistenceGeneration,
-    pub(crate) previous: smelt_store::StoreHead,
+    pub(crate) persistence: PersistenceAcknowledgement,
     pub(crate) receipt: smelt_store::TurnTransitionReceipt,
 }
 
@@ -1216,7 +1216,7 @@ impl SessionPersistence {
             target,
             durable: self.durable_generation(),
             omitted: None,
-            receipt: None,
+            acknowledgement: self.status().acknowledgement,
             cause: Some(PersistenceCause::unavailable(
                 "persistence actor close did not complete before the deadline",
             )),
@@ -1229,7 +1229,7 @@ impl SessionPersistence {
             target,
             durable: self.durable_generation(),
             omitted: None,
-            receipt: None,
+            acknowledgement: self.status().acknowledgement,
             cause: Some(PersistenceCause::unavailable(
                 "persistence actor stopped before completing close",
             )),
@@ -1358,6 +1358,14 @@ struct StatusPublisher {
 }
 
 impl StatusPublisher {
+    fn acknowledgement(&self) -> Option<PersistenceAcknowledgement> {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .acknowledgement
+            .clone()
+    }
+
     fn publish_state(&self, state: PersistenceState) {
         self.status
             .lock()
@@ -1369,6 +1377,7 @@ impl StatusPublisher {
     fn publish_durable(
         &self,
         generation: PersistenceGeneration,
+        record_projection: SessionRecordSaveProjection,
         receipt: smelt_store::SaveReceipt,
     ) -> PersistenceAcknowledgement {
         let mut status = self
@@ -1386,7 +1395,9 @@ impl StatusPublisher {
                 current.previous
             });
         let acknowledgement = PersistenceAcknowledgement {
+            epoch: status.epoch,
             generation,
+            record_projection,
             previous,
             receipt: receipt.clone(),
         };
@@ -1705,7 +1716,7 @@ impl PersistenceActor {
                         target,
                         durable: self.durable,
                         omitted,
-                        receipt: self.last_receipt.clone(),
+                        acknowledgement: self.publisher.acknowledgement(),
                         cause,
                     };
                     if !can_close {
@@ -1840,7 +1851,11 @@ impl PersistenceActor {
                 self.durable = intent.generation;
                 self.last_receipt = Some(receipt.clone());
                 self.blocked = None;
-                self.publisher.publish_durable(intent.generation, receipt);
+                self.publisher.publish_durable(
+                    intent.generation,
+                    intent.record_projection,
+                    receipt,
+                );
             }
             Err(cause) => self.block_canonical(intent.generation, cause),
         }
@@ -2126,13 +2141,13 @@ impl PersistenceActor {
         self.durable = intent.session.generation;
         self.last_receipt = Some(receipt.session.clone());
         self.blocked = None;
-        let acknowledgement = self
-            .publisher
-            .publish_durable(intent.session.generation, receipt.session.clone());
+        let persistence = self.publisher.publish_durable(
+            intent.session.generation,
+            intent.session.record_projection,
+            receipt.session.clone(),
+        );
         Ok(SubmitTurnAcknowledgement {
-            epoch: self.epoch,
-            generation: intent.session.generation,
-            previous: acknowledgement.previous,
+            persistence,
             receipt,
         })
     }
@@ -2245,13 +2260,13 @@ impl PersistenceActor {
         self.durable = intent.session.generation;
         self.last_receipt = Some(receipt.session.clone());
         self.blocked = None;
-        let acknowledgement = self
-            .publisher
-            .publish_durable(intent.session.generation, receipt.session.clone());
+        let persistence = self.publisher.publish_durable(
+            intent.session.generation,
+            intent.session.record_projection,
+            receipt.session.clone(),
+        );
         Ok(TurnTransitionAcknowledgement {
-            epoch: self.epoch,
-            generation: intent.session.generation,
-            previous: acknowledgement.previous,
+            persistence,
             receipt,
         })
     }
@@ -2650,6 +2665,10 @@ mod tests {
     fn intent(generation: u64, history: &[&str]) -> SessionSaveIntent {
         SessionSaveIntent {
             generation: PersistenceGeneration::new(generation),
+            record_projection: SessionRecordSaveProjection {
+                bounds: None,
+                final_len: 0,
+            },
             identity: smelt_store::SessionIdentity {
                 id: SESSION_ID.into(),
                 created_at: 1,
@@ -2803,6 +2822,12 @@ mod tests {
         assert_eq!(close.target, PersistenceGeneration::new(1));
         assert_eq!(close.durable, PersistenceGeneration::new(1));
         assert!(close.omitted.is_none());
+        let acknowledgement = close
+            .acknowledgement
+            .as_ref()
+            .expect("close returns the unconfirmed durable acknowledgement");
+        assert_eq!(acknowledgement.epoch, SessionEpoch::new(1));
+        assert_eq!(acknowledgement.generation, PersistenceGeneration::new(1));
         assert!(actor.thread.is_none());
 
         let reader =

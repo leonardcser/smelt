@@ -655,7 +655,7 @@ impl TuiApp {
                 (
                     acknowledgement.receipt.turn_id.get(),
                     acknowledgement.receipt.session.current.revision.get(),
-                    acknowledgement.generation.get(),
+                    acknowledgement.persistence.generation.get(),
                     Some(std::time::Instant::now()),
                 )
             };

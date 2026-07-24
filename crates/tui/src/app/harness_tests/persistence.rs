@@ -272,6 +272,173 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
 }
 
 #[test]
+fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
+    const RECORD_COUNT: usize = 600;
+
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..RECORD_COUNT {
+            app.push_transcript_block(Block::Text {
+                content: format!("record {index}"),
+            });
+        }
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.load_session_by_id(&session_id);
+    let initial_record_start = {
+        let history = app.conversation_probe().transcript().history();
+        let first = history.order.first().copied().expect("loaded tail");
+        history.stored_ref(first).unwrap().record_index
+    };
+    assert!(
+        initial_record_start > 0,
+        "test requires a sparse tail with a non-zero record base"
+    );
+    assert!(app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .order
+        .iter()
+        .all(|id| !app
+            .conversation_probe()
+            .transcript()
+            .history()
+            .is_materialized(*id)));
+    app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 1,
+        ..Default::default()
+    });
+
+    app.insert_transcript_checkpoint_for_harness(
+        0,
+        Block::Text {
+            content: "inserted prefix".into(),
+        },
+    );
+    app.save_session();
+    assert!(app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .order
+        .iter()
+        .any(|id| !app
+            .conversation_probe()
+            .transcript()
+            .history()
+            .is_materialized(*id)));
+    app.flush_persist();
+    assert!(
+        !app.session_document_has_unflushed_work(),
+        "shifted record save was not acknowledged"
+    );
+    assert_eq!(
+        app.conversation_probe().transcript().record_total_count(),
+        Some(RECORD_COUNT + 1)
+    );
+    app.drain_transcript_compaction_for_harness();
+    let inserted_id = app.conversation_probe().transcript().history().order[0];
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .stored_ref(inserted_id)
+            .expect("inserted record compacted")
+            .record_index,
+        initial_record_start,
+        "compaction lost the sparse tail's global record base"
+    );
+    app.require_transcript_record_resave_from_for_harness(0);
+    app.set_fast_mode(true);
+    app.save_session_and_flush();
+
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .record_dirty_from(),
+        None
+    );
+    assert!(
+        !app.session_document_has_unflushed_work(),
+        "rewritten compacted record suffix remained dirty: {:?}",
+        app.overlays_probe().notification()
+    );
+    assert!(
+        !has_sticky_session_save_failure(&app, &session_id),
+        "rewritten compacted record suffix failed to save: {:?}",
+        app.overlays_probe().notification()
+    );
+    assert!(
+        app.overlays_probe()
+            .notification()
+            .is_none_or(|notification| !notification
+                .summary
+                .contains("hydrate canonical transcript record suffix")),
+        "record retry used stale persisted indices: {:?}",
+        app.overlays_probe().notification()
+    );
+
+    let reader =
+        smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
+            .unwrap();
+    let durable_previews = reader
+        .read_all_transcript_records()
+        .unwrap()
+        .into_iter()
+        .map(|record| record.preview_text)
+        .collect::<Vec<_>>();
+    let mut expected_previews = (0..RECORD_COUNT)
+        .map(|index| format!("record {index}"))
+        .collect::<Vec<_>>();
+    expected_previews.insert(initial_record_start, "inserted prefix".into());
+    assert_eq!(durable_previews, expected_previews);
+    drop(app);
+
+    let mut reloaded = TestApp::builder().build_without_test_home_reset(&guard);
+    reloaded.load_session_by_id(&session_id);
+    let ids = reloaded
+        .conversation_probe()
+        .transcript()
+        .history()
+        .order
+        .clone();
+    for id in ids.iter().copied() {
+        let record_index = reloaded
+            .conversation_probe()
+            .transcript()
+            .history()
+            .stored_ref(id)
+            .unwrap()
+            .record_index;
+        assert!(record_index < durable_previews.len());
+    }
+    let reloaded_rows = reloaded
+        .with_pinned_transcript_blocks(&ids, |history| {
+            ids.iter()
+                .map(|id| {
+                    let stored = history.stored_ref(*id).unwrap();
+                    (history.raw_text(*id).unwrap(), stored.record_index)
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("hydrate reloaded record tail");
+    let reloaded_text = reloaded_rows
+        .iter()
+        .map(|(text, _)| text.clone())
+        .collect::<Vec<_>>();
+    let reloaded_expected = reloaded_rows
+        .iter()
+        .map(|(_, record_index)| durable_previews[*record_index].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(reloaded_text, reloaded_expected);
+}
+
+#[test]
 fn record_resave_preserves_semantic_history_links() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);

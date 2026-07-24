@@ -442,6 +442,22 @@ impl SparseTranscriptRecords {
         total_count
     }
 
+    fn invalidate_from(&mut self, start: smelt_store::TranscriptRecordOffset) {
+        self.records.retain(|index, _| *index < start);
+        self.lru.retain(|index| *index < start);
+        self.loaded_ranges = self
+            .loaded_ranges
+            .drain(..)
+            .filter_map(|range| {
+                if range.start >= start {
+                    None
+                } else {
+                    Some(range.start..range.end.min(start))
+                }
+            })
+            .collect();
+    }
+
     fn add_loaded_range(&mut self, range: Range<smelt_store::TranscriptRecordOffset>) {
         if range.start >= range.end {
             return;
@@ -1211,12 +1227,11 @@ struct TranscriptViewportRuntime {
     trace: Option<TranscriptScrollTrace>,
 }
 
-pub(crate) enum TranscriptRecordSaveSuffix {
-    Unchanged,
-    Suffix {
-        record_start_idx: usize,
-        records: Vec<smelt_core::TranscriptBlockRecordWithId>,
-    },
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptRecordSaveBounds {
+    pub(crate) order_start: usize,
+    pub(crate) record_start_idx: usize,
+    pub(crate) record_end_idx: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1644,6 +1659,10 @@ impl TranscriptDocument {
             record_record_window_metrics(window);
         }
         let records = TranscriptRecordState::from_loaded(&loaded);
+        let compacted_record_len = records
+            .active_range()
+            .map(|range| range.start.get())
+            .unwrap_or_default();
         let mut document = Self {
             content: TranscriptContentState {
                 transcript: loaded.transcript,
@@ -1658,7 +1677,7 @@ impl TranscriptDocument {
             hydration: TranscriptHydrationState::default(),
             pending_compaction: None,
             compaction_order_index: 0,
-            compacted_record_len: 0,
+            compacted_record_len,
         };
         document
             .content
@@ -1892,8 +1911,11 @@ impl TranscriptDocument {
         summary
     }
 
-    pub(crate) fn pin_record_suffix_for_save(&mut self) -> Result<Vec<BlockId>, String> {
-        let Some(start) = self.content.transcript.history.record_dirty_from() else {
+    pub(crate) fn pin_record_suffix_for_save(
+        &mut self,
+        bounds: Option<TranscriptRecordSaveBounds>,
+    ) -> Result<Vec<BlockId>, String> {
+        let Some(bounds) = bounds else {
             return Ok(Vec::new());
         };
         let ids = self
@@ -1902,7 +1924,7 @@ impl TranscriptDocument {
             .history
             .order
             .iter()
-            .skip(start)
+            .skip(bounds.order_start)
             .copied()
             .filter(|id| self.content.transcript.history.stored_ref(*id).is_some())
             .collect::<Vec<_>>();
@@ -1910,6 +1932,32 @@ impl TranscriptDocument {
             Ok(ids)
         } else {
             Err("hydrate canonical transcript record suffix".to_string())
+        }
+    }
+
+    pub(crate) fn apply_persisted_record_suffix(
+        &mut self,
+        bounds: TranscriptRecordSaveBounds,
+        total_count: usize,
+    ) {
+        self.content
+            .transcript
+            .history
+            .reindex_stored_records_from(bounds.order_start, bounds.record_start_idx);
+        if self.records.total_count().is_some() {
+            let record_start = smelt_store::TranscriptRecordOffset::new(bounds.record_start_idx);
+            self.records.sparse.invalidate_from(record_start);
+            self.records.sparse.total_count = Some(total_count);
+            if let Some(active) = self.records.active_range.as_mut() {
+                let start = active.start.get().min(total_count);
+                let end = start
+                    .saturating_add(self.content.transcript.history.persisted_block_count())
+                    .min(total_count);
+                *active = smelt_store::TranscriptRecordOffset::new(start)
+                    ..smelt_store::TranscriptRecordOffset::new(end);
+            }
+            self.extent_index.clear_persisted_record_estimates();
+            self.clear_transcript_layout_caches();
         }
     }
 
@@ -2171,22 +2219,23 @@ impl TranscriptDocument {
     pub(crate) fn schedule_durable_compaction(
         &mut self,
         record_len: usize,
-        dirty_from: Option<usize>,
+        persisted_bounds: Option<TranscriptRecordSaveBounds>,
     ) {
         let mut next_order_index = self.compaction_order_index;
         let mut next_record_index = self.compacted_record_len;
-        if let Some(dirty_from) = dirty_from.filter(|dirty| *dirty < next_order_index) {
-            next_order_index = dirty_from;
-            next_record_index = self
-                .content
-                .transcript
-                .history
-                .record_index_for_order_index(dirty_from);
+        if let Some(bounds) =
+            persisted_bounds.filter(|bounds| bounds.order_start <= next_order_index)
+        {
+            next_order_index = bounds.order_start;
+            next_record_index = bounds.record_start_idx;
         }
         match self.pending_compaction.as_mut() {
             Some(pending) => {
-                pending.record_len = pending.record_len.max(record_len);
-                if next_order_index < pending.next_order_index {
+                pending.record_len = record_len;
+                if next_order_index < pending.next_order_index
+                    || (next_order_index == pending.next_order_index
+                        && next_record_index != pending.next_record_index)
+                {
                     pending.next_order_index = next_order_index;
                     pending.next_record_index = next_record_index;
                 }
@@ -5159,39 +5208,29 @@ impl TranscriptDocument {
         copied
     }
 
-    pub(crate) fn record_save_suffix(
+    pub(crate) fn record_save_bounds(
         &self,
-        records_persisted: bool,
         dirty_history_from: Option<usize>,
-    ) -> TranscriptRecordSaveSuffix {
+    ) -> Option<TranscriptRecordSaveBounds> {
         let history = self.history();
-        let record_order_dirty = if records_persisted {
-            let history_order_dirty = dirty_history_from
-                .and_then(|idx| history.first_block_index_for_history_origin_at_or_after(idx));
-            match (history.record_dirty_from(), history_order_dirty) {
-                (Some(record), Some(history)) => Some(record.min(history)),
-                (dirty, None) | (None, dirty) => dirty,
-            }
-        } else {
-            Some(0)
-        };
-        let Some(record_order_start) = record_order_dirty else {
-            return TranscriptRecordSaveSuffix::Unchanged;
-        };
-        let local_record_start_idx = if records_persisted {
-            history.record_index_for_order_index(record_order_start)
-        } else {
-            0
-        };
-        let record_start_idx = if records_persisted {
-            self.records.global_record_index(local_record_start_idx)
-        } else {
-            0
-        };
-        TranscriptRecordSaveSuffix::Suffix {
-            record_start_idx,
-            records: history.block_records_with_ids_from(record_order_start),
-        }
+        let history_order_dirty = dirty_history_from
+            .and_then(|idx| history.first_block_index_for_history_origin_at_or_after(idx));
+        let order_start = match (history.record_dirty_from(), history_order_dirty) {
+            (Some(record), Some(history)) => Some(record.min(history)),
+            (dirty, None) | (None, dirty) => dirty,
+        }?;
+        let local_record_start_idx = history.record_index_for_order_index(order_start);
+        let record_base_idx = self
+            .records
+            .active_range
+            .as_ref()
+            .map(|range| range.start.get())
+            .unwrap_or_default();
+        Some(TranscriptRecordSaveBounds {
+            order_start,
+            record_start_idx: record_base_idx.saturating_add(local_record_start_idx),
+            record_end_idx: record_base_idx.saturating_add(history.persisted_block_count()),
+        })
     }
 
     pub(crate) fn history(&self) -> &BlockHistory {
@@ -5231,64 +5270,9 @@ impl TranscriptDocument {
                 .is_none_or(|total_count| total_count == 0)
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn record_total_count(&self) -> Option<usize> {
         self.records.total_count()
-    }
-
-    pub(crate) fn note_persisted_record_append(&mut self, count: usize) {
-        if count == 0 {
-            return;
-        }
-        let total = self
-            .records
-            .sparse
-            .total_count
-            .unwrap_or_else(|| self.content.transcript.history.block_records().len());
-        if let Some(active) = self.records.active_range.as_mut() {
-            if active.end.get() == total {
-                active.end = smelt_store::TranscriptRecordOffset::new(total.saturating_add(count));
-            }
-        }
-        self.records.sparse.total_count = Some(total.saturating_add(count));
-    }
-
-    pub(crate) fn can_reconcile_dense_record_count(&self, total_count: usize) -> bool {
-        self.records.records_for_active_range().len() <= total_count
-    }
-
-    pub(crate) fn reconcile_dense_record_count(&mut self, total_count: usize) -> bool {
-        let active_records = self.records.records_for_active_range();
-        if active_records.len() > total_count {
-            return false;
-        }
-
-        let start = total_count.saturating_sub(active_records.len());
-        let end = start.saturating_add(active_records.len());
-        let mut sparse = SparseTranscriptRecords {
-            total_count: Some(total_count),
-            ..Default::default()
-        };
-        for (offset, record) in active_records.into_iter().enumerate() {
-            let index = smelt_store::TranscriptRecordOffset::new(start.saturating_add(offset));
-            sparse.records.insert(index, record);
-            sparse.lru.push_back(index);
-        }
-        if start < end {
-            sparse.add_loaded_range(
-                smelt_store::TranscriptRecordOffset::new(start)
-                    ..smelt_store::TranscriptRecordOffset::new(end),
-            );
-            self.records.active_range = Some(
-                smelt_store::TranscriptRecordOffset::new(start)
-                    ..smelt_store::TranscriptRecordOffset::new(end),
-            );
-        } else {
-            self.records.active_range = None;
-        }
-        self.records.sparse = sparse;
-        self.extent_index.clear_persisted_record_estimates();
-        self.clear_transcript_layout_caches();
-        true
     }
 
     #[cfg(test)]
@@ -5447,27 +5431,18 @@ mod document_tests {
             .count()
     }
 
-    fn comparable_record_suffix(
-        suffix: TranscriptRecordSaveSuffix,
-    ) -> Option<(usize, Vec<(u64, String)>)> {
-        match suffix {
-            TranscriptRecordSaveSuffix::Unchanged => None,
-            TranscriptRecordSaveSuffix::Suffix {
-                record_start_idx,
-                records,
-            } => Some((
-                record_start_idx,
-                records
-                    .into_iter()
-                    .map(|record| {
-                        (
-                            record.block_id.get(),
-                            serde_json::to_string(&record.record).expect("serialize record"),
-                        )
-                    })
-                    .collect(),
-            )),
-        }
+    fn comparable_record_rows(
+        records: Vec<smelt_core::TranscriptBlockRecordWithId>,
+    ) -> Vec<(u64, String)> {
+        records
+            .into_iter()
+            .map(|record| {
+                (
+                    record.block_id.get(),
+                    serde_json::to_string(&record.record).expect("serialize record"),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -5786,12 +5761,28 @@ mod document_tests {
             );
         }
 
-        let bounded_pins = bounded.pin_record_suffix_for_save().unwrap();
-        let non_evicting_pins = non_evicting.pin_record_suffix_for_save().unwrap();
-        assert_eq!(
-            comparable_record_suffix(bounded.record_save_suffix(true, None)),
-            comparable_record_suffix(non_evicting.record_save_suffix(true, None))
-        );
+        let bounded_bounds = bounded.record_save_bounds(None);
+        let non_evicting_bounds = non_evicting.record_save_bounds(None);
+        let bounded_pins = bounded.pin_record_suffix_for_save(bounded_bounds).unwrap();
+        let non_evicting_pins = non_evicting
+            .pin_record_suffix_for_save(non_evicting_bounds)
+            .unwrap();
+        assert_eq!(bounded_bounds, non_evicting_bounds);
+        let bounded_records = bounded_bounds.map(|bounds| {
+            comparable_record_rows(
+                bounded
+                    .history()
+                    .block_records_with_ids_from(bounds.order_start),
+            )
+        });
+        let non_evicting_records = non_evicting_bounds.map(|bounds| {
+            comparable_record_rows(
+                non_evicting
+                    .history()
+                    .block_records_with_ids_from(bounds.order_start),
+            )
+        });
+        assert_eq!(bounded_records, non_evicting_records);
         bounded.unpin_operation_blocks(&bounded_pins);
         non_evicting.unpin_operation_blocks(&non_evicting_pins);
 
@@ -5800,10 +5791,24 @@ mod document_tests {
         bounded.truncate_to(17);
         non_evicting.truncate_to(17);
         assert_eq!(bounded.history().order, non_evicting.history().order);
-        assert_eq!(
-            comparable_record_suffix(bounded.record_save_suffix(true, None)),
-            comparable_record_suffix(non_evicting.record_save_suffix(true, None))
-        );
+        let bounded_bounds = bounded.record_save_bounds(None);
+        let non_evicting_bounds = non_evicting.record_save_bounds(None);
+        assert_eq!(bounded_bounds, non_evicting_bounds);
+        let bounded_records = bounded_bounds.map(|bounds| {
+            comparable_record_rows(
+                bounded
+                    .history()
+                    .block_records_with_ids_from(bounds.order_start),
+            )
+        });
+        let non_evicting_records = non_evicting_bounds.map(|bounds| {
+            comparable_record_rows(
+                non_evicting
+                    .history()
+                    .block_records_with_ids_from(bounds.order_start),
+            )
+        });
+        assert_eq!(bounded_records, non_evicting_records);
         assert!(bounded.memory_snapshot().evicted_entries > 0);
     }
 
@@ -5928,9 +5933,9 @@ mod document_tests {
         assert!(document
             .history_mut()
             .update_tool_state("pending-call", |state| state.status = ToolStatus::Ok));
-        let dirty_from = document.history().record_dirty_from();
+        let persisted_bounds = document.record_save_bounds(None);
         document.history_mut().clear_record_dirty();
-        document.schedule_durable_compaction(2, dirty_from);
+        document.schedule_durable_compaction(2, persisted_bounds);
         assert!(document.drain_compaction_slice());
         assert!(!document.history().is_materialized(ids[1]));
     }
@@ -9404,59 +9409,21 @@ mod tests {
         assert_eq!(document.loaded_record_ranges().len(), 1);
         assert_eq!(document.loaded_record_ranges()[0].start.get(), 98);
         assert_eq!(document.loaded_record_ranges()[0].end.get(), 100);
-        assert!(matches!(
-            document.record_save_suffix(true, None),
-            super::TranscriptRecordSaveSuffix::Suffix {
-                record_start_idx: 100,
-                records,
-            } if records.len() == 1
-        ));
+        let bounds = document
+            .record_save_bounds(None)
+            .expect("dirty tail produces save bounds");
+        assert_eq!(bounds.record_start_idx, 100);
+        assert_eq!(
+            document
+                .history()
+                .block_records_with_ids_from(bounds.order_start)
+                .len(),
+            1
+        );
     }
 
     #[test]
-    fn transcript_reconciles_stale_record_extent_after_dense_compaction() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut record = test_record_record(302);
-        record.origin_json =
-            Some(serde_json::to_string(&smelt_core::BlockOrigin::History(0)).unwrap());
-        let slice = smelt_store::TranscriptRecordSlice::new(
-            smelt_store::TranscriptRecordOffset::new(302),
-            303,
-            smelt_store::TranscriptRecordHydration::ObjectBacked,
-            vec![record],
-        );
-        let loaded = super::LoadedTranscript::from_record_slice(slice, dir.path().to_path_buf())
-            .expect("loaded stale tail");
-        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
-        document.push_with_origin(
-            smelt_core::Block::Text {
-                content: "new tail".into(),
-            },
-            smelt_core::BlockOrigin::History(1),
-        );
-
-        let before = document.record_save_suffix(true, None);
-        assert!(matches!(
-            before,
-            super::TranscriptRecordSaveSuffix::Suffix {
-                record_start_idx: 303,
-                ..
-            }
-        ));
-
-        assert!(document.reconcile_dense_record_count(111));
-        let after = document.record_save_suffix(true, None);
-        assert!(matches!(
-            after,
-            super::TranscriptRecordSaveSuffix::Suffix {
-                record_start_idx: 111,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn record_save_suffix_uses_earliest_dirty_source() {
+    fn record_save_bounds_use_earliest_dirty_source() {
         let mut document = super::TranscriptDocument::new();
         document.push_with_origin(
             smelt_core::Block::Text {
@@ -9473,16 +9440,67 @@ mod tests {
         );
         assert_eq!(document.history().record_dirty_from(), Some(1));
 
-        let suffix = document.record_save_suffix(true, Some(0));
-        let super::TranscriptRecordSaveSuffix::Suffix {
-            record_start_idx,
-            records,
-        } = suffix
-        else {
-            panic!("dirty record sources should produce a save suffix");
-        };
-        assert_eq!(record_start_idx, 0);
-        assert_eq!(records.len(), 2);
+        let bounds = document
+            .record_save_bounds(Some(0))
+            .expect("dirty record sources should produce save bounds");
+        assert_eq!(bounds.record_start_idx, 0);
+        assert_eq!(
+            document
+                .history()
+                .block_records_with_ids_from(bounds.order_start)
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn record_save_pins_history_dirty_prefix() {
+        let mut source = smelt_core::content::transcript::Transcript::new();
+        for index in 0..2 {
+            source.push_with_origin(
+                smelt_core::Block::Text {
+                    content: format!("history block {index}"),
+                },
+                smelt_core::BlockOrigin::History(index),
+            );
+        }
+        let records = source.history.block_records();
+        let record_rows = records
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, mut record)| {
+                record.origin = None;
+                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                    index,
+                    index as u64,
+                    &record,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.apply_transcript_record_fixture(&record_rows).unwrap();
+        drop(db);
+        source.history.clear_record_dirty();
+        let mut document = super::TranscriptDocument::from_transcript(source);
+        document.set_session_dir(dir.path().to_path_buf());
+        document.schedule_durable_compaction(records.len(), None);
+        while document.drain_compaction_slice() {}
+
+        let bounds = document.record_save_bounds(Some(0));
+        let pins = document.pin_record_suffix_for_save(bounds).unwrap();
+        assert_eq!(pins.len(), records.len());
+        let bounds = bounds.expect("history dirtiness should produce save bounds");
+        assert_eq!(
+            document
+                .history()
+                .block_records_with_ids_from(bounds.order_start)
+                .len(),
+            records.len()
+        );
+        document.unpin_operation_blocks(&pins);
     }
 
     #[test]

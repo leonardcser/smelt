@@ -287,6 +287,17 @@ impl TestApp {
     }
 
     #[cfg(test)]
+    pub(crate) fn insert_transcript_checkpoint_for_harness(
+        &mut self,
+        block_index: usize,
+        block: smelt_core::transcript_model::Block,
+    ) {
+        self.app
+            .conversation
+            .insert_checkpoint_marker(block_index, block);
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace_loaded_transcript_for_harness(
         &mut self,
         transcript: crate::app::transcript::LoadedTranscript,

@@ -12,7 +12,7 @@ use smelt_core::session::{
 use smelt_core::session_runtime::LiveSession;
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
-use crate::app::transcript::TranscriptDocument;
+use crate::app::transcript::{TranscriptDocument, TranscriptRecordSaveBounds};
 use crate::persist::SessionEpoch;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -95,21 +95,33 @@ impl DocumentChanges {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SessionRecordSaveProjection {
+    pub(crate) bounds: Option<TranscriptRecordSaveBounds>,
+    pub(crate) final_len: usize,
+}
+
+impl SessionRecordSaveProjection {
+    pub(crate) fn persisted_head(head: smelt_store::StoreHead) -> Self {
+        Self {
+            bounds: None,
+            final_len: head
+                .transcript_record_count
+                .as_usize()
+                .expect("persisted record count originated as usize"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SessionSaveIntent {
     pub(crate) generation: PersistenceGeneration,
+    pub(crate) record_projection: SessionRecordSaveProjection,
     pub(crate) identity: smelt_store::SessionIdentity,
     pub(crate) metadata: smelt_store::SessionMetadata,
     pub(crate) history: smelt_store::HistorySuffix,
     pub(crate) side_tables: smelt_store::SideTableSuffixes,
     pub(crate) records: Option<smelt_store::TranscriptRecordSuffix>,
-}
-
-struct AcknowledgementView<'a> {
-    generation: PersistenceGeneration,
-    previous: smelt_store::StoreHead,
-    receipt: &'a smelt_store::SaveReceipt,
-    coalesced: bool,
 }
 
 pub(crate) struct SessionDocument {
@@ -396,19 +408,38 @@ impl TuiSessionDocument {
             history_len,
         )
         .map_err(|error| error.to_string())?;
-        let record_pins = self.transcript.pin_record_suffix_for_save()?;
-        let records = record_save_plan(&self.transcript, true, self.changes.history_dirty_from)
-            .map(|plan| {
-                let records = plan
-                    .records
+        let record_bounds = self
+            .transcript
+            .record_save_bounds(self.changes.history_dirty_from);
+        let record_projection = SessionRecordSaveProjection {
+            bounds: record_bounds,
+            final_len: record_bounds.map_or_else(
+                || {
+                    self.changes
+                        .acknowledged_head
+                        .transcript_record_count
+                        .as_usize()
+                        .expect("document record count originated as usize")
+                },
+                |bounds| bounds.record_end_idx,
+            ),
+        };
+        let record_pins = self.transcript.pin_record_suffix_for_save(record_bounds)?;
+        let records = record_bounds
+            .map(|bounds| {
+                let record_rows = self
+                    .transcript
+                    .history()
+                    .block_records_with_ids_from(bounds.order_start);
+                let records = record_rows
                     .iter()
                     .enumerate()
                     .map(|(offset, record)| {
-                        transcript_record_row(plan.start_record_idx + offset, record, &history)
+                        transcript_record_row(bounds.record_start_idx + offset, record, &history)
                     })
                     .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
                 Ok::<_, smelt_store::StoreError>(smelt_store::TranscriptRecordSuffix {
-                    start: smelt_store::TranscriptRecordIndex::new(plan.start_record_idx as u64),
+                    start: smelt_store::TranscriptRecordIndex::new(bounds.record_start_idx as u64),
                     records,
                 })
             })
@@ -417,6 +448,7 @@ impl TuiSessionDocument {
         let records = records.map_err(|error| format!("prepare transcript records: {error}"))?;
         Ok(Some(SessionSaveIntent {
             generation: self.changes.current,
+            record_projection,
             identity,
             metadata,
             history,
@@ -441,77 +473,41 @@ impl TuiSessionDocument {
 
     pub(crate) fn acknowledge(
         &mut self,
-        epoch: SessionEpoch,
-        generation: PersistenceGeneration,
-        receipt: &smelt_store::SaveReceipt,
-        session_id: &str,
-        history_len: usize,
-        checkpoint: Option<&ContextCheckpoint>,
-    ) -> bool {
-        self.acknowledge_from(
-            epoch,
-            AcknowledgementView {
-                generation,
-                previous: receipt.previous,
-                receipt,
-                coalesced: false,
-            },
-            session_id,
-            history_len,
-            checkpoint,
-        )
-    }
-
-    pub(crate) fn acknowledge_convergence(
-        &mut self,
-        epoch: SessionEpoch,
         acknowledgement: &crate::persist::PersistenceAcknowledgement,
         session_id: &str,
         history_len: usize,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> bool {
-        self.acknowledge_from(
-            epoch,
-            AcknowledgementView {
-                generation: acknowledgement.generation,
-                previous: acknowledgement.previous,
-                receipt: &acknowledgement.receipt,
-                coalesced: true,
-            },
-            session_id,
-            history_len,
-            checkpoint,
-        )
+        self.acknowledge_from(acknowledgement, false, session_id, history_len, checkpoint)
     }
 
-    fn acknowledge_from(
+    pub(crate) fn acknowledge_convergence(
         &mut self,
-        epoch: SessionEpoch,
-        acknowledgement: AcknowledgementView<'_>,
+        acknowledgement: &crate::persist::PersistenceAcknowledgement,
         session_id: &str,
         history_len: usize,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> bool {
-        let AcknowledgementView {
-            generation,
-            previous,
-            receipt,
-            coalesced,
-        } = acknowledgement;
-        if self.persistence_epoch != Some(epoch) || generation != self.changes.current {
+        self.acknowledge_from(acknowledgement, true, session_id, history_len, checkpoint)
+    }
+
+    fn acknowledge_from(
+        &mut self,
+        acknowledgement: &crate::persist::PersistenceAcknowledgement,
+        coalesced: bool,
+        session_id: &str,
+        history_len: usize,
+        checkpoint: Option<&ContextCheckpoint>,
+    ) -> bool {
+        if self.persistence_epoch != Some(acknowledgement.epoch)
+            || acknowledgement.generation != self.changes.current
+        {
             return false;
         }
-        let record_dirty_from = self.transcript.history().record_dirty_from();
-        let expected_record_len =
-            record_save_plan(&self.transcript, true, self.changes.history_dirty_from)
-                .and_then(|plan| plan.start_record_idx.checked_add(plan.records.len()))
-                .unwrap_or_else(|| {
-                    self.changes
-                        .acknowledged_head
-                        .transcript_record_count
-                        .as_usize()
-                        .expect("document record length originated as usize")
-                });
+        let record_projection = acknowledgement.record_projection;
+        let previous = acknowledgement.previous;
+        let receipt = &acknowledgement.receipt;
+        let expected_record_len = record_projection.final_len;
         let revision_advanced_once = receipt
             .previous
             .revision
@@ -524,18 +520,11 @@ impl TuiSessionDocument {
             receipt.previous == previous
                 && (receipt.current.revision == receipt.previous.revision || revision_advanced_once)
         };
-        let record_projection_valid = self.transcript.record_total_count().is_none_or(|total| {
-            expected_record_len >= total
-                || self
-                    .transcript
-                    .can_reconcile_dense_record_count(expected_record_len)
-        });
         if receipt.session_id != session_id
             || receipt.current.history_len.as_usize() != Some(history_len)
             || receipt.current.transcript_record_count.as_usize() != Some(expected_record_len)
             || previous != self.changes.acknowledged_head
             || !revision_valid
-            || !record_projection_valid
         {
             return false;
         }
@@ -550,19 +539,12 @@ impl TuiSessionDocument {
             self.transcript
                 .set_session_dir(live_session.dir().to_path_buf());
         }
-        if let Some(total) = self.transcript.record_total_count() {
-            if expected_record_len >= total {
-                self.transcript
-                    .note_persisted_record_append(expected_record_len - total);
-            } else if !self
-                .transcript
-                .reconcile_dense_record_count(expected_record_len)
-            {
-                return false;
-            }
+        if let Some(bounds) = record_projection.bounds {
+            self.transcript
+                .apply_persisted_record_suffix(bounds, expected_record_len);
         }
         self.transcript
-            .schedule_durable_compaction(expected_record_len, record_dirty_from);
+            .schedule_durable_compaction(expected_record_len, record_projection.bounds);
         self.transcript.history_mut().clear_record_dirty();
         self.changes.mark_clean(receipt.current);
         true
@@ -605,11 +587,6 @@ pub(crate) struct StoreBackedSessionDocument {
     pub(crate) live_session: smelt_core::session_runtime::LiveSession,
     pub(crate) store_head: smelt_store::StoreHead,
     pub(crate) repair_records: bool,
-}
-
-struct SessionRecordSavePlan {
-    start_record_idx: usize,
-    records: Vec<smelt_core::TranscriptBlockRecordWithId>,
 }
 
 #[derive(Clone, Copy)]
@@ -1507,23 +1484,6 @@ impl SessionDocument {
             self.store_head
                 .expect("store-backed session document includes a store head"),
         )
-    }
-}
-
-fn record_save_plan(
-    transcript: &TranscriptDocument,
-    records_persisted: bool,
-    dirty_history_from: Option<usize>,
-) -> Option<SessionRecordSavePlan> {
-    match transcript.record_save_suffix(records_persisted, dirty_history_from) {
-        crate::app::transcript::TranscriptRecordSaveSuffix::Unchanged => None,
-        crate::app::transcript::TranscriptRecordSaveSuffix::Suffix {
-            record_start_idx,
-            records,
-        } => Some(SessionRecordSavePlan {
-            start_record_idx: record_start_idx,
-            records,
-        }),
     }
 }
 
@@ -2760,6 +2720,20 @@ mod tests {
         }
     }
 
+    fn acknowledgement_for(
+        epoch: SessionEpoch,
+        intent: &SessionSaveIntent,
+        receipt: smelt_store::SaveReceipt,
+    ) -> crate::persist::PersistenceAcknowledgement {
+        crate::persist::PersistenceAcknowledgement {
+            epoch,
+            generation: intent.generation,
+            record_projection: intent.record_projection,
+            previous: receipt.previous,
+            receipt,
+        }
+    }
+
     #[test]
     fn persistence_generation_is_checked() {
         assert_eq!(
@@ -2839,12 +2813,37 @@ mod tests {
         assert_eq!(intent.history.items.len(), 2);
 
         let epoch = SessionEpoch::new(7);
-        let receipt = receipt_for(&intent, previous);
+        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(epoch, intent.generation, &receipt, &session.id, 2, None));
+        assert!(document.acknowledge(&acknowledgement, &session.id, 2, None));
         assert_eq!(document.durable_generation(), intent.generation);
         assert_eq!(document.dirty_history_from_for_test(), None);
         assert!(!document.has_session_work());
+    }
+
+    #[test]
+    fn acknowledgement_uses_submitted_record_projection() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        document.apply_transcript(TranscriptMutation::AppendBlock {
+            block: Block::Text {
+                content: "durable record".into(),
+            },
+        });
+
+        let previous = document.acknowledged_head();
+        let intent = document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare intent")
+            .expect("dirty intent");
+        assert!(intent.record_projection.bounds.is_some());
+        document.transcript.history_mut().clear_record_dirty();
+
+        let epoch = SessionEpoch::new(8);
+        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
+        document.bind_persistence(epoch);
+        assert!(document.acknowledge(&acknowledgement, &session.id, 0, None));
+        assert_eq!(document.durable_generation(), intent.generation);
     }
 
     #[test]
@@ -2875,9 +2874,9 @@ mod tests {
             .expect("prepare intent")
             .expect("dirty intent");
         let epoch = SessionEpoch::new(9);
-        let receipt = receipt_for(&intent, previous);
+        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(epoch, intent.generation, &receipt, &session.id, 1, None));
+        assert!(document.acknowledge(&acknowledgement, &session.id, 1, None));
 
         assert!(!document.transcript.drain_compaction_slice());
         assert!(document.transcript.history().is_live(id));
@@ -2906,72 +2905,37 @@ mod tests {
             .expect("prepare intent")
             .expect("dirty intent");
         let epoch = SessionEpoch::new(3);
-        let receipt = receipt_for(&intent, previous);
+        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
         document.bind_persistence(epoch);
 
-        assert!(!document.acknowledge(
-            SessionEpoch::new(4),
-            intent.generation,
-            &receipt,
-            &session.id,
-            1,
-            None,
-        ));
-        assert!(!document.acknowledge(
-            epoch,
-            PersistenceGeneration::new(intent.generation.get() - 1),
-            &receipt,
-            &session.id,
-            1,
-            None,
-        ));
-        assert!(!document.acknowledge(
-            epoch,
-            PersistenceGeneration::new(intent.generation.get() + 1),
-            &receipt,
-            &session.id,
-            1,
-            None,
-        ));
-        assert!(!document.acknowledge(epoch, intent.generation, &receipt, &session.id, 2, None));
-        let mut wrong_session = receipt.clone();
-        wrong_session.session_id = "different-session".into();
-        assert!(!document.acknowledge(
-            epoch,
-            intent.generation,
-            &wrong_session,
-            &session.id,
-            1,
-            None,
-        ));
-        let mut wrong_record_len = receipt.clone();
-        wrong_record_len.current.transcript_record_count =
+        let mut wrong_epoch = acknowledgement.clone();
+        wrong_epoch.epoch = SessionEpoch::new(4);
+        assert!(!document.acknowledge(&wrong_epoch, &session.id, 1, None));
+        let mut older_generation = acknowledgement.clone();
+        older_generation.generation = PersistenceGeneration::new(intent.generation.get() - 1);
+        assert!(!document.acknowledge(&older_generation, &session.id, 1, None));
+        let mut newer_generation = acknowledgement.clone();
+        newer_generation.generation = PersistenceGeneration::new(intent.generation.get() + 1);
+        assert!(!document.acknowledge(&newer_generation, &session.id, 1, None));
+        assert!(!document.acknowledge(&acknowledgement, &session.id, 2, None));
+        let mut wrong_session = acknowledgement.clone();
+        wrong_session.receipt.session_id = "different-session".into();
+        assert!(!document.acknowledge(&wrong_session, &session.id, 1, None));
+        let mut wrong_record_len = acknowledgement.clone();
+        wrong_record_len.receipt.current.transcript_record_count =
             smelt_store::TranscriptRecordCount::new(1);
-        assert!(!document.acknowledge(
-            epoch,
-            intent.generation,
-            &wrong_record_len,
-            &session.id,
-            1,
-            None,
-        ));
-        let mut wrong_head = receipt.clone();
-        wrong_head.previous.revision = smelt_store::Revision::new(9);
-        assert!(!document.acknowledge(epoch, intent.generation, &wrong_head, &session.id, 1, None,));
-        let mut skipped_revision = receipt.clone();
-        skipped_revision.current.revision = skipped_revision
+        assert!(!document.acknowledge(&wrong_record_len, &session.id, 1, None));
+        let mut wrong_head = acknowledgement.clone();
+        wrong_head.receipt.previous.revision = smelt_store::Revision::new(9);
+        assert!(!document.acknowledge(&wrong_head, &session.id, 1, None));
+        let mut skipped_revision = acknowledgement.clone();
+        skipped_revision.receipt.current.revision = skipped_revision
+            .receipt
             .previous
             .revision
             .checked_add(2)
             .expect("revision");
-        assert!(!document.acknowledge(
-            epoch,
-            intent.generation,
-            &skipped_revision,
-            &session.id,
-            1,
-            None,
-        ));
+        assert!(!document.acknowledge(&skipped_revision, &session.id, 1, None));
         assert!(document.has_session_work());
     }
 
@@ -3195,9 +3159,9 @@ mod tests {
         assert_eq!(intent.history.start, smelt_store::HistoryIndex::new(2));
         assert_eq!(intent.history.items.len(), 1);
         let epoch = SessionEpoch::new(9);
-        let receipt = receipt_for(&intent, previous);
+        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(epoch, intent.generation, &receipt, &session.id, 3, None));
+        assert!(document.acknowledge(&acknowledgement, &session.id, 3, None));
         assert_eq!(
             document
                 .live_session

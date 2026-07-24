@@ -1751,6 +1751,25 @@ impl BlockHistory {
         self.entries.get(&id).and_then(BlockEntry::stored)
     }
 
+    pub fn reindex_stored_records_from(&mut self, order_start: usize, record_start: usize) {
+        let mut record_index = record_start;
+        for id in self.order.iter().skip(order_start.min(self.order.len())) {
+            let Some(entry) = self.entries.get_mut(id) else {
+                continue;
+            };
+            if !entry.is_persisted_block() {
+                continue;
+            }
+            match entry {
+                BlockEntry::Stored(stored) | BlockEntry::Hydrated { stored, .. } => {
+                    Arc::make_mut(stored).record_index = record_index;
+                }
+                BlockEntry::Live(_) => {}
+            }
+            record_index = record_index.saturating_add(1);
+        }
+    }
+
     pub fn row_estimate_text(&self, id: BlockId) -> Option<BlockText<'_>> {
         self.entries
             .get(&id)
