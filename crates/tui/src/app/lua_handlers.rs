@@ -333,7 +333,7 @@ impl TuiApp {
         &mut self,
         kind: &'static str,
         refresh_agent_inputs: bool,
-        mut cwd_transition: Option<(std::path::PathBuf, bool)>,
+        cwd_transition: Option<(std::path::PathBuf, bool)>,
         apply_runtime_effects: bool,
         run_ready_hooks: bool,
     ) -> Option<LuaBringUpError> {
@@ -406,6 +406,17 @@ impl TuiApp {
             .picker_state
             .retain(|win, _| candidate_tui.ui.win(*win).is_some());
         candidate_tui.placeholders.retain_windows(&candidate_tui.ui);
+        let staged_cwd = if let Some((path, mark_session_dirty)) = cwd_transition {
+            match crate::app::cwd::StagedCwdTransition::stage(path.clone(), mark_session_dirty) {
+                Ok(staged) => Some(staged),
+                Err(error) => {
+                    self.discard_lua_candidate_resources(candidate_id);
+                    return Some(bring_up_error("cwd", Some(path), error));
+                }
+            }
+        } else {
+            None
+        };
         let activation = crate::lua::scope_app(self, || candidate.activate());
         if let Err(error) = activation {
             self.discard_lua_candidate_resources(candidate_id);
@@ -439,10 +450,7 @@ impl TuiApp {
             }
             self.managed_models.replace_catalog(next_managed_models);
             self.commit_lua_runtime_config(next_runtime, next_permissions);
-            let committed_cwd = cwd_transition.take().map(|(cwd, mark_session_dirty)| {
-                self.install_runtime_cwd(cwd, mark_session_dirty);
-                mark_session_dirty
-            });
+            let committed_cwd = staged_cwd.map(|staged| staged.commit(self));
             self.submit_managed_model_refreshes();
             self.reconcile_auto_reload();
             if refresh_agent_inputs {
@@ -458,7 +466,7 @@ impl TuiApp {
             self.publish_diff_signals();
             self.reconcile_runtime_controllers();
         } else {
-            debug_assert!(cwd_transition.is_none());
+            debug_assert!(staged_cwd.is_none());
         }
 
         // Make layout geometry current before `ready` hooks open overlays or

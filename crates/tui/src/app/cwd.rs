@@ -18,6 +18,55 @@ struct PendingCwdChange {
     tool_invocation: Option<smelt_core::lua::ToolInvocationContext>,
 }
 
+pub(crate) struct StagedCwdTransition {
+    previous_cwd: std::path::PathBuf,
+    previous_pwd: Option<std::ffi::OsString>,
+    cwd: std::path::PathBuf,
+    mark_session_dirty: bool,
+    committed: bool,
+}
+
+impl StagedCwdTransition {
+    pub(crate) fn stage(
+        path: std::path::PathBuf,
+        mark_session_dirty: bool,
+    ) -> Result<Self, String> {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let previous_cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        let previous_pwd = std::env::var_os("PWD");
+        std::env::set_current_dir(&path)
+            .map_err(|error| format!("set cwd {}: {error}", path.display()))?;
+        let cwd = std::env::current_dir().unwrap_or(path);
+        std::env::set_var("PWD", &cwd);
+        Ok(Self {
+            previous_cwd,
+            previous_pwd,
+            cwd,
+            mark_session_dirty,
+            committed: false,
+        })
+    }
+
+    pub(crate) fn commit(mut self, app: &mut TuiApp) -> bool {
+        app.install_runtime_cwd(self.cwd.clone(), self.mark_session_dirty);
+        self.committed = true;
+        self.mark_session_dirty
+    }
+}
+
+impl Drop for StagedCwdTransition {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = std::env::set_current_dir(&self.previous_cwd);
+        match &self.previous_pwd {
+            Some(pwd) => std::env::set_var("PWD", pwd),
+            None => std::env::remove_var("PWD"),
+        }
+    }
+}
+
 pub(crate) struct WorkspaceState {
     cwd: String,
     home: std::path::PathBuf,
@@ -275,11 +324,7 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn install_runtime_cwd(
-        &mut self,
-        cwd: std::path::PathBuf,
-        mark_session_dirty: bool,
-    ) {
+    fn install_runtime_cwd(&mut self, cwd: std::path::PathBuf, mark_session_dirty: bool) {
         self.core.env.set_cwd(cwd.clone());
         self.platform.install_cwd(cwd.clone());
         self.prompt.set_cwd(cwd.clone());
@@ -324,7 +369,25 @@ impl TuiApp {
 
 #[cfg(test)]
 mod tests {
-    use super::worktree_display_path;
+    use super::{worktree_display_path, StagedCwdTransition};
+
+    #[test]
+    fn staged_cwd_transition_rolls_back_when_not_committed() {
+        let target = tempfile::TempDir::new().unwrap();
+        let _environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        let original_cwd = std::env::current_dir().unwrap();
+        let original_pwd = std::env::var_os("PWD");
+        let target = std::fs::canonicalize(target.path()).unwrap();
+
+        {
+            let _staged = StagedCwdTransition::stage(target.clone(), true).unwrap();
+            assert_eq!(std::env::current_dir().unwrap(), target);
+            assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+        }
+
+        assert_eq!(std::env::current_dir().unwrap(), original_cwd);
+        assert_eq!(std::env::var_os("PWD"), original_pwd);
+    }
 
     #[test]
     fn worktree_display_path_is_relative_to_project_root() {

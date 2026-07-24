@@ -9,6 +9,32 @@ fn prompt_has_command_highlight(app: &mut TestApp) -> bool {
         .is_empty()
 }
 
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "smelt test")
+        .env("GIT_AUTHOR_EMAIL", "smelt-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "smelt test")
+        .env("GIT_COMMITTER_EMAIL", "smelt-test@example.invalid")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn worktree_repo() -> tempfile::TempDir {
+    let repo = tempfile::TempDir::new().expect("create worktree repository");
+    git(repo.path(), &["init", "-b", "main"]);
+    std::fs::write(repo.path().join("README.md"), "fixture\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-m", "initial"]);
+    repo
+}
+
 #[test]
 fn lua_config_auto_reload_success_notifies_for_real_edits() {
     let mut app = TestApp::builder().build();
@@ -1318,8 +1344,8 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
 
 #[test]
 fn relative_lua_cwd_change_resolves_from_runtime_cwd() {
-    let process_cwd = std::env::current_dir().expect("process cwd");
-    let mut app = TestApp::builder().build();
+    let environment_guard = test_environment_guard();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let target = std::path::Path::new(app.cwd_str()).join("nested-project");
     std::fs::create_dir_all(&target).expect("create nested runtime cwd");
     let expected = std::fs::canonicalize(&target).expect("canonical nested runtime cwd");
@@ -1333,15 +1359,18 @@ fn relative_lua_cwd_change_resolves_from_runtime_cwd() {
     assert!(app.drain_idle_work());
 
     assert_eq!(app.core_probe().env.cwd(), expected);
-    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+    assert_eq!(std::env::current_dir().unwrap(), expected);
+    assert_eq!(
+        std::env::var_os("PWD").as_deref(),
+        Some(expected.as_os_str())
+    );
 }
 
 #[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
-    let process_cwd = std::env::current_dir().expect("process cwd");
-    let process_pwd = std::env::var_os("PWD");
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
 
@@ -1365,8 +1394,8 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
         Some(expected.as_str())
     );
     assert_eq!(app.core_probe().env.cwd(), target);
-    assert_eq!(std::env::current_dir().expect("process cwd"), process_cwd);
-    assert_eq!(std::env::var_os("PWD"), process_pwd);
+    assert_eq!(std::env::current_dir().expect("process cwd"), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(
         app.core_probe().signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
@@ -1405,8 +1434,58 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
 }
 
 #[test]
+fn enter_worktree_tool_changes_the_process_cwd() {
+    let repo = worktree_repo();
+    let environment_guard = test_environment_guard();
+
+    let mut app = TestApp::builder()
+        .with_cwd(repo.path())
+        .build_with_test_environment_guard(&environment_guard);
+    let mut settings = app.core_probe().config.settings.clone();
+    settings.worktree_root = ".worktrees".into();
+    app.set_settings_for_harness(settings);
+    app.start_turn(42);
+    let _ = app.drain_engine_sends();
+    app.clear_actions();
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        request_id: 96,
+        call_id: "enter-worktree".into(),
+        tool_name: "enter_worktree".into(),
+        args: std::collections::HashMap::from([(
+            "name".into(),
+            serde_json::Value::String("Tool Cwd".into()),
+        )]),
+    }));
+
+    let target = std::fs::canonicalize(repo.path().join(".worktrees/tool-cwd")).unwrap();
+    let expected = target.to_string_lossy();
+    assert_eq!(app.workspace_probe().cwd(), expected);
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().unwrap(), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+    assert!(!app.workspace_probe().has_pending_change());
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(command)
+            if matches!(
+                command.as_ref(),
+                protocol::UiCommand::ToolResult {
+                    request_id: 96,
+                    call_id,
+                    is_error: false,
+                    metadata: Some(metadata),
+                    ..
+                } if call_id == "enter-worktree"
+                    && metadata["path"] == expected.as_ref()
+                    && metadata["cwd_committed"] == true
+            )
+    )));
+}
+
+#[test]
 fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
-    let process_cwd = std::env::current_dir().expect("process cwd");
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create tool cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
     let expected = target.to_string_lossy().into_owned();
@@ -1427,7 +1506,7 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
     )
     .unwrap();
 
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     app.mark_project_trusted(&target).unwrap();
     app.start_turn(42);
     let original_generation = app.lua_probe().id;
@@ -1447,7 +1526,8 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
 
     assert_eq!(app.workspace_probe().cwd(), expected);
     assert_eq!(app.core_probe().env.cwd(), target);
-    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+    assert_eq!(std::env::current_dir().unwrap(), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
     assert!(!app.workspace_probe().has_pending_change());
     assert!(app
@@ -1510,9 +1590,10 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
 
 #[test]
 fn concurrent_model_tool_cannot_commit_a_cwd_change() {
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create concurrent tool cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let original_cwd = app.workspace_probe().cwd().to_owned();
     let original_process_cwd = std::env::current_dir().unwrap();
     assert!(app.run_lua(
@@ -1567,9 +1648,10 @@ fn concurrent_model_tool_cannot_commit_a_cwd_change() {
 
 #[test]
 fn cancelled_sequential_tool_discards_its_pending_cwd_change() {
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create cancelled tool cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let original_cwd = app.workspace_probe().cwd().to_owned();
     assert!(app.run_lua(
         r#"
@@ -1612,6 +1694,7 @@ fn cancelled_sequential_tool_discards_its_pending_cwd_change() {
 
 #[test]
 fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create deferred cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
     let expected = target.to_string_lossy().into_owned();
@@ -1646,7 +1729,7 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
         ),
     )
     .unwrap();
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     app.mark_project_trusted(&target).unwrap();
     let original_cwd = app.workspace_probe().cwd().to_owned();
     let original_generation = app.lua_probe().id;
@@ -1704,6 +1787,8 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
 
     assert_eq!(app.workspace_probe().cwd(), expected);
     assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().unwrap(), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
     assert!(!app.workspace_probe().has_pending_change());
     assert!(app
@@ -1721,12 +1806,13 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
 
 #[test]
 fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create failed tool cwd tempdir");
     let smelt_dir = target_dir.path().join(".smelt");
     std::fs::create_dir_all(&smelt_dir).unwrap();
     std::fs::write(smelt_dir.join("init.lua"), "this is invalid target Lua @@@").unwrap();
 
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     app.mark_project_trusted(target_dir.path()).unwrap();
     app.start_turn(42);
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
@@ -1788,29 +1874,12 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
 
 #[test]
 fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
-    let repo = tempfile::TempDir::new().expect("create worktree repository");
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .current_dir(repo.path())
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "smelt test")
-            .env("GIT_AUTHOR_EMAIL", "smelt-test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "smelt test")
-            .env("GIT_COMMITTER_EMAIL", "smelt-test@example.invalid")
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-b", "main"]);
-    std::fs::write(repo.path().join("README.md"), "fixture\n").unwrap();
-    git(&["add", "."]);
-    git(&["commit", "-m", "initial"]);
+    let repo = worktree_repo();
+    let environment_guard = test_environment_guard();
 
-    let mut app = TestApp::builder().with_cwd(repo.path()).build();
+    let mut app = TestApp::builder()
+        .with_cwd(repo.path())
+        .build_with_test_environment_guard(&environment_guard);
     let mut settings = app.core_probe().config.settings.clone();
     settings.worktree_root = ".worktrees".into();
     app.set_settings_for_harness(settings);
@@ -1820,8 +1889,8 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
     let project_config = repo.path().join(".smelt");
     std::fs::create_dir_all(&project_config).unwrap();
     std::fs::write(project_config.join("init.lua"), invalid_init).unwrap();
-    git(&["add", ".smelt/init.lua"]);
-    git(&["commit", "-m", "add target config"]);
+    git(repo.path(), &["add", ".smelt/init.lua"]);
+    git(repo.path(), &["commit", "-m", "add target config"]);
 
     let target = repo.path().join(".worktrees").join("broken-context");
     std::fs::create_dir_all(target.join(".smelt")).unwrap();
@@ -1900,12 +1969,13 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
 
 #[test]
 fn failed_cwd_candidate_preserves_the_complete_project_context() {
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create failed cwd tempdir");
     let smelt_dir = target_dir.path().join(".smelt");
     std::fs::create_dir_all(&smelt_dir).unwrap();
     let init = smelt_dir.join("init.lua");
     std::fs::write(&init, "this is invalid target Lua @@@").unwrap();
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     app.mark_project_trusted(target_dir.path()).unwrap();
     let original_cwd = app.workspace_probe().cwd().to_owned();
     let original_runtime_cwd = app.core_probe().env.cwd();
@@ -1932,6 +2002,9 @@ fn failed_cwd_candidate_preserves_the_complete_project_context() {
     assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__failed_cwd_target).pending == true)"));
     assert!(app.drain_idle_work());
     assert_eq!(app.workspace_probe().cwd(), expected);
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().unwrap(), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(app.lua_probe().id, original_generation.wrapping_add(1));
     assert!(!app
         .overlays_probe()
@@ -1950,10 +2023,9 @@ fn failed_cwd_candidate_preserves_the_complete_project_context() {
 
 #[test]
 fn loading_session_restores_persisted_cwd() {
-    let process_cwd = std::env::current_dir().expect("process cwd");
-    let process_pwd = std::env::var_os("PWD");
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create resumed cwd tempdir");
-    let mut app = TestApp::builder().build();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
     let _ = app.drain_engine_sends();
@@ -1974,8 +2046,8 @@ fn loading_session_restores_persisted_cwd() {
         Some(expected.as_str())
     );
     assert_eq!(app.core_probe().env.cwd(), target);
-    assert_eq!(std::env::current_dir().expect("process cwd"), process_cwd);
-    assert_eq!(std::env::var_os("PWD"), process_pwd);
+    assert_eq!(std::env::current_dir().expect("process cwd"), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(
         app.core_probe().signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
@@ -2012,6 +2084,11 @@ fn loading_session_restores_persisted_cwd() {
         Some(display_expected.as_str())
     );
     assert_eq!(app.core_probe().env.cwd(), display_target);
+    assert_eq!(std::env::current_dir().unwrap(), display_target);
+    assert_eq!(
+        std::env::var_os("PWD").as_deref(),
+        Some(display_target.as_os_str())
+    );
     assert_eq!(
         app.conversation_probe()
             .live_session()
@@ -2044,6 +2121,11 @@ fn loading_session_restores_persisted_cwd() {
         "runtime fallback must not rewrite canonical session metadata"
     );
     assert_eq!(app.core_probe().env.cwd(), fallback_path);
+    assert_eq!(std::env::current_dir().unwrap(), fallback_path);
+    assert_eq!(
+        std::env::var_os("PWD").as_deref(),
+        Some(fallback_path.as_os_str())
+    );
     assert!(app
         .overlays_probe()
         .notification()

@@ -11,6 +11,7 @@ static PROCESS_ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
 /// for the complete lifetime of code that may read the modified process state.
 pub struct ProcessEnvironmentGuard {
     original_cwd: PathBuf,
+    original_pwd: Option<OsString>,
     original_variables: RefCell<Vec<(OsString, Option<OsString>)>>,
     _lock: MutexGuard<'static, ()>,
 }
@@ -22,6 +23,7 @@ impl ProcessEnvironmentGuard {
             .unwrap_or_else(|error| error.into_inner());
         Self {
             original_cwd: std::env::current_dir().expect("capture process cwd"),
+            original_pwd: std::env::var_os("PWD"),
             original_variables: RefCell::new(Vec::new()),
             _lock: lock,
         }
@@ -61,6 +63,10 @@ impl Drop for ProcessEnvironmentGuard {
                 None => std::env::remove_var(name),
             }
         }
+        match &self.original_pwd {
+            Some(pwd) => std::env::set_var("PWD", pwd),
+            None => std::env::remove_var("PWD"),
+        }
     }
 }
 
@@ -73,15 +79,18 @@ mod tests {
         const NAME: &str = "SMELT_TEST_SUPPORT_RESTORE";
         let original_value = std::env::var_os(NAME);
         let original_cwd = std::env::current_dir().unwrap();
+        let original_pwd = std::env::var_os("PWD");
         let dir = std::env::temp_dir();
         {
             let guard = ProcessEnvironmentGuard::capture();
             guard.set_var(NAME, "changed");
             guard.set_current_dir(&dir).unwrap();
+            std::env::set_var("PWD", &dir);
             assert_eq!(std::env::var(NAME).as_deref(), Ok("changed"));
             assert_eq!(std::env::current_dir().unwrap(), dir);
         }
         assert_eq!(std::env::var_os(NAME), original_value);
         assert_eq!(std::env::current_dir().unwrap(), original_cwd);
+        assert_eq!(std::env::var_os("PWD"), original_pwd);
     }
 }
