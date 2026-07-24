@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 607
+assertion_line: 595
 expression: frame.text()
 ---
 * outline crates/core/src/lsp.rs, function containing "request", depth 2
@@ -17,13 +17,10 @@ expression: frame.text()
     ]
   }
 
-* explore ×2
+* lsp ×3
   find_definition crates/core/src/lsp.rs:111:12
   find_references crates/core/src/lsp.rs:111:12
-
-* diagnostics crates/core/src/lsp.rs
-  1 diagnostic
-  - warning crates/core/src/lsp.rs:211:9 - unused variable: settings
+  diagnostics crates/core/src/lsp.rs
 
 * preview_rename crates/core/src/lsp.rs:111:12 to "manager"
   preview across 1 file
@@ -32,6 +29,9 @@ expression: frame.text()
 * rename_symbol crates/core/src/lsp.rs:111:12 to "manager"
   applied across 1 file
   - crates/core/src/lsp.rs (1 edit)
+
+
+
 
 
 
