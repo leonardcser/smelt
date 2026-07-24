@@ -285,6 +285,19 @@ fn block_history_covers_history(history: &BlockHistory, session: &session::Sessi
     records_cover_history(history.block_records().iter(), session)
 }
 
+fn block_history_reaches_history_tail(history: &BlockHistory, session: &session::Session) -> bool {
+    let Some(last_visible) = session
+        .history
+        .iter()
+        .rposition(|item| fallback_history_item_block_count(item) > 0)
+    else {
+        return true;
+    };
+    history.block_records().iter().any(|record| {
+        matches!(record.origin, Some(smelt_core::BlockOrigin::History(origin)) if origin == last_visible)
+    })
+}
+
 fn records_cover_history<'a>(
     records: impl IntoIterator<Item = &'a smelt_core::TranscriptBlockRecord>,
     session: &session::Session,
@@ -1734,9 +1747,15 @@ impl TuiApp {
             width,
             viewport_rows,
         ) {
-            Some(loaded_transcript) => (loaded_transcript, true),
-            None => {
-                // Sessions without record rows rebuild the display transcript from the loaded session.
+            Some(loaded_transcript)
+                if block_history_reaches_history_tail(
+                    &loaded_transcript.transcript.history,
+                    self.conversation.session(),
+                ) =>
+            {
+                (loaded_transcript, true)
+            }
+            Some(_) | None => {
                 smelt_perf::perf::record_value("session:rebuild_transcript_full_fallback", 1);
                 (
                     crate::app::transcript::LoadedTranscript::full(self.build_current_transcript()),
@@ -3159,6 +3178,32 @@ mod checkpoint_tests {
         let history = app.app.conversation.transcript().history();
         let id = history.order[0];
         assert!(matches!(history.block(id), Some(Block::Mode { .. })));
+    }
+
+    #[test]
+    fn restore_screen_rejects_sqlite_tail_behind_in_memory_history() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .conversation
+            .replace_history_for_harness(vec![user("hello")]);
+        app.app.restore_screen();
+        app.app.save_session_and_flush();
+
+        app.app.conversation.replace_history_for_harness(vec![
+            user("hello"),
+            HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                "normal",
+                "apply",
+                "now in apply mode",
+            )),
+        ]);
+        app.app.restore_screen();
+
+        let history = app.app.conversation.transcript().history();
+        assert!(history
+            .order
+            .iter()
+            .any(|id| matches!(history.block(*id), Some(Block::Mode { text, .. }) if text == "now in apply mode")));
     }
 
     #[test]
