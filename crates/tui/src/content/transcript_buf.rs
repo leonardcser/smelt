@@ -4796,6 +4796,14 @@ pub(crate) mod tests {
             ToolStatus::Ok,
             tool_args(&[("file_path", "src/lib.rs")]),
         );
+        push_named_tool(
+            &mut transcript,
+            "symbol-1",
+            "find_symbol",
+            "RenderNode",
+            ToolStatus::Ok,
+            tool_args(&[("query", "RenderNode")]),
+        );
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
@@ -4804,13 +4812,81 @@ pub(crate) mod tests {
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
             [crate::content::render_plan::RenderNode::Group(group)]
-                if group.name == "explore" && group.child_ids.len() == 4
+                if group.name == "explore" && group.child_ids.len() == 5
         ));
-        assert!(rows.iter().any(|line| line == "* explore ×4"));
+        assert!(rows.iter().any(|line| line == "* explore ×5"));
         assert!(rows.iter().any(|line| line == "  read_file src/lib.rs"));
         assert!(rows.iter().any(|line| line == "  grep \"RenderNode\""));
         assert!(rows.iter().any(|line| line == "  glob **/*.rs"));
         assert!(rows.iter().any(|line| line == "  outline src/lib.rs"));
+        assert!(rows.iter().any(|line| line == "  find_symbol RenderNode"));
+    }
+
+    #[test]
+    fn built_in_lsp_group_mixes_adjacent_semantic_tools() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        let names = [
+            "inspect_symbol",
+            "inspect_symbol_at",
+            "find_definition",
+            "find_references",
+            "diagnostics",
+        ];
+        for (index, name) in names.iter().copied().enumerate() {
+            push_named_tool(
+                &mut transcript,
+                &format!("lsp-{index}"),
+                name,
+                name,
+                ToolStatus::Ok,
+                tool_args(&[]),
+            );
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [crate::content::render_plan::RenderNode::Group(group)]
+                if group.name == "lsp" && group.child_ids.len() == 5
+        ));
+        assert!(rows.iter().any(|line| line == "* lsp ×5"));
+        for name in names {
+            assert!(rows.iter().any(|line| line == &format!("  {name}")));
+        }
+    }
+
+    #[test]
+    fn built_in_tool_groups_leave_lsp_status_and_renames_standalone() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        for (index, name) in ["language_server_status", "preview_rename", "rename_symbol"]
+            .into_iter()
+            .enumerate()
+        {
+            push_named_tool(
+                &mut transcript,
+                &format!("standalone-{index}"),
+                name,
+                name,
+                ToolStatus::Ok,
+                tool_args(&[]),
+            );
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        projection.build_rows(&lua, &mut transcript.history, 80, &theme);
+
+        assert_eq!(projection.render_plan.nodes.len(), 3);
+        assert!(projection
+            .render_plan
+            .nodes
+            .iter()
+            .all(|node| matches!(node, crate::content::render_plan::RenderNode::Block { .. })));
     }
 
     #[test]

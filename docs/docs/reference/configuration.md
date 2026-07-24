@@ -380,7 +380,9 @@ smelt.settings.transcript = {
     },
     groups = {
       explore = "collapsed",
+      lsp = "collapsed",
       -- explore = false,
+      -- lsp = false,
     },
   },
   limits = {

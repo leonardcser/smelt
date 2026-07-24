@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 607
+assertion_line: 595
 expression: frame.text()
 ---
 * read_file src/lib.rs
@@ -15,8 +15,8 @@ expression: frame.text()
 * outline crates/tui/src/app.rs, function containing "render", depth 2
   2 symbols
 
-
-
+* find_symbol RenderNode, enum, crates/tui/**/*.rs
+  1 symbol
 
 
 

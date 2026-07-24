@@ -48,6 +48,72 @@ app_story!(explore_tool_group_states, |ctx| {
         json!({ "display_count": { "value": 2, "unit": "symbol" } }),
         Some(7),
     );
+    ctx.tool_call_with_metadata(
+        "find_symbol",
+        &[
+            ("query", json!("RenderNode")),
+            ("kind", json!("enum")),
+            ("path_glob", json!("crates/tui/**/*.rs")),
+        ],
+        "1 symbol\n- enum RenderNode - crates/tui/src/content/render_plan.rs:26:1",
+        json!({ "display_count": { "value": 1, "unit": "symbol" } }),
+        Some(4),
+    );
+    ctx.assert_snapshot_named("collapsed");
+
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot_named("expanded");
+});
+
+app_story!(lsp_tool_group_states, |ctx| {
+    ctx.set_viewport(90, 24);
+    ctx.run_lua("require('smelt.plugins.lsp').setup({ servers = {} })");
+    ctx.tool_call(
+        "inspect_symbol",
+        &[
+            ("query", json!("RenderNode")),
+            ("kind", json!("enum")),
+            ("path_glob", json!("crates/tui/**/*.rs")),
+        ],
+        "enclosing: enum RenderNode\ndefinitions: 1 location",
+        Some(6),
+    );
+    ctx.tool_call(
+        "inspect_symbol_at",
+        &[
+            ("file_path", json!("crates/tui/src/content/render_plan.rs")),
+            ("line", json!(26)),
+            ("column", json!(17)),
+        ],
+        "enclosing: enum RenderNode\nreferences: 12 references",
+        Some(5),
+    );
+    ctx.tool_call(
+        "find_definition",
+        &[
+            ("file_path", json!("crates/tui/src/content/render_plan.rs")),
+            ("line", json!(44)),
+            ("column", json!(19)),
+        ],
+        "1 definition\n- crates/core/src/transcript_model.rs:118:1",
+        Some(4),
+    );
+    ctx.tool_call(
+        "find_references",
+        &[
+            ("file_path", json!("crates/tui/src/content/render_plan.rs")),
+            ("line", json!(26)),
+            ("column", json!(17)),
+        ],
+        "2 references\n- crates/tui/src/content/render_plan.rs:44:13\n- crates/tui/src/content/transcript_buf.rs:812:9",
+        Some(8),
+    );
+    ctx.tool_call(
+        "diagnostics",
+        &[("file_path", json!("crates/tui/src/content/render_plan.rs"))],
+        "no diagnostics",
+        Some(3),
+    );
     ctx.assert_snapshot_named("collapsed");
 
     ctx.run_lua("smelt.transcript.fold_all('open')");

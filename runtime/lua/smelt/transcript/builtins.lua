@@ -90,7 +90,7 @@ local function glob_label(child)
   return label
 end
 
-local function explore_label(child)
+local function tool_group_label(child)
   local label
   if child.name == "read_file" then
     label = read_file_label(child)
@@ -207,7 +207,7 @@ function M.register()
 
   smelt.transcript.groups.register({
     name = "explore",
-    cache_key = "smelt.transcript.group.explore:v1",
+    cache_key = "smelt.transcript.group.explore:v2",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
@@ -219,16 +219,36 @@ function M.register()
         "glob",
         "outline",
         "find_symbol",
-        "inspect_symbol",
-        "inspect_symbol_at",
-        "find_definition",
-        "find_references",
       },
     },
     render = function(group, ctx)
       return render_terminal_tool_group(group, ctx, {
         name = "explore",
-        label = explore_label,
+        label = tool_group_label,
+      })
+    end,
+  })
+
+  smelt.transcript.groups.register({
+    name = "lsp",
+    cache_key = "smelt.transcript.group.lsp:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = {
+      kind = "tool",
+      names = {
+        "inspect_symbol",
+        "inspect_symbol_at",
+        "find_definition",
+        "find_references",
+        "diagnostics",
+      },
+    },
+    render = function(group, ctx)
+      return render_terminal_tool_group(group, ctx, {
+        name = "lsp",
+        label = tool_group_label,
       })
     end,
   })

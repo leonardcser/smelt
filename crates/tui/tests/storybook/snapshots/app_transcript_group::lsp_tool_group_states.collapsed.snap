@@ -3,12 +3,12 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 595
 expression: frame.text()
 ---
-* explore ×5
-  read_file src/lib.rs
-  grep "render_group" in crates/tui/src
-  glob **/*.rs in crates/tui/src
-  outline crates/tui/src/app.rs, function containing "render", depth 2
-  find_symbol RenderNode, enum, crates/tui/**/*.rs
+* lsp ×5
+  inspect_symbol RenderNode, enum, crates/tui/**/*.rs
+  inspect_symbol_at crates/tui/src/content/render_plan.rs:26:17
+  find_definition crates/tui/src/content/render_plan.rs:44:19
+  find_references crates/tui/src/content/render_plan.rs:26:17
+  diagnostics crates/tui/src/content/render_plan.rs
 
 
 
