@@ -583,9 +583,9 @@ impl Config {
             }
         }
 
-        let mut discovered = models.iter().collect::<Vec<_>>();
-        discovered.sort_by(|left, right| left.id.cmp(&right.id));
-        for model in discovered {
+        // Managed providers return models in recommendation order. Preserve it so
+        // catalog fallback follows provider priority instead of model spelling.
+        for model in models {
             if resolved
                 .iter()
                 .any(|entry| entry.provider_name == provider_name && entry.model_name == model.id)
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_metadata_preserves_aliases_and_fills_only_missing_fields() {
+    fn dynamic_metadata_preserves_aliases_fields_and_provider_order() {
         let cfg = Config {
             providers: vec![ProviderConfig {
                 name: Some("copilot".into()),
@@ -772,8 +772,8 @@ mod tests {
         assert_eq!(resolved[0].config.context_window, Some(8_192));
         assert_eq!(resolved[0].config.max_tokens, Some(8_192));
         assert_eq!(resolved[0].display_name.as_deref(), Some("friendly-alias"));
-        assert_eq!(resolved[1].key, "copilot/canonical");
-        assert_eq!(resolved[2].key, "copilot/z-model");
+        assert_eq!(resolved[1].key, "copilot/z-model");
+        assert_eq!(resolved[2].key, "copilot/canonical");
         assert!(resolved[1..]
             .iter()
             .all(|model| model.api_key_env == "COPILOT_KEY"));

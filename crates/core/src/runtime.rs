@@ -57,6 +57,8 @@ pub struct Core {
     /// engine task; swap in [`engine::clock::VirtualClock`] for tests
     /// that need to drive time deterministically.
     pub clock: Arc<dyn engine::clock::Clock>,
+    /// Recent user choices rooted in this runtime's application state path.
+    pub recent: crate::state::RecentStore,
     /// Canonical session storage and its derived catalog, rooted in the runtime state path.
     pub sessions: crate::session::SessionStorage,
     /// Process-level env snapshot: pid, home, xdg dirs, working directory,
@@ -91,6 +93,7 @@ impl Core {
         let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
         let workspace_permissions =
             crate::permissions::store::WorkspacePermissionStore::new(env.xdg_state().join("smelt"));
+        let recent = crate::state::RecentStore::from_env(&env);
         let sessions = crate::session::SessionStorage::from_env(&env);
         // Read before the struct literal moves `config` into the field below.
         let clipboard =
@@ -113,6 +116,7 @@ impl Core {
             workspace_permissions,
             mcp: None,
             clock,
+            recent,
             sessions,
             env,
         }

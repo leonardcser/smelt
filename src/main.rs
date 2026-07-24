@@ -1087,7 +1087,7 @@ async fn async_main() {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let s = startup::resolve(&args, lua_cfg, &lua_modes);
+    let s = startup::resolve(&args, lua_cfg, &lua_modes, &env);
     let startup::ResolvedStartup {
         runtime,
         startup_overrides,

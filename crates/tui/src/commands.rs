@@ -1,7 +1,6 @@
 use crate::app::{
     CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, QueueStage, QueuedInput, TuiApp,
 };
-use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
 mod parse;
@@ -473,6 +472,12 @@ impl TuiApp {
         Some(ExecHandle { rx, kill, sink })
     }
 
+    fn warn_if_recent_write_failed(&mut self, choice: &str, result: std::io::Result<()>) {
+        if let Err(error) = result {
+            self.notify_warn(format!("failed to remember {choice}: {error}"));
+        }
+    }
+
     /// Switch to a model by key. No-op if the key is not found.
     /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
@@ -525,7 +530,8 @@ impl TuiApp {
             self.update_session_persist_metadata();
         }
         if record && self.core.config.remember.model {
-            state::set_selected_model(resolved.key.clone());
+            let result = self.core.recent.set_selected_model(resolved.key.clone());
+            self.warn_if_recent_write_failed("model selection", result);
         }
         self.warn_if_api_base_normalized();
         if self.active_agent_turn_id().is_some() {
@@ -717,7 +723,8 @@ impl TuiApp {
         self.core.config.revision = self.core.config.revision.wrapping_add(1);
         self.core.config.mode = mode.clone();
         if record && self.core.config.remember.mode {
-            state::set_mode(self.core.config.mode.clone());
+            let result = self.core.recent.set_mode(self.core.config.mode.clone());
+            self.warn_if_recent_write_failed("mode", result);
         }
         // Publish new mode before Lua/tool snapshots for future requests.
         if old != mode {
@@ -762,7 +769,8 @@ impl TuiApp {
             self.update_session_persist_metadata();
         }
         if record && self.core.config.remember.reasoning_effort {
-            state::set_reasoning_effort(effort);
+            let result = self.core.recent.set_reasoning_effort(effort);
+            self.warn_if_recent_write_failed("reasoning effort", result);
         }
         self.core
             .signals

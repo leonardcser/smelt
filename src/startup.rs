@@ -139,13 +139,11 @@ pub struct ResolvedStartup {
 }
 
 /// Resolve all startup configuration through the shared pure runtime resolver.
-///
-/// `http_client` is reused for managed-provider cache/refresh work so startup
-/// does not rebuild a rustls client for each provider.
 pub fn resolve(
     args: &Args,
     cfg: smelt_core::config::Config,
     registered_modes: &[AgentMode],
+    env: &engine::env::RuntimeEnv,
 ) -> ResolvedStartup {
     let mut cfg = cfg;
     let mut managed_models = smelt_core::ManagedModels::load(&cfg, 0);
@@ -245,7 +243,7 @@ pub fn resolve(
         request_audit_env,
     };
 
-    let recent = smelt_core::state::Recent::load();
+    let recent = smelt_core::state::RecentStore::from_env(env).load();
     let selections = smelt_core::RuntimeSelections {
         model: recent.selected_model.clone(),
         model_source: smelt_core::ModelSelectionSource::Remembered,

@@ -52,7 +52,8 @@ pub enum ModelSelectionSource {
     Session,
     Remembered,
     Default,
-    FirstAvailable,
+    /// First model in stable configuration or managed-provider priority order.
+    CatalogDefault,
     Direct,
     User,
     #[default]
@@ -514,6 +515,8 @@ fn resolve_model_selection(
             .ok_or_else(|| ResolveError(format!("unknown model or provider: {requested}")));
     }
 
+    // Static catalogs retain configuration order, while managed catalogs retain
+    // provider recommendation order. Their first entry is the explicit fallback.
     let Some(resolved) = inputs.available_models.first() else {
         if inputs.startup.api_base.is_some() {
             return Err(ResolveError(
@@ -525,7 +528,7 @@ fn resolve_model_selection(
     Ok(resolved_selection(
         inputs,
         resolved,
-        ModelSelectionSource::FirstAvailable,
+        ModelSelectionSource::CatalogDefault,
     ))
 }
 
@@ -881,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_remembered_static_model_falls_back_to_first_available() {
+    fn missing_remembered_static_model_falls_back_to_catalog_default() {
         let config = provider_config();
         let models = config.resolve_models();
         let resolved = resolve_runtime(RuntimeInputs {
@@ -902,7 +905,55 @@ mod tests {
         assert_eq!(resolved.active_model().unwrap().key, "test/model-a");
         assert_eq!(
             resolved.model_selection.requested_by,
-            ModelSelectionSource::FirstAvailable
+            ModelSelectionSource::CatalogDefault
+        );
+    }
+
+    #[test]
+    fn missing_remembered_managed_model_uses_provider_priority() {
+        let config = config::Config {
+            providers: vec![config::ProviderConfig {
+                name: Some("codex".into()),
+                provider_type: Some("codex".into()),
+                api_base: Some("https://chatgpt.com/backend-api/codex".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let metadata = |id: &str| protocol::ModelMetadata {
+            id: id.into(),
+            display_name: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_reasoning: None,
+            supports_fast_mode: None,
+            input_modalities: None,
+        };
+        let mut models = config.resolve_models();
+        config.inject_codex_models(
+            &mut models,
+            &[metadata("gpt-5.6-sol"), metadata("gpt-5.3-codex-spark")],
+        );
+
+        let resolved = resolve_runtime(RuntimeInputs {
+            config: &config,
+            startup: &StartupOverrides::default(),
+            available_models: &models,
+            registered_modes: &[],
+            selections: &RuntimeSelections {
+                model: Some("codex/removed-model".into()),
+                model_source: ModelSelectionSource::Remembered,
+                ..Default::default()
+            },
+            previous: None,
+            headless: false,
+        })
+        .unwrap();
+
+        assert_eq!(resolved.active_model().unwrap().key, "codex/gpt-5.6-sol");
+        assert_eq!(
+            resolved.model_selection.requested_by,
+            ModelSelectionSource::CatalogDefault
         );
     }
 
@@ -943,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_precedence_is_cli_remembered_default_then_first() {
+    fn model_selection_precedence_ends_with_catalog_default() {
         let mut config = provider_config();
         config.defaults.model = Some("test/model-b".into());
         let models = config.resolve_models();
@@ -998,7 +1049,7 @@ mod tests {
         assert_eq!(first.active_model().unwrap().key, "test/model-a");
         assert_eq!(
             first.model_selection.requested_by,
-            ModelSelectionSource::FirstAvailable
+            ModelSelectionSource::CatalogDefault
         );
     }
 

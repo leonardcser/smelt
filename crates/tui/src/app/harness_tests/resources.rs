@@ -128,6 +128,15 @@ fn model_switch_marks_missing_credentials_unavailable() {
 
     app.apply_model("missing/credentials", true);
 
+    assert_eq!(
+        app.core_probe().recent.state_root(),
+        app.core_probe().env.xdg_state().join("smelt")
+    );
+    let recent = app.core_probe().recent.load();
+    assert_eq!(
+        recent.selected_model.as_deref(),
+        Some("missing/credentials")
+    );
     assert!(matches!(
         app.core_probe()
             .config
@@ -145,6 +154,29 @@ fn model_switch_marks_missing_credentials_unavailable() {
         assert(status.reason == "missing_credentials")
         "#,
     ));
+}
+
+#[test]
+fn recent_model_persistence_failure_is_reported() {
+    let mut app = TestApp::builder().build();
+    let mut model = app.core_probe().config.available_models[0].clone();
+    model.key = "test/alternate-model".into();
+    model.model_name = "alternate-model".into();
+    let mut models = app.core_probe().config.available_models.clone();
+    models.push(model);
+    app.set_available_models(models);
+    std::fs::create_dir_all(app.core_probe().recent.state_root().join("recent.lock")).unwrap();
+
+    app.apply_model("test/alternate-model", true);
+
+    assert_eq!(
+        app.core_probe()
+            .config
+            .active_model()
+            .map(|model| model.key.as_str()),
+        Some("test/alternate-model")
+    );
+    assert!(app.lua_messages_contain("failed to remember model selection:"));
 }
 
 #[test]
@@ -916,6 +948,90 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
             .map(|model| model.key.as_str()),
         Some("codex/fresh-model")
     );
+}
+
+#[test]
+fn expired_kimi_auth_preserves_selected_codex_model() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        smelt.provider.register("codex", {
+            type = "codex",
+            api_base = "https://example.invalid",
+            models = {},
+        })
+        "#,
+    ));
+    app.reconcile_committed_lua_runtime().unwrap();
+    app.handle_managed_auth_checked(vec![
+        (
+            engine::auth::AuthProvider::Codex,
+            Some(11),
+            vec![protocol::ModelMetadata {
+                id: "gpt-5.6-sol".into(),
+                display_name: Some("GPT-5.6-Sol".into()),
+                context_window: Some(272_000),
+                max_output_tokens: None,
+                supports_reasoning: Some(true),
+                supports_fast_mode: Some(true),
+                input_modalities: Some(vec!["text".into()]),
+            }],
+        ),
+        (
+            engine::auth::AuthProvider::KimiCode,
+            Some(22),
+            vec![protocol::ModelMetadata {
+                id: "kimi-for-coding".into(),
+                display_name: Some("Kimi for Coding".into()),
+                context_window: Some(262_144),
+                max_output_tokens: None,
+                supports_reasoning: Some(true),
+                supports_fast_mode: None,
+                input_modalities: Some(vec!["text".into()]),
+            }],
+        ),
+    ]);
+    app.apply_model("codex/gpt-5.6-sol", true);
+
+    let kimi_refresh = app
+        .begin_managed_model_refreshes()
+        .into_iter()
+        .find(|token| token.provider == engine::auth::AuthProvider::KimiCode)
+        .expect("Kimi refresh token");
+    app.handle_managed_model_refresh(
+        kimi_refresh,
+        engine::auth::ManagedModelsRefreshOutcome::Unauthenticated(
+            "Kimi refresh token expired".into(),
+        ),
+    );
+
+    assert_eq!(
+        app.managed_model_status(engine::auth::AuthProvider::KimiCode),
+        smelt_core::ManagedModelsStatus::Unauthenticated
+    );
+    assert!(app
+        .core_probe()
+        .config
+        .available_models
+        .iter()
+        .all(|model| !model.key.starts_with("kimi-code/")));
+    assert_eq!(
+        app.core_probe()
+            .config
+            .active_model()
+            .map(|model| model.key.as_str()),
+        Some("codex/gpt-5.6-sol")
+    );
+    assert_eq!(
+        app.core_probe()
+            .config
+            .model_selection
+            .requested_key
+            .as_deref(),
+        Some("codex/gpt-5.6-sol")
+    );
+    let recent = app.core_probe().recent.load();
+    assert_eq!(recent.selected_model.as_deref(), Some("codex/gpt-5.6-sol"));
 }
 
 #[test]

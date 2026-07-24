@@ -264,7 +264,7 @@ impl TestApp {
         self.app.core.config.available_models = vec![model.clone()];
         self.app.core.config.model_selection = smelt_core::ModelSelectionState {
             requested_key: Some(model.key.clone()),
-            requested_by: smelt_core::ModelSelectionSource::FirstAvailable,
+            requested_by: smelt_core::ModelSelectionSource::CatalogDefault,
             active: Some(smelt_core::ActiveModel::from_resolved(&model)),
         };
     }

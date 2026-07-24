@@ -1,7 +1,7 @@
 use crate::config::{Config, ResolvedModel};
 use engine::auth::{AuthProvider, ManagedModelsRefreshFailure, ManagedModelsRefreshOutcome};
 use protocol::ModelMetadata;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedModelsStatus {
@@ -481,8 +481,10 @@ impl ManagedModels {
 }
 
 fn normalize_models(models: &mut Vec<ModelMetadata>) {
-    models.sort_by(|left, right| left.id.cmp(&right.id));
-    models.dedup_by(|left, right| left.id == right.id);
+    // The provider's order carries recommendation priority. Deduplicate without
+    // sorting so that priority survives cache loads and refreshes.
+    let mut seen = HashSet::with_capacity(models.len());
+    models.retain(|model| seen.insert(model.id.clone()));
 }
 
 fn has_provider(config: &Config, provider: AuthProvider) -> bool {
@@ -551,6 +553,33 @@ mod tests {
         let mut catalog = config.resolve_models();
         managed.inject(&config, &mut catalog);
         assert!(catalog.iter().any(|model| model.key == "codex/fresh-model"));
+    }
+
+    #[test]
+    fn model_normalization_preserves_provider_priority() {
+        let (mut managed, token) = refreshing_models();
+
+        assert_eq!(
+            managed.apply(
+                token,
+                fresh(vec![
+                    metadata("recommended-model"),
+                    metadata("legacy-model"),
+                    metadata("recommended-model"),
+                ]),
+            ),
+            Some(true)
+        );
+
+        assert_eq!(
+            managed
+                .provider(AuthProvider::Codex)
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recommended-model", "legacy-model"]
+        );
     }
 
     #[test]
