@@ -2382,6 +2382,11 @@ impl TranscriptProjection {
             viewport_rows,
         };
         let plan = self.plan_projection_from_prepared(history, theme, &request);
+        let ids = self.projection_hydration_ids_for_plan(&plan);
+        (ids, plan)
+    }
+
+    pub(crate) fn projection_hydration_ids_for_plan(&self, plan: &ProjectionPlan) -> Vec<BlockId> {
         let mut ids = plan
             .node_range()
             .flat_map(|index| {
@@ -2393,13 +2398,13 @@ impl TranscriptProjection {
         if let Some(
             ProjectionAnchor::RenderedBlockRow { id, .. }
             | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. },
-        ) = anchor
+        ) = plan.target.anchor
         {
             ids.push(id);
         }
         ids.sort_unstable_by_key(|id| id.get());
         ids.dedup();
-        (ids, plan)
+        ids
     }
 
     pub(crate) fn remeasure_projection_plan(

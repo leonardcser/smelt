@@ -4551,6 +4551,58 @@ impl TranscriptDocument {
         )
     }
 
+    fn plan_hydrated_projection(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        theme: &Theme,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        viewport_rows: u16,
+    ) -> crate::content::transcript_buf::ProjectionPlan {
+        let (mut hydrated_ids, initial_plan) = self.content.projection.projection_hydration_ids(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            theme,
+            scroll_target,
+            viewport_rows,
+        );
+        let _ = self.set_viewport_hydration_ids(&hydrated_ids);
+        let mut plan = self.content.projection.remeasure_projection_plan(
+            lua,
+            &mut self.content.transcript.history,
+            theme,
+            initial_plan,
+        );
+
+        loop {
+            let plan_ids = self
+                .content
+                .projection
+                .projection_hydration_ids_for_plan(&plan);
+            if plan_ids
+                .iter()
+                .all(|id| hydrated_ids.binary_search(id).is_ok())
+            {
+                let _ = self.set_viewport_hydration_ids(&plan_ids);
+                return plan;
+            }
+
+            hydrated_ids.extend(plan_ids);
+            hydrated_ids.sort_unstable_by_key(|id| id.get());
+            hydrated_ids.dedup();
+            if !self.set_viewport_hydration_ids(&hydrated_ids) {
+                return plan;
+            }
+            plan = self.content.projection.remeasure_projection_plan(
+                lua,
+                &mut self.content.transcript.history,
+                theme,
+                plan,
+            );
+        }
+    }
+
     fn plan_projection_measured_with_sparse_placeholders(
         &mut self,
         lua: &LuaRuntime,
@@ -4619,21 +4671,8 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => crate::content::transcript_buf::ScrollTarget::visible_tail(),
         };
-        let (hydration_ids, hydration_plan) = self.content.projection.projection_hydration_ids(
-            lua,
-            &mut self.content.transcript.history,
-            width,
-            theme,
-            local_target,
-            viewport_rows,
-        );
-        let _ = self.set_viewport_hydration_ids(&hydration_ids);
-        let mut inner = self.content.projection.remeasure_projection_plan(
-            lua,
-            &mut self.content.transcript.history,
-            theme,
-            hydration_plan,
-        );
+        let mut inner =
+            self.plan_hydrated_projection(lua, width, theme, local_target, viewport_rows);
         let mut loaded_rows = self.content.projection.estimated_total_rows(
             lua,
             &mut self.content.transcript.history,
@@ -4657,21 +4696,12 @@ impl TranscriptDocument {
                 )
             );
             if !planned_as_tail && options.repin_at_semantic_tail {
-                let (tail_hydration_ids, tail_hydration_plan) =
-                    self.content.projection.projection_hydration_ids(
-                        lua,
-                        &mut self.content.transcript.history,
-                        width,
-                        theme,
-                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
-                        viewport_rows,
-                    );
-                let _ = self.set_viewport_hydration_ids(&tail_hydration_ids);
-                inner = self.content.projection.remeasure_projection_plan(
+                inner = self.plan_hydrated_projection(
                     lua,
-                    &mut self.content.transcript.history,
+                    width,
                     theme,
-                    tail_hydration_plan,
+                    crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    viewport_rows,
                 );
                 loaded_rows = self.content.projection.estimated_total_rows(
                     lua,

@@ -1253,6 +1253,22 @@ fn transcript_interaction_trace_records_click_and_projection_events() {
 }
 
 #[test]
+fn resumed_sparse_tail_projection_covers_initial_viewport() {
+    let (app, _dir) = resumed_heterogeneous_transcript_app(256, 40, 21);
+    let window = app.transcript_window();
+    let rows = window
+        .materialized_rows
+        .expect("resumed transcript should be row-materialized");
+    let viewport_rows = window.viewport.expect("transcript viewport").rect.height;
+
+    assert!(
+        rows.clamped_scroll.saturating_add(viewport_rows.into())
+            <= rows.row_base.saturating_add(rows.materialized_rows),
+        "materialized transcript rows should cover the initial viewport: {rows:?}"
+    );
+}
+
+#[test]
 fn transcript_fast_scroll_jump_bottom_then_click_preserves_bottom_viewport() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
