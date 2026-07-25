@@ -3440,6 +3440,7 @@ dependencies = [
  "mlua",
  "notify",
  "scoped-tls-hkt",
+ "seahash",
  "serde",
  "serde_json",
  "smelt-buffer",

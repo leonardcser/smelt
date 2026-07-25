@@ -4,6 +4,7 @@ use protocol::{
     TokenUsage, ToolInvocation, ToolOutcome,
 };
 use smelt_core::transcript_model::Block;
+use std::collections::HashMap;
 
 fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
     crate::app::history::materialize_full_session(
@@ -34,6 +35,35 @@ fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
                         if owner_session_id == session_id
                 )
         })
+}
+
+fn legacy_preserve_order_hash<T: serde::Serialize>(value: &T) -> u64 {
+    let value = serde_json::to_value(value).unwrap();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    seahash::hash(&bytes)
+}
+
+fn rewrite_tool_record_hashes_as_legacy(session_id: &str) -> usize {
+    let db_path = smelt_core::session::dir_for_id(session_id).join("session.db");
+    let mut db = smelt_store::SessionDb::open(db_path).unwrap();
+    let mut records = db.read_all_transcript_records().unwrap();
+    let mut rewritten = 0;
+
+    for record in &mut records {
+        if record.kind != "tool" {
+            continue;
+        }
+        let persisted_json: serde_json::Value = serde_json::from_str(&record.block_json).unwrap();
+        let block: Block = serde_json::from_value(persisted_json.clone()).unwrap();
+        let legacy_hash = legacy_preserve_order_hash(&persisted_json);
+        assert_eq!(legacy_hash, seahash::hash(record.block_json.as_bytes()));
+        assert_ne!(legacy_hash, block.content_hash());
+        record.content_hash = legacy_hash.to_string();
+        rewritten += 1;
+    }
+
+    db.apply_transcript_record_fixture(&records).unwrap();
+    rewritten
 }
 
 fn retry_persistence_via_lua(app: &mut TestApp) -> bool {
@@ -269,6 +299,84 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
             && summary_titles == ["Inspecting the report", "Planning the fix"]
             && content == "The stored tail remains mergeable."
     ));
+}
+
+#[test]
+fn resumed_turn_hydrates_legacy_multi_arg_tool_record_suffix_for_save() {
+    const RECORD_COUNT: usize = 600;
+
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..RECORD_COUNT {
+            let block = if index % 2 == 0 {
+                Block::Text {
+                    content: format!("record {index}"),
+                }
+            } else {
+                Block::ToolCall {
+                    call_id: format!("call-{index}"),
+                    name: "bash".into(),
+                    summary: protocol::StyledLines::from_plain(format!("tool {index}")),
+                    args: HashMap::from([
+                        ("command".into(), serde_json::json!(format!("echo {index}"))),
+                        ("description".into(), serde_json::json!("regression")),
+                        ("timeout_ms".into(), serde_json::json!(30_000)),
+                        ("background".into(), serde_json::json!(false)),
+                        ("alpha".into(), serde_json::json!({"nested": true})),
+                        ("bravo".into(), serde_json::json!([1, 2, 3])),
+                        ("charlie".into(), serde_json::json!(null)),
+                        ("delta".into(), serde_json::json!(4)),
+                    ]),
+                }
+            };
+            app.push_transcript_block(block);
+        }
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+    let legacy_tool_records = rewrite_tool_record_hashes_as_legacy(&session_id);
+    assert_eq!(legacy_tool_records, RECORD_COUNT / 2);
+
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.load_session_by_id(&session_id);
+    let history = app.conversation_probe().transcript().history();
+    let legacy_tool_id = history
+        .order
+        .iter()
+        .copied()
+        .find(|id| history.block_kind(*id) == Some("tool") && !history.is_materialized(*id))
+        .expect("test requires a compacted legacy tool record");
+    let loaded_content_hash = history.content_hash(legacy_tool_id);
+    let legacy_record = smelt_store::SessionReader::open_existing(app.session_dir())
+        .unwrap()
+        .read_all_transcript_records()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.block_idx == legacy_tool_id.get())
+        .unwrap();
+    let block: Block = serde_json::from_str(&legacy_record.block_json).unwrap();
+    assert_ne!(
+        legacy_record.content_hash.parse::<u64>().unwrap(),
+        block.content_hash()
+    );
+    assert_eq!(loaded_content_hash, block.content_hash());
+
+    app.require_transcript_record_resave_from_for_harness(0);
+    app.use_model(app.core_probe().config.available_models[0].clone());
+    app.type_text("continue the session");
+    app.press(KeyCode::Enter);
+
+    assert!(
+        app.agent_running(),
+        "failed to start resumed turn: {:?}",
+        app.overlays_probe().notification()
+    );
+    assert!(
+        !has_sticky_session_save_failure(&app, &session_id),
+        "resumed turn failed to save: {:?}",
+        app.overlays_probe().notification()
+    );
 }
 
 #[test]

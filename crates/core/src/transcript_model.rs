@@ -600,7 +600,19 @@ impl TryFrom<smelt_store::StoredTranscriptBlock> for TranscriptBlockRecord {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?;
-        let content_hash = row.content_hash.parse::<u64>().unwrap_or_default();
+        let persisted_content_hash = row.content_hash.parse::<u64>().unwrap_or_default();
+        let canonical_content_hash = block.content_hash();
+        // COMPAT(transcript-preserve-order-content-hash): `serde_json`'s
+        // `preserve_order` feature made old hashes depend on HashMap iteration
+        // order. The raw JSON hash validates those rows before upgrading their
+        // in-memory identity to the canonical hash.
+        let content_hash = if persisted_content_hash != canonical_content_hash
+            && persisted_content_hash == seahash::hash(row.block_json.as_bytes())
+        {
+            canonical_content_hash
+        } else {
+            persisted_content_hash
+        };
         Ok(Self {
             block,
             content_hash,
@@ -2885,6 +2897,30 @@ mod tests {
         }
     }
 
+    fn legacy_preserve_order_hash<T: serde::Serialize>(value: &T) -> u64 {
+        let value = serde_json::to_value(value).unwrap();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        seahash::hash(&bytes)
+    }
+
+    fn multi_arg_tool_block() -> Block {
+        Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("run command"),
+            args: HashMap::from([
+                ("command".into(), serde_json::json!("echo hi")),
+                ("description".into(), serde_json::json!("regression")),
+                ("timeout_ms".into(), serde_json::json!(30_000)),
+                ("background".into(), serde_json::json!(false)),
+                ("alpha".into(), serde_json::json!({"nested": true})),
+                ("bravo".into(), serde_json::json!([1, 2, 3])),
+                ("charlie".into(), serde_json::json!(null)),
+                ("delta".into(), serde_json::json!(4)),
+            ]),
+        }
+    }
+
     #[test]
     fn indexed_text_preserves_full_size_for_extent_estimation() {
         let block = Block::Text {
@@ -2931,6 +2967,65 @@ mod tests {
         let expected = "bash\nok\nbash\nalpha λ";
         assert_eq!(row.indexed_text, expected);
         assert_eq!(row.estimated_text_bytes, expected.len() as u64);
+    }
+
+    #[test]
+    fn legacy_order_dependent_block_hash_hydrates_as_canonical() {
+        let block = multi_arg_tool_block();
+        let canonical_content_hash = block.content_hash();
+        let record = TranscriptBlockRecord {
+            block,
+            content_hash: canonical_content_hash,
+            origin: Some(BlockOrigin::History(0)),
+            tool_state: None,
+        };
+        let legacy_content_hash = legacy_preserve_order_hash(&record.block);
+        let mut row = transcript_block_row(0, &record).unwrap();
+        assert_eq!(
+            legacy_content_hash,
+            seahash::hash(row.block_json.as_bytes())
+        );
+        assert_ne!(legacy_content_hash, canonical_content_hash);
+        row.content_hash = legacy_content_hash.to_string();
+
+        let stored = compact_block_rows(0, vec![row.clone()])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(stored.stored.content_hash, canonical_content_hash);
+        let hydrated = TranscriptBlockRecordWithId::try_from(row).unwrap();
+        assert_eq!(hydrated.record.content_hash, canonical_content_hash);
+        let mut history = BlockHistory::new();
+        history.install_stored_projection([(stored.block_id, stored.stored)]);
+        let stored = history.stored_ref(hydrated.block_id).unwrap().clone();
+
+        assert!(history.install_hydrated_record(hydrated.block_id, stored, hydrated.record));
+    }
+
+    #[test]
+    fn hydration_rejects_block_json_that_does_not_match_content_hash() {
+        let block = multi_arg_tool_block();
+        let record = TranscriptBlockRecord {
+            content_hash: block.content_hash(),
+            block,
+            origin: Some(BlockOrigin::History(0)),
+            tool_state: None,
+        };
+        let row = transcript_block_row(0, &record).unwrap();
+        let stored = compact_block_rows(0, vec![row.clone()])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut tampered_row = row;
+        tampered_row.block_json = tampered_row
+            .block_json
+            .replacen("echo hi", "echo tampered", 1);
+        let tampered = TranscriptBlockRecordWithId::try_from(tampered_row).unwrap();
+        let mut history = BlockHistory::new();
+        history.install_stored_projection([(stored.block_id, stored.stored)]);
+        let stored = history.stored_ref(tampered.block_id).unwrap().clone();
+
+        assert!(!history.install_hydrated_record(tampered.block_id, stored, tampered.record));
     }
 
     #[test]

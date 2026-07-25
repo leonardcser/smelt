@@ -30,6 +30,21 @@ with `COMPAT(<id>)`.
 - Tests:
   - `maintenance_repair_preserves_semantic_links_and_detaches_mismatches`
 
+## transcript-preserve-order-content-hash
+
+- Remove after: sessions written while transcript hashes depended on JSON object
+  insertion order no longer need to open in supported versions
+- Why: enabling `serde_json/preserve_order` made tool argument hashes depend on
+  randomized `HashMap` iteration order, so valid persisted tool blocks could fail
+  hydration after deserialization
+- Code:
+  - `crates/core/src/transcript_model.rs`: validates the legacy hash against the
+    exact persisted block JSON, then upgrades it in memory to the canonical hash
+- Tests:
+  - `legacy_order_dependent_block_hash_hydrates_as_canonical`
+  - `hydration_rejects_block_json_that_does_not_match_content_hash`
+  - `resumed_turn_hydrates_legacy_multi_arg_tool_record_suffix_for_save`
+
 ## session-checkpoint-live-index-past-history
 
 - Remove after: sessions saved by early sparse resume builds with stale
