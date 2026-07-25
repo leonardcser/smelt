@@ -13,7 +13,7 @@
 --     render = function(it)
 --       return {
 --         text  = string.format("%s%s", string.rep("  ", it.depth or 0), it.label),
---         marks = { { col = 0, end_col = 8, opts = { dim = true } } },
+--         marks = { { col = 0, opts = { end_col = 8, dim = true } } },
 --       }
 --     end,
 --     filter = function(it) return it.cwd == current_cwd end,
@@ -151,7 +151,8 @@ local function render_visible(self)
   else
     self.buf:lines(lines)
   end
-  for row, marks in ipairs(row_marks) do
+  for row = 1, #lines do
+    local marks = row_marks[row]
     if marks then
       for _, m in ipairs(marks) do
         self.buf:mark(NS, row, m.col or 0, m.opts or {})

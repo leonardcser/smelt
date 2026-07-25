@@ -327,6 +327,9 @@ app_story!(resume_dialog, |ctx| {
     ctx.wait_for_session_catalog();
     ctx.run_command("resume");
     ctx.assert_snapshot();
+
+    ctx.type_prompt("parser");
+    ctx.assert_snapshot();
 });
 
 app_story!(permissions_dialog, |ctx| {
