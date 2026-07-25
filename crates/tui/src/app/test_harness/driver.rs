@@ -262,11 +262,17 @@ impl TestApp {
     }
 
     pub fn inject_engine(&self, ev: EngineEvent) -> Result<(), Box<EngineEvent>> {
-        self.output_injector.send(ev)
+        let Some(injector) = self.output_injector.as_ref() else {
+            return Err(Box::new(ev));
+        };
+        injector.send(ev)
     }
 
     pub fn inject_host_call(&self, call: engine::HostCall) -> Result<(), Box<engine::HostCall>> {
-        self.output_injector.send_host_call(call)
+        let Some(injector) = self.output_injector.as_ref() else {
+            return Err(Box::new(call));
+        };
+        injector.send_host_call(call)
     }
 
     pub(crate) fn try_receive_engine_output(
@@ -277,7 +283,10 @@ impl TestApp {
 
     /// Drain `UiCommand`s buffered on the engine channel into the action log.
     pub(super) fn drain_cmd(&mut self) {
-        while let Ok(cmd) = self.cmd_rx.try_recv() {
+        let Some(cmd_rx) = self.cmd_rx.as_mut() else {
+            return;
+        };
+        while let Ok(cmd) = cmd_rx.try_recv() {
             self.actions.push(Action::EngineSend(Box::new(cmd)));
         }
     }
@@ -286,8 +295,11 @@ impl TestApp {
     /// Useful for host-hook tests that need to inspect background
     /// `EngineAsk` requests directly without going through `feed_one`.
     pub fn drain_engine_sends(&mut self) -> Vec<UiCommand> {
+        let Some(cmd_rx) = self.cmd_rx.as_mut() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
-        while let Ok(cmd) = self.cmd_rx.try_recv() {
+        while let Ok(cmd) = cmd_rx.try_recv() {
             out.push(cmd);
         }
         out
@@ -295,7 +307,7 @@ impl TestApp {
 
     pub fn disconnect_engine_commands(&mut self) {
         let (_, replacement) = tokio::sync::mpsc::unbounded_channel();
-        self.cmd_rx = replacement;
+        self.cmd_rx = Some(replacement);
     }
 
     pub fn actions(&self) -> &[Action] {

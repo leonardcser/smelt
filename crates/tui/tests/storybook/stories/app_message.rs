@@ -257,6 +257,14 @@ app_story!(compacted_block_summary, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(compaction_preview_waiting_for_summary, |ctx| {
+    // The block is created before the provider emits its first text delta so
+    // slow-starting Responses providers still show transcript progress.
+    ctx.set_viewport(64, 8);
+    ctx.push_compaction_preview("");
+    ctx.assert_snapshot();
+});
+
 app_story!(compaction_preview_streaming_summary, |ctx| {
     // Live compaction preview is a transient peeked block. It should show
     // the tail of the summary as deltas arrive, then be replaced by the

@@ -245,7 +245,7 @@ local function summarize_messages(history, instructions, done)
 
 	local function send(messages, retrying_after_tool_denial)
 		streamed_summary = ""
-		set_compaction_preview(nil)
+		set_compaction_preview(streamed_summary)
 		smelt.engine.ask_inherited({
 			messages = messages,
 			model = smelt.model.preferred("compact"),

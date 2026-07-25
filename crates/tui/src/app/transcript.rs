@@ -5326,9 +5326,6 @@ impl TranscriptDocument {
 
     pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
         let summary = summary.trim().to_string();
-        if summary.is_empty() {
-            return self.clear_compaction_preview();
-        }
 
         if let Some(id) = self.content.compaction_preview_id {
             if self.content.transcript.block(id).is_some() {

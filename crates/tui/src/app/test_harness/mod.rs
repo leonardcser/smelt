@@ -206,8 +206,8 @@ pub struct TestApp {
     #[cfg(not(test))]
     app: TuiApp,
     pub clock: Arc<VirtualClock>,
-    cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
-    output_injector: engine::EngineOutputInjector,
+    cmd_rx: Option<mpsc::UnboundedReceiver<UiCommand>>,
+    output_injector: Option<engine::EngineOutputInjector>,
     actions: Vec<Action>,
     quit: bool,
     /// Allocation delta for the most recent `feed_one`. `None` when no event
@@ -228,6 +228,7 @@ pub struct TestAppBuilder {
     cwd: Option<std::path::PathBuf>,
     ephemeral: bool,
     model_available: bool,
+    engine: Option<EngineHandle>,
 }
 
 impl Default for TestAppBuilder {
@@ -243,6 +244,7 @@ impl Default for TestAppBuilder {
             cwd: None,
             ephemeral: false,
             model_available: true,
+            engine: None,
         }
     }
 }
@@ -301,6 +303,11 @@ impl TestAppBuilder {
         self
     }
 
+    pub(crate) fn with_engine(mut self, engine: EngineHandle) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
     pub fn build(self) -> TestApp {
         if let Some(home) = self.runtime_home.clone() {
             return self.build_with_runtime_home(home, None);
@@ -335,7 +342,13 @@ impl TestAppBuilder {
         home: PathBuf,
         runtime_dir: Option<tempfile::TempDir>,
     ) -> TestApp {
-        let (engine, cmd_rx, output_injector) = EngineHandle::for_test();
+        let (engine, cmd_rx, output_injector) = match self.engine {
+            Some(engine) => (engine, None, None),
+            None => {
+                let (engine, cmd_rx, output_injector) = EngineHandle::for_test();
+                (engine, Some(cmd_rx), Some(output_injector))
+            }
+        };
 
         let permissions = smelt_core::permissions::PermissionsHandle::new(
             smelt_core::permissions::Permissions::load(),

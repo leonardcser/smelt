@@ -332,8 +332,19 @@ impl TuiApp {
         &mut self,
         output: engine::EngineOutput,
     ) -> bool {
-        let mut stdout = std::io::stdout();
-        self.dispatch_engine_output_in_render_loop_to(output, &mut stdout, |_| {})
+        self.dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::stdout())
+    }
+
+    pub(crate) fn dispatch_selected_engine_output_in_render_loop_to<W: std::io::Write>(
+        &mut self,
+        output: engine::EngineOutput,
+        out: &mut W,
+    ) -> bool {
+        let keep_streaming = self.dispatch_engine_output_in_render_loop_to(output, out, |_| {});
+        // Selected outputs bypass the ready-queue drain, so honor render
+        // requests raised during dispatch before waiting for more input.
+        self.render_requested_transient_frame_to(out);
+        keep_streaming
     }
 
     pub(crate) fn dispatch_engine_output_in_render_loop_to<

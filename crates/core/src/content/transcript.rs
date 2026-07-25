@@ -98,15 +98,9 @@ impl Transcript {
                     summary: t.to_string(),
                 }
             }
-            Block::CompactionPreview { summary } => {
-                let t = summary.trim();
-                if t.is_empty() {
-                    return None;
-                }
-                Block::CompactionPreview {
-                    summary: t.to_string(),
-                }
-            }
+            Block::CompactionPreview { summary } => Block::CompactionPreview {
+                summary: summary.trim().to_string(),
+            },
             other => other,
         })
     }
@@ -364,8 +358,18 @@ mod tests {
     }
 
     #[test]
+    fn push_keeps_blank_compaction_preview() {
+        let mut t = Transcript::new();
+        t.push(Block::CompactionPreview { summary: "".into() });
+        assert_eq!(
+            block_at(&t.history, 0),
+            &Block::CompactionPreview { summary: "".into() }
+        );
+    }
+
+    #[test]
     fn push_user_block_keeps_raw_text_untrimmed() {
-        // The trim path covers only Text/Thinking/Compacted variants.
+        // Transcript normalization intentionally preserves user-authored spacing.
         let mut t = Transcript::new();
         t.push(Block::User {
             text: "  question  ".into(),
