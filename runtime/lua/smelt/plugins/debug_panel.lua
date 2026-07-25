@@ -89,6 +89,8 @@ local function compose_lines(win)
 	local api_base = smelt.config.api_base()
 	local mode = smelt.mode.current() or ""
 	local reasoning = smelt.reasoning.current() or ""
+	local session_status = smelt.session.status()
+	local fast = session_status.fast or {}
 
 	local ctx = smelt.session.context_tokens()
 	local window = smelt.session.context_window()
@@ -113,6 +115,7 @@ local function compose_lines(win)
 	add_kv(lines, spans, "provider", provider, width)
 	add_kv(lines, spans, "api_base", api_base, width)
 	add_kv(lines, spans, "mode", mode .. (reasoning ~= "off" and " / " .. reasoning or ""), width)
+	add_kv(lines, spans, "fast_mode", string.format("active=%s supported=%s", fmt_bool(fast.active), fmt_bool(fast.supported)), width)
 	add_kv(lines, spans, "session_id", session_id, width)
 	if session_title then
 		add_kv(lines, spans, "title", session_title, width)

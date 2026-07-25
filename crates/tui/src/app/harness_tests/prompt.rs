@@ -35,8 +35,8 @@ fn slash_completion_tab_accepts_command_name() {
     assert_eq!(app.state().prompt_text, "/tab-accept-regression ");
 }
 
-#[test]
-fn fast_slash_command_updates_session_state_for_supported_model() {
+#[tokio::test(flavor = "current_thread")]
+async fn fast_slash_command_updates_session_state_for_supported_model() {
     let mut app = TestApp::builder().build();
     app.configure_active_model_fast_mode("codex", true);
 
@@ -50,6 +50,12 @@ fn fast_slash_command_updates_session_state_for_supported_model() {
         Action::EngineSend(cmd)
             if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { enabled: true })
     )));
+    app.press(KeyCode::F(3));
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("active=true supported=true"));
+    app.press(KeyCode::Esc);
 
     app.type_text("/fast off");
     app.press(KeyCode::Enter);

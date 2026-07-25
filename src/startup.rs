@@ -189,6 +189,12 @@ pub fn resolve(
         }
         settings.insert(key.to_string(), parsed);
     }
+    if args.fast {
+        settings.insert(
+            "fast_mode".to_string(),
+            smelt_core::config::SettingValue::Bool(true),
+        );
+    }
 
     let parse_mode = |value: &str| {
         AgentMode::parse(value)
@@ -294,9 +300,36 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     fn bootstrap(args: &[&str]) -> BootstrapArgs {
         scan_bootstrap_args(args.iter().copied())
+    }
+
+    #[test]
+    fn fast_flag_enables_startup_fast_mode() {
+        let args = Args::try_parse_from(["smelt", "--fast", "--set", "fast_mode=false"]).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let env = engine::env::RuntimeEnv::scripted(
+            1,
+            root.clone(),
+            root.clone(),
+            root.clone(),
+            root.clone(),
+            root.clone(),
+            root.clone(),
+            root,
+            std::num::NonZeroUsize::new(1).unwrap(),
+        );
+
+        let resolved = resolve(&args, smelt_core::config::Config::default(), &[], &env);
+
+        assert!(resolved.runtime.settings.fast_mode);
+        assert_eq!(
+            resolved.startup_overrides.settings.get("fast_mode"),
+            Some(&smelt_core::config::SettingValue::Bool(true))
+        );
     }
 
     #[test]

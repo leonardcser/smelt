@@ -1065,7 +1065,7 @@ mod tests {
                         model: "gpt-test",
                         messages: &messages,
                         tools: &[],
-                        effort: ReasoningEffort::Off,
+                        effort: ReasoningEffort::Max,
                         config: &ModelConfig::default(),
                         cache: CacheConfig::default(),
                         response_format: None,
@@ -1086,6 +1086,7 @@ mod tests {
     async fn codex_http_request_normalizes_endpoint_and_emits_one_based_attempts() {
         let (fast_body, fast_attempts) = capture_codex_request(true).await;
         assert_eq!(fast_body["service_tier"], "priority");
+        assert_eq!(fast_body["reasoning"]["effort"], "xhigh");
         assert_eq!(fast_attempts, vec![1]);
 
         let (standard_body, standard_attempts) = capture_codex_request(false).await;

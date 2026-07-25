@@ -76,6 +76,8 @@ pub struct Args {
     top_p: Option<f64>,
     #[arg(long, value_name = "VALUE", help = "Top-k sampling")]
     top_k: Option<u32>,
+    #[arg(long, help = "Request accelerated inference when supported")]
+    fast: bool,
     #[arg(long, help = "Disable tool calling (model becomes chat-only)")]
     no_tool_calling: bool,
     #[arg(
