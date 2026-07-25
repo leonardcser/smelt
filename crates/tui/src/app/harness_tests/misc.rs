@@ -2977,6 +2977,37 @@ fn transcript_key_repeat_bursts_do_not_overaccumulate_sparse_local_motion() {
 }
 
 #[test]
+fn transcript_jump_top_uses_first_record_anchor_from_sparse_tail() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
+    prepare_transcript_burst_app(&mut app);
+    app.set_transcript_scroll_trace_for_harness(true);
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+
+    let frames = app.take_transcript_scroll_trace_frames_for_harness();
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::RevealBlock {
+                record_index: 0,
+                row_offset: 0,
+                screen_padding_top: 0,
+                ..
+            }
+        )),
+        "gg should project through the exact first transcript record: {frames:?}"
+    );
+    assert_eq!(
+        first_visible_record_index(&app),
+        Some(0),
+        "gg did not reveal the first sparse transcript record"
+    );
+}
+
+#[test]
 fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
     prepare_transcript_burst_app(&mut app);

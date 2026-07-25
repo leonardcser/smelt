@@ -660,6 +660,33 @@ impl TuiApp {
                 let rows = signed_row_delta(command_scroll_before, scroll_top);
                 let intent = if local_transcript_command {
                     TranscriptScrollIntent::UserDelta { rows }
+                } else if matches!(
+                    command,
+                    DocumentCommand::BufferStart | DocumentCommand::GotoRow(0)
+                ) {
+                    self.conversation
+                        .transcript_record_block_reveal_position(
+                            &self.lua,
+                            viewport_cols.max(1),
+                            0,
+                            0,
+                            0,
+                            viewport_rows,
+                        )
+                        .map(|reveal| TranscriptScrollIntent::RevealBlock {
+                            record_index: 0,
+                            block_id: reveal.block_id,
+                            row_offset: 0,
+                            screen_padding_top: 0,
+                        })
+                        .unwrap_or_else(|| {
+                            let anchor = self.conversation.transcript_trace_anchor_at_row(
+                                &self.lua,
+                                viewport_cols.max(1),
+                                scroll_top,
+                            );
+                            TranscriptScrollIntent::ExactContentAnchor(anchor)
+                        })
                 } else {
                     let anchor = self.conversation.transcript_trace_anchor_at_row(
                         &self.lua,
