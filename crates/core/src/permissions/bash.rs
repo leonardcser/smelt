@@ -298,7 +298,7 @@ pub(super) fn analyze_shell_command_in(
     };
     let initial_state = ShellState::new(base_dir, home);
     let initial_states = vec![initial_state.clone()];
-    let Ok(program) = shell_parse::parse(command) else {
+    let Some(program) = shell_parse::parse(command) else {
         record_unknown_shell(command, &initial_state.cwd, &mut analysis);
         return analysis;
     };
@@ -754,7 +754,7 @@ fn analyze_embedded_command(
     analysis: &mut ShellAnalysis,
     depth: usize,
 ) {
-    let Ok(program) = shell_parse::parse(command) else {
+    let Some(program) = shell_parse::parse(command) else {
         record_unknown_shell(command, &state.cwd, analysis);
         return;
     };

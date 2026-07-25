@@ -445,6 +445,19 @@ fn split_shell_commands_utf8_with_heredoc() {
 }
 
 #[test]
+fn oversized_io_number_does_not_bypass_shell_permissions() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    assert_eq!(
+        permissions.check_subcommand(
+            normal(),
+            "bash",
+            "echo ok 999999999999999999999999999999>&1 && rm foo",
+        ),
+        Decision::Deny
+    );
+}
+
+#[test]
 fn split_shell_commands_input_fd_duplication_is_not_background() {
     assert_eq!(
         split_shell_commands("cat <&0 | head"),

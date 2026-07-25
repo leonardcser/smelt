@@ -10,9 +10,28 @@ use smelt_buffer::text::{byte_of_char, slice};
 
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 
-pub(super) fn parse(command: &str) -> Result<ast::Program, brush_parser::ParseError> {
+pub(super) fn parse(command: &str) -> Option<ast::Program> {
+    if has_unrepresentable_io_number(command) {
+        return None;
+    }
     let mut parser = Parser::new(Cursor::new(command.as_bytes()), &ParserOptions::default());
-    parser.parse_program()
+    parser.parse_program().ok()
+}
+
+fn has_unrepresentable_io_number(command: &str) -> bool {
+    let Ok(tokens) = tokenize_str(command) else {
+        return false;
+    };
+    tokens.windows(2).any(|tokens| {
+        let [Token::Word(number, number_span), Token::Operator(operator, operator_span)] = tokens
+        else {
+            return false;
+        };
+        number_span.end.index == operator_span.start.index
+            && operator.starts_with(['<', '>'])
+            && number.chars().all(|ch| ch.is_ascii_digit())
+            && number.parse::<ast::IoFd>().is_err()
+    })
 }
 
 pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
@@ -109,14 +128,14 @@ pub(super) fn embedded_commands(pieces: &[WordPieceWithSource]) -> Vec<&str> {
 }
 
 pub(super) fn split_with_ops(command: &str) -> Vec<(String, Option<String>)> {
-    let Ok(program) = parse(command) else {
+    let Some(program) = parse(command) else {
         return tokenized_split(command);
     };
     split_program_with_ops(&program, command)
 }
 
 pub(super) fn split(command: &str) -> Vec<String> {
-    let Ok(program) = parse(command) else {
+    let Some(program) = parse(command) else {
         return tokenized_split(command)
             .into_iter()
             .map(|(command, _)| command)
@@ -537,7 +556,7 @@ fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
 
 pub(super) fn has_output_redirection(command: &str) -> bool {
     parse(command).map_or_else(
-        |_| tokenized_has_output_redirection(command),
+        || tokenized_has_output_redirection(command),
         |program| program_has_output_redirection(&program),
     )
 }
@@ -698,7 +717,7 @@ fn tokenized_has_output_redirection(command: &str) -> bool {
 }
 
 pub(super) fn is_single_cd(command: &str) -> bool {
-    let Ok(program) = parse(command) else {
+    let Some(program) = parse(command) else {
         return false;
     };
     let [complete] = program.complete_commands.as_slice() else {
