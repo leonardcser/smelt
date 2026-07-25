@@ -809,7 +809,7 @@ fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
             top:renderer()
             local inactive_dots = count_marks(top:buf(), function(_, text) return text == " ·" end)
             local inactive_bar_dots = count_marks(top:buf(), function(mark, text)
-              return text == " ·" and mark.fg == "SmeltBar" and mark.hl_group == nil
+              return text == " ·" and mark.fg == "SmeltSeparator" and mark.hl_group == nil
             end)
 
             smelt.__resize = true
@@ -827,7 +827,7 @@ fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
               return text:find("─", 1, true) ~= nil and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil
             end)
             local bottom_bar_dashes = count_marks(bottom:buf(), function(mark, text)
-              return text:find("─", 1, true) ~= nil and mark.fg == "SmeltBar" and mark.hl_group == nil
+              return text:find("─", 1, true) ~= nil and mark.fg == "SmeltSeparator" and mark.hl_group == nil
             end)
             return inactive_dots, inactive_bar_dots, active_dots, active_resize_dots, active_dashes, bottom_resize_dashes, bottom_bar_dashes
             "#,

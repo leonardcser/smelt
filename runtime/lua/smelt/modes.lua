@@ -25,7 +25,7 @@ local function normalize(spec)
     name = spec.name,
     label = spec.label or spec.name,
     icon = spec.icon or "",
-    hl_group = spec.hl_group or ("SmeltMode" .. spec.name:gsub("^%l", string.upper)),
+    hl_group = spec.hl_group or "SmeltModeDefault",
     note = spec.note or ("now in " .. spec.name .. " mode"),
     permissions = spec.permissions or {},
   }

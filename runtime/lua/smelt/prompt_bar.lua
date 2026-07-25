@@ -153,7 +153,7 @@ end
 
 local function indicator_spans(opts)
   opts = opts or {}
-  local bar_style = opts.bar_style or { fg = "SmeltBar" }
+  local bar_style = opts.bar_style or { fg = "SmeltSeparator" }
   local state = smelt.signal.get("work_state")
   if not state or state == "idle" then return nil end
 
@@ -258,16 +258,16 @@ end
 
 local function reasoning_color_group(effort)
   if effort == "low" then return "SmeltReasonLow"
-  elseif effort == "medium" then return "SmeltReasonMed"
+  elseif effort == "medium" then return "SmeltReasonMedium"
   elseif effort == "high" then return "SmeltReasonHigh"
   elseif effort == "max" then return "SmeltReasonMax"
-  else return "SmeltReasonOff"
+  else return "Comment"
   end
 end
 
 local function right_spans(opts)
   opts = opts or {}
-  local bar_style = opts.bar_style or { fg = "SmeltBar" }
+  local bar_style = opts.bar_style or { fg = "SmeltSeparator" }
   local spans = {}
   local status = smelt.session.status and smelt.session.status() or {}
   local model = status.model or smelt.model.current()

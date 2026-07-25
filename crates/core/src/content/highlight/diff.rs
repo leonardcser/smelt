@@ -698,7 +698,7 @@ struct DiffPalette {
 
 fn active_diff_palette() -> DiffPalette {
     let theme = crate::theme::active();
-    let del_row = theme.get("SmeltDiffDelBg").bg;
+    let del_row = theme.get("SmeltDiffDeleteBg").bg;
     let add_row = theme.get("SmeltDiffAddBg").bg;
     DiffPalette {
         add: DiffSidePalette {
@@ -707,7 +707,7 @@ fn active_diff_palette() -> DiffPalette {
         },
         del: DiffSidePalette {
             row_bg: del_row,
-            inline_bg: theme.get("SmeltDiffDelInlineBg").bg.or(del_row),
+            inline_bg: theme.get("SmeltDiffDeleteInlineBg").bg.or(del_row),
         },
     }
 }
@@ -808,7 +808,7 @@ pub fn print_diff_ir_with_width(
     out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
     // Diff row fills come from the active theme. Themes that omit
-    // `SmeltDiffAddBg` / `SmeltDiffDelBg` produce diffs without a row
+    // `SmeltDiffAddBg` / `SmeltDiffDeleteBg` produce diffs without a row
     // background (text still highlights via syntax colors).
     let palette = active_diff_palette();
 
@@ -917,7 +917,7 @@ pub fn print_diff_ir_with_width(
                     emit_diff_prefix(out, gutter, source_line, vi, lineno_digits, &blank_prefix);
                     if let Some((ch, color)) = sign {
                         // bg is None when the theme doesn't define
-                        // `SmeltDiffAddBg` / `SmeltDiffDelBg`; in that
+                        // `SmeltDiffAddBg` / `SmeltDiffDeleteBg`; in that
                         // case skip the row-fill but still emit the sign.
                         if let Some(bgv) = bg {
                             out.set_bg(bgv);

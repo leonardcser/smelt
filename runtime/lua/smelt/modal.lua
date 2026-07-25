@@ -68,7 +68,7 @@ local function render_actions(buf, actions, selected, width)
       local mark = {
         end_col = item.end_col,
         fg = "Normal",
-        bg = "SmeltCursorLineBg",
+        bg = "CursorLine",
       }
       if i == selected then
         mark.reverse = true

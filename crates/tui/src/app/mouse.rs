@@ -1212,7 +1212,7 @@ mod tests {
                 0,
                 0,
                 width,
-                smelt_core::theme::intern("SmeltBar"),
+                smelt_core::theme::intern("SmeltSeparator"),
                 smelt_core::buffer::SpanMeta::unselectable(),
             );
         }

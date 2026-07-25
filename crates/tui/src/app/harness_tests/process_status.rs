@@ -39,6 +39,21 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
 }
 
 #[test]
+fn custom_mode_without_highlight_group_uses_default_style() {
+    let mut app = TestApp::builder().build();
+    let group: String = app
+        .eval_lua(
+            r#"
+            smelt.mode.register({ name = "review" })
+            return smelt.mode.style("review").hl_group
+            "#,
+        )
+        .expect("custom mode highlight group");
+
+    assert_eq!(group, "SmeltModeDefault");
+}
+
+#[test]
 fn statusline_can_truncate_items_in_the_middle() {
     let mut app = TestApp::builder().build();
     let row: String = app
@@ -53,7 +68,7 @@ fn statusline_can_truncate_items_in_the_middle() {
                 truncatable = true,
                 truncate = "middle",
               },
-            }, { width = 14, bg_group = "SmeltStatusBg", sep_group = "SmeltBar" })
+            }, { width = 14, bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
             return row.text
             "#,
         )
@@ -75,7 +90,7 @@ fn statusline_spacing_respects_text_and_block_items() {
               { text = " INSERT ", style = { hl_group = "SmeltVimInsert" } },
               { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
               { text = "procs", style = { fg = "SmeltProcess" }, separated = true },
-            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltBar" })
+            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
             return row.text
             "#,
         )
@@ -99,7 +114,7 @@ fn statusline_separates_first_inline_indicator_after_pills() {
               { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
               { text = "14 procs", style = { fg = "SmeltProcess" }, separated = true },
               { text = "permission pending", style = { fg = "SmeltAccent" }, separated = true },
-            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltBar" })
+            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
             return row.text
             "#,
         )

@@ -55,7 +55,7 @@ impl TuiApp {
         }
 
         let border =
-            crate::smelt_edit::Border::single().top(smelt_buffer::theme::intern("SmeltBar"));
+            crate::smelt_edit::Border::single().top(smelt_buffer::theme::intern("SmeltSeparator"));
         let title = format!(" :!{command} ");
         let layout = crate::smelt_edit::LayoutTree::vbox(vec![(
             crate::smelt_edit::Constraint::Percentage(100),

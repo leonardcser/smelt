@@ -22,15 +22,15 @@ local function severity_role(us)
 		return "Comment"
 	end
 	if us < 1000 then
-		return "SmeltReasonLow"
+		return "SmeltSuccess"
 	end
 	if us < 5000 then
-		return "SmeltReasonMed"
+		return "SmeltAccent"
 	end
 	if us < 16000 then
-		return "SmeltReasonHigh"
+		return "WarningMsg"
 	end
-	return "SmeltReasonMax"
+	return "ErrorMsg"
 end
 
 local function fmt_us(us)

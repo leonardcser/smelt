@@ -414,7 +414,9 @@ referencing another group in the same spec. Built-in colorschemes live at
 `~/.config/smelt/lua/smelt/colorschemes/<name>.lua` and load via
 `smelt.theme.use("<name>")`. See the
 [customization guide](../guide/customization.md#themes) for the full shape;
-`runtime/lua/smelt/colorschemes/default.lua` is the worked example.
+`runtime/lua/smelt/colorschemes/default.lua` is the worked example. The canonical
+group names, style roles, ownership, and descriptions are listed in
+`runtime/lua/smelt/colorschemes/_groups.lua`.
 
 ## MCP (Model Context Protocol)
 

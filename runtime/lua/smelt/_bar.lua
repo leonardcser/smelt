@@ -135,7 +135,7 @@ function M.compose(width, left, right, opts)
   if #left_kept > 0 then
     segs[#segs + 1] = { text = " ", style = {}, selectable = false }
   end
-  local bar_style = opts.bar_style or { fg = "SmeltBar" }
+  local bar_style = opts.bar_style or { fg = "SmeltSeparator" }
   segs[#segs + 1] = { text = string.rep(DASH, bar_len), style = bar_style, selectable = false }
   if #right_kept > 0 then
     for _, s in ipairs(right_kept) do

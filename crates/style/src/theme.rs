@@ -4,7 +4,7 @@
 //! A `Theme` is a flat `HlGroup → Style` map plus an `is_light` hint. There
 //! is no aliasing layer - a colorscheme that wants two names to share a
 //! color either sets both directly, or expresses the relationship in its
-//! source spec (e.g. `Comment = "SmeltMuted"` resolved at compile time in
+//! source spec (e.g. `SmeltToolPending = "Comment"` resolved at compile time in
 //! `smelt_tui::theme::compile`). The runtime sees only resolved styles.
 
 use crate::style::Style;

@@ -124,9 +124,8 @@ return {
   groups = {
     SmeltAccent  = { fg = { ansi = 208 } },
     SmeltProcess = { fg = { ansi = 117 } },
-    SmeltMuted   = { fg = { ansi = 244 } },
     SmeltUserBg  = { bg = { dark = { ansi = 236 }, light = { ansi = 254 } } },
-    Comment      = "SmeltMuted",
+    Comment      = { fg = { ansi = 244 } },
   },
 }
 ```
@@ -140,7 +139,8 @@ end)
 
 Color values support `{ ansi = N }`, `{ rgb = { R, G, B } }`, or a
 `{ dark = ..., light = ... }` pair. The built-in reference is
-`runtime/lua/smelt/colorschemes/default.lua`.
+`runtime/lua/smelt/colorschemes/default.lua`; the canonical group manifest with
+style roles and descriptions is `runtime/lua/smelt/colorschemes/_groups.lua`.
 
 ## Keymaps
 

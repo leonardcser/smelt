@@ -9,7 +9,7 @@ end
 
 -- Apply `ansi` to the slug pill bg and the bar/separator fg (prompt
 -- top + bottom bars and the statusline dot separator all read from
--- `SmeltBar`), so `/color` tints the whole chrome family at once.
+-- `SmeltSeparator`), so `/color` tints the whole chrome family at once.
 local function apply(ansi)
   local slug = smelt.theme.get("SmeltSlug") or {}
   smelt.theme.set("SmeltSlug", {
@@ -21,15 +21,15 @@ local function apply(ansi)
     underline = slug.underline,
     crossedout = slug.crossedout,
   })
-  local bar = smelt.theme.get("SmeltBar") or {}
-  smelt.theme.set("SmeltBar", {
+  local separator = smelt.theme.get("SmeltSeparator") or {}
+  smelt.theme.set("SmeltSeparator", {
     fg = ansi and { ansi = ansi } or nil,
-    bg = bar.bg,
-    bold = bar.bold,
-    italic = bar.italic,
-    dim = bar.dim,
-    underline = bar.underline,
-    crossedout = bar.crossedout,
+    bg = separator.bg,
+    bold = separator.bold,
+    italic = separator.italic,
+    dim = separator.dim,
+    underline = separator.underline,
+    crossedout = separator.crossedout,
   })
 end
 
@@ -50,7 +50,7 @@ smelt.cmd.picker("color", {
   prepare    = function()
     original = {
       slug_bg = ((smelt.theme.get("SmeltSlug") or {}).bg or {}).ansi,
-      bar_fg = ((smelt.theme.get("SmeltBar") or {}).fg or {}).ansi,
+      separator_fg = ((smelt.theme.get("SmeltSeparator") or {}).fg or {}).ansi,
     }
   end,
   on_select  = function(item) if item.ansi_color then apply(item.ansi_color) end end,
@@ -64,12 +64,12 @@ smelt.cmd.picker("color", {
       bold = slug.bold, italic = slug.italic, dim = slug.dim,
       underline = slug.underline, crossedout = slug.crossedout,
     })
-    local bar = smelt.theme.get("SmeltBar") or {}
-    smelt.theme.set("SmeltBar", {
-      fg = original.bar_fg and { ansi = original.bar_fg } or nil,
-      bg = bar.bg,
-      bold = bar.bold, italic = bar.italic, dim = bar.dim,
-      underline = bar.underline, crossedout = bar.crossedout,
+    local separator = smelt.theme.get("SmeltSeparator") or {}
+    smelt.theme.set("SmeltSeparator", {
+      fg = original.separator_fg and { ansi = original.separator_fg } or nil,
+      bg = separator.bg,
+      bold = separator.bold, italic = separator.italic, dim = separator.dim,
+      underline = separator.underline, crossedout = separator.crossedout,
     })
   end,
 })

@@ -209,7 +209,7 @@ local function render(win)
   local row = bar.compose_status(items, {
     width = width,
     bg_group = "SmeltStatusBg",
-    sep_group = "SmeltBar",
+    sep_group = "SmeltSeparator",
   })
   bar.write_rows(buf, { row }, NS)
 end

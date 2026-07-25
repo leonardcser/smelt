@@ -220,9 +220,9 @@ smelt.theme.set("SmeltAccent", { fg = { ansi = 208 }, bold = true })
 `smelt.theme.set(group, style)` overrides one highlight group; the override
 persists across reloads because it lives in `init.lua`. Common group names:
 `SmeltAccent` (primary accent), `Comment`, `SmeltDiffAddBg`,
-`SmeltDiffRemoveBg`, `SmeltSlug` (task-slug pill), `SmeltBar` (prompt bars +
-statusline separator). Use `smelt.theme.snapshot()` to dump every currently-set
-group when the user needs to discover names.
+`SmeltDiffDeleteBg`, `SmeltSlug` (task-slug pill), `SmeltSeparator` (prompt bars,
+borders, and statusline separators). Use `smelt.theme.snapshot()` to dump every
+currently-set group when the user needs to discover names.
 
 If the user names a session-color preset (`"ember"`, `"coral"`, `"rose"`,
 `"gold"`, `"ice"`, `"sky"`, `"blue"`, `"lavender"`, `"lilac"`, `"mint"`,
@@ -249,7 +249,7 @@ return {
     Comment          = { fg = { ansi = 244 } },
     SmeltDiffAddBg   = { bg = { ansi = 22 } },
     -- string-valued entries reference another group in this spec:
-    SmeltDiffAdd     = "SmeltAccent",
+    SmeltProcess     = "SmeltAccent",
   },
 }
 ```

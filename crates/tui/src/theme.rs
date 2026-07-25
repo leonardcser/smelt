@@ -13,7 +13,7 @@
 //!   `light` branches are themselves `ColorDecl`s) so the `FromLua` and
 //!   `LuaType` impls are hand-written; the leaf types use the derive.
 //! - `compile(spec, is_light) -> Theme` resolves string-valued group
-//!   entries (e.g. `Comment = "SmeltMuted"`) at compile time, applies
+//!   entries (e.g. `SmeltToolPending = "Comment"`) at compile time, applies
 //!   the `is_light` branch to any `{ dark, light }` `ColorDecl`, and
 //!   produces a flat `HlGroup → Style` map. There is no runtime alias
 //!   table - references are resolved once.
@@ -40,7 +40,7 @@ use std::sync::{Arc, OnceLock};
 
 /// Single group entry in a `ThemeSpec`. Either a concrete `StyleDecl`
 /// (`{ fg = ..., bg = ..., bold = true }`) or a string referencing
-/// another group in the same spec (`"SmeltMuted"`). String references
+/// another group in the same spec (`"Comment"`). String references
 /// are resolved at compile time; the runtime `Theme` only contains
 /// concrete styles.
 #[derive(Debug, Clone)]
@@ -274,8 +274,8 @@ impl FromLua for ColorDecl {
 /// referencing another group in the same spec as the value. Compile via
 /// [`compile`] to produce a runtime `Theme`. Every themable color lives in
 /// `groups` - there are no special-case group fields. The diff renderer's row
-/// and inline fills are `SmeltDiffAddBg` / `SmeltDiffDelBg` and
-/// `SmeltDiffAddInlineBg` / `SmeltDiffDelInlineBg` groups, scrollbar colors are
+/// and inline fills are `SmeltDiffAddBg` / `SmeltDiffDeleteBg` and
+/// `SmeltDiffAddInlineBg` / `SmeltDiffDeleteInlineBg` groups, scrollbar colors are
 /// `SmeltScrollbarTrack` / `…Thumb`, and so on.
 #[derive(Debug, Default, Clone)]
 pub struct ThemeSpec {
@@ -426,7 +426,7 @@ fn install_resize_handle_group(theme: &mut Theme) {
         Color::White
     };
     let fg = theme
-        .get("SmeltBar")
+        .get("SmeltSeparator")
         .fg
         .or_else(|| theme.get("Comment").fg)
         .or_else(|| theme.get("Normal").fg)
@@ -664,6 +664,159 @@ fn baked_default_spec() -> ThemeSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn canonical_group_names(lua: &Lua) -> BTreeSet<String> {
+        const GROUPS_LUA: &str =
+            include_str!("../../../runtime/lua/smelt/colorschemes/_groups.lua");
+        let entries: LuaTable = lua
+            .load(GROUPS_LUA)
+            .set_name("colorschemes/_groups.lua")
+            .eval()
+            .expect("highlight group manifest must load");
+        let mut names = BTreeSet::new();
+        for entry in entries.sequence_values::<LuaTable>() {
+            let entry = entry.expect("manifest entries must be tables");
+            let name: String = entry.get("name").expect("manifest group name");
+            let role: String = entry.get("role").expect("manifest group role");
+            let owner: String = entry.get("owner").expect("manifest group owner");
+            let description: String = entry
+                .get("description")
+                .expect("manifest group description");
+            assert!(
+                matches!(role.as_str(), "foreground" | "background" | "style"),
+                "invalid role `{role}` for `{name}`"
+            );
+            assert!(!owner.is_empty(), "missing owner for `{name}`");
+            assert!(!description.is_empty(), "missing description for `{name}`");
+            assert!(names.insert(name.clone()), "duplicate group `{name}`");
+        }
+        names
+    }
+
+    fn spec_group_names(spec: &ThemeSpec) -> BTreeSet<String> {
+        spec.groups.keys().cloned().collect()
+    }
+
+    fn production_group_usage() -> String {
+        fn visit(dir: &Path, sources: &mut String) {
+            for entry in std::fs::read_dir(dir).expect("read source directory") {
+                let path = entry.expect("read source entry").path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    if matches!(
+                        name,
+                        "colorschemes" | "examples" | "harness_tests" | "test_harness" | "tests"
+                    ) {
+                        continue;
+                    }
+                    visit(&path, sources);
+                } else if matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("lua" | "rs")
+                ) && path.file_name().and_then(|name| name.to_str()) != Some("theme.rs")
+                {
+                    sources.push_str(
+                        &std::fs::read_to_string(&path)
+                            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+                    );
+                    sources.push('\n');
+                }
+            }
+        }
+
+        let root = workspace_root();
+        let mut sources = String::new();
+        visit(&root.join("runtime/lua/smelt"), &mut sources);
+        visit(&root.join("crates"), &mut sources);
+        sources
+    }
+
+    #[test]
+    fn bundled_themes_match_the_canonical_group_manifest() {
+        let lua = Lua::new();
+        let canonical = canonical_group_names(&lua);
+        assert_eq!(spec_group_names(&baked_default_spec()), canonical);
+
+        const TWO_FACE_LUA: &str =
+            include_str!("../../../runtime/lua/smelt/colorschemes/_two_face.lua");
+        let generator: LuaTable = lua
+            .load(TWO_FACE_LUA)
+            .set_name("colorschemes/_two_face.lua")
+            .eval()
+            .expect("bundled theme generator must load");
+        let theme: LuaFunction = generator.get("theme").expect("theme generator function");
+        let schemes: LuaTable = generator.get("schemes").expect("bundled theme list");
+        for scheme in schemes.sequence_values::<LuaTable>() {
+            let scheme = scheme.expect("bundled theme metadata");
+            let module: String = scheme.get("module").expect("bundled theme module");
+            let value: LuaValue = theme.call(module.as_str()).expect("generate bundled theme");
+            let spec = ThemeSpec::from_lua(value, &lua).expect("decode bundled theme");
+            assert_eq!(
+                spec_group_names(&spec),
+                canonical,
+                "bundled theme `{module}` does not match the canonical manifest"
+            );
+            compile(&spec, false)
+                .unwrap_or_else(|error| panic!("bundled theme `{module}` must compile: {error}"));
+        }
+    }
+
+    #[test]
+    fn canonical_groups_match_production_consumers() {
+        let lua = Lua::new();
+        let canonical = canonical_group_names(&lua);
+        let sources = production_group_usage();
+        for name in &canonical {
+            assert!(
+                sources.contains(&format!("\"{name}\"")),
+                "canonical group `{name}` has no production consumer"
+            );
+        }
+        for (start, _) in sources.match_indices("\"Smelt") {
+            let identifier = sources[start + 1..]
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .expect("group identifier");
+            if identifier != "Smelt" {
+                assert!(
+                    canonical.contains(identifier),
+                    "production source references unknown group `{identifier}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn documented_smelt_groups_are_canonical() {
+        let lua = Lua::new();
+        let canonical = canonical_group_names(&lua);
+        let root = workspace_root();
+        for relative in [
+            "docs/docs/guide/customization.md",
+            "docs/docs/reference/configuration.md",
+            "runtime/skills/customize/SKILL.md",
+        ] {
+            let text =
+                std::fs::read_to_string(root.join(relative)).expect("read theme documentation");
+            for identifier in text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
+                if identifier.starts_with("Smelt") && identifier != "Smelt" {
+                    assert!(
+                        canonical.contains(identifier),
+                        "documentation `{relative}` references unknown group `{identifier}`"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_osc11_dark_background() {
@@ -703,11 +856,9 @@ mod tests {
     }
 
     #[test]
-    fn baked_default_compiles_and_resolves_aliases() {
+    fn baked_default_uses_canonical_group_styles() {
         let theme = default_baked();
-        // Comment is aliased to SmeltMuted → fg = AnsiValue(244).
         assert_eq!(theme.get("Comment").fg, Some(Color::AnsiValue(244)));
-        assert_eq!(theme.get("SmeltMuted").fg, Some(Color::AnsiValue(244)));
         // SmeltSlug carries the pill fg only; bg falls back to
         // SmeltAccent in statusline.lua so `/color` and theme swaps
         // both propagate through SmeltAccent without rewriting the slug.
@@ -717,6 +868,19 @@ mod tests {
         assert_eq!(theme.get("Search").bg, theme.get("SmeltAccent").fg);
         assert_eq!(theme.get("Search").fg, Some(Color::AnsiValue(0)));
         assert_eq!(theme.get("SmeltLink").fg, Some(Color::AnsiValue(75)));
+    }
+
+    #[test]
+    fn baked_default_distinguishes_paused_and_blocked_goals() {
+        let theme = default_baked();
+        assert_eq!(
+            theme.get("SmeltGoalBannerPausedLabel").bg,
+            Some(Color::AnsiValue(220))
+        );
+        assert_eq!(
+            theme.get("SmeltGoalBannerBlockedLabel").bg,
+            Some(Color::AnsiValue(203))
+        );
     }
 
     #[test]
@@ -831,7 +995,7 @@ mod tests {
             })
         );
         assert_eq!(
-            theme.get("SmeltDiffDelBg").bg,
+            theme.get("SmeltDiffDeleteBg").bg,
             Some(Color::Rgb {
                 r: 60,
                 g: 20,
@@ -847,7 +1011,7 @@ mod tests {
             })
         );
         assert_eq!(
-            theme.get("SmeltDiffDelInlineBg").bg,
+            theme.get("SmeltDiffDeleteInlineBg").bg,
             Some(Color::Rgb {
                 r: 110,
                 g: 35,
