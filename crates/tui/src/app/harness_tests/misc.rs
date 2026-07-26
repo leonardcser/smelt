@@ -3008,6 +3008,52 @@ fn transcript_jump_top_uses_first_record_anchor_from_sparse_tail() {
 }
 
 #[test]
+fn transcript_resize_reflow_preserves_sparse_anchor_after_prefix_width_change() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.install_sparse_transcript_scroll_fixture(256, 40, 36);
+
+    app.transcript_scroll_probe_render();
+    app.transcript_scroll_probe_render();
+    app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+    app.transcript_scroll_probe_render();
+
+    app.set_terminal_size(95, 39);
+    app.render_silent();
+
+    let frames = app.take_transcript_scroll_trace_frames_for_harness();
+    let frame = frames
+        .iter()
+        .find(|frame| {
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::ResizeReflow { .. }
+            )
+        })
+        .expect("resize/reflow trace frame");
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: before_anchor_record,
+        block_id: before_block,
+        ..
+    }) = frame.viewport_anchor_before
+    else {
+        panic!("resize should start from a content anchor: {frame:?}");
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: after_anchor_record,
+        block_id: after_block,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
+        panic!("resize should preserve a content anchor: {frame:?}");
+    };
+    assert_eq!(
+        (after_anchor_record, after_block),
+        (before_anchor_record, before_block),
+        "resize/reflow moved to a different sparse transcript block: {frame:?}"
+    );
+}
+
+#[test]
 fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
     prepare_transcript_burst_app(&mut app);

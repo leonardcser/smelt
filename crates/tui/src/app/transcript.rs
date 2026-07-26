@@ -2812,14 +2812,22 @@ impl TranscriptDocument {
             return;
         };
         let viewport_rows = RowIndex::from(ctx.viewport_rows.max(1));
-        let first_visible_content_anchor =
-            self.trace_visible_content_anchor_at_row(lua, ctx.width, rows.clamped_scroll);
+        let first_visible_content_anchor = self.trace_visible_content_anchor_at_row_with_offset(
+            lua,
+            ctx.width,
+            rows.clamped_scroll,
+            ctx.row_offset,
+        );
         let last_visible_row = rows
             .clamped_scroll
             .saturating_add(viewport_rows.saturating_sub(1))
             .min(rows.total_rows.saturating_sub(1));
-        let last_visible_content_anchor =
-            self.trace_visible_content_anchor_at_row(lua, ctx.width, last_visible_row);
+        let last_visible_content_anchor = self.trace_visible_content_anchor_at_row_with_offset(
+            lua,
+            ctx.width,
+            last_visible_row,
+            ctx.row_offset,
+        );
         let active_record_range_after = Self::trace_record_range(self.records.active_range());
         let viewport_anchor_after = self.viewport.state.top_anchor.map(Self::trace_anchor);
         let visible_record_or_block_ids = self.visible_block_ids_for_virtual_range(
@@ -2846,13 +2854,14 @@ impl TranscriptDocument {
         }
     }
 
-    fn trace_visible_content_anchor_at_row(
+    fn trace_visible_content_anchor_at_row_with_offset(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
         row: RowIndex,
+        row_offset: RowIndex,
     ) -> Option<TranscriptVisibleContentAnchor> {
-        self.row_anchor_at_row(lua, width, row)
+        self.row_anchor_at_row_with_offset(lua, width, row, row_offset)
             .map(|anchor| TranscriptVisibleContentAnchor {
                 virtual_row: row,
                 node_id: anchor.id,
@@ -2954,8 +2963,24 @@ impl TranscriptDocument {
         width: u16,
         row: RowIndex,
     ) -> Option<RowIndex> {
-        let (loaded_start, loaded_end) = self.active_virtual_row_span(lua, width)?;
-        (loaded_start <= row && row < loaded_end).then_some(row.saturating_sub(loaded_start))
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.exact_loaded_row_for_virtual_content_row_with_offset(lua, width, row, row_offset)
+    }
+
+    fn exact_loaded_row_for_virtual_content_row_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+        row_offset: RowIndex,
+    ) -> Option<RowIndex> {
+        let loaded_rows = self.content.projection.estimated_total_rows(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+        );
+        let loaded_end = row_offset.saturating_add(loaded_rows);
+        (row_offset <= row && row < loaded_end).then_some(row.saturating_sub(row_offset))
     }
 
     fn offset_node_row(
@@ -3023,7 +3048,20 @@ impl TranscriptDocument {
         crate::smelt_edit::RowIndex,
         crate::smelt_edit::RowIndex,
     )> {
-        let offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
+    }
+
+    fn materialize_exact_loaded_block_layout_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row_offset: RowIndex,
+    ) -> Vec<(
+        BlockId,
+        crate::smelt_edit::RowIndex,
+        crate::smelt_edit::RowIndex,
+    )> {
         let ids = self.content.transcript.history.order.clone();
         if !self.pin_operation_blocks(&ids) {
             return Vec::new();
@@ -3033,7 +3071,7 @@ impl TranscriptDocument {
             .projection
             .materialize_block_layout(lua, &mut self.content.transcript.history, width)
             .into_iter()
-            .map(|(id, first_row, rows)| (id, first_row.saturating_add(offset), rows))
+            .map(|(id, first_row, rows)| (id, first_row.saturating_add(row_offset), rows))
             .collect();
         self.unpin_operation_blocks(&ids);
         layout
@@ -3169,7 +3207,19 @@ impl TranscriptDocument {
         row: RowIndex,
         bias: TranscriptAnchorBias,
     ) -> Option<TranscriptContentAnchor> {
-        let row_anchor = self.row_anchor_at_row(lua, width, row)?;
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.content_anchor_at_row_with_offset(lua, width, row, bias, row_offset)
+    }
+
+    fn content_anchor_at_row_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+        bias: TranscriptAnchorBias,
+        row_offset: RowIndex,
+    ) -> Option<TranscriptContentAnchor> {
+        let row_anchor = self.row_anchor_at_row_with_offset(lua, width, row, row_offset)?;
         let block_id = row_anchor.id.as_block_id()?;
         let record_index = self.record_index_for_block_id(block_id)?;
         Some(TranscriptContentAnchor {
@@ -3235,26 +3285,41 @@ impl TranscriptDocument {
         self.row_for_anchor(lua, width, anchor.row_anchor)
     }
 
-    fn content_anchor_at_or_after_row(
+    fn row_for_content_anchor_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: TranscriptContentAnchor,
+        row_offset: RowIndex,
+    ) -> Option<RowIndex> {
+        self.row_for_anchor_with_offset(lua, width, anchor.row_anchor, row_offset)
+    }
+
+    fn content_anchor_at_or_after_row_with_offset(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
         top_row: RowIndex,
         viewport_rows: u16,
+        row_offset: RowIndex,
     ) -> Option<(TranscriptContentAnchor, isize)> {
         let viewport_rows = RowIndex::from(viewport_rows.max(1));
         for offset in 0..viewport_rows {
             let row = top_row.saturating_add(offset);
-            if let Some(anchor) =
-                self.content_anchor_at_row(lua, width, row, TranscriptAnchorBias::Top)
-            {
+            if let Some(anchor) = self.content_anchor_at_row_with_offset(
+                lua,
+                width,
+                row,
+                TranscriptAnchorBias::Top,
+                row_offset,
+            ) {
                 return Some((anchor, -(offset as isize)));
             }
         }
 
         let visible_end = top_row.saturating_add(viewport_rows);
         let (block_id, first_row, rows) = self
-            .materialize_exact_loaded_block_layout(lua, width)
+            .materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
             .into_iter()
             .find(|(_, first_row, rows)| {
                 let end = first_row.saturating_add(*rows);
@@ -3958,6 +4023,27 @@ impl TranscriptDocument {
         self.history().is_stable_scroll_anchor(anchor.block_id)
     }
 
+    fn capture_fallback_content_anchor_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        top_row: RowIndex,
+        viewport_rows: u16,
+        mut anchor: TranscriptContentAnchor,
+        row_offset: RowIndex,
+    ) -> Option<(Option<TranscriptScrollAnchor>, isize)> {
+        let anchor_row = self.row_for_content_anchor_with_offset(lua, width, anchor, row_offset)?;
+        let viewport_rows = RowIndex::from(viewport_rows.max(1));
+        let visible_end = top_row.saturating_add(viewport_rows);
+        let anchor_window_end = anchor_row.saturating_add(viewport_rows);
+        if anchor_row >= visible_end || top_row >= anchor_window_end {
+            return None;
+        }
+        let offset = signed_row_delta(anchor_row, top_row).unwrap_or(0);
+        anchor.fallback_row = anchor_row;
+        Some((Some(TranscriptScrollAnchor::Content(anchor)), offset))
+    }
+
     fn capture_viewport_anchor(
         &mut self,
         lua: &LuaRuntime,
@@ -3966,10 +4052,59 @@ impl TranscriptDocument {
         viewport_rows: u16,
         fallback: TranscriptScrollAnchor,
     ) {
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.capture_viewport_anchor_with_offset(
+            lua,
+            width,
+            top_row,
+            viewport_rows,
+            fallback,
+            row_offset,
+        );
+    }
+
+    fn capture_viewport_anchor_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        top_row: RowIndex,
+        viewport_rows: u16,
+        fallback: TranscriptScrollAnchor,
+        row_offset: RowIndex,
+    ) {
         let (top_anchor, top_offset_rows) = match fallback {
             TranscriptScrollAnchor::Tail => (Some(TranscriptScrollAnchor::Tail), 0),
-            TranscriptScrollAnchor::Content(_) | TranscriptScrollAnchor::EstimatedRow(_) => self
-                .content_anchor_at_or_after_row(lua, width, top_row, viewport_rows)
+            TranscriptScrollAnchor::Content(anchor) => self
+                .capture_fallback_content_anchor_with_offset(
+                    lua,
+                    width,
+                    top_row,
+                    viewport_rows,
+                    anchor,
+                    row_offset,
+                )
+                .or_else(|| {
+                    self.content_anchor_at_or_after_row_with_offset(
+                        lua,
+                        width,
+                        top_row,
+                        viewport_rows,
+                        row_offset,
+                    )
+                    .and_then(|(anchor, offset)| {
+                        self.stable_viewport_anchor(anchor)
+                            .then_some((Some(TranscriptScrollAnchor::Content(anchor)), offset))
+                    })
+                })
+                .unwrap_or((Some(TranscriptScrollAnchor::Content(anchor)), 0)),
+            TranscriptScrollAnchor::EstimatedRow(_) => self
+                .content_anchor_at_or_after_row_with_offset(
+                    lua,
+                    width,
+                    top_row,
+                    viewport_rows,
+                    row_offset,
+                )
                 .and_then(|(anchor, offset)| {
                     self.stable_viewport_anchor(anchor)
                         .then_some((Some(TranscriptScrollAnchor::Content(anchor)), offset))
@@ -4313,12 +4448,28 @@ impl TranscriptDocument {
                 };
                 (target, None)
             }
-            TranscriptScrollIntent::ResizeReflow { .. } => (
-                crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
-                    fallback_scroll_top,
-                ),
-                None,
-            ),
+            TranscriptScrollIntent::ResizeReflow { .. } => {
+                let target = if self.records.total_count().is_some() {
+                    match self.row_for_viewport_anchor(
+                        lua,
+                        width,
+                        viewport_rows,
+                        fallback_scroll_top,
+                    ) {
+                        Some(row) => {
+                            crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                                row,
+                            )
+                        }
+                        None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    }
+                } else {
+                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                        fallback_scroll_top,
+                    )
+                };
+                (target, None)
+            }
             TranscriptScrollIntent::UserDelta { rows } => (
                 self.local_delta_scroll_target(
                     lua,
@@ -4492,9 +4643,14 @@ impl TranscriptDocument {
         input: TranscriptViewportProjectionInput,
         viewport_rows: u16,
     ) -> TranscriptProjectionPlan {
+        let previous_top_anchor = self.viewport.state.top_anchor;
         let pending_intent = self.take_viewport_intent(input);
         let intent = pending_intent.intent;
         let behavior = Self::intent_behavior(&intent);
+        let preserve_anchor_intent = matches!(
+            intent,
+            TranscriptScrollIntent::PreserveViewport | TranscriptScrollIntent::ResizeReflow { .. }
+        );
         let semantic_anchor = Self::semantic_anchor_for_intent(&intent);
         let (scroll_target, cursor_target) = self.scroll_target_for_intent(
             lua,
@@ -4525,6 +4681,11 @@ impl TranscriptDocument {
                 repin_at_semantic_tail: behavior.repin_at_semantic_tail,
             },
         );
+        if preserve_anchor_intent && self.records.total_count().is_some() {
+            if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
+                plan.scroll_anchor = anchor;
+            }
+        }
         plan.cursor_target = cursor_target;
         plan.semantic_anchor = semantic_anchor;
         plan
@@ -4882,15 +5043,22 @@ impl TranscriptDocument {
                 rows.clamped_scroll = requested;
             }
         }
-        self.capture_viewport_anchor(
+        self.capture_viewport_anchor_with_offset(
             lua,
             width,
             rows.clamped_scroll,
             viewport_rows,
             scroll_anchor,
+            row_offset,
         );
         let captured_semantic_anchor = self
-            .content_anchor_at_or_after_row(lua, width, rows.clamped_scroll, viewport_rows)
+            .content_anchor_at_or_after_row_with_offset(
+                lua,
+                width,
+                rows.clamped_scroll,
+                viewport_rows,
+                row_offset,
+            )
             .map(|(anchor, _)| anchor.into());
         self.viewport.state.semantic_anchor = semantic_anchor.or(captured_semantic_anchor);
         self.viewport.state.resolved_scroll_top = Some(rows.clamped_scroll);
@@ -5013,13 +5181,26 @@ impl TranscriptDocument {
             .map(|node| self.offset_node_row(width, node))
     }
 
+    #[cfg(test)]
     pub(crate) fn row_anchor_at_row(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
-        let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.row_anchor_at_row_with_offset(lua, width, row, row_offset)
+    }
+
+    fn row_anchor_at_row_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: crate::smelt_edit::RowIndex,
+        row_offset: RowIndex,
+    ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
+        let local_row =
+            self.exact_loaded_row_for_virtual_content_row_with_offset(lua, width, row, row_offset)?;
         self.content.projection.row_anchor_at_row(
             lua,
             &mut self.content.transcript.history,
@@ -5034,11 +5215,21 @@ impl TranscriptDocument {
         width: u16,
         anchor: crate::content::transcript_buf::TranscriptRowAnchor,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        let offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.row_for_anchor_with_offset(lua, width, anchor, row_offset)
+    }
+
+    fn row_for_anchor_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+        row_offset: RowIndex,
+    ) -> Option<crate::smelt_edit::RowIndex> {
         self.content
             .projection
             .row_for_anchor(lua, &mut self.content.transcript.history, width, anchor)
-            .map(|row| row.saturating_add(offset))
+            .map(|row| row.saturating_add(row_offset))
     }
 
     pub(super) fn position_anchor(
