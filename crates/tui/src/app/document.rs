@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use serde_json::json;
 
 use crate::app::transcript::TranscriptProjectionRestore;
-use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
+use crate::app::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptTraceAnchor};
 use crate::app::TuiApp;
 use crate::smelt_edit::{
     BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DocPosition, DocRange,
@@ -660,6 +660,17 @@ impl TuiApp {
                 let rows = signed_row_delta(command_scroll_before, scroll_top);
                 let intent = if local_transcript_command {
                     TranscriptScrollIntent::UserDelta { rows }
+                } else if matches!(command, DocumentCommand::BufferEnd) {
+                    let anchor = self.conversation.transcript_trace_anchor_at_row(
+                        &self.lua,
+                        viewport_cols.max(1),
+                        scroll_top,
+                    );
+                    if matches!(anchor, TranscriptTraceAnchor::EstimatedRow(_)) {
+                        TranscriptScrollIntent::ApproximateRowSeek(scroll_top)
+                    } else {
+                        TranscriptScrollIntent::ExactContentAnchor(anchor)
+                    }
                 } else if matches!(
                     command,
                     DocumentCommand::BufferStart | DocumentCommand::GotoRow(0)

@@ -3008,6 +3008,34 @@ fn transcript_jump_top_uses_first_record_anchor_from_sparse_tail() {
 }
 
 #[test]
+fn transcript_jump_bottom_labels_sparse_row_seek_as_approximate() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.install_sparse_transcript_scroll_fixture(96, 40, 29);
+
+    let mut frames = Vec::new();
+    for _ in 0..12 {
+        app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::JumpBottom);
+        app.render_silent();
+        frames.extend(app.take_transcript_scroll_trace_frames_for_harness());
+    }
+
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ApproximateRowSeek(_)
+        )),
+        "G should label sparse transcript bottom jumps as approximate row seeks: {frames:?}"
+    );
+    assert!(
+        frames.iter().all(|frame| !matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ExactContentAnchor(TranscriptTraceAnchor::EstimatedRow(_))
+        )),
+        "G used an estimated row as an exact content anchor: {frames:?}"
+    );
+}
+
+#[test]
 fn transcript_resize_reflow_preserves_sparse_anchor_after_prefix_width_change() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.install_sparse_transcript_scroll_fixture(256, 40, 36);
