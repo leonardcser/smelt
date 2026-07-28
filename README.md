@@ -49,7 +49,7 @@ Prebuilt Linux and macOS binaries for x86_64 and aarch64 are on the
 source:
 
 ```bash
-cargo install --git https://github.com/leonardcser/smelt.git
+cargo install --git https://github.com/leonardcser/smelt.git smelt-agent
 ```
 
 ## Run
