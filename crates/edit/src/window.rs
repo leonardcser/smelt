@@ -410,7 +410,8 @@ pub struct SplitConfig {
 /// panes that wrap or format their buffer before paint (transcript, prompt).
 /// The terminal's hardware caret is hidden for the lifetime of the app -
 /// every cursor we show is painted into the grid as a styled cell, which keeps
-/// large redraws atomic with the rest of the frame.
+/// large redraws atomic with the rest of the frame. The renderer still tracks
+/// the hidden caret at the same cell so terminal-managed preedit text is stable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorShape {
     #[default]
@@ -3470,12 +3471,14 @@ impl Window {
                     let dst_col = col - self.scroll_left;
                     if dst_col < content_width {
                         let under = slice.cell(content_offset + dst_col, screen_row).symbol;
+                        let cursor_col = content_offset + dst_col;
                         let painted = if under == '\0' || under == ' ' {
                             glyph
                         } else {
                             under
                         };
-                        slice.set(content_offset + dst_col, screen_row, painted, style);
+                        slice.set(cursor_col, screen_row, painted, style);
+                        slice.set_terminal_cursor_position(cursor_col, screen_row);
                     }
                 }
             }
@@ -6682,9 +6685,11 @@ mod tests {
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         w.render(&buf, &mut slice, &ctx);
-        // Block cursor paints the glyph and overrides the buffer-text bg.
+        // Block cursor paints the glyph, overrides the buffer-text bg, and
+        // anchors terminal-managed preedit text at the same cell.
         assert_eq!(grid.cell(1, 0).symbol, 'b');
         assert_eq!(grid.cell(1, 0).style.bg, cursor_style.bg);
+        assert_eq!(grid.terminal_cursor_position(), Some((1, 0)));
         // Adjacent cells keep the buffer text untouched.
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(2, 0).symbol, 'c');
@@ -6747,8 +6752,9 @@ mod tests {
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         w.render(&buf, &mut slice, &ctx);
-        // Buffer text stays; no block painted.
+        // Buffer text stays; no block painted or terminal preedit anchor set.
         assert_eq!(grid.cell(1, 0).symbol, 'b');
+        assert_eq!(grid.terminal_cursor_position(), None);
     }
 
     #[test]
@@ -6777,6 +6783,7 @@ mod tests {
         for col in 0..10 {
             assert_ne!(grid.cell(col, 0).symbol, '!');
         }
+        assert_eq!(grid.terminal_cursor_position(), None);
     }
 
     #[test]

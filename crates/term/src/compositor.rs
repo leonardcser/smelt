@@ -61,6 +61,9 @@ impl Compositor {
                 flush_diff(w, frame.diff(&self.previous))?;
             }
 
+            if let Some((x, y)) = frame.terminal_cursor_position() {
+                w.queue(crossterm::cursor::MoveTo(x, y))?;
+            }
             w.queue(EndSynchronizedUpdate)?;
             w.flush()
         })();
@@ -77,7 +80,9 @@ impl Compositor {
 
     /// Render one frame. The hardware caret stays hidden for the lifetime of
     /// the app - any visible cursor is painted into the grid, so it rides the
-    /// diff atomically with the rest of the frame.
+    /// diff atomically with the rest of the frame. Its hidden position is still
+    /// restored to the painted caret so terminal-managed preedit text has a
+    /// stable anchor.
     pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme)>(
         &mut self,
         theme: &Theme,
@@ -201,6 +206,25 @@ mod tests {
         assert_eq!(staged_out, direct_out);
         assert_eq!(staged.previous().cell(1, 0).symbol, 'x');
         assert_eq!(staged.previous().cell(3, 1).symbol, 'y');
+    }
+
+    #[test]
+    fn flush_restores_the_hidden_terminal_cursor_inside_the_synchronized_update() {
+        let theme = Theme::default();
+        let mut compositor = Compositor::new(4, 2);
+        let mut output = Vec::new();
+
+        compositor
+            .render_with(&theme, &mut output, |grid, _| {
+                grid.set(0, 0, 'x', Style::default());
+                grid.set_terminal_cursor_position(2, 1);
+            })
+            .unwrap();
+
+        assert!(
+            output.ends_with(b"\x1b[2;3H\x1b[?2026l"),
+            "cursor must be restored before the frame is displayed: {output:?}"
+        );
     }
 
     struct FailingWriter;

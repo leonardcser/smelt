@@ -127,6 +127,35 @@ fn statusline_separates_first_inline_indicator_after_pills() {
 }
 
 #[test]
+fn spinner_redraw_restores_the_terminal_cursor_before_displaying_the_frame() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(48, 12);
+    app.start_turn(1);
+    assert!(app.run_lua(
+        r#"
+        _G.spinner_frame = "a"
+        smelt.spinner.glyph = function() return _G.spinner_frame end
+        "#,
+    ));
+
+    app.render_frame_to(&mut std::io::sink());
+    assert!(app.run_lua(r#"_G.spinner_frame = "b""#));
+
+    let mut output = Vec::new();
+    app.render_frame_to(&mut output);
+
+    const END_SYNCHRONIZED_UPDATE: &[u8] = b"\x1b[?2026l";
+    let frame = output
+        .strip_suffix(END_SYNCHRONIZED_UPDATE)
+        .expect("frame should end its synchronized update");
+    assert_eq!(
+        frame.last(),
+        Some(&b'H'),
+        "frame must restore the hidden terminal cursor after painting the spinner: {output:?}"
+    );
+}
+
+#[test]
 fn tick_event_advances_virtual_clock() {
     let mut app = TestApp::builder().build();
     let before = app.core_probe().clock.instant_now();

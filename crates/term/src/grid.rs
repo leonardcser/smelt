@@ -84,6 +84,7 @@ pub struct Grid {
     cells: Vec<Cell>,
     width: u16,
     height: u16,
+    terminal_cursor_position: Option<(u16, u16)>,
 }
 
 impl Grid {
@@ -93,6 +94,7 @@ impl Grid {
             cells: vec![Cell::default(); len],
             width,
             height,
+            terminal_cursor_position: None,
         }
     }
 
@@ -102,6 +104,20 @@ impl Grid {
 
     pub fn height(&self) -> u16 {
         self.height
+    }
+
+    /// Position where the hidden terminal cursor should be restored after this
+    /// frame. Terminal emulators use it to anchor input-method preedit text even
+    /// though the application paints its own visible cursor into the grid.
+    pub fn terminal_cursor_position(&self) -> Option<(u16, u16)> {
+        self.terminal_cursor_position
+    }
+
+    /// Set the hidden terminal cursor's screen position for this frame.
+    pub fn set_terminal_cursor_position(&mut self, x: u16, y: u16) {
+        if x < self.width && y < self.height {
+            self.terminal_cursor_position = Some((x, y));
+        }
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -292,6 +308,7 @@ impl Grid {
         for cell in &mut self.cells {
             *cell = Cell::default();
         }
+        self.terminal_cursor_position = None;
     }
 
     pub fn slice_mut(&mut self, area: Rect) -> GridSlice<'_> {
@@ -331,6 +348,10 @@ impl Grid {
         std::mem::swap(&mut self.cells, &mut other.cells);
         std::mem::swap(&mut self.width, &mut other.width);
         std::mem::swap(&mut self.height, &mut other.height);
+        std::mem::swap(
+            &mut self.terminal_cursor_position,
+            &mut other.terminal_cursor_position,
+        );
     }
 
     fn idx(&self, x: u16, y: u16) -> usize {
@@ -362,6 +383,16 @@ impl<'a> GridSlice<'a> {
     /// Absolute rect this slice covers in the underlying grid.
     pub fn grid_rect(&self) -> Rect {
         self.area
+    }
+
+    /// Set the hidden terminal cursor using slice-local coordinates.
+    pub fn set_terminal_cursor_position(&mut self, x: u16, y: u16) {
+        if x < self.area.width && y < self.area.height {
+            self.grid.set_terminal_cursor_position(
+                self.area.left.saturating_add(x),
+                self.area.top.saturating_add(y),
+            );
+        }
     }
 
     pub fn to_grid_rect(&self, rect: Rect) -> Rect {
@@ -861,14 +892,29 @@ mod tests {
     }
 
     #[test]
+    fn slice_terminal_cursor_position_uses_screen_coordinates_and_clears_with_the_frame() {
+        let mut grid = Grid::new(8, 4);
+        grid.slice_mut(Rect::new(1, 2, 4, 2))
+            .set_terminal_cursor_position(1, 1);
+        assert_eq!(grid.terminal_cursor_position(), Some((3, 2)));
+
+        grid.clear_all();
+        assert_eq!(grid.terminal_cursor_position(), None);
+    }
+
+    #[test]
     fn swap_grids() {
         let mut a = Grid::new(5, 3);
         let mut b = Grid::new(5, 3);
         a.set(0, 0, 'A', Style::default());
+        a.set_terminal_cursor_position(1, 1);
         b.set(0, 0, 'B', Style::default());
+        b.set_terminal_cursor_position(2, 2);
         a.swap_with(&mut b);
         assert_eq!(a.cell(0, 0).symbol, 'B');
+        assert_eq!(a.terminal_cursor_position(), Some((2, 2)));
         assert_eq!(b.cell(0, 0).symbol, 'A');
+        assert_eq!(b.terminal_cursor_position(), Some((1, 1)));
     }
 
     // ── Wide chars ───────────────────────────────────────────────────────
