@@ -9,15 +9,15 @@ use sha2::{Digest, Sha256};
 use crate::blob_staging::recover_blob_staging;
 #[cfg(test)]
 use crate::blob_staging::{stage_session_blobs, SessionBlob, BLOB_STAGING_DIR};
-use crate::db::SessionDb;
+use crate::db::{validate_session_identity_connection, SessionDb};
 use crate::{
     FullSession, HistoryIndex, HistoryLen, HistorySuffix, ObjectMeta, RequestAuditPayloadMode,
     RequestAuditPayloads, RequestAuditQuery, RequestAuditStats, RequestAuditSummary, Result,
     SaveReceipt, SessionCommit, SessionCommitFailure, SessionIdentity, SessionMeta,
     SessionMetadata, SideTableSuffixes, StartupRecoveryReceipt, StoreError, StoreHead,
     StoredObject, StoredSession, StoredTranscriptBlock, StoredTurn, SubmitTurn, SubmitTurnReceipt,
-    TranscriptBlockMetadataRecord, TranscriptRecordIndex, TranscriptRecordOffset,
-    TranscriptRecordRange, TranscriptRecordSlice, TranscriptRecordSuffix,
+    TranscriptBlockMetadataRecord, TranscriptExtentChunk, TranscriptRecordIndex,
+    TranscriptRecordOffset, TranscriptRecordRange, TranscriptRecordSlice, TranscriptRecordSuffix,
     TranscriptSearchCandidate, TranscriptSearchDirection, TurnId, TurnTransition,
     TurnTransitionReceipt, WriterOwner,
 };
@@ -28,9 +28,68 @@ pub struct LegacyAttachmentBlob {
     pub data_url: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SessionSchemaStatus {
+    Current { version: i32 },
+    Upgradeable { found: i32, target: i32 },
+    Future { found: i32, supported: i32 },
+    Unrecognized { found: i32, supported: i32 },
+    Orphaned { found: i32 },
+    Corrupt { found: i32, reason: String },
+}
+
+impl SessionSchemaStatus {
+    fn from_version(version: i32) -> Self {
+        match version {
+            crate::schema::SCHEMA_VERSION => Self::Current { version },
+            1..crate::schema::SCHEMA_VERSION => Self::Upgradeable {
+                found: version,
+                target: crate::schema::SCHEMA_VERSION,
+            },
+            version if version > crate::schema::SCHEMA_VERSION => Self::Future {
+                found: version,
+                supported: crate::schema::SCHEMA_VERSION,
+            },
+            found => Self::Unrecognized {
+                found,
+                supported: crate::schema::SCHEMA_VERSION,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct SessionSchemaMigration {
+    pub session_id: String,
+    pub from_version: i32,
+    pub to_version: i32,
+    pub migrated: bool,
+    pub store_head: StoreHead,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionOrphanQuarantine {
+    pub session_id: String,
+    pub schema_version: i32,
+    pub quarantine_path: PathBuf,
+}
+
 #[derive(Debug)]
 pub struct SessionReader {
     db: SessionDb,
+}
+
+#[derive(Debug)]
+pub struct SessionSchemaInspection {
+    status: SessionSchemaStatus,
+    reader: Option<SessionReader>,
+}
+
+impl SessionSchemaInspection {
+    pub fn into_parts(self) -> (SessionSchemaStatus, Option<SessionReader>) {
+        (self.status, self.reader)
+    }
 }
 
 impl SessionReader {
@@ -41,6 +100,15 @@ impl SessionReader {
     pub fn open_database(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             db: SessionDb::open_read_only(path)?,
+        })
+    }
+
+    fn from_read_only_connection(
+        path: impl AsRef<Path>,
+        connection: rusqlite::Connection,
+    ) -> Result<Self> {
+        Ok(Self {
+            db: SessionDb::from_read_only_connection(path, connection)?,
         })
     }
 
@@ -185,6 +253,10 @@ impl SessionReader {
         width: u16,
     ) -> Result<u64> {
         self.db.transcript_record_estimated_rows(range, width)
+    }
+
+    pub fn transcript_extent_chunks(&self) -> Result<Vec<TranscriptExtentChunk>> {
+        self.db.transcript_extent_chunks()
     }
 
     pub fn read_all_transcript_records(&self) -> Result<Vec<StoredTranscriptBlock>> {
@@ -588,6 +660,125 @@ impl SessionLease {
     }
 }
 
+pub fn inspect_session_schema(
+    root: impl AsRef<Path>,
+    session_id: impl Into<String>,
+) -> Result<SessionSchemaInspection> {
+    let layout = SessionLayout::new(root, session_id)?;
+    inspect_session_schema_for_layout(&layout)
+}
+
+pub fn session_schema_status(
+    root: impl AsRef<Path>,
+    session_id: impl Into<String>,
+) -> Result<SessionSchemaStatus> {
+    Ok(inspect_session_schema(root, session_id)?.status)
+}
+
+pub fn migrate_session_schema(
+    root: impl AsRef<Path>,
+    session_id: impl Into<String>,
+) -> Result<SessionSchemaMigration> {
+    let lease = SessionLease::acquire(SessionLayout::new(root, session_id)?)?;
+    let (status, reader) = inspect_session_schema_for_layout(&lease.layout)?.into_parts();
+    match status {
+        SessionSchemaStatus::Current { version } => Ok(SessionSchemaMigration {
+            session_id: lease.layout.session_id.clone(),
+            from_version: version,
+            to_version: version,
+            migrated: false,
+            store_head: reader
+                .expect("current schema inspection includes a reader")
+                .store_head()?,
+        }),
+        SessionSchemaStatus::Upgradeable { .. } => {
+            // COMPAT(storage-root-lease): older writers may coordinate only through
+            // the in-directory lock. Hold it after the root lock through migration.
+            let _legacy_lock = LegacySessionLock::acquire(lease.layout.published_dir())?;
+            let (status, reader) = inspect_session_schema_for_layout(&lease.layout)?.into_parts();
+            let (found, target) = match status {
+                SessionSchemaStatus::Current { version } => {
+                    return Ok(SessionSchemaMigration {
+                        session_id: lease.layout.session_id.clone(),
+                        from_version: version,
+                        to_version: version,
+                        migrated: false,
+                        store_head: reader
+                            .expect("current schema inspection includes a reader")
+                            .store_head()?,
+                    });
+                }
+                SessionSchemaStatus::Upgradeable { found, target } => (found, target),
+                status => return Err(schema_status_migration_error(status)),
+            };
+            let db_path = published_database_path(&lease.layout)?;
+            let db = SessionDb::open(&db_path)?;
+            validate_stored_identity(&db, &lease.layout.session_id)?;
+            let to_version = db.schema_version()?;
+            if to_version != target {
+                return Err(StoreError::Integrity(format!(
+                    "session schema migration stopped at version {to_version}; expected {target}"
+                )));
+            }
+            Ok(SessionSchemaMigration {
+                session_id: lease.layout.session_id.clone(),
+                from_version: found,
+                to_version,
+                migrated: true,
+                store_head: db.store_head()?,
+            })
+        }
+        status => Err(schema_status_migration_error(status)),
+    }
+}
+
+fn schema_status_migration_error(status: SessionSchemaStatus) -> StoreError {
+    match status {
+        SessionSchemaStatus::Future { found, supported } => StoreError::UnsupportedSchema {
+            found,
+            expected: supported,
+        },
+        SessionSchemaStatus::Unrecognized { found, supported } => StoreError::Integrity(format!(
+            "unrecognized session schema version {found}; supported migrations start at 1 and target {supported}"
+        )),
+        SessionSchemaStatus::Orphaned { found } => StoreError::OrphanedSession { found },
+        SessionSchemaStatus::Corrupt { reason, .. } => StoreError::Integrity(reason),
+        SessionSchemaStatus::Current { version } => StoreError::Integrity(format!(
+            "session schema changed unexpectedly to current version {version}"
+        )),
+        SessionSchemaStatus::Upgradeable { found, target } => StoreError::Integrity(format!(
+            "session schema remained upgradeable from version {found} to {target}"
+        )),
+    }
+}
+
+pub fn quarantine_orphaned_session(
+    root: impl AsRef<Path>,
+    session_id: impl Into<String>,
+) -> Result<Option<SessionOrphanQuarantine>> {
+    let lease = SessionLease::acquire(SessionLayout::new(root, session_id)?)?;
+    let Some(observed_version) = orphaned_session_schema_version(&lease.layout)? else {
+        return Ok(None);
+    };
+    // COMPAT(storage-root-lease): an old writer may know only the in-directory
+    // lock. Hold it after the root lock while moving an old orphan aside.
+    let _legacy_lock = if observed_version < crate::schema::SCHEMA_VERSION {
+        Some(LegacySessionLock::acquire(lease.layout.published_dir())?)
+    } else {
+        None
+    };
+    let Some(schema_version) = orphaned_session_schema_version(&lease.layout)? else {
+        return Ok(None);
+    };
+    let quarantine_path =
+        quarantine_artifact(&lease.layout.root, lease.layout.published_dir(), "orphaned")?;
+    Ok(Some(SessionOrphanQuarantine {
+        session_id: lease.layout.session_id.clone(),
+        schema_version,
+        quarantine_path,
+    }))
+}
+
 #[derive(Debug)]
 enum SessionLocation {
     Staged { path: PathBuf },
@@ -651,16 +842,35 @@ impl OwnedSessionWriter {
 
     fn open_published(lease: SessionLease) -> Result<Self> {
         let session_dir = lease.layout.published_dir();
-        let db_path = session_dir.join("session.db");
-        let version = database_schema_version(&db_path)?;
-        // COMPAT(storage-root-lease): pre-v6 writers coordinate only through the
-        // in-directory lock. Hold it after the root lock through migration and
+        let db_path = published_database_path(&lease.layout)?;
+        let observed_version = database_schema_version(&db_path)?;
+        // COMPAT(storage-root-lease): older writers may coordinate only through
+        // the in-directory lock. Hold it after the root lock through migration and
         // token claim so an old writer cannot overlap the version boundary.
-        let _legacy_lock = if version < crate::schema::SCHEMA_VERSION {
+        let _legacy_lock = if observed_version < crate::schema::SCHEMA_VERSION {
             Some(LegacySessionLock::acquire(session_dir)?)
         } else {
             None
         };
+        let version = if _legacy_lock.is_some() {
+            database_schema_version(&db_path)?
+        } else {
+            observed_version
+        };
+        match SessionSchemaStatus::from_version(version) {
+            SessionSchemaStatus::Upgradeable { .. } => {
+                validate_database_identity(&db_path, &lease.layout.session_id, version)?;
+            }
+            SessionSchemaStatus::Unrecognized { found, supported } => {
+                return Err(StoreError::Integrity(format!(
+                    "unrecognized session schema version {found}; supported migrations start at 1 and target {supported}"
+                )));
+            }
+            SessionSchemaStatus::Current { .. } | SessionSchemaStatus::Future { .. } => {}
+            SessionSchemaStatus::Orphaned { .. } | SessionSchemaStatus::Corrupt { .. } => {
+                unreachable!("version-only schema classification returned identity status")
+            }
+        }
         let mut db = SessionDb::open(&db_path)?;
         validate_stored_identity(&db, &lease.layout.session_id)?;
         db.claim_writer_owner(&lease.token, &lease.owner)?;
@@ -1466,7 +1676,7 @@ fn cleanup_artifact_directory(
     Ok(())
 }
 
-fn quarantine_artifact(root: &Path, path: &Path, reason: &str) -> Result<()> {
+fn quarantine_artifact(root: &Path, path: &Path, reason: &str) -> Result<PathBuf> {
     let quarantine = root.join(QUARANTINE_DIR);
     ensure_private_directory(&quarantine)?;
     let name = path
@@ -1479,7 +1689,8 @@ fn quarantine_artifact(root: &Path, path: &Path, reason: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         sync_directory(parent)?;
     }
-    sync_directory(root)
+    sync_directory(root)?;
+    Ok(destination)
 }
 
 fn artifact_session_id(name: &str) -> Option<&str> {
@@ -1538,12 +1749,114 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn database_schema_version(path: &Path) -> Result<i32> {
+fn published_database_path(layout: &SessionLayout) -> Result<PathBuf> {
+    let session_dir = layout.published_dir();
+    match fs::symlink_metadata(session_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!(
+                    "published session path is not a directory: {}",
+                    session_dir.display()
+                ),
+            )))
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let db_path = session_dir.join("session.db");
+    reject_symlink(&db_path)?;
+    match fs::metadata(&db_path) {
+        Ok(metadata) if metadata.is_file() => Ok(db_path),
+        Ok(_) => Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("session database is not a file: {}", db_path.display()),
+        ))),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn inspect_session_schema_for_layout(layout: &SessionLayout) -> Result<SessionSchemaInspection> {
+    let db_path = published_database_path(layout)?;
+    let connection = database_connection_read_only(&db_path)?;
+    let version = crate::schema::user_version(&connection)?;
+    let status = SessionSchemaStatus::from_version(version);
+    if matches!(&status, SessionSchemaStatus::Current { .. }) {
+        let reader = match SessionReader::from_read_only_connection(&db_path, connection) {
+            Ok(reader) => reader,
+            Err(StoreError::Integrity(reason)) => {
+                return Ok(SessionSchemaInspection {
+                    status: SessionSchemaStatus::Corrupt {
+                        found: version,
+                        reason,
+                    },
+                    reader: None,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = reader
+            .db
+            .validate_session_identity(&layout.session_id, version)
+        {
+            return Ok(SessionSchemaInspection {
+                status: schema_identity_error_status(error, version)?,
+                reader: None,
+            });
+        }
+        return Ok(SessionSchemaInspection {
+            status,
+            reader: Some(reader),
+        });
+    }
+    if matches!(&status, SessionSchemaStatus::Upgradeable { .. }) {
+        if let Err(error) =
+            validate_session_identity_connection(&connection, &layout.session_id, version)
+        {
+            return Ok(SessionSchemaInspection {
+                status: schema_identity_error_status(error, version)?,
+                reader: None,
+            });
+        }
+    }
+    Ok(SessionSchemaInspection {
+        status,
+        reader: None,
+    })
+}
+
+fn schema_identity_error_status(error: StoreError, version: i32) -> Result<SessionSchemaStatus> {
+    match error {
+        StoreError::OrphanedSession { found } => Ok(SessionSchemaStatus::Orphaned { found }),
+        StoreError::Integrity(reason) => Ok(SessionSchemaStatus::Corrupt {
+            found: version,
+            reason,
+        }),
+        error => Err(error),
+    }
+}
+
+fn orphaned_session_schema_version(layout: &SessionLayout) -> Result<Option<i32>> {
+    match inspect_session_schema_for_layout(layout)?.status {
+        SessionSchemaStatus::Orphaned { found } => Ok(Some(found)),
+        SessionSchemaStatus::Corrupt { reason, .. } => Err(StoreError::Integrity(reason)),
+        _ => Ok(None),
+    }
+}
+
+fn database_connection_read_only(path: &Path) -> Result<rusqlite::Connection> {
     reject_symlink(path)?;
     let flags =
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let connection = rusqlite::Connection::open_with_flags(path, flags)?;
-    crate::schema::user_version(&connection)
+    Ok(rusqlite::Connection::open_with_flags(path, flags)?)
+}
+
+fn validate_database_identity(path: &Path, session_id: &str, version: i32) -> Result<()> {
+    validate_session_identity_connection(&database_connection_read_only(path)?, session_id, version)
+}
+
+fn database_schema_version(path: &Path) -> Result<i32> {
+    crate::schema::user_version(&database_connection_read_only(path)?)
 }
 
 fn now_ms() -> u64 {
@@ -2407,6 +2720,172 @@ mod tests {
             .writer_owner()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn migration_only_ownership_upgrades_without_interrupting_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
+        let ready = writer
+            .submit_turn(&submit_command(&writer, "pending", 10))
+            .unwrap();
+        writer.publish().unwrap();
+        writer.release().unwrap();
+        let db_path = root.path().join(SESSION_ID).join("session.db");
+        let expected_store_head = SessionReader::open_database(&db_path)
+            .unwrap()
+            .store_head()
+            .unwrap();
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 9")
+            .unwrap();
+
+        assert_eq!(
+            session_schema_status(root.path(), SESSION_ID).unwrap(),
+            SessionSchemaStatus::Upgradeable {
+                found: 9,
+                target: crate::SCHEMA_VERSION,
+            }
+        );
+        let migration = migrate_session_schema(root.path(), SESSION_ID).unwrap();
+
+        assert_eq!(
+            migration,
+            SessionSchemaMigration {
+                session_id: SESSION_ID.into(),
+                from_version: 9,
+                to_version: crate::SCHEMA_VERSION,
+                migrated: true,
+                store_head: expected_store_head,
+            }
+        );
+        let reader = SessionReader::open_database(&db_path).unwrap();
+        assert_eq!(
+            reader.turn(ready.turn_id).unwrap().unwrap().state,
+            crate::TurnState::Ready
+        );
+        assert!(reader.writer_owner().unwrap().is_none());
+    }
+
+    #[test]
+    fn migration_probe_rejects_future_and_classifies_missing_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
+        publish_and_release(writer);
+        let db_path = root.path().join(SESSION_ID).join("session.db");
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA user_version = {}",
+                crate::SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            session_schema_status(root.path(), SESSION_ID).unwrap(),
+            SessionSchemaStatus::Future {
+                found: crate::SCHEMA_VERSION + 1,
+                supported: crate::SCHEMA_VERSION,
+            }
+        );
+        assert!(matches!(
+            migrate_session_schema(root.path(), SESSION_ID),
+            Err(StoreError::UnsupportedSchema {
+                found,
+                expected,
+            }) if found == crate::SCHEMA_VERSION + 1 && expected == crate::SCHEMA_VERSION
+        ));
+        assert_eq!(
+            database_schema_version(&db_path).unwrap(),
+            crate::SCHEMA_VERSION + 1
+        );
+
+        let second_root = tempfile::tempdir().unwrap();
+        let mut writer = OwnedSessionWriter::open(second_root.path(), SESSION_ID).unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
+        publish_and_release(writer);
+        let db_path = second_root.path().join(SESSION_ID).join("session.db");
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "DELETE FROM session_state;
+                 INSERT INTO request_attempts (started_at) VALUES (1);
+                 PRAGMA user_version = 9",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            session_schema_status(second_root.path(), SESSION_ID).unwrap(),
+            SessionSchemaStatus::Orphaned { found: 9 }
+        );
+        assert!(matches!(
+            migrate_session_schema(second_root.path(), SESSION_ID),
+            Err(StoreError::OrphanedSession { found: 9 })
+        ));
+        assert_eq!(database_schema_version(&db_path).unwrap(), 9);
+
+        let quarantine = quarantine_orphaned_session(second_root.path(), SESSION_ID)
+            .unwrap()
+            .expect("identity-less empty session should be quarantined");
+        assert_eq!(quarantine.session_id, SESSION_ID);
+        assert_eq!(quarantine.schema_version, 9);
+        assert!(!second_root.path().join(SESSION_ID).exists());
+        assert!(quarantine.quarantine_path.join("session.db").is_file());
+
+        let third_root = tempfile::tempdir().unwrap();
+        let mut writer = OwnedSessionWriter::open(third_root.path(), SESSION_ID).unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
+        publish_and_release(writer);
+        let db_path = third_root.path().join(SESSION_ID).join("session.db");
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO history_items (idx, kind, json, hash, created_at)
+                 VALUES (0, 'user', '{}', ?1, 1)",
+                ["0".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute_batch("DELETE FROM session_state; PRAGMA user_version = 9")
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            session_schema_status(third_root.path(), SESSION_ID).unwrap(),
+            SessionSchemaStatus::Corrupt { found: 9, reason }
+                if reason.contains("missing canonical identity")
+        ));
+        assert!(matches!(
+            quarantine_orphaned_session(third_root.path(), SESSION_ID),
+            Err(StoreError::Integrity(message)) if message.contains("missing canonical identity")
+        ));
+        assert!(third_root.path().join(SESSION_ID).is_dir());
+        assert_eq!(database_schema_version(&db_path).unwrap(), 9);
+    }
+
+    #[test]
+    fn schema_inspection_classifies_current_shape_failure_as_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
+        publish_and_release(writer);
+        let db_path = root.path().join(SESSION_ID).join("session.db");
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch("DROP TABLE session_state")
+            .unwrap();
+
+        assert!(matches!(
+            session_schema_status(root.path(), SESSION_ID).unwrap(),
+            SessionSchemaStatus::Corrupt { found, reason }
+                if found == crate::SCHEMA_VERSION
+                    && reason.contains("sqlite schema missing table session_state")
+        ));
     }
 
     #[test]

@@ -248,6 +248,10 @@ fn legacy_lock_holder_blocks_root_lease_migration() {
         smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID),
         Err(smelt_store::StoreError::OwnershipConflict { .. })
     ));
+    assert!(matches!(
+        smelt_store::migrate_session_schema(dir.path(), SESSION_ID),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
 
     touch(&release);
     assert_success(legacy.wait().expect("wait for legacy lock"));

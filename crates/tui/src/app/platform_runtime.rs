@@ -231,6 +231,13 @@ impl PlatformRuntime {
         self.app_event_tx.clone()
     }
 
+    #[cfg(test)]
+    pub(super) fn try_recv_app_event(&mut self) -> Option<AppEvent> {
+        self.app_event_rx
+            .as_mut()
+            .and_then(|receiver| receiver.try_recv().ok())
+    }
+
     pub(super) fn install_http_client(&mut self, client: engine::HttpClient) {
         self.http_client = Some(client);
     }

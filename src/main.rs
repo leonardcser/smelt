@@ -1,3 +1,4 @@
+mod session_maintenance;
 mod setup;
 mod startup;
 mod upgrade;
@@ -196,6 +197,10 @@ enum SessionCommand {
     Doctor(SessionDoctorArgs),
     /// Copy a transactionally consistent session database to a new file
     Backup(SessionBackupArgs),
+    /// Upgrade one or all supported session databases to the latest schema
+    Migrate(SessionMigrateArgs),
+    /// Move identity-less session artifacts into quarantine without deleting them
+    QuarantineOrphans(SessionQuarantineOrphansArgs),
     /// Delete objects unreachable from history and request audits
     Gc(SessionTargetArgs),
     /// Compact free database pages under exclusive ownership
@@ -210,6 +215,38 @@ struct SessionDoctorArgs {
     /// Inspect every visible session
     #[arg(long, conflicts_with = "session")]
     all: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct SessionMigrateArgs {
+    /// Session id or unique prefix to migrate
+    #[arg(required_unless_present = "all")]
+    session: Option<String>,
+    /// Migrate every session directory, continuing after individual failures
+    #[arg(long, conflicts_with = "session")]
+    all: bool,
+    /// Inspect and report planned migrations without changing databases
+    #[arg(long)]
+    dry_run: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct SessionQuarantineOrphansArgs {
+    /// Session id or unique prefix to inspect and quarantine if orphaned
+    #[arg(required_unless_present = "all")]
+    session: Option<String>,
+    /// Inspect every session directory and quarantine every orphan
+    #[arg(long, conflicts_with = "session")]
+    all: bool,
+    /// Report orphaned directories without moving them
+    #[arg(long)]
+    dry_run: bool,
     /// Print machine-readable JSON
     #[arg(long)]
     json: bool,
@@ -872,6 +909,32 @@ fn run_session_command(args: SessionArgs) {
             }
             result
         }
+        SessionCommand::Migrate(args) => session_maintenance::run_migrate(
+            args.session.as_deref(),
+            args.all,
+            args.dry_run,
+            args.json,
+        )
+        .and_then(|successful| {
+            if successful {
+                Ok(())
+            } else {
+                Err("one or more sessions could not be migrated".into())
+            }
+        }),
+        SessionCommand::QuarantineOrphans(args) => session_maintenance::run_quarantine_orphans(
+            args.session.as_deref(),
+            args.all,
+            args.dry_run,
+            args.json,
+        )
+        .and_then(|successful| {
+            if successful {
+                Ok(())
+            } else {
+                Err("one or more orphaned session directories could not be quarantined".into())
+            }
+        }),
         SessionCommand::Gc(args) => with_session_maintenance(&args.session, |maintenance| {
             let deleted = maintenance
                 .garbage_collect_objects()
@@ -1507,5 +1570,99 @@ fn redirect_stderr() {
             }
             // `file` drops here but fd 2 now shares the same open file description.
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn migrate_args(argv: &[&str]) -> SessionMigrateArgs {
+        let args = Args::try_parse_from(argv).expect("migration arguments should parse");
+        let Some(Commands::Session(session)) = args.command else {
+            panic!("expected session command");
+        };
+        let SessionCommand::Migrate(args) = session.command else {
+            panic!("expected migrate command");
+        };
+        args
+    }
+
+    fn quarantine_orphans_args(argv: &[&str]) -> SessionQuarantineOrphansArgs {
+        let args = Args::try_parse_from(argv).expect("orphan quarantine arguments should parse");
+        let Some(Commands::Session(session)) = args.command else {
+            panic!("expected session command");
+        };
+        let SessionCommand::QuarantineOrphans(args) = session.command else {
+            panic!("expected quarantine-orphans command");
+        };
+        args
+    }
+
+    #[test]
+    fn migration_cli_accepts_one_session_or_all() {
+        let single = migrate_args(&["smelt", "session", "migrate", "abc123", "--dry-run"]);
+        assert_eq!(single.session.as_deref(), Some("abc123"));
+        assert!(!single.all);
+        assert!(single.dry_run);
+
+        let all = migrate_args(&[
+            "smelt",
+            "session",
+            "migrate",
+            "--all",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(all.session, None);
+        assert!(all.all);
+        assert!(all.dry_run);
+        assert!(all.json);
+    }
+
+    #[test]
+    fn migration_cli_rejects_missing_or_ambiguous_targets() {
+        assert!(Args::try_parse_from(["smelt", "session", "migrate"]).is_err());
+        assert!(Args::try_parse_from(["smelt", "session", "migrate", "abc123", "--all"]).is_err());
+    }
+
+    #[test]
+    fn quarantine_orphans_cli_accepts_one_session_or_all() {
+        let single = quarantine_orphans_args(&[
+            "smelt",
+            "session",
+            "quarantine-orphans",
+            "abc123",
+            "--dry-run",
+        ]);
+        assert_eq!(single.session.as_deref(), Some("abc123"));
+        assert!(!single.all);
+        assert!(single.dry_run);
+
+        let all = quarantine_orphans_args(&[
+            "smelt",
+            "session",
+            "quarantine-orphans",
+            "--all",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(all.session, None);
+        assert!(all.all);
+        assert!(all.dry_run);
+        assert!(all.json);
+    }
+
+    #[test]
+    fn quarantine_orphans_cli_rejects_missing_or_ambiguous_targets() {
+        assert!(Args::try_parse_from(["smelt", "session", "quarantine-orphans"]).is_err());
+        assert!(Args::try_parse_from([
+            "smelt",
+            "session",
+            "quarantine-orphans",
+            "abc123",
+            "--all",
+        ])
+        .is_err());
     }
 }

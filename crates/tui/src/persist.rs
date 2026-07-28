@@ -101,6 +101,7 @@ impl PersistenceCause {
             smelt_store::StoreError::OwnershipConflict { .. }
             | smelt_store::StoreError::OwnershipLost => PersistenceFailureClass::Ownership,
             smelt_store::StoreError::UnsupportedSchema { .. }
+            | smelt_store::StoreError::OrphanedSession { .. }
             | smelt_store::StoreError::Integrity(_)
             | smelt_store::StoreError::MissingObject { .. }
             | smelt_store::StoreError::ObjectTooLarge { .. }

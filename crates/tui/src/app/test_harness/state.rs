@@ -1059,6 +1059,11 @@ impl TestApp {
     }
 
     #[cfg(test)]
+    pub(crate) fn try_recv_app_event(&mut self) -> Option<crate::app::AppEvent> {
+        self.app.platform.try_recv_app_event()
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_context_token_baseline_for_harness(&mut self, tokens: Option<u32>) {
         self.app
             .conversation

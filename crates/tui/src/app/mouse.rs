@@ -102,16 +102,10 @@ fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usi
     (soft, hard)
 }
 
-enum TranscriptScrollInputResolution {
-    UseCapturedIntent,
-    UseResolvedScrollAfterDispatch,
-}
-
 struct TranscriptScrollInputCandidate {
     label: String,
     intent: TranscriptScrollIntent,
     window_scroll_before: RowIndex,
-    resolution: TranscriptScrollInputResolution,
 }
 
 impl TuiApp {
@@ -127,7 +121,6 @@ impl TuiApp {
                 label: label.into(),
                 intent: TranscriptScrollIntent::UserDelta { rows: delta },
                 window_scroll_before: self.transcript_scroll_top(),
-                resolution: TranscriptScrollInputResolution::UseCapturedIntent,
             })
         });
         if candidate.is_some() {
@@ -153,7 +146,6 @@ impl TuiApp {
             label: "drag_autoscroll".to_string(),
             intent: TranscriptScrollIntent::UserDelta { rows: delta },
             window_scroll_before: self.transcript_scroll_top(),
-            resolution: TranscriptScrollInputResolution::UseCapturedIntent,
         };
         let Some(restore) = self.advance_transcript_drag_autoscroll_endpoint(delta) else {
             return false;
@@ -249,7 +241,6 @@ impl TuiApp {
                 },
                 intent: TranscriptScrollIntent::UserDelta { rows },
                 window_scroll_before: self.transcript_scroll_top(),
-                resolution: TranscriptScrollInputResolution::UseCapturedIntent,
             }
         })
     }
@@ -280,30 +271,22 @@ impl TuiApp {
             .unwrap_or_else(|| {
                 TranscriptScrollIntent::ApproximateRowSeek(self.transcript_scroll_top())
             });
-        let resolution = if matches!(me.kind, MouseEventKind::Drag(MouseButton::Left)) {
-            TranscriptScrollInputResolution::UseResolvedScrollAfterDispatch
-        } else {
-            TranscriptScrollInputResolution::UseCapturedIntent
-        };
         Some(TranscriptScrollInputCandidate {
             label: "scrollbar".to_string(),
             intent,
             window_scroll_before: self.transcript_scroll_top(),
-            resolution,
         })
     }
 
     fn transcript_scrollbar_fraction(&self, row: u16) -> Option<TranscriptScrollIntent> {
-        let win = self.ui.win(crate::app::TRANSCRIPT_WIN)?;
-        let viewport = win.viewport?;
-        let bar = viewport.scrollbar?;
-        let rel_row = row.saturating_sub(viewport.rect.top);
-        let metrics = bar.metrics(0);
-        let numerator = u64::from(metrics.thumb_top_for_click(rel_row));
-        let denominator = u64::from(metrics.max_thumb_top.max(1));
+        let (numerator, denominator, total_rows, viewport_rows) = self
+            .ui
+            .scrollbar_pointer_fraction(crate::app::TRANSCRIPT_WIN, row)?;
         Some(TranscriptScrollIntent::ScrollbarFraction {
             numerator,
             denominator,
+            total_rows,
+            viewport_rows,
         })
     }
 
@@ -314,15 +297,9 @@ impl TuiApp {
         let Some(candidate) = candidate else {
             return;
         };
-        let intent = match candidate.resolution {
-            TranscriptScrollInputResolution::UseCapturedIntent => candidate.intent,
-            TranscriptScrollInputResolution::UseResolvedScrollAfterDispatch => {
-                TranscriptScrollIntent::ApproximateRowSeek(self.transcript_scroll_top())
-            }
-        };
         self.record_transcript_scroll_intent_for_projection(
             candidate.label,
-            intent,
+            candidate.intent,
             candidate.window_scroll_before,
             TranscriptProjectionRestore::default(),
             None,

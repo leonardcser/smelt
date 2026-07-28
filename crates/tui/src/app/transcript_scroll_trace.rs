@@ -38,7 +38,7 @@ use serde_json::json;
 
 use crate::app::transcript::TranscriptSearchAnchor;
 use crate::content::render_plan::RenderNodeId;
-use crate::smelt_edit::RowIndex;
+use crate::smelt_edit::{add_signed_row, RowIndex};
 use smelt_core::transcript_model::BlockId;
 
 #[allow(dead_code)]
@@ -71,6 +71,8 @@ pub(crate) enum TranscriptScrollIntent {
     ScrollbarFraction {
         numerator: u64,
         denominator: u64,
+        total_rows: RowIndex,
+        viewport_rows: u16,
     },
     ApproximateRowSeek(RowIndex),
 }
@@ -82,6 +84,7 @@ impl TranscriptScrollIntent {
             Self::ScrollbarFraction {
                 numerator,
                 denominator,
+                ..
             } => *numerator >= (*denominator).max(1),
             Self::ApproximateRowSeek(_) => true,
             Self::PreserveViewport
@@ -158,7 +161,19 @@ pub(crate) enum TranscriptTraceAnchor {
 pub(crate) enum TranscriptProjectionTargetTrace {
     Tail,
     ExactRow(RowIndex),
+    StableRowDelta { row: RowIndex, delta: isize },
     ReflowStableRow(RowIndex),
+}
+
+impl TranscriptProjectionTargetTrace {
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn exact_target_row(self) -> Option<RowIndex> {
+        match self {
+            Self::ExactRow(row) => Some(row),
+            Self::StableRowDelta { row, delta } => Some(add_signed_row(row, delta)),
+            Self::Tail | Self::ReflowStableRow(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +366,9 @@ impl TranscriptScrollTrace {
                 TranscriptProjectionTargetTrace::Tail => 0,
                 TranscriptProjectionTargetTrace::ExactRow(row)
                 | TranscriptProjectionTargetTrace::ReflowStableRow(row) => row,
+                TranscriptProjectionTargetTrace::StableRowDelta { row, delta } => {
+                    add_signed_row(row, delta)
+                }
             };
             TranscriptScrollTraceRenderInput {
                 input_event_or_tick: "render_frame".to_string(),
@@ -359,7 +377,8 @@ impl TranscriptScrollTrace {
                     TranscriptProjectionTargetTrace::ExactRow(row) => {
                         TranscriptScrollIntent::ApproximateRowSeek(row)
                     }
-                    TranscriptProjectionTargetTrace::ReflowStableRow(_) => {
+                    TranscriptProjectionTargetTrace::StableRowDelta { .. }
+                    | TranscriptProjectionTargetTrace::ReflowStableRow(_) => {
                         TranscriptScrollIntent::PreserveViewport
                     }
                 },

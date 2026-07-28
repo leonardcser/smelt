@@ -776,6 +776,60 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
+        self.session_load_request = self
+            .session_load_request
+            .checked_add(1)
+            .expect("session load request counter overflowed");
+        if matches!(
+            self.core.sessions.session_schema_status_result(id),
+            Ok(smelt_store::SessionSchemaStatus::Upgradeable { .. })
+        ) {
+            self.upgrade_and_load_session(id);
+            return;
+        }
+        self.load_current_session_by_id(id);
+    }
+
+    fn upgrade_and_load_session(&mut self, id: &str) {
+        let session_id = match self.core.sessions.resolve_prefix(id) {
+            Ok(id) => id.into_string(),
+            Err(error) => {
+                self.notify_error_sticky(format!("failed to resolve session: {error}"));
+                return;
+            }
+        };
+        let request = self.session_load_request;
+        let busy_token = self
+            .busy_stack
+            .push(format!("upgrading session {}", &session_id[..8]));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.core.sessions.clone();
+            let app_event_tx = self.platform.app_event_sender();
+            runtime.spawn_blocking(move || {
+                let result = sessions.migrate_session_schema_result(&session_id);
+                let _ = app_event_tx.send(crate::app::AppEvent::SessionSchemaMigrationCompleted {
+                    request,
+                    busy_token,
+                    session_id,
+                    result,
+                });
+            });
+        } else {
+            let result = self
+                .core
+                .sessions
+                .migrate_session_schema_result(&session_id);
+            self.busy_stack.release(busy_token);
+            match result {
+                Ok(_) => self.load_current_session_by_id(&session_id),
+                Err(error) => {
+                    self.notify_error_sticky(format!("failed to upgrade session: {error}"))
+                }
+            }
+        }
+    }
+
+    pub(crate) fn load_current_session_by_id(&mut self, id: &str) {
         let target_rows = crate::app::transcript::record_tail_target_rows(self.last_height);
         let resume =
             match self

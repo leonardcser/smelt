@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use smelt_perf::perf;
 use std::io::{Read, Write};
 use std::ops::Range;
+use unicode_width::UnicodeWidthStr;
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -88,6 +89,74 @@ impl TranscriptRecordRange {
 impl From<Range<usize>> for TranscriptRecordRange {
     fn from(value: Range<usize>) -> Self {
         Self::new(value.start.into(), value.end.into())
+    }
+}
+
+pub const TRANSCRIPT_EXTENT_PROFILE_WIDTHS: [u16; 6] = [20, 40, 80, 120, 160, 240];
+pub const TRANSCRIPT_EXTENT_CHUNK_RECORDS: usize = 64;
+const TRANSCRIPT_EXTENT_PROFILE_VERSION: i64 = 1;
+const TRANSCRIPT_EXTENT_BACKFILL_BATCH_RECORDS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TranscriptExtentProfile {
+    rows: [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()],
+}
+
+impl TranscriptExtentProfile {
+    pub fn new(rows: [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()]) -> Self {
+        let mut rows = rows;
+        for index in 1..rows.len() {
+            rows[index] = rows[index].min(rows[index - 1]);
+        }
+        Self { rows }
+    }
+
+    pub fn rows(self) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] {
+        self.rows
+    }
+
+    pub fn estimated_rows(self, width: u16) -> u64 {
+        let width = width.max(1);
+        let first_width = TRANSCRIPT_EXTENT_PROFILE_WIDTHS[0];
+        if width < first_width {
+            let slope = self.rows[0].saturating_sub(self.rows[1]);
+            let extra = slope
+                .saturating_mul(u64::from(first_width - width))
+                .div_ceil(u64::from(TRANSCRIPT_EXTENT_PROFILE_WIDTHS[1] - first_width));
+            return self.rows[0].saturating_add(extra);
+        }
+
+        for index in 0..TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len() - 1 {
+            let lower_width = TRANSCRIPT_EXTENT_PROFILE_WIDTHS[index];
+            let upper_width = TRANSCRIPT_EXTENT_PROFILE_WIDTHS[index + 1];
+            if width <= upper_width {
+                let lower_rows = self.rows[index];
+                let upper_rows = self.rows[index + 1];
+                let row_drop = lower_rows.saturating_sub(upper_rows);
+                let width_offset = u64::from(width - lower_width);
+                let width_span = u64::from(upper_width - lower_width);
+                let interpolated_drop = row_drop
+                    .saturating_mul(width_offset)
+                    .saturating_add(width_span / 2)
+                    / width_span;
+                return lower_rows.saturating_sub(interpolated_drop);
+            }
+        }
+
+        self.rows.last().copied().unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TranscriptExtentChunk {
+    pub start: TranscriptRecordOffset,
+    pub record_count: usize,
+    pub profile: TranscriptExtentProfile,
+}
+
+impl TranscriptExtentChunk {
+    pub fn end(self) -> TranscriptRecordOffset {
+        TranscriptRecordOffset::new(self.start.get().saturating_add(self.record_count))
     }
 }
 
@@ -685,7 +754,8 @@ pub(crate) fn replace_transcript_record_suffix_in_transaction(
 ) -> Result<()> {
     let _perf = perf::begin("store:transcript:replace_block_suffix");
     let current_block_count = transcript_record_count(conn)?;
-    if transcript_record_dense_extent(conn)? != current_block_count {
+    let compacted = transcript_record_dense_extent(conn)? != current_block_count;
+    if compacted {
         compact_transcript_record_indices(conn)?;
     }
     if start_record_idx > current_block_count {
@@ -760,6 +830,14 @@ pub(crate) fn replace_transcript_record_suffix_in_transaction(
         "store:transcript:block_db_rows_inserted",
         records.len() as u64,
     );
+    rebuild_transcript_extent_chunks(
+        conn,
+        if compacted {
+            0
+        } else {
+            start_record_idx as usize
+        },
+    )?;
     Ok(())
 }
 
@@ -800,12 +878,23 @@ fn insert_transcript_record_record(
         .history_idx
         .map(|idx| checked_i64(idx, "history_idx"))
         .transpose()?;
+    let extent = transcript_record_extent_profile(
+        &record.kind,
+        record.estimated_text_bytes,
+        &record.preview_text,
+        &record.indexed_text,
+    );
+    let extent_rows = extent.rows();
     conn.execute(
         "INSERT INTO transcript_blocks (
             block_idx, record_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-            estimated_text_bytes, block_json, origin_json, tool_state_json,
-            preview_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            estimated_text_bytes, block_json, origin_json, tool_state_json, preview_text,
+            extent_profile_version, extent_rows_20, extent_rows_40, extent_rows_80,
+            extent_rows_120, extent_rows_160, extent_rows_240
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17, ?18, ?19
+         )",
         params![
             block_idx,
             record_idx,
@@ -819,6 +908,13 @@ fn insert_transcript_record_record(
             record.origin_json,
             tool_state_json,
             record.preview_text,
+            TRANSCRIPT_EXTENT_PROFILE_VERSION,
+            checked_i64(extent_rows[0], "extent_rows_20")?,
+            checked_i64(extent_rows[1], "extent_rows_40")?,
+            checked_i64(extent_rows[2], "extent_rows_80")?,
+            checked_i64(extent_rows[3], "extent_rows_120")?,
+            checked_i64(extent_rows[4], "extent_rows_160")?,
+            checked_i64(extent_rows[5], "extent_rows_240")?,
         ],
     )?;
     insert_transcript_search(conn, block_idx, history_idx, &record.indexed_text)?;
@@ -881,6 +977,116 @@ pub(crate) fn transcript_record_index_for_block_idx(
     Ok(index.map(|index| TranscriptRecordOffset::new(index.max(0) as usize)))
 }
 
+fn estimated_text_rows(text: &str, width: u16) -> u64 {
+    let width = usize::from(width.max(1));
+    text.lines()
+        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width) as u64)
+        .sum::<u64>()
+        .max(1)
+}
+
+fn transcript_record_extent_profile(
+    kind: &str,
+    estimated_text_bytes: u64,
+    preview_text: &str,
+    indexed_text: &str,
+) -> TranscriptExtentProfile {
+    let compact = matches!(kind, "tool" | "thinking" | "process_status" | "mode");
+    let text = if matches!(kind, "tool" | "thinking") && !preview_text.is_empty() {
+        preview_text
+            .lines()
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+    } else if compact && !preview_text.is_empty() {
+        preview_text
+    } else {
+        indexed_text
+    };
+    let omitted_bytes = if compact {
+        0
+    } else {
+        estimated_text_bytes.saturating_sub(text.len() as u64)
+    };
+    TranscriptExtentProfile::new(TRANSCRIPT_EXTENT_PROFILE_WIDTHS.map(|width| {
+        estimated_text_rows(text, width)
+            .saturating_add(omitted_bytes.div_ceil(u64::from(width)))
+            .saturating_add(1)
+    }))
+}
+
+fn extent_profile_rows_from_row(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+) -> rusqlite::Result<[i64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()]> {
+    Ok([
+        row.get(start)?,
+        row.get(start + 1)?,
+        row.get(start + 2)?,
+        row.get(start + 3)?,
+        row.get(start + 4)?,
+        row.get(start + 5)?,
+    ])
+}
+
+fn valid_extent_profile_rows(
+    rows: [i64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()],
+    record_count: usize,
+) -> bool {
+    let Ok(minimum_rows) = i64::try_from(record_count) else {
+        return false;
+    };
+    rows.iter().all(|rows| *rows >= minimum_rows)
+        && rows.windows(2).all(|widths| widths[0] >= widths[1])
+}
+
+fn extent_profile_from_validated_rows(
+    rows: [i64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()],
+) -> TranscriptExtentProfile {
+    TranscriptExtentProfile::new(rows.map(|rows| rows as u64))
+}
+
+pub(crate) fn transcript_extent_chunks(conn: &Connection) -> Result<Vec<TranscriptExtentChunk>> {
+    let _perf = perf::begin("store:transcript:extent_chunks");
+    let mut stmt = conn.prepare(
+        "SELECT chunk_idx, record_count,
+                rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
+         FROM transcript_extent_chunks
+         ORDER BY chunk_idx",
+    )?;
+    let stored_chunks = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            extent_profile_rows_from_row(row, 2)?,
+        ))
+    })?;
+    let mut chunks = Vec::new();
+    for chunk in stored_chunks {
+        let (chunk_idx, record_count, rows) = chunk?;
+        let (Ok(chunk_idx), Ok(record_count)) =
+            (usize::try_from(chunk_idx), usize::try_from(record_count))
+        else {
+            return Err(StoreError::Integrity(
+                "invalid transcript extent chunk coordinates".to_string(),
+            ));
+        };
+        if !valid_extent_profile_rows(rows, record_count) {
+            return Err(StoreError::Integrity(format!(
+                "invalid transcript extent profile for chunk {chunk_idx}"
+            )));
+        }
+        chunks.push(TranscriptExtentChunk {
+            start: TranscriptRecordOffset::new(
+                chunk_idx.saturating_mul(TRANSCRIPT_EXTENT_CHUNK_RECORDS),
+            ),
+            record_count,
+            profile: extent_profile_from_validated_rows(rows),
+        });
+    }
+    perf::record_value("store:transcript:extent_chunk_count", chunks.len() as u64);
+    Ok(chunks)
+}
+
 pub(crate) fn transcript_record_estimated_rows(
     conn: &Connection,
     range: TranscriptRecordRange,
@@ -894,38 +1100,154 @@ pub(crate) fn transcript_record_estimated_rows(
         perf::record_value("store:transcript:block_estimated_rows_total", 0);
         return Ok(0);
     }
-    let width = width.max(1) as u64;
-    let limit = checked_i64((end - start) as u64, "block_estimated_rows_len")?;
-    let offset = checked_i64(start as u64, "block_estimated_rows_start")?;
-    let rows: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(
-             COALESCE(
-                 estimated_rows,
-                 CASE
-                     WHEN kind IN ('tool', 'process_status', 'mode') THEN
-                         ((MAX(LENGTH(COALESCE(preview_text, '')), 1) + ?1 - 1) / ?1) + 1
-                     ELSE
-                         ((MAX(estimated_text_bytes, 1) + ?1 - 1) / ?1) + 1
-                 END
-             )
-         ), 0)
+    let (record_count, current_profile_count, profile_rows) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN extent_profile_version = ?3 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(extent_rows_20), 0),
+                COALESCE(SUM(extent_rows_40), 0),
+                COALESCE(SUM(extent_rows_80), 0),
+                COALESCE(SUM(extent_rows_120), 0),
+                COALESCE(SUM(extent_rows_160), 0),
+                COALESCE(SUM(extent_rows_240), 0)
          FROM transcript_blocks
          WHERE block_json IS NOT NULL
-           AND record_idx >= ?3
-           AND record_idx < ?3 + ?2",
+           AND record_idx >= ?1
+           AND record_idx < ?2",
         params![
-            checked_i64(width, "block_estimated_rows_width")?,
-            limit,
-            offset
+            checked_i64(start as u64, "block_estimated_rows_start")?,
+            checked_i64(end as u64, "block_estimated_rows_end")?,
+            TRANSCRIPT_EXTENT_PROFILE_VERSION,
         ],
-        |row| row.get(0),
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?.max(0) as usize,
+                row.get::<_, i64>(1)?.max(0) as usize,
+                extent_profile_rows_from_row(row, 2)?,
+            ))
+        },
     )?;
+    if current_profile_count != record_count
+        || !valid_extent_profile_rows(profile_rows, record_count)
+    {
+        return Err(StoreError::Integrity(format!(
+            "invalid transcript extent profiles in record range {start}..{end}"
+        )));
+    }
+    let rows = extent_profile_from_validated_rows(profile_rows).estimated_rows(width);
     perf::record_value(
         "store:transcript:block_estimated_rows_requested",
         end.saturating_sub(start) as u64,
     );
-    perf::record_value("store:transcript:block_estimated_rows_total", rows as u64);
-    Ok(rows as u64)
+    perf::record_value("store:transcript:block_estimated_rows_total", rows);
+    Ok(rows)
+}
+
+pub(crate) fn backfill_transcript_extent_profiles(conn: &Connection) -> Result<()> {
+    let _perf = perf::begin("store:transcript:extent_profile_backfill");
+    let mut backfilled = 0usize;
+    loop {
+        let profiles = {
+            let mut stmt = conn.prepare(
+                "SELECT b.block_idx, b.kind, b.estimated_text_bytes,
+                        COALESCE(b.preview_text, ''), COALESCE(s.indexed_text, '')
+                 FROM transcript_blocks b
+                 LEFT JOIN transcript_search s ON s.block_idx = b.block_idx
+                 WHERE b.block_json IS NOT NULL AND b.extent_profile_version != ?1
+                 ORDER BY b.record_idx
+                 LIMIT ?2",
+            )?;
+            let profiles = stmt
+                .query_map(
+                    params![
+                        TRANSCRIPT_EXTENT_PROFILE_VERSION,
+                        TRANSCRIPT_EXTENT_BACKFILL_BATCH_RECORDS as i64
+                    ],
+                    |row| {
+                        let block_idx = row.get::<_, i64>(0)?;
+                        let kind = row.get::<_, String>(1)?;
+                        let estimated_text_bytes = row.get::<_, i64>(2)?.max(0) as u64;
+                        let preview_text = row.get::<_, String>(3)?;
+                        let indexed_text = row.get::<_, String>(4)?;
+                        Ok((
+                            block_idx,
+                            transcript_record_extent_profile(
+                                &kind,
+                                estimated_text_bytes,
+                                &preview_text,
+                                &indexed_text,
+                            ),
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            profiles
+        };
+        if profiles.is_empty() {
+            break;
+        }
+
+        let mut update = conn.prepare(
+            "UPDATE transcript_blocks
+             SET extent_profile_version = ?1,
+                 extent_rows_20 = ?2, extent_rows_40 = ?3, extent_rows_80 = ?4,
+                 extent_rows_120 = ?5, extent_rows_160 = ?6, extent_rows_240 = ?7
+             WHERE block_idx = ?8",
+        )?;
+        for (block_idx, profile) in &profiles {
+            let rows = profile.rows();
+            update.execute(params![
+                TRANSCRIPT_EXTENT_PROFILE_VERSION,
+                checked_i64(rows[0], "extent_rows_20")?,
+                checked_i64(rows[1], "extent_rows_40")?,
+                checked_i64(rows[2], "extent_rows_80")?,
+                checked_i64(rows[3], "extent_rows_120")?,
+                checked_i64(rows[4], "extent_rows_160")?,
+                checked_i64(rows[5], "extent_rows_240")?,
+                block_idx,
+            ])?;
+        }
+        backfilled = backfilled.saturating_add(profiles.len());
+    }
+    perf::record_value(
+        "store:transcript:extent_profiles_backfilled",
+        backfilled as u64,
+    );
+    rebuild_transcript_extent_chunks(conn, 0)
+}
+
+pub(crate) fn rebuild_transcript_extent_chunks(
+    conn: &Connection,
+    start_record_idx: usize,
+) -> Result<()> {
+    let first_chunk = start_record_idx / TRANSCRIPT_EXTENT_CHUNK_RECORDS;
+    conn.execute(
+        "DELETE FROM transcript_extent_chunks WHERE chunk_idx >= ?1",
+        [checked_i64(first_chunk as u64, "extent_first_chunk")?],
+    )?;
+    conn.execute(
+        "INSERT INTO transcript_extent_chunks (
+             chunk_idx, record_count, rows_20, rows_40, rows_80,
+             rows_120, rows_160, rows_240
+         )
+         SELECT record_idx / ?1, COUNT(*),
+                SUM(extent_rows_20), SUM(extent_rows_40), SUM(extent_rows_80),
+                SUM(extent_rows_120), SUM(extent_rows_160), SUM(extent_rows_240)
+         FROM transcript_blocks
+         WHERE block_json IS NOT NULL AND record_idx >= ?2
+         GROUP BY record_idx / ?1
+         ORDER BY record_idx / ?1",
+        params![
+            checked_i64(
+                TRANSCRIPT_EXTENT_CHUNK_RECORDS as u64,
+                "extent_chunk_records"
+            )?,
+            checked_i64(
+                first_chunk.saturating_mul(TRANSCRIPT_EXTENT_CHUNK_RECORDS) as u64,
+                "extent_chunk_start"
+            )?,
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn read_transcript_records(conn: &Connection) -> Result<Vec<StoredTranscriptBlock>> {

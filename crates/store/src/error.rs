@@ -23,6 +23,9 @@ pub enum StoreError {
         owner: Option<String>,
     },
     OwnershipLost,
+    OrphanedSession {
+        found: i32,
+    },
     MissingObject {
         reference: String,
     },
@@ -94,6 +97,10 @@ impl fmt::Display for StoreError {
                 None => f.write_str("session is owned by another writer"),
             },
             StoreError::OwnershipLost => f.write_str("session writer ownership was lost"),
+            StoreError::OrphanedSession { found } => write!(
+                f,
+                "orphaned session schema version {found} has no canonical identity or session content"
+            ),
             StoreError::MissingObject { reference } => {
                 write!(f, "session object is missing: {reference}")
             }

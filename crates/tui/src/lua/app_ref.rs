@@ -79,6 +79,11 @@ pub(crate) struct SessionPreviewRender {
     pub(crate) window: Option<crate::smelt_edit::WinId>,
 }
 
+pub(crate) enum SessionPreviewRenderOutcome {
+    Ready(crate::smelt_edit::MaterializedRows),
+    HydrationFailed(crate::app::transcript::TranscriptProjectionHydrationError),
+}
+
 pub(crate) enum DeferredLuaOperation {
     WindowKeymap {
         window: crate::smelt_edit::WinId,
@@ -1624,7 +1629,7 @@ impl SessionLuaHost<'_> {
     pub(crate) fn render_session_preview(
         &mut self,
         request: SessionPreviewRender,
-    ) -> Option<(u64, u64)> {
+    ) -> Option<SessionPreviewRenderOutcome> {
         let SessionPreviewRender {
             cache_key,
             mut view,
@@ -1641,7 +1646,14 @@ impl SessionLuaHost<'_> {
         let scroll_target = scroll_top
             .map(crate::content::transcript_buf::ScrollTarget::visible_row)
             .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
-        let plan = view.plan_projection_measured(&execution, width, &theme, scroll_target, height);
+        let plan =
+            match view.plan_projection_measured(&execution, width, &theme, scroll_target, height) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.app.conversation.store_resume_preview(cache_key, view);
+                    return Some(SessionPreviewRenderOutcome::HydrationFailed(error));
+                }
+            };
         let output = {
             let target = self.app.ui.buf_mut(buffer)?;
             view.project_planned(&execution, target, &theme, plan)
@@ -1651,7 +1663,7 @@ impl SessionLuaHost<'_> {
             window.pin_scroll(output.clamped_scroll);
         }
         self.app.conversation.store_resume_preview(cache_key, view);
-        Some((output.total_rows, output.clamped_scroll))
+        Some(SessionPreviewRenderOutcome::Ready(output))
     }
 
     pub(crate) fn list_session_entries(

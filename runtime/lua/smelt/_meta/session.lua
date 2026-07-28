@@ -75,11 +75,11 @@ session.id = nil
 ---@type fun(): table
 session.info = nil
 
---- List persisted sessions other than the current one from the derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.
+--- List persisted sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`. Rows for older supported schemas have `upgrade_required = true` and remain loadable without being rewritten by listing.
 ---@type fun(opts: table?): table
 session.list = nil
 
---- Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.
+--- Switch the UI to the persisted session with `id`. Older supported schemas are upgraded transactionally before loading; migration runs off the UI thread. Replays the bounded persisted tail and resets transient state.
 ---@type fun(id: string): nil
 session.load = nil
 
@@ -87,7 +87,7 @@ session.load = nil
 ---@type fun(): table
 session.model_messages = nil
 
---- Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.
+--- Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'unavailable', reason }` when persisted content cannot be hydrated, or `nil` when the session is missing.
 ---@type fun(id: string, opts: table): table?
 session.render_preview_into = nil
 

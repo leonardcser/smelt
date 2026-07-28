@@ -12,8 +12,8 @@
 use crate::app::TuiApp;
 use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
 use crate::smelt_edit::{
-    BodyDrag, Callback, CallbackResult, Constraint, Decoration, DragConfig, KeyBind, LayoutTree,
-    Overlay, Payload, ResizeConfig, RowIndex, WinEvent, WinId,
+    add_signed_row, BodyDrag, Callback, CallbackResult, Constraint, Decoration, DragConfig,
+    KeyBind, LayoutTree, Overlay, Payload, ResizeConfig, RowIndex, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -641,14 +641,6 @@ pub(crate) fn set_cursor_row(app: &mut TuiApp, leaf: WinId, row: RowIndex) {
 /// Read the current cursor row of `leaf` (0-based), or `None` if the leaf doesn't exist.
 pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
     app.ui.win(leaf).map(|w| w.cursor_abs_row())
-}
-
-fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
-    if delta >= 0 {
-        row.saturating_add(delta as RowIndex)
-    } else {
-        row.saturating_sub(delta.unsigned_abs() as RowIndex)
-    }
 }
 
 /// Wire the built-in input recipe: printable chars insert at cursor, Backspace deletes,

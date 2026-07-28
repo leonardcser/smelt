@@ -150,6 +150,21 @@ impl SessionDb {
         )
     }
 
+    pub(crate) fn from_read_only_connection(
+        path: impl AsRef<Path>,
+        connection: Connection,
+    ) -> Result<Self> {
+        let _perf = smelt_perf::perf::begin("store:db:open_read_only");
+        Self::initialize_connection(
+            path.as_ref().to_path_buf(),
+            connection,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                ..OpenOptions::default()
+            },
+        )
+    }
+
     pub(crate) fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         let _perf = smelt_perf::perf::begin(match options.mode {
             OpenMode::CreateOrMigrate | OpenMode::CurrentWriter => "store:db:open_read_write",
@@ -170,23 +185,29 @@ impl SessionDb {
             OpenMode::CurrentWriter => OpenFlags::SQLITE_OPEN_READ_WRITE,
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
         } | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let mut conn = Connection::open_with_flags(&path, flags)?;
-        apply_pragmas(&conn, options.mode)?;
+        let connection = Connection::open_with_flags(&path, flags)?;
+        Self::initialize_connection(path, connection, options)
+    }
 
+    fn initialize_connection(
+        path: PathBuf,
+        mut connection: Connection,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        apply_pragmas(&connection, options.mode)?;
         match options.mode {
             OpenMode::CreateOrMigrate => {
-                schema::migrate(&mut conn, &options.app_version)?;
+                schema::migrate(&mut connection, &options.app_version)?;
                 secure_sqlite_files(&path)?;
             }
             OpenMode::CurrentWriter => {
-                schema::validate_read_only_schema(&conn)?;
+                schema::validate_read_only_schema(&connection)?;
                 secure_sqlite_files(&path)?;
             }
-            OpenMode::ReadOnly => schema::validate_read_only_schema(&conn)?,
+            OpenMode::ReadOnly => schema::validate_read_only_schema(&connection)?,
         }
-
         Ok(Self {
-            conn,
+            conn: connection,
             path,
             object_compression: options.object_compression,
         })
@@ -292,6 +313,10 @@ impl SessionDb {
 
     pub fn schema_version(&self) -> Result<i32> {
         self.user_version()
+    }
+
+    pub(crate) fn validate_session_identity(&self, session_id: &str, version: i32) -> Result<()> {
+        validate_session_identity_connection(&self.conn, session_id, version)
     }
 
     pub fn storage_stats(&self) -> Result<StorageStats> {
@@ -1339,6 +1364,10 @@ impl SessionDb {
         history::transcript_record_estimated_rows(&self.conn, range, width)
     }
 
+    pub fn transcript_extent_chunks(&self) -> Result<Vec<history::TranscriptExtentChunk>> {
+        history::transcript_extent_chunks(&self.conn)
+    }
+
     pub fn read_all_transcript_records(&self) -> Result<Vec<StoredTranscriptBlock>> {
         history::read_transcript_records(&self.conn)
     }
@@ -1808,6 +1837,11 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
         StoreError::Integrity(message) | StoreError::MissingObject { reference: message } => {
             SessionCommitFailure::Integrity { message }
         }
+        StoreError::OrphanedSession { found } => SessionCommitFailure::Integrity {
+            message: format!(
+                "orphaned session schema version {found} has no canonical identity or session content"
+            ),
+        },
         StoreError::Io(err) => SessionCommitFailure::Io {
             message: err.to_string(),
         },
@@ -3507,6 +3541,56 @@ fn sqlite_error_is_locked(err: &rusqlite::Error) -> bool {
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
             )
     )
+}
+
+pub(crate) fn validate_session_identity_connection(
+    connection: &Connection,
+    session_id: &str,
+    version: i32,
+) -> Result<()> {
+    let stored_id = connection
+        .query_row(
+            "SELECT id FROM session_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(stored_id) = stored_id else {
+        if connection_has_canonical_session_content(connection)? {
+            return Err(StoreError::Integrity(format!(
+                "published session {session_id} is missing canonical identity"
+            )));
+        }
+        return Err(StoreError::OrphanedSession { found: version });
+    };
+    if stored_id != session_id {
+        return Err(StoreError::Integrity(format!(
+            "session id mismatch: requested {session_id}, stored {stored_id}"
+        )));
+    }
+    Ok(())
+}
+
+fn connection_has_canonical_session_content(connection: &Connection) -> Result<bool> {
+    for table in schema::CANONICAL_CONTENT_TABLES {
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            continue;
+        }
+        let query = format!("SELECT 1 FROM \"{table}\" LIMIT 1");
+        if connection
+            .query_row(&query, [], |row| row.get::<_, i64>(0))
+            .optional()?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
@@ -6601,14 +6685,14 @@ mod tests {
             0
         );
         assert_eq!(
-            db.transcript_record_estimated_rows((0..4).into(), 5)
+            db.transcript_record_estimated_rows((0..4).into(), 20)
                 .unwrap(),
-            10
+            8
         );
         assert_eq!(
-            db.transcript_record_estimated_rows((1..3).into(), 5)
+            db.transcript_record_estimated_rows((1..3).into(), 20)
                 .unwrap(),
-            5
+            4
         );
     }
 
@@ -6625,15 +6709,112 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            db.transcript_record_estimated_rows((0..1).into(), 10)
+            db.transcript_record_estimated_rows((0..1).into(), 20)
                 .unwrap(),
-            3
+            2
         );
         assert_eq!(
-            db.transcript_record_estimated_rows((0..2).into(), 10)
+            db.transcript_record_estimated_rows((0..2).into(), 20)
                 .unwrap(),
-            5
+            4
         );
+    }
+
+    #[test]
+    fn transcript_extent_profile_preserves_many_short_hard_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let text = "short\n".repeat(100);
+        db.apply_test_transcript_records(&[transcript_record(0, "multiline", &text)])
+            .unwrap();
+
+        assert_eq!(
+            db.transcript_record_estimated_rows((0..1).into(), 40)
+                .unwrap(),
+            101
+        );
+    }
+
+    #[test]
+    fn transcript_extent_chunks_follow_suffix_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = (0..130)
+            .map(|index| transcript_record(index, &format!("record-{index}"), "line"))
+            .collect::<Vec<_>>();
+        db.apply_test_transcript_records(&records).unwrap();
+
+        let chunks = db.transcript_extent_chunks().unwrap();
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.record_count)
+                .collect::<Vec<_>>(),
+            vec![64, 64, 2]
+        );
+        assert_eq!(chunks[1].start.get(), 64);
+
+        let replacement = (0..5)
+            .map(|offset| transcript_record(100 + offset, "replacement", "a\nb\nc"))
+            .collect::<Vec<_>>();
+        db.apply_test_record_suffix(100, &replacement).unwrap();
+
+        let chunks = db.transcript_extent_chunks().unwrap();
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.record_count)
+                .collect::<Vec<_>>(),
+            vec![64, 41]
+        );
+        assert_eq!(chunks[1].start.get(), 64);
+        assert_eq!(chunks[1].end().get(), 105);
+    }
+
+    #[test]
+    fn transcript_extent_reads_reject_missing_or_corrupt_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.apply_test_transcript_records(&[transcript_record(0, "record", "content")])
+            .unwrap();
+
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks SET extent_profile_version = 0 WHERE record_idx = 0",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.transcript_record_estimated_rows((0..1).into(), 80),
+            Err(StoreError::Integrity(_))
+        ));
+
+        db.connection()
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE transcript_blocks
+                 SET extent_profile_version = 1,
+                     extent_rows_20 = -1, extent_rows_40 = -1, extent_rows_80 = -1,
+                     extent_rows_120 = -1, extent_rows_160 = -1, extent_rows_240 = -1
+                 WHERE record_idx = 0;
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .unwrap();
+        assert!(matches!(
+            db.transcript_record_estimated_rows((0..1).into(), 80),
+            Err(StoreError::Integrity(_))
+        ));
+
+        db.connection()
+            .execute(
+                "UPDATE transcript_extent_chunks SET rows_20 = 0 WHERE chunk_idx = 0",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.transcript_extent_chunks(),
+            Err(StoreError::Integrity(_))
+        ));
     }
 
     #[test]

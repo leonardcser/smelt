@@ -95,6 +95,13 @@ local function make_render(now_ms)
         marks = { { col = 0, opts = { end_col = #meta + #prefix, dim = true } } },
       }
     end
+    if entry.upgrade_required then
+      local meta = string.rep(" ", LEADING + SIZE_COL + GAP + TIME_COL + GAP)
+      return {
+        text = meta .. prefix .. "Upgrade required - " .. entry.id:sub(1, 8),
+        marks = { { col = 0, opts = { end_col = #meta + #prefix, dim = true } } },
+      }
+    end
 
     local size_str = format_size(entry.size_bytes)
     local ts = (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms
@@ -193,7 +200,7 @@ smelt.cmd.register("resume", function()
       if texts ~= nil then return end
       local ids = {}
       for _, e in ipairs(entries) do
-        if e.available ~= false then table.insert(ids, e.id) end
+        if e.available ~= false and not e.upgrade_required then table.insert(ids, e.id) end
       end
       local raw = smelt.session.texts(ids)
       local lowered = {}
@@ -202,7 +209,8 @@ smelt.cmd.register("resume", function()
     end
 
     local function entry_matches(entry)
-      if entry.available ~= false and workspace_only and entry.cwd ~= current_cwd then return false end
+      if entry.available ~= false and not entry.upgrade_required
+          and workspace_only and entry.cwd ~= current_cwd then return false end
       if query == "" then return true end
       if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
         return true
@@ -304,6 +312,18 @@ smelt.cmd.register("resume", function()
         preview_leaf:scroll(0)
         return
       end
+      if e.upgrade_required then
+        active_preview_key = nil
+        preview_buf:lines({
+          "  Session upgrade required",
+          "",
+          "  " .. (e.error or "This session uses an older supported schema."),
+          "",
+          "  Press Enter to upgrade and resume it.",
+        })
+        preview_leaf:scroll(0)
+        return
+      end
       local width, height = preview_size()
       local key = table.concat({
         e.id,
@@ -324,8 +344,16 @@ smelt.cmd.register("resume", function()
       })
       rendering_preview = false
       if active_preview_key == key then
-        if info then
+        if info and info.status == "ready" then
           ignore_preview_scroll_top = info.scroll_top
+        elseif info and info.status == "unavailable" then
+          preview_buf:lines({
+            "  (session preview unavailable)",
+            "",
+            "  " .. (info.reason or "Persisted content could not be hydrated."),
+          })
+          ignore_preview_scroll_top = 0
+          preview_leaf:scroll(0)
         else
           preview_buf:lines({ "  (session missing)" })
           ignore_preview_scroll_top = 0

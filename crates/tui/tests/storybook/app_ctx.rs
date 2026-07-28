@@ -383,6 +383,11 @@ impl AppStoryCtx {
         self.app.seed_session_meta(meta);
     }
 
+    /// Mark a canonical fixture as requiring a supported schema upgrade.
+    pub fn mark_session_upgradeable(&self, id: &str, version: i32) {
+        self.app.seed_upgradeable_session(id, version);
+    }
+
     /// Create a session directory with no readable canonical database.
     pub fn write_unavailable_session(&self, id: &str) {
         self.app.seed_unavailable_session(id);

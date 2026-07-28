@@ -8,6 +8,8 @@ smelt export history [--output <PATH>] <SESSION>
 smelt export requests [--output <PATH>] <SESSION>
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
 smelt session doctor [<SESSION>|--all] [--json]
+smelt session migrate (<SESSION>|--all) [--dry-run] [--json]
+smelt session quarantine-orphans (<SESSION>|--all) [--dry-run] [--json]
 smelt session backup <SESSION> <OUTPUT>
 smelt session rebuild-derived <SESSION>
 smelt session gc <SESSION>
@@ -36,6 +38,8 @@ with `smelt.remember.set(...)`.
 | `smelt export requests`          | Export request audit entries for a saved session as JSONL                                           |
 | `smelt inspect`                  | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
 | `smelt session doctor`           | Check session database health without changing data                                                 |
+| `smelt session migrate`          | Inspect or upgrade one or every supported older session schema                                      |
+| `smelt session quarantine-orphans` | Move identity-less, content-free session artifacts aside without deleting them                     |
 | `smelt session backup`           | Create and verify a transactionally consistent database backup                                      |
 | `smelt session rebuild-derived`  | Rebuild the search index and deprecated compatibility exports                                       |
 | `smelt session gc`               | Delete database objects that no history or request audit references                                 |
@@ -72,16 +76,51 @@ accept a full session id or an unambiguous prefix.
 | `session doctor <SESSION>`                 | Read-only schema, SQLite integrity, reference, index, and storage-size checks |
 | `session doctor --all`                     | Check every visible session; cannot be combined with a session id |
 | `session doctor ... --json`                | Emit a JSON array suitable for automation |
+| `session migrate <SESSION>`                | Upgrade one session selected by full id or unambiguous prefix |
+| `session migrate --all`                    | Inspect and sequentially upgrade every filesystem session, continuing after individual failures |
+| `session migrate ... --dry-run`            | Classify selected schemas without changing their databases |
+| `session migrate ... --json`               | Emit per-session results and a categorized summary as JSON |
+| `session quarantine-orphans <SESSION>`     | Move one proven orphan into `.quarantine` under exclusive ownership |
+| `session quarantine-orphans --all`         | Inspect every filesystem session and sequentially quarantine proven orphans |
+| `session quarantine-orphans ... --dry-run` | Report orphan candidates without moving any directory |
+| `session quarantine-orphans ... --json`    | Emit actionable per-session results and a categorized summary as JSON |
 | `session backup <SESSION> <OUTPUT>`        | Copy a consistent database snapshot, verify it, and write `<OUTPUT>.manifest.json`; neither output file is overwritten |
 | `session rebuild-derived <SESSION>`        | Rebuild the search index and deprecated `meta.json` / `content.txt` compatibility exports |
 | `session gc <SESSION>`                     | Delete unreferenced content objects and print `deleted_objects` |
 | `session vacuum <SESSION>`                 | Run SQLite vacuum to return unused pages to the filesystem |
 
-`doctor` and `backup` can safely inspect a live session. Mutating maintenance
-commands acquire exclusive session ownership and fail rather than racing a
-running smelt process. Close any process using that session before running
-`rebuild-derived`, `gc`, or `vacuum`. Backups and manifests are private files
-(mode `0600`) on Unix.
+`doctor`, `backup`, and `migrate --dry-run` can safely inspect a live session.
+Schema migration acquires the session's exclusive lease and runs transactionally;
+it does not interrupt incomplete turns or claim runtime writer ownership. Close
+any process using a selected session before migrating it. Other mutating
+maintenance commands also acquire exclusive session ownership and fail rather
+than racing a running smelt process. Close any process using that session before
+running `rebuild-derived`, `gc`, or `vacuum`. Backups and manifests are private
+files (mode `0600`) on Unix.
+
+Opening one supported older session explicitly through `--resume`, `/resume`, or
+`session migrate` upgrades only that session. Startup, session listing, picker
+preview, and dry-run classification remain read-only, so smelt never performs an
+unrequested bulk migration. Future schema versions, unrecognized versions, and
+corrupt databases are reported and never rewritten. A supported database with no
+canonical identity and no canonical session content is reported separately as
+`orphaned`; missing identity alongside history, transcript, turn, or session
+metadata remains `corrupt`. An active writer is `busy`, not a generic migration
+failure. `session migrate --all` exits unsuccessfully after reporting every
+selected session if any result is future, unrecognized, orphaned, busy, or
+failed. JSON rows use `current`, `would_migrate`, `migrated`, `future`,
+`unrecognized`, `orphaned`, `busy`, or `failed` status values. They include
+applicable `from_version`, `to_version`, or `supported_version` fields plus
+`duration_ms`, `error_kind`, and `error` details.
+
+`session quarantine-orphans` is the only cleanup path for orphaned published
+session directories. It revalidates the orphan while holding the stable root
+lease and, for an older schema, the historical in-directory lease. It then moves
+the complete directory into the private `.quarantine` namespace without deleting
+its database or request audits. `--dry-run` is read-only. Bulk JSON omits
+`not_orphaned` rows from `sessions` while retaining their count in `summary`.
+Busy or structurally corrupt entries are never moved and make a mutating bulk run
+exit unsuccessfully.
 
 `doctor` exits unsuccessfully if any selected session is unavailable or
 degraded, which makes `smelt session doctor --all --json` suitable for a health

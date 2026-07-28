@@ -171,6 +171,153 @@ fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) ->
     app.session_snapshot().id.clone()
 }
 
+async fn next_app_event(app: &mut TestApp) -> crate::app::AppEvent {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(event) = app.try_recv_app_event() {
+            return event;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for app event"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+#[test]
+fn explicit_resume_migrates_old_supported_schema_before_bounded_load() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db_path = session_dir.join("session.db");
+    let db = smelt_store::SessionDb::open(&db_path).unwrap();
+    db.connection()
+        .execute_batch("PRAGMA user_version = 9")
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let sessions_root = session_dir.parent().unwrap();
+    assert_eq!(
+        smelt_store::session_schema_status(sessions_root, &session_id).unwrap(),
+        smelt_store::SessionSchemaStatus::Upgradeable {
+            found: 9,
+            target: smelt_store::SCHEMA_VERSION,
+        }
+    );
+
+    resumed.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.session_snapshot().id, session_id);
+    assert_eq!(resumed.app.session_history_len(), 1);
+    assert_eq!(
+        smelt_store::session_schema_status(sessions_root, &session_id).unwrap(),
+        smelt_store::SessionSchemaStatus::Current {
+            version: smelt_store::SCHEMA_VERSION,
+        }
+    );
+    assert_eq!(
+        loaded_session(&resumed, &session_id).history,
+        vec![HistoryItem::user(Content::text("persisted before resume"))]
+    );
+}
+
+#[test]
+fn explicit_resume_rejects_future_schema_without_modifying_or_loading_it() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let future_version = smelt_store::SCHEMA_VERSION + 1;
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+    db.connection()
+        .pragma_update(None, "user_version", future_version)
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let initial_session_id = resumed.session_snapshot().id.clone();
+    resumed.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.session_snapshot().id, initial_session_id);
+    assert_eq!(
+        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
+        smelt_store::SessionSchemaStatus::Future {
+            found: future_version,
+            supported: smelt_store::SCHEMA_VERSION,
+        }
+    );
+    let notification = resumed
+        .overlays_probe()
+        .notification()
+        .expect("future schema error notification");
+    assert!(notification.lifetime.is_sticky());
+    assert!(notification.summary.contains("unsupported session schema"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_resume_migration_completes_off_thread_before_loading() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+    db.connection()
+        .execute_batch("PRAGMA user_version = 9")
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let initial_session_id = resumed.session_snapshot().id.clone();
+    resumed.load_session_by_id(&session_id);
+    assert_eq!(resumed.session_snapshot().id, initial_session_id);
+    assert!(resumed.working_state().busy);
+
+    let event = next_app_event(&mut resumed).await;
+    assert_eq!(resumed.session_snapshot().id, initial_session_id);
+
+    resumed.handle_app_event(event);
+
+    assert!(!resumed.working_state().busy);
+    assert_eq!(resumed.session_snapshot().id, session_id);
+    assert_eq!(resumed.app.session_history_len(), 1);
+    assert_eq!(
+        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
+        smelt_store::SessionSchemaStatus::Current {
+            version: smelt_store::SCHEMA_VERSION,
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_schema_migration_completion_does_not_replace_newer_load_request() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+    db.connection()
+        .execute_batch("PRAGMA user_version = 9")
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let initial_session_id = resumed.session_snapshot().id.clone();
+    resumed.load_session_by_id(&session_id);
+    assert!(resumed.working_state().busy);
+    resumed.load_session_by_id("missing-session");
+
+    let event = next_app_event(&mut resumed).await;
+    resumed.handle_app_event(event);
+
+    assert!(!resumed.working_state().busy);
+    assert_eq!(resumed.session_snapshot().id, initial_session_id);
+    assert_eq!(
+        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
+        smelt_store::SessionSchemaStatus::Current {
+            version: smelt_store::SCHEMA_VERSION,
+        }
+    );
+}
+
 #[test]
 fn session_save_notification_dismissal_uses_typed_ownership() {
     let mut app = TestApp::builder().build();

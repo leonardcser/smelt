@@ -49,6 +49,12 @@ fn session_entries_to_lua(
                     row.set("size_bytes", size)?;
                 }
             }
+            smelt_core::session::SessionListStatus::Upgradeable { reason } => {
+                row.set("available", true)?;
+                row.set("upgrade_required", true)?;
+                row.set("error_kind", "upgrade_required")?;
+                row.set("error", reason)?;
+            }
             smelt_core::session::SessionListStatus::Unavailable(error) => {
                 row.set("available", false)?;
                 row.set("error_kind", error.code())?;
@@ -836,7 +842,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "List persisted sessions other than the current one from the derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.",
+        "List persisted sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`. Rows for older supported schemas have `upgrade_required = true` and remain loadable without being rewritten by listing.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let current_id =
@@ -915,7 +921,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "load",
-        "Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.",
+        "Switch the UI to the persisted session with `id`. Older supported schemas are upgraded transactionally before loading; migration runs off the UI thread. Replays the bounded persisted tail and resets transient state.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
             crate::lua::with_session_host(|host| host.load_session_by_id(&id));
@@ -945,7 +951,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "render_preview_into",
-        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
+        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'unavailable', reason }` when persisted content cannot be hydrated, or `nil` when the session is missing.",
         &["id", "opts"],
         |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
             let _perf = smelt_perf::perf::begin("session:render_preview_into");
@@ -998,7 +1004,7 @@ pub(super) fn register(
             let Some(view) = cached_view else {
                 return Ok(None);
             };
-            let Some((total_rows, scroll_top)) = crate::lua::with_session_host(|host| {
+            let Some(outcome) = crate::lua::with_session_host(|host| {
                 host.render_session_preview(crate::lua::app_ref::SessionPreviewRender {
                     cache_key,
                     view,
@@ -1012,8 +1018,27 @@ pub(super) fn register(
                 return Ok(None);
             };
             let out = lua.create_table()?;
-            out.set("total_rows", total_rows)?;
-            out.set("scroll_top", scroll_top)?;
+            match outcome {
+                crate::lua::app_ref::SessionPreviewRenderOutcome::Ready(rows) => {
+                    out.set("status", "ready")?;
+                    out.set("total_rows", rows.total_rows)?;
+                    out.set("scroll_top", rows.clamped_scroll)?;
+                    out.set("row_base", rows.row_base)?;
+                    out.set("materialized_rows", rows.materialized_rows)?;
+                }
+                crate::lua::app_ref::SessionPreviewRenderOutcome::HydrationFailed(error) => {
+                    smelt_perf::perf::record_value(
+                        "session:render_preview_into:hydration_failure_required_blocks",
+                        error.required_blocks as u64,
+                    );
+                    smelt_perf::perf::record_value(
+                        "session:render_preview_into:hydration_failure_missing_blocks",
+                        error.missing_blocks as u64,
+                    );
+                    out.set("status", "unavailable")?;
+                    out.set("reason", "persisted content could not be hydrated")?;
+                }
+            }
             Ok(Some(out))
         },
     )?;

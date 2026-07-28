@@ -9,6 +9,7 @@ dim: 72 18
   3   5   1 fg=AnsiValue(244)
   3  65   1 fg=AnsiValue(244)
   4   5   1 fg=AnsiValue(244)
+  4   7  13 attrs=dim
   4  65   1 fg=AnsiValue(244)
   5   5   1 fg=AnsiValue(244)
   5   7  13 attrs=dim

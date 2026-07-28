@@ -86,6 +86,13 @@ pub struct WindowSnapshot {
     pub gutter_pad_left: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedWindowSnapshot {
+    pub lines: Vec<String>,
+    pub rows: crate::smelt_edit::MaterializedRows,
+    pub viewport_rows: u16,
+}
+
 /// Read-only transcript viewport state used by interaction and rendering tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptWindowSnapshot {

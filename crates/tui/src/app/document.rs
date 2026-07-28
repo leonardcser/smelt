@@ -601,11 +601,44 @@ impl TuiApp {
                 }),
             );
         }
-        if defer_local_transcript_scroll
-            && !trace_transcript_command
+        let defer_transcript_tail = win == crate::app::TRANSCRIPT_WIN
+            && matches!(command, DocumentCommand::BufferEnd)
+            && !selection_active_before
             && state.active
-            && viewport_rows > 0
-        {
+            && viewport_rows > 0;
+        if defer_transcript_tail {
+            let restore = TranscriptProjectionRestore {
+                cursor_screen_row: Some(viewport_rows.saturating_sub(1)),
+                drag_endpoint_screen_row: None,
+            };
+            let total_rows = self
+                .conversation
+                .transcript_search_total_rows(&self.lua, viewport_cols.max(1));
+            let target = total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)));
+            self.record_transcript_scroll_intent_from_document_command(
+                "document_command",
+                TranscriptScrollIntent::ApproximateRowSeek(target),
+                window_scroll_before,
+                restore,
+                None,
+            );
+            if trace_transcript_command {
+                self.conversation.record_transcript_scroll_trace_event(
+                    "document_command_after",
+                    json!({
+                        "command": format!("{:?}", command),
+                        "window_scroll_before": window_scroll_before,
+                        "window_scroll_after_apply": self.transcript_scroll_top(),
+                        "document_state_cursor_after": trace_doc_position_json(state.cursor),
+                        "materialized_after": trace_materialized_rows_json(state.materialized),
+                        "copy_returned": false,
+                        "deferred_tail": true,
+                    }),
+                );
+            }
+            return None;
+        }
+        if defer_local_transcript_scroll && state.active && viewport_rows > 0 {
             if let Some(local_scroll) = self
                 .conversation
                 .transcript()
@@ -624,6 +657,10 @@ impl TuiApp {
                         local_scroll.base_scroll,
                     );
                 }
+                state.cursor.row = local_scroll.cursor_row;
+                if let Some(win_ref) = self.ui.win_mut(win) {
+                    win_ref.set_document_view_state(state);
+                }
                 let restore = TranscriptProjectionRestore {
                     cursor_screen_row: Some(local_scroll.cursor_screen_row),
                     drag_endpoint_screen_row: None,
@@ -637,6 +674,27 @@ impl TuiApp {
                     restore,
                     Some(local_scroll.next_scroll),
                 );
+                if trace_transcript_command {
+                    let cursor_anchor = self.conversation.transcript_trace_anchor_at_row(
+                        &self.lua,
+                        viewport_cols.max(1),
+                        state.cursor.row,
+                    );
+                    self.conversation.record_transcript_scroll_trace_event(
+                        "document_command_after",
+                        json!({
+                            "command": format!("{:?}", command),
+                            "window_scroll_before": window_scroll_before,
+                            "resolved_scroll_after_command": local_scroll.next_scroll,
+                            "window_scroll_after_apply": self.transcript_scroll_top(),
+                            "document_state_cursor_after": trace_doc_position_json(state.cursor),
+                            "document_state_cursor_anchor_after": format!("{:?}", cursor_anchor),
+                            "materialized_after": trace_materialized_rows_json(state.materialized),
+                            "copy_returned": false,
+                            "deferred_local_scroll": true,
+                        }),
+                    );
+                }
                 return None;
             }
         }

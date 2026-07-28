@@ -1,6 +1,36 @@
 use super::*;
 
 impl TestApp {
+    pub fn window_lines_containing(&self, needle: &str) -> Option<Vec<String>> {
+        self.app.ui.iter_wins().find_map(|(_, win)| {
+            let buf = self.app.ui.buf(win.buf)?;
+            buf.lines()
+                .iter()
+                .any(|line| line.contains(needle))
+                .then(|| buf.lines().to_vec())
+        })
+    }
+
+    pub fn materialized_window_containing(
+        &self,
+        needle: &str,
+    ) -> Option<MaterializedWindowSnapshot> {
+        self.app.ui.iter_wins().find_map(|(_, win)| {
+            let rows = win.materialized_rows()?;
+            let buf = self.app.ui.buf(win.buf)?;
+            buf.lines()
+                .iter()
+                .any(|line| line.contains(needle))
+                .then(|| MaterializedWindowSnapshot {
+                    lines: buf.lines().to_vec(),
+                    rows,
+                    viewport_rows: win
+                        .viewport
+                        .map_or(1, |viewport| viewport.rect.height.max(1)),
+                })
+        })
+    }
+
     /// Side-channel: install a hostile prompt `text_changed` callback that
     /// tries to move the prompt cursor away from the edit endpoint.
     pub fn install_prompt_cursor_trap(&mut self, variant: u8) {

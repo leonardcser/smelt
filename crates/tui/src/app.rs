@@ -258,6 +258,7 @@ pub struct TuiApp {
     transient_render_requested: bool,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
+    session_load_request: u64,
     managed_models: crate::app::managed_models::ManagedModelState,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
@@ -438,6 +439,12 @@ pub enum AppEvent {
     McpStartupReady {
         busy_token: u64,
         readiness: smelt_core::mcp::McpReadiness,
+    },
+    SessionSchemaMigrationCompleted {
+        request: u64,
+        busy_token: u64,
+        session_id: String,
+        result: smelt_core::session::SessionStoreResult<smelt_store::SessionSchemaMigration>,
     },
     ShutdownSignal,
 }
@@ -1747,6 +1754,7 @@ impl TuiApp {
             transient_render_requested: false,
             last_width: term_w,
             last_height: term_h,
+            session_load_request: 0,
             managed_models,
             busy_stack: BusyStack::default(),
             api_base_normalization_warnings: HashSet::new(),
@@ -2490,6 +2498,22 @@ impl TuiApp {
                         "MCP tool {reason} for {}; continuing without those tools",
                         unavailable.join(", ")
                     ));
+                }
+            }
+            AppEvent::SessionSchemaMigrationCompleted {
+                request,
+                busy_token,
+                session_id,
+                result,
+            } => {
+                self.busy_stack.release(busy_token);
+                if request == self.session_load_request {
+                    match result {
+                        Ok(_) => self.load_current_session_by_id(&session_id),
+                        Err(error) => {
+                            self.notify_error_sticky(format!("failed to upgrade session: {error}"))
+                        }
+                    }
                 }
             }
             AppEvent::ShutdownSignal => self.pending_quit = true,

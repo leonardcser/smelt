@@ -13,8 +13,10 @@ mod schema;
 mod session_commit;
 
 pub use access::{
-    cleanup_abandoned_session_artifacts, ArtifactCleanupReport, LegacyAttachmentBlob,
-    OwnedSessionWriter, SessionMaintenance, SessionReader,
+    cleanup_abandoned_session_artifacts, inspect_session_schema, migrate_session_schema,
+    quarantine_orphaned_session, session_schema_status, ArtifactCleanupReport,
+    LegacyAttachmentBlob, OwnedSessionWriter, SessionMaintenance, SessionOrphanQuarantine,
+    SessionReader, SessionSchemaInspection, SessionSchemaMigration, SessionSchemaStatus,
 };
 pub use catalog::{
     archive_corrupt_catalog, rebuild_catalog, Catalog, CatalogAvailability, CatalogCursor,
@@ -33,9 +35,10 @@ pub use db::{
 };
 pub use error::{Result, StoreError};
 pub use history::{
-    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptRecordHydration,
-    TranscriptRecordOffset, TranscriptRecordRange, TranscriptRecordSlice,
-    TranscriptSearchCandidate, TranscriptSearchDirection,
+    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptExtentChunk,
+    TranscriptExtentProfile, TranscriptRecordHydration, TranscriptRecordOffset,
+    TranscriptRecordRange, TranscriptRecordSlice, TranscriptSearchCandidate,
+    TranscriptSearchDirection, TRANSCRIPT_EXTENT_CHUNK_RECORDS, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use meta::{SessionCostUsd, SessionIdentity, SessionMeta, SessionMetadata, WriterOwner};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};

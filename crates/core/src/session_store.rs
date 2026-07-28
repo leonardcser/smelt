@@ -32,6 +32,9 @@ pub enum SessionStoreError {
     ReadOnlyOwnerConflict {
         owner: String,
     },
+    Orphaned {
+        found: i32,
+    },
     Busy {
         operation: String,
         attempts: u32,
@@ -74,6 +77,7 @@ impl SessionStoreError {
             Self::CatalogUnavailable { kind, .. } => kind,
             Self::SymlinkNotAllowed { .. } => "symlink_not_allowed",
             Self::ReadOnlyOwnerConflict { .. } => "read_only_owner_conflict",
+            Self::Orphaned { .. } => "orphaned",
             Self::Busy { .. } => "busy",
             Self::Io { .. } => "io",
             Self::UnsupportedSchema { .. } => "unsupported_schema",
@@ -111,6 +115,10 @@ impl fmt::Display for SessionStoreError {
             Self::ReadOnlyOwnerConflict { owner } => {
                 write!(f, "session is owned by another writer: {owner}")
             }
+            Self::Orphaned { found } => write!(
+                f,
+                "orphaned session schema version {found} has no canonical identity or session content"
+            ),
             Self::Busy {
                 operation,
                 attempts,
@@ -211,6 +219,7 @@ pub fn store_error(
         smelt_store::StoreError::OwnershipLost => SessionStoreError::ReadOnlyOwnerConflict {
             owner: "writer ownership was lost".into(),
         },
+        smelt_store::StoreError::OrphanedSession { found } => SessionStoreError::Orphaned { found },
         smelt_store::StoreError::MissingObject { reference } => {
             SessionStoreError::MissingObject { reference }
         }

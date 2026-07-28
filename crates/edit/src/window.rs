@@ -5,7 +5,9 @@ use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, UndoHistory, WinId};
-use crate::row::{row_to_usize, DocPosition, DocRange, DocumentHandle, MaterializedRows, RowIndex};
+use crate::row::{
+    add_signed_row, row_to_usize, DocPosition, DocRange, DocumentHandle, MaterializedRows, RowIndex,
+};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::{LineCursorPolicy, SelectionRange, VirtTextPos};
@@ -3483,14 +3485,6 @@ impl Window {
                 }
             }
         }
-    }
-}
-
-fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
-    if delta >= 0 {
-        row.saturating_add(delta as RowIndex)
-    } else {
-        row.saturating_sub(delta.unsigned_abs() as RowIndex)
     }
 }
 

@@ -166,11 +166,15 @@ smelt --resume              # open the session picker
 smelt --resume <SESSION_ID> # resume a specific session
 ```
 
-Or use `/resume` from within the TUI. Use `/fork` to branch the current
-conversation into a new session, or `/rewind` (also `Esc Esc` when idle) to roll
-back to an earlier turn. `/session` shows the current id, paths, worktree, model,
-context usage, costs, compactions, and history counts; press `c` there to copy the
-id or `y` to copy all metadata.
+Or use `/resume` from within the TUI. Explicitly opening a session written with a
+supported older schema upgrades that session transactionally before loading it.
+Listing sessions and viewing picker previews remain read-only; smelt does not
+migrate every session at startup.
+
+Use `/fork` to branch the current conversation into a new session, or `/rewind`
+(also `Esc Esc` when idle) to roll back to an earlier turn. `/session` shows the
+current id, paths, worktree, model, context usage, costs, compactions, and history
+counts; press `c` there to copy the id or `y` to copy all metadata.
 
 Use `smelt --ephemeral` for a temporary interactive session. Ephemeral sessions
 can use tools and attachments normally, but they are stored in a temporary
@@ -184,8 +188,9 @@ smelt inspect
 smelt inspect --session <SESSION_ID>
 ```
 
-For database health checks, transactionally consistent backups, or storage
-maintenance, use `smelt session doctor|backup|rebuild-derived|gc|vacuum`. See the
+For schema upgrades, database health checks, transactionally consistent backups,
+or storage maintenance, use
+`smelt session migrate|quarantine-orphans|doctor|backup|rebuild-derived|gc|vacuum`. See the
 [CLI session-maintenance reference](../reference/cli.md#session-maintenance)
 before running mutating maintenance against a session.
 

@@ -70,13 +70,27 @@ with `COMPAT(<id>)`.
 
 - Remove after: schema versions older than v6 are no longer supported for
   writable open or migration
-- Why: a pre-v6 binary coordinates through `<session>/session.lock`, so migration
-  must acquire the stable root lock first and the legacy lock second, then hold
-  both through schema migration and owner-token claim
+- Why: a pre-v6 binary coordinates through `<session>/session.lock`. Any
+  supported older schema may still be owned by such a binary, so migration
+  conservatively acquires the stable root lock first and the legacy lock second,
+  then holds both through migration and any writer-owner claim
 - Code:
   - `crates/store/src/access.rs`: migration-only `LegacySessionLock`
 - Tests:
   - `legacy_lock_holder_blocks_root_lease_migration`
+
+## storage-v2-wide-transcript-search
+
+- Remove after: schema v2 sessions created by early alpha builds no longer need
+  to open in supported versions
+- Why: one historical v2 shape added three byte-count columns to
+  `transcript_search`. The canonical v2-to-v3 rebuild retains only `block_idx`,
+  `history_idx`, and `indexed_text`, so migration must select those columns
+  explicitly instead of copying all six by position
+- Code:
+  - `crates/store/src/schema.rs`: v2 `transcript_search` rebuild
+- Tests:
+  - `v2_wide_transcript_search_migration_preserves_data_and_removes_dead_schema`
 
 ## session-writer-lease-metadata
 
@@ -97,4 +111,4 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/store/src/schema.rs`: v2/v3 to v4 request-attempt migration
 - Tests:
-  - `v2_to_v6_migration_preserves_data_and_removes_dead_schema`
+  - `v2_wide_transcript_search_migration_preserves_data_and_removes_dead_schema`

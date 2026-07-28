@@ -70,9 +70,9 @@ pub use overlay::{
     OverlayId, ResizeConfig, ResizeEdges,
 };
 pub use row::{
-    display_row_matches, doc_range_for_match, row_match_is_selectable, row_to_usize,
-    BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot,
-    DocPosition, DocRange, DocumentHandle, MaterializeRequest, MaterializedRows,
+    add_signed_row, display_row_matches, doc_range_for_match, row_match_is_selectable,
+    row_to_usize, BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows,
+    DisplaySnapshot, DocPosition, DocRange, DocumentHandle, MaterializeRequest, MaterializedRows,
     PreparedWindowRequest, RowBreak, RowIndex, StaticRowsDocument, TextRange,
 };
 pub use vim::VimMode;
@@ -3135,6 +3135,44 @@ impl Ui {
             bar,
             thumb_grab_row,
         });
+    }
+
+    /// Resolve a pointer row against the scrollbar geometry frozen at pointer-down.
+    ///
+    /// Returns the thumb-position numerator and denominator, total rows, and viewport
+    /// rows. Without an active drag, the current window geometry is used.
+    pub fn scrollbar_pointer_fraction(
+        &self,
+        owner: WinId,
+        row: u16,
+    ) -> Option<(u64, u64, RowIndex, u16)> {
+        let (rect_top, bar, thumb_grab_row) =
+            if let Some(drag) = self.scrollbar_drag.filter(|drag| drag.owner == owner) {
+                (drag.rect_top, drag.bar, drag.thumb_grab_row)
+            } else {
+                let win = self.wins.get(&owner)?;
+                let viewport = win.viewport?;
+                let bar = viewport.scrollbar?;
+                let rel_row = row.saturating_sub(viewport.rect.top);
+                let metrics = bar.metrics(win.scroll_top());
+                let thumb_grab_row = if metrics.is_thumb_at(rel_row) {
+                    rel_row.saturating_sub(metrics.thumb_top)
+                } else {
+                    metrics.thumb_size / 2
+                };
+                (viewport.rect.top, bar, thumb_grab_row)
+            };
+        let rel_row = row.saturating_sub(rect_top);
+        let metrics = bar.metrics(0);
+        let thumb_top = rel_row
+            .saturating_sub(thumb_grab_row)
+            .min(metrics.max_thumb_top);
+        Some((
+            u64::from(thumb_top),
+            u64::from(metrics.max_thumb_top.max(1)),
+            bar.total_rows,
+            bar.viewport_rows,
+        ))
     }
 
     fn apply_scrollbar_drag(&mut self, owner: WinId, row: u16) {
@@ -6280,6 +6318,37 @@ mod tests {
         // Bar column = leaf_rect.right - 1. Overlay centered: term 80, ov w=42
         // ⇒ left=19, leaf left=20, leaf width=40 ⇒ bar_col=59.
         assert_eq!(bar.col, 59, "scrollbar lives at rightmost column of leaf");
+    }
+
+    #[test]
+    fn scrollbar_pointer_fraction_uses_frozen_drag_geometry() {
+        let mut ui = make_ui();
+        let win = WinId(42);
+        register_window(&mut ui, win);
+        let original_bar = ScrollbarState::new(39, 100, 20).expect("overflowing scrollbar");
+        ui.win_mut(win).unwrap().viewport = Some(WindowViewport::new(
+            Rect::new(10, 0, 40, 20),
+            39,
+            100,
+            0,
+            Some(original_bar),
+        ));
+
+        ui.start_scrollbar_drag(win, 10);
+        let refined_bar = ScrollbarState::new(39, 1_000, 8).expect("overflowing scrollbar");
+        ui.win_mut(win).unwrap().viewport = Some(WindowViewport::new(
+            Rect::new(2, 0, 40, 8),
+            39,
+            1_000,
+            0,
+            Some(refined_bar),
+        ));
+
+        assert_eq!(
+            ui.scrollbar_pointer_fraction(win, 18),
+            Some((8, 16, 100, 20)),
+            "an active drag must retain its pointer-down track and extent",
+        );
     }
 
     #[test]

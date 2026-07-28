@@ -772,7 +772,8 @@ fn list_session_items(
         .into_iter()
         .filter_map(|entry| match entry.status {
             smelt_core::session::SessionListStatus::Available(meta) => Some(*meta),
-            smelt_core::session::SessionListStatus::Unavailable(_) => None,
+            smelt_core::session::SessionListStatus::Upgradeable { .. }
+            | smelt_core::session::SessionListStatus::Unavailable(_) => None,
         })
         .map(|meta| {
             let (project, path_group) = project_labels(meta.cwd.as_deref());

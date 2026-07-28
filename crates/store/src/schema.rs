@@ -3,7 +3,21 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
+
+pub(crate) const CANONICAL_CONTENT_TABLES: &[&str] = &[
+    "session_state",
+    "history_items",
+    "turns",
+    "transcript_blocks",
+    "transcript_extent_chunks",
+    "history_object_refs",
+    "turn_metas",
+    "metadata_snapshots",
+    "accounting_snapshots",
+    "transcript_search",
+    "transcript_search_chars",
+];
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
@@ -90,6 +104,10 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if (1..=8).contains(&current) {
         migrate_to_v9(conn)?;
+        current = 9;
+    }
+    if (1..=9).contains(&current) {
+        migrate_to_v10(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -453,6 +471,58 @@ fn migrate_to_v9(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_v10(conn: &Connection) -> Result<()> {
+    for (column, definition) in [
+        (
+            "extent_profile_version",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_profile_version >= 0)",
+        ),
+        (
+            "extent_rows_20",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_20 >= 0)",
+        ),
+        (
+            "extent_rows_40",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_40 >= 0)",
+        ),
+        (
+            "extent_rows_80",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_80 >= 0)",
+        ),
+        (
+            "extent_rows_120",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_120 >= 0)",
+        ),
+        (
+            "extent_rows_160",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_160 >= 0)",
+        ),
+        (
+            "extent_rows_240",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_240 >= 0)",
+        ),
+    ] {
+        if !column_exists(conn, "transcript_blocks", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE transcript_blocks ADD COLUMN {column} {definition}"
+            ))?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS transcript_extent_chunks (
+             chunk_idx INTEGER PRIMARY KEY CHECK (chunk_idx >= 0),
+             record_count INTEGER NOT NULL CHECK (record_count > 0),
+             rows_20 INTEGER NOT NULL CHECK (rows_20 >= 0),
+             rows_40 INTEGER NOT NULL CHECK (rows_40 >= 0),
+             rows_80 INTEGER NOT NULL CHECK (rows_80 >= 0),
+             rows_120 INTEGER NOT NULL CHECK (rows_120 >= 0),
+             rows_160 INTEGER NOT NULL CHECK (rows_160 >= 0),
+             rows_240 INTEGER NOT NULL CHECK (rows_240 >= 0)
+         );",
+    )?;
+    crate::history::backfill_transcript_extent_profiles(conn)
+}
+
 fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
     if !column_exists(conn, "session_state", "fast_mode")? {
         conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
@@ -525,7 +595,11 @@ fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
             INSERT INTO turn_metas SELECT * FROM turn_metas_legacy;
             INSERT INTO metadata_snapshots SELECT * FROM metadata_snapshots_legacy;
             INSERT INTO accounting_snapshots SELECT * FROM accounting_snapshots_legacy;
-            INSERT INTO transcript_search SELECT * FROM transcript_search_legacy;
+            -- COMPAT(storage-v2-wide-transcript-search): early v2 databases
+            -- carried three byte-count columns that were never part of the
+            -- canonical search row. Copy only the retained columns.
+            INSERT INTO transcript_search (block_idx, history_idx, indexed_text)
+                SELECT block_idx, history_idx, indexed_text FROM transcript_search_legacy;
             "#,
         )?;
         // COMPAT(request-audit-zero-based-attempts): v2/v3 producers wrote zero-based attempts.
@@ -700,10 +774,22 @@ CREATE TABLE IF NOT EXISTS accounting_snapshots (
 "#;
 
 fn legacy_schema_v8() -> String {
-    SCHEMA
+    legacy_schema_v9()
         .replace("transcript_record_count", "descriptor_len")
         .replace("record_idx", "descriptor_idx")
         .replace("block_json", "descriptor_json")
+}
+
+fn legacy_schema_v9() -> String {
+    SCHEMA
+        .replace(
+            "    tool_state_json TEXT,\n    extent_profile_version INTEGER NOT NULL DEFAULT 0 CHECK (extent_profile_version >= 0),\n    extent_rows_20 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_20 >= 0),\n    extent_rows_40 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_40 >= 0),\n    extent_rows_80 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_80 >= 0),\n    extent_rows_120 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_120 >= 0),\n    extent_rows_160 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_160 >= 0),\n    extent_rows_240 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_240 >= 0)\n",
+            "    tool_state_json TEXT\n",
+        )
+        .replace(
+            "CREATE TABLE IF NOT EXISTS transcript_extent_chunks (\n    chunk_idx INTEGER PRIMARY KEY CHECK (chunk_idx >= 0),\n    record_count INTEGER NOT NULL CHECK (record_count > 0),\n    rows_20 INTEGER NOT NULL CHECK (rows_20 >= 0),\n    rows_40 INTEGER NOT NULL CHECK (rows_40 >= 0),\n    rows_80 INTEGER NOT NULL CHECK (rows_80 >= 0),\n    rows_120 INTEGER NOT NULL CHECK (rows_120 >= 0),\n    rows_160 INTEGER NOT NULL CHECK (rows_160 >= 0),\n    rows_240 INTEGER NOT NULL CHECK (rows_240 >= 0)\n);\n\n",
+            "",
+        )
 }
 
 const SCHEMA: &str = r#"
@@ -789,7 +875,14 @@ CREATE TABLE IF NOT EXISTS transcript_blocks (
     preview_text TEXT,
     block_json TEXT,
     origin_json TEXT,
-    tool_state_json TEXT
+    tool_state_json TEXT,
+    extent_profile_version INTEGER NOT NULL DEFAULT 0 CHECK (extent_profile_version >= 0),
+    extent_rows_20 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_20 >= 0),
+    extent_rows_40 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_40 >= 0),
+    extent_rows_80 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_80 >= 0),
+    extent_rows_120 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_120 >= 0),
+    extent_rows_160 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_160 >= 0),
+    extent_rows_240 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_240 >= 0)
 );
 CREATE INDEX IF NOT EXISTS transcript_blocks_history_idx ON transcript_blocks(history_idx, block_idx);
 CREATE UNIQUE INDEX IF NOT EXISTS transcript_blocks_record_idx
@@ -802,6 +895,17 @@ CREATE INDEX IF NOT EXISTS transcript_blocks_tool_call_id_idx ON transcript_bloc
 CREATE INDEX IF NOT EXISTS transcript_blocks_extent_idx
     ON transcript_blocks(record_idx, kind, estimated_rows, estimated_text_bytes, preview_text)
     WHERE block_json IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS transcript_extent_chunks (
+    chunk_idx INTEGER PRIMARY KEY CHECK (chunk_idx >= 0),
+    record_count INTEGER NOT NULL CHECK (record_count > 0),
+    rows_20 INTEGER NOT NULL CHECK (rows_20 >= 0),
+    rows_40 INTEGER NOT NULL CHECK (rows_40 >= 0),
+    rows_80 INTEGER NOT NULL CHECK (rows_80 >= 0),
+    rows_120 INTEGER NOT NULL CHECK (rows_120 >= 0),
+    rows_160 INTEGER NOT NULL CHECK (rows_160 >= 0),
+    rows_240 INTEGER NOT NULL CHECK (rows_240 >= 0)
+);
 
 CREATE TABLE IF NOT EXISTS objects (
     hash TEXT PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
@@ -1025,7 +1129,71 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v9_migration_moves_search_text_and_removes_dead_schema() {
+    fn v9_to_v10_migration_backfills_extent_profiles_and_chunks() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&legacy_schema_v9()).unwrap();
+        assert!(!column_exists(&conn, "transcript_blocks", "extent_profile_version").unwrap());
+        assert!(!table_exists(&conn, "transcript_extent_chunks").unwrap());
+
+        for record_idx in 0..530i64 {
+            let indexed_text = if record_idx % 2 == 0 {
+                format!("record {record_idx}\nwith several hard lines\nand unicode 界")
+            } else {
+                format!("record {record_idx} {}", "wrapped content ".repeat(12))
+            };
+            conn.execute(
+                "INSERT INTO transcript_blocks (
+                     block_idx, record_idx, kind, estimated_text_bytes, preview_text, block_json
+                 ) VALUES (?1, ?1, 'text', ?2, ?3, '{}')",
+                rusqlite::params![record_idx, indexed_text.len() as i64, &indexed_text],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript_search (block_idx, indexed_text) VALUES (?1, ?2)",
+                rusqlite::params![record_idx, indexed_text],
+            )
+            .unwrap();
+        }
+        set_user_version(&conn, 9).unwrap();
+
+        migrate(&mut conn, "test-v10").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM transcript_blocks
+                 WHERE extent_profile_version = 1
+                   AND extent_rows_20 > 0
+                   AND extent_rows_240 > 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            530
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*), SUM(record_count) FROM transcript_extent_chunks",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (9, 530)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT record_count FROM transcript_extent_chunks WHERE chunk_idx = 8",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            18
+        );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v1_to_v10_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -1107,13 +1275,16 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v9_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_wide_transcript_search_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "ignore_check_constraints", true)
             .unwrap();
         conn.execute_batch(
             r#"
+            ALTER TABLE transcript_search ADD COLUMN indexed_text_bytes INTEGER;
+            ALTER TABLE transcript_search ADD COLUMN full_text_bytes INTEGER;
+            ALTER TABLE transcript_search ADD COLUMN omitted_text_bytes INTEGER;
             INSERT INTO history_items (idx, kind, json, hash, search_text)
             VALUES (0, 'user', '{"kind":"user","content":"hello"}',
                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'hello');
@@ -1233,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v9_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v10_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1303,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v9_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v10_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1343,7 +1514,45 @@ mod tests {
     }
 
     #[test]
-    fn v6_to_v9_migration_caches_transcript_record_count_without_rebuilding() {
+    fn v5_to_v10_migration_preserves_canonical_session_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_legacy_v4_schema(&conn);
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        migrate_to_v5(&conn, false).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute(
+            "INSERT INTO session_state (
+                 singleton, id, title, revision, history_len, created_at, updated_at
+             ) VALUES (1, 'session', 'kept', 3, 0, 10, 20)",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 5).unwrap();
+
+        migrate(&mut conn, "test-v10").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT id, title, revision, history_len FROM session_state",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap(),
+            ("session".to_string(), "kept".to_string(), 3, 0)
+        );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v6_to_v10_migration_caches_transcript_record_count_without_rebuilding() {
         let mut conn = Connection::open_in_memory().unwrap();
         let v6_schema = schema_v7()
             .replace(
@@ -1429,7 +1638,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v7_to_v9_migration_adds_empty_canonical_turn_state() {
+    fn v7_to_v10_migration_adds_empty_canonical_turn_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&schema_v7()).unwrap();
         conn.execute(
@@ -1493,7 +1702,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v8_to_v9_migration_renames_transcript_storage_vocabulary() {
+    fn v8_to_v10_migration_renames_transcript_storage_vocabulary() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy_schema_v8()).unwrap();
         conn.execute(

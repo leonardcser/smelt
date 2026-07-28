@@ -3186,6 +3186,7 @@ dependencies = [
  "sha2 0.11.0",
  "smelt-perf",
  "smelt-protocol",
+ "unicode-width",
  "zstd",
 ]
 

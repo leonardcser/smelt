@@ -658,9 +658,7 @@ fn assert_burst_bench_projection_bounded(
             input_rows <= max_input_rows,
             "{label} over-accumulated a single burst input: input_rows={input_rows}, max_input_rows={max_input_rows}, frame={frame:?}"
         );
-        let crate::app::transcript_scroll_trace::TranscriptProjectionTargetTrace::ExactRow(target) =
-            frame.projection_target
-        else {
+        let Some(target) = frame.projection_target.exact_target_row() else {
             panic!("{label} projected user delta through a non-exact target: {frame:?}");
         };
         if strict_projection_delta {
@@ -1479,6 +1477,13 @@ fn resume_dialog_open_benchmark_suite() {
         .with_vim(true)
         .build_without_test_home_reset(&guard);
     app.app.handle_resize(120, 32);
+    assert!(
+        app.app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(120)),
+        "resume benchmark catalog did not finish indexing seeded sessions"
+    );
 
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
@@ -1504,7 +1509,11 @@ fn resume_dialog_open_benchmark_suite() {
         0,
         "resume preview must use sparse sqlite transcript records, not full session load"
     );
-    assert_eq!(duration_count(&open_snapshot, "session:list_page"), 1);
+    assert_eq!(
+        duration_count(&open_snapshot, "session:list_page"),
+        count.div_ceil(500),
+        "resume should load each catalog page exactly once"
+    );
 
     smelt_perf::perf::clear();
     let preview_ms = run_resume_preview_timer(&mut app);

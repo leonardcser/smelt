@@ -6,8 +6,8 @@ use smelt_core::transcript_model::{Block, TranscriptBlockRecord};
 use crate::app::search::SearchDirection;
 use crate::app::transcript::TranscriptDocument;
 use crate::app::transcript_scroll_trace::{
-    TranscriptProjectionTargetTrace, TranscriptRecordTraceRange, TranscriptScrollIntent,
-    TranscriptScrollTraceFrame, TranscriptTraceAnchor,
+    TranscriptRecordTraceRange, TranscriptScrollIntent, TranscriptScrollTraceFrame,
+    TranscriptTraceAnchor,
 };
 use crate::smelt_edit::VimMode;
 
@@ -34,7 +34,9 @@ static SPARSE_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 #[derive(Clone, Copy, Debug)]
 struct UserDeltaAnchor {
     sign: i8,
-    virtual_row: u64,
+    record_index: usize,
+    block_id: smelt_core::transcript_model::BlockId,
+    row_offset: crate::smelt_edit::RowIndex,
 }
 
 #[derive(Default)]
@@ -676,10 +678,7 @@ fn assert_transcript_scroll_probe_frames(
                     "local transcript input mutated Window::scroll_top before projection: {frame:?}"
                 );
                 assert!(
-                    matches!(
-                        frame.projection_target,
-                        TranscriptProjectionTargetTrace::ExactRow(_)
-                    ),
+                    frame.projection_target.exact_target_row().is_some(),
                     "local transcript movement projected through a non-exact target: {frame:?}"
                 );
                 assert!(
@@ -762,29 +761,43 @@ fn assert_user_delta_direction(
     frame: &TranscriptScrollTraceFrame,
 ) {
     let sign = rows.signum() as i8;
-    let Some(anchor) = frame.first_visible_content_anchor else {
+    let Some(TranscriptTraceAnchor::Content {
+        record_index,
+        block_id,
+        row_offset,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
         state.last_user_delta_anchor = None;
         return;
     };
-    let virtual_row = anchor.virtual_row;
+    let current = UserDeltaAnchor {
+        sign,
+        record_index,
+        block_id,
+        row_offset,
+    };
     let Some(previous) = state.last_user_delta_anchor else {
-        state.last_user_delta_anchor = Some(UserDeltaAnchor { sign, virtual_row });
+        state.last_user_delta_anchor = Some(current);
         return;
     };
+    let movement = (current.record_index, current.block_id, current.row_offset).cmp(&(
+        previous.record_index,
+        previous.block_id,
+        previous.row_offset,
+    ));
     if previous.sign == sign && sign < 0 {
         assert!(
-            virtual_row <= previous.virtual_row,
-            "upward local movement moved visible content downward: previous={}, current={virtual_row}, frame={frame:?}",
-            previous.virtual_row
+            !movement.is_gt(),
+            "upward local movement moved the semantic viewport anchor downward: previous={previous:?}, current={current:?}, frame={frame:?}"
         );
     } else if previous.sign == sign && sign > 0 {
         assert!(
-            virtual_row >= previous.virtual_row,
-            "downward local movement moved visible content upward: previous={}, current={virtual_row}, frame={frame:?}",
-            previous.virtual_row
+            !movement.is_lt(),
+            "downward local movement moved the semantic viewport anchor upward: previous={previous:?}, current={current:?}, frame={frame:?}"
         );
     }
-    state.last_user_delta_anchor = Some(UserDeltaAnchor { sign, virtual_row });
+    state.last_user_delta_anchor = Some(current);
 }
 
 fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {

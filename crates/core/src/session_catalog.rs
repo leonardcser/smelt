@@ -950,26 +950,76 @@ fn load_projection(
             summary: format!("session {id} has no sqlite database"),
         });
     }
-    let reader = smelt_store::SessionReader::open_database(&db_path).map_err(|error| {
+    let inspection = smelt_store::inspect_session_schema(root, id).map_err(|error| {
         projection_error(crate::session_store::store_error(
-            "open for catalog projection",
+            "inspect schema for catalog projection",
             &db_path,
             error,
         ))
     })?;
-    let stored = reader
-        .stored_session()
-        .map_err(|error| {
-            projection_error(crate::session_store::store_error(
-                "read for catalog projection",
-                &db_path,
-                error,
-            ))
-        })?
-        .ok_or_else(|| ProjectionError {
+    let (status, reader) = inspection.into_parts();
+    let reader = match status {
+        smelt_store::SessionSchemaStatus::Current { .. } => {
+            let Some(reader) = reader else {
+                return Err(ProjectionError {
+                    kind: "corrupt".into(),
+                    summary: format!("current session {id} has no validated reader"),
+                });
+            };
+            reader
+        }
+        smelt_store::SessionSchemaStatus::Upgradeable { found, target } => {
+            return Err(ProjectionError {
+                kind: "upgrade_required".into(),
+                summary: format!(
+                    "session schema version {found} will be upgraded to {target} when opened"
+                ),
+            });
+        }
+        smelt_store::SessionSchemaStatus::Future { found, supported } => {
+            return Err(ProjectionError {
+                kind: "unsupported_schema".into(),
+                summary: format!(
+                    "unsupported session schema version {found}; this build supports {supported}"
+                ),
+            });
+        }
+        smelt_store::SessionSchemaStatus::Unrecognized { found, supported } => {
+            return Err(ProjectionError {
+                kind: "corrupt".into(),
+                summary: format!(
+                    "unrecognized session schema version {found}; supported migrations start at 1 and target {supported}"
+                ),
+            });
+        }
+        smelt_store::SessionSchemaStatus::Orphaned { found } => {
+            return Err(ProjectionError {
+                kind: "orphaned".into(),
+                summary: format!(
+                    "orphaned session schema version {found} has no canonical identity or session content"
+                ),
+            });
+        }
+        smelt_store::SessionSchemaStatus::Corrupt { reason, .. } => {
+            return Err(ProjectionError {
+                kind: "corrupt".into(),
+                summary: reason,
+            });
+        }
+    };
+    let stored = reader.stored_session().map_err(|error| {
+        projection_error(crate::session_store::store_error(
+            "read for catalog projection",
+            &db_path,
+            error,
+        ))
+    })?;
+    let Some(stored) = stored else {
+        return Err(ProjectionError {
             kind: "corrupt".into(),
             summary: format!("session {id} has no canonical metadata"),
-        })?;
+        });
+    };
     if stored.identity.id != id {
         return Err(ProjectionError {
             kind: "corrupt".into(),
@@ -1053,6 +1103,67 @@ mod tests {
         session.title = Some(title.into());
         session.updated_at_ms = 1_700_000_000_000;
         session
+    }
+
+    #[test]
+    fn projection_classifies_old_supported_schema_without_migrating_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_root = temp.path().join("sessions");
+        let session_dir = sessions_root.join(SESSION_ID);
+        fs::create_dir_all(&session_dir).unwrap();
+        let session = canonical_session("old schema");
+        let command = crate::session::initial_store_commit_from_session(&session).unwrap();
+        let db_path = session_dir.join("session.db");
+        let mut db = smelt_store::SessionDb::open(&db_path).unwrap();
+        db.apply_session_commit(&command).unwrap();
+        db.connection()
+            .execute_batch("PRAGMA user_version = 9")
+            .unwrap();
+        drop(db);
+
+        let error = load_projection(temp.path(), &sessions_root, SESSION_ID).unwrap_err();
+
+        assert_eq!(error.kind, "upgrade_required");
+        assert!(error.summary.contains("version 9"));
+        assert_eq!(
+            smelt_store::session_schema_status(&sessions_root, SESSION_ID).unwrap(),
+            smelt_store::SessionSchemaStatus::Upgradeable {
+                found: 9,
+                target: smelt_store::SCHEMA_VERSION,
+            }
+        );
+    }
+
+    #[test]
+    fn projection_classifies_request_audit_only_database_as_orphaned() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_root = temp.path().join("sessions");
+        let session_dir = sessions_root.join(SESSION_ID);
+        fs::create_dir_all(&session_dir).unwrap();
+        let command =
+            crate::session::initial_store_commit_from_session(&canonical_session("orphan"))
+                .unwrap();
+        let db_path = session_dir.join("session.db");
+        let mut db = smelt_store::SessionDb::open(&db_path).unwrap();
+        db.apply_session_commit(&command).unwrap();
+        db.connection()
+            .execute_batch(
+                "DELETE FROM session_state;
+                 INSERT INTO request_attempts (started_at) VALUES (1)",
+            )
+            .unwrap();
+        drop(db);
+
+        let error = load_projection(temp.path(), &sessions_root, SESSION_ID).unwrap_err();
+
+        assert_eq!(error.kind, "orphaned");
+        assert!(error.summary.contains("no canonical identity"));
+        assert_eq!(
+            smelt_store::session_schema_status(&sessions_root, SESSION_ID).unwrap(),
+            smelt_store::SessionSchemaStatus::Orphaned {
+                found: smelt_store::SCHEMA_VERSION,
+            }
+        );
     }
 
     fn test_worker(root: &Path) -> (ServiceHandle, thread::JoinHandle<()>) {

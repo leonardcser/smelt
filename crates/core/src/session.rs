@@ -472,6 +472,7 @@ pub struct SessionListEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionListStatus {
     Available(Box<SessionMeta>),
+    Upgradeable { reason: String },
     Unavailable(SessionStoreError),
 }
 
@@ -1659,6 +1660,109 @@ impl SessionStorage {
         load_meta_from_db_result(&dir)
     }
 
+    pub fn session_schema_status_result(
+        &self,
+        id_or_prefix: &str,
+    ) -> SessionStoreResult<smelt_store::SessionSchemaStatus> {
+        let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
+        self.session_schema_status_for_resolved(&resolved)
+    }
+
+    pub fn migrate_session_schema_result(
+        &self,
+        id_or_prefix: &str,
+    ) -> SessionStoreResult<smelt_store::SessionSchemaMigration> {
+        let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
+        self.migrate_session_schema_for_resolved(&resolved)
+    }
+
+    pub fn quarantine_orphaned_session_result(
+        &self,
+        id_or_prefix: &str,
+    ) -> SessionStoreResult<Option<smelt_store::SessionOrphanQuarantine>> {
+        let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
+        if let Ok(catalog) = self.catalog() {
+            catalog.begin_delete(&resolved.id);
+        }
+        let result = smelt_store::quarantine_orphaned_session(self.sessions_dir(), &resolved.id)
+            .map_err(|error| {
+                crate::session_store::store_error(
+                    "quarantine orphaned session",
+                    &resolved.dir.join("session.db"),
+                    error,
+                )
+            });
+        match &result {
+            Ok(Some(_)) => {
+                if let Ok(catalog) = self.catalog() {
+                    catalog.complete_delete(&resolved.id);
+                }
+            }
+            Ok(None) | Err(_) => {
+                if let Ok(catalog) = self.catalog() {
+                    catalog.cancel_delete(&resolved.id);
+                }
+            }
+        }
+        result
+    }
+
+    fn session_schema_status_for_resolved(
+        &self,
+        resolved: &ResolvedSessionDir,
+    ) -> SessionStoreResult<smelt_store::SessionSchemaStatus> {
+        smelt_store::session_schema_status(self.sessions_dir(), &resolved.id).map_err(|error| {
+            crate::session_store::store_error(
+                "inspect session schema",
+                &resolved.dir.join("session.db"),
+                error,
+            )
+        })
+    }
+
+    fn migrate_session_schema_for_resolved(
+        &self,
+        resolved: &ResolvedSessionDir,
+    ) -> SessionStoreResult<smelt_store::SessionSchemaMigration> {
+        let db_path = resolved.dir.join("session.db");
+        let migration = smelt_store::migrate_session_schema(self.sessions_dir(), &resolved.id)
+            .map_err(|error| {
+                crate::session_store::store_error("migrate session schema", &db_path, error)
+            })?;
+        if migration.migrated {
+            self.request_session_catalog_projection(&resolved.id, migration.store_head.revision);
+        }
+        Ok(migration)
+    }
+
+    fn ensure_current_schema_for_explicit_open(
+        &self,
+        resolved: &ResolvedSessionDir,
+    ) -> SessionStoreResult<()> {
+        match self.session_schema_status_for_resolved(resolved)? {
+            smelt_store::SessionSchemaStatus::Current { .. } => Ok(()),
+            smelt_store::SessionSchemaStatus::Upgradeable { .. } => self
+                .migrate_session_schema_for_resolved(resolved)
+                .map(|_| ()),
+            smelt_store::SessionSchemaStatus::Future { found, supported } => {
+                Err(SessionStoreError::UnsupportedSchema { found, supported })
+            }
+            smelt_store::SessionSchemaStatus::Unrecognized { found, supported } => {
+                Err(SessionStoreError::Corrupt {
+                    context: format!(
+                        "unrecognized session schema version {found}; supported migrations start at 1 and target {supported}"
+                    ),
+                })
+            }
+            smelt_store::SessionSchemaStatus::Orphaned { found } => {
+                Err(SessionStoreError::Orphaned { found })
+            }
+            smelt_store::SessionSchemaStatus::Corrupt { reason, .. } => {
+                Err(SessionStoreError::Corrupt { context: reason })
+            }
+        }
+    }
+
     pub fn resolve_session_dir_for_read(&self, id_or_prefix: &str) -> Option<ResolvedSessionDir> {
         self.resolve_session_dir_for_read_result(id_or_prefix).ok()
     }
@@ -1700,6 +1804,7 @@ impl SessionStorage {
         record_target_rows: u16,
     ) -> SessionStoreResult<Option<SessionStoreResume>> {
         let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
+        self.ensure_current_schema_for_explicit_open(&resolved)?;
         load_store_resume_from_resolved(resolved, record_width, record_target_rows)
     }
 
@@ -1755,6 +1860,24 @@ pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
 
 pub fn load_meta_result(id_or_prefix: &str) -> SessionStoreResult<Option<SessionMeta>> {
     process_storage().load_meta_result(id_or_prefix)
+}
+
+pub fn session_schema_status_result(
+    id_or_prefix: &str,
+) -> SessionStoreResult<smelt_store::SessionSchemaStatus> {
+    process_storage().session_schema_status_result(id_or_prefix)
+}
+
+pub fn migrate_session_schema_result(
+    id_or_prefix: &str,
+) -> SessionStoreResult<smelt_store::SessionSchemaMigration> {
+    process_storage().migrate_session_schema_result(id_or_prefix)
+}
+
+pub fn quarantine_orphaned_session_result(
+    id_or_prefix: &str,
+) -> SessionStoreResult<Option<smelt_store::SessionOrphanQuarantine>> {
+    process_storage().quarantine_orphaned_session_result(id_or_prefix)
 }
 
 pub fn resolve_session_dir_for_read(id_or_prefix: &str) -> Option<ResolvedSessionDir> {
@@ -2261,6 +2384,38 @@ fn transcript_block_record(
 }
 
 impl SessionStorage {
+    pub fn session_ids_result(&self) -> SessionStoreResult<Vec<String>> {
+        let root = self.sessions_dir();
+        crate::session_store::reject_symlink_in(self.state_root(), &root, "list sessions")?;
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(SessionStoreError::Io {
+                    operation: "list sessions in",
+                    path: root.display().to_string(),
+                    message: error.to_string(),
+                })
+            }
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| SessionStoreError::Io {
+                operation: "read session entry in",
+                path: root.display().to_string(),
+                message: error.to_string(),
+            })?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if crate::session_id::SessionId::parse(&name).is_ok() {
+                ids.push(name);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
     pub fn resolve_prefix(&self, prefix: &str) -> SessionStoreResult<crate::session_id::SessionId> {
         resolve_prefix_in(self.state_root(), &self.sessions_dir(), prefix)
     }
@@ -2301,6 +2456,10 @@ impl SessionStorage {
     }
 }
 
+pub fn session_ids_result() -> SessionStoreResult<Vec<String>> {
+    process_storage().session_ids_result()
+}
+
 pub fn resolve_prefix(prefix: &str) -> SessionStoreResult<crate::session_id::SessionId> {
     process_storage().resolve_prefix(prefix)
 }
@@ -2317,6 +2476,21 @@ fn resolve_prefix_in(
         }
     })?;
     crate::session_store::reject_symlink_in(state_root, root, "resolve")?;
+    if let Ok(id) = crate::session_id::SessionId::parse(prefix.as_str()) {
+        return match fs::symlink_metadata(root.join(id.as_str())) {
+            Ok(_) => Ok(id),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(SessionStoreError::SessionNotFound {
+                    id: prefix.as_str().to_string(),
+                })
+            }
+            Err(error) => Err(SessionStoreError::Io {
+                operation: "inspect session in",
+                path: root.display().to_string(),
+                message: error.to_string(),
+            }),
+        };
+    }
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -2372,7 +2546,7 @@ impl SessionStorage {
             .into_iter()
             .filter_map(|entry| match entry.status {
                 SessionListStatus::Available(meta) => Some(*meta),
-                SessionListStatus::Unavailable(_) => None,
+                SessionListStatus::Upgradeable { .. } | SessionListStatus::Unavailable(_) => None,
             })
             .collect()
     }
@@ -2613,12 +2787,16 @@ fn session_list_entry_from_catalog(
             let summary = session
                 .error_summary
                 .unwrap_or_else(|| format!("session {id} is unavailable"));
-            let error = match kind.as_str() {
-                "missing_database" => SessionStoreError::MissingDatabase { id: id.clone() },
-                "corrupt" => SessionStoreError::Corrupt { context: summary },
-                _ => SessionStoreError::CatalogUnavailable { kind, summary },
-            };
-            SessionListStatus::Unavailable(error)
+            if kind == "upgrade_required" {
+                SessionListStatus::Upgradeable { reason: summary }
+            } else {
+                let error = match kind.as_str() {
+                    "missing_database" => SessionStoreError::MissingDatabase { id: id.clone() },
+                    "corrupt" => SessionStoreError::Corrupt { context: summary },
+                    _ => SessionStoreError::CatalogUnavailable { kind, summary },
+                };
+                SessionListStatus::Unavailable(error)
+            }
         }
     };
     Ok(SessionListEntry { id, status })
@@ -3244,6 +3422,99 @@ mod tests {
                 .any(|row| row.label == "store:db:open_read_only" && row.count > 0),
             "exact load should still enrich stale metadata from sqlite"
         );
+    }
+
+    #[test]
+    fn listing_classifies_old_schema_and_explicit_resume_migrates_and_reprojects() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let mut session = fixture_session();
+        session.id = numbered_session_id(4);
+        session.history.push(user_item("upgrade me"));
+        save_result(&session).unwrap();
+        assert!(wait_for_session_catalog(std::time::Duration::from_secs(2)));
+
+        let session_dir = dir_for(&session);
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 9)
+            .unwrap();
+        drop(db);
+        request_session_catalog_reconciliation();
+        assert!(wait_for_session_catalog(std::time::Duration::from_secs(2)));
+
+        let entry = list_session_entries()
+            .into_iter()
+            .find(|entry| entry.id == session.id)
+            .expect("old session remains listed");
+        assert!(matches!(
+            entry.status,
+            SessionListStatus::Upgradeable { .. }
+        ));
+        assert_eq!(
+            session_schema_status_result(&session.id).unwrap(),
+            smelt_store::SessionSchemaStatus::Upgradeable {
+                found: 9,
+                target: smelt_store::SCHEMA_VERSION,
+            },
+            "listing must not migrate canonical storage"
+        );
+
+        let resumed = load_store_resume_result(&session.id, 80, 40)
+            .unwrap()
+            .expect("bounded resume");
+        assert_eq!(resumed.header.history_len, 1);
+        assert_eq!(
+            session_schema_status_result(&session.id).unwrap(),
+            smelt_store::SessionSchemaStatus::Current {
+                version: smelt_store::SCHEMA_VERSION,
+            }
+        );
+        assert!(wait_for_session_catalog(std::time::Duration::from_secs(2)));
+        let entry = list_session_entries()
+            .into_iter()
+            .find(|entry| entry.id == session.id)
+            .expect("migrated session remains listed");
+        assert!(matches!(entry.status, SessionListStatus::Available(_)));
+    }
+
+    #[test]
+    fn explicit_migration_reuses_the_validated_store_head_for_catalog_projection() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let mut session = fixture_session();
+        session.id = numbered_session_id(5);
+        session.history.push(user_item("upgrade without reopening"));
+        save_result(&session).unwrap();
+        assert!(wait_for_session_catalog(std::time::Duration::from_secs(2)));
+
+        let session_dir = dir_for(&session);
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let expected_head = db.store_head().unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 9)
+            .unwrap();
+        drop(db);
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let migration = migrate_session_schema_result(&session.id).unwrap();
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+
+        assert!(migration.migrated);
+        assert_eq!(migration.store_head, expected_head);
+        let read_only_count = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "store:db:open_read_only")
+            .map(|row| row.count)
+            .unwrap_or(0);
+        assert_eq!(
+            read_only_count, 0,
+            "migration must project from its receipt instead of reopening canonical storage"
+        );
+        assert!(wait_for_session_catalog(std::time::Duration::from_secs(2)));
     }
 
     #[test]

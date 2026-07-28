@@ -12,8 +12,8 @@ use crate::content::prompt_parser::{
 };
 use crate::content::transcript_buf::TranscriptRowAnchor;
 use crate::smelt_edit::{
-    Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
-    DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
+    add_signed_row, Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition,
+    DocRange, DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
 };
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
@@ -37,8 +37,8 @@ const TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER: usize = 3;
 const TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS: usize = 512;
 const TRANSCRIPT_RECORD_PAGE_SIZE: usize = 128;
 const TRANSCRIPT_RECORD_CACHE_GUARD_PAGES: usize = 2;
-const TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS: RowIndex = 2;
-const TRANSCRIPT_RECORD_PREFIX_STRIDE: usize = 4096;
+const TRANSCRIPT_RECORD_PREFIX_STRIDE: usize = smelt_store::TRANSCRIPT_EXTENT_CHUNK_RECORDS;
+const TRANSCRIPT_LOCAL_PAGE_GUARD_VIEWPORTS: RowIndex = 8;
 const TRANSCRIPT_IDLE_COMPACTION_BLOCKS: usize = 64;
 const TRANSCRIPT_IDLE_COMPACTION_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_HYDRATED_BLOCK_BUDGET: usize = 32 * 1024 * 1024;
@@ -260,13 +260,19 @@ fn compact_record_rows(
 
 struct SqliteTranscriptStore {
     db: smelt_store::SessionReader,
+    #[cfg(test)]
+    extent_read_count: std::cell::Cell<usize>,
 }
 
 impl SqliteTranscriptStore {
     fn open_read_only(session_dir: impl AsRef<std::path::Path>) -> smelt_store::Result<Self> {
         let db =
             smelt_store::SessionReader::open_database(session_dir.as_ref().join("session.db"))?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            #[cfg(test)]
+            extent_read_count: std::cell::Cell::new(0),
+        })
     }
 
     fn read_tail_record_slice_for_rows(
@@ -305,8 +311,23 @@ impl SqliteTranscriptStore {
     }
 
     fn estimated_record_rows(&self, width: u16, range: Range<usize>) -> smelt_store::Result<u64> {
+        #[cfg(test)]
+        self.extent_read_count
+            .set(self.extent_read_count.get().saturating_add(1));
         self.db
             .transcript_record_estimated_rows(range.into(), width)
+    }
+
+    fn extent_chunks(&self) -> smelt_store::Result<Vec<smelt_store::TranscriptExtentChunk>> {
+        #[cfg(test)]
+        self.extent_read_count
+            .set(self.extent_read_count.get().saturating_add(1));
+        self.db.transcript_extent_chunks()
+    }
+
+    #[cfg(test)]
+    fn extent_read_count(&self) -> usize {
+        self.extent_read_count.get()
     }
 }
 
@@ -316,6 +337,13 @@ struct TranscriptStoreCache {
 }
 
 impl TranscriptStoreCache {
+    fn cached_store_for_session(&self, session_dir: &PathBuf) -> Option<&SqliteTranscriptStore> {
+        self.store
+            .as_ref()
+            .filter(|(open_dir, _)| open_dir == session_dir)
+            .map(|(_, store)| store)
+    }
+
     fn store_for_session(
         &mut self,
         session_dir: Option<&PathBuf>,
@@ -699,13 +727,6 @@ enum RecordRangeState {
     Missing,
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct RecordRowsEstimateKey {
-    width: u16,
-    start: usize,
-    end: usize,
-}
-
 struct TranscriptRecordExtentModel<'a> {
     records: &'a SparseTranscriptRecords,
     store: Option<&'a SqliteTranscriptStore>,
@@ -723,14 +744,14 @@ fn persisted_record_rows_to_transcript_rows(
 }
 
 #[derive(Clone, Debug)]
-struct RecordPrefixEstimateIndex {
+struct TranscriptExtentPrefixIndex {
     width: u16,
     total_count: usize,
     stride: usize,
     prefix_rows: Vec<RowIndex>,
 }
 
-impl RecordPrefixEstimateIndex {
+impl TranscriptExtentPrefixIndex {
     fn matches(&self, width: u16, total_count: usize) -> bool {
         self.width == width.max(1)
             && self.total_count == total_count
@@ -777,8 +798,7 @@ struct ExactRecordRowsKey {
 
 #[derive(Default)]
 struct TranscriptExtentIndex {
-    record_rows_estimate_cache: HashMap<RecordRowsEstimateKey, RowIndex>,
-    record_prefix_estimate: Option<RecordPrefixEstimateIndex>,
+    prefix_index: Option<TranscriptExtentPrefixIndex>,
     exact_record_rows: HashMap<ExactRecordRowsKey, RowIndex>,
     latest_exact_record_rows: BTreeMap<(u16, usize), ExactRecordRowsKey>,
 }
@@ -790,8 +810,7 @@ impl TranscriptExtentIndex {
     }
 
     fn clear_persisted_record_estimates(&mut self) {
-        self.record_rows_estimate_cache.clear();
-        self.record_prefix_estimate = None;
+        self.prefix_index = None;
     }
 
     fn exact_observation_count(&self) -> usize {
@@ -809,6 +828,12 @@ impl TranscriptExtentIndex {
         records: &SparseTranscriptRecords,
         snapshot: crate::content::transcript_buf::TranscriptExactHeightSnapshot,
     ) {
+        let loaded_record_indices: HashSet<_> =
+            records.records.keys().map(|index| index.get()).collect();
+        self.latest_exact_record_rows
+            .retain(|(_, record_index), _| loaded_record_indices.contains(record_index));
+        self.exact_record_rows
+            .retain(|key, _| loaded_record_indices.contains(&key.record_index));
         if snapshot.observations.is_empty() {
             return;
         }
@@ -884,7 +909,7 @@ impl TranscriptExtentIndex {
     }
 
     fn approximate_rows_for_unloaded_record_range(
-        &mut self,
+        &self,
         store: Option<&SqliteTranscriptStore>,
         width: u16,
         range: Range<usize>,
@@ -892,51 +917,10 @@ impl TranscriptExtentIndex {
         if range.start >= range.end {
             return Some(0);
         }
-        let width = width.max(1);
-        let stride = TRANSCRIPT_RECORD_PREFIX_STRIDE;
-        let mut cursor = range.start;
-        let mut rows: RowIndex = 0;
-        let first_boundary = cursor
-            .saturating_add(stride - 1)
-            .saturating_div(stride)
-            .saturating_mul(stride)
-            .min(range.end);
-        if cursor < first_boundary {
-            rows = rows.saturating_add(self.cached_record_rows(
-                store,
-                width,
-                cursor..first_boundary,
-            )?);
-            cursor = first_boundary;
-        }
-        while cursor.saturating_add(stride) <= range.end {
-            let end = cursor + stride;
-            rows = rows.saturating_add(self.cached_record_rows(store, width, cursor..end)?);
-            cursor = end;
-        }
-        if cursor < range.end {
-            rows = rows.saturating_add(self.cached_record_rows(store, width, cursor..range.end)?);
-        }
-        Some(rows)
-    }
-
-    fn cached_record_rows(
-        &mut self,
-        store: Option<&SqliteTranscriptStore>,
-        width: u16,
-        range: Range<usize>,
-    ) -> Option<RowIndex> {
-        let key = RecordRowsEstimateKey {
-            width,
-            start: range.start,
-            end: range.end,
-        };
-        if let Some(rows) = self.record_rows_estimate_cache.get(&key).copied() {
-            return Some(rows);
-        }
-        let rows = store?.estimated_record_rows(width, range).ok()? as RowIndex;
-        self.record_rows_estimate_cache.insert(key, rows);
-        Some(rows)
+        store?
+            .estimated_record_rows(width.max(1), range)
+            .ok()
+            .map(|rows| rows as RowIndex)
     }
 
     fn record_extent_model<'a>(
@@ -983,7 +967,53 @@ impl TranscriptExtentIndex {
         model: &TranscriptRecordExtentModel<'_>,
         record_index: usize,
     ) -> RowIndex {
-        self.estimated_rows_for_record_range(model, 0..record_index)
+        let Some(total) = model.total_count else {
+            return self.estimated_rows_for_record_range(model, 0..record_index);
+        };
+        let record_index = record_index.min(total);
+        let stride = TRANSCRIPT_RECORD_PREFIX_STRIDE;
+        let chunk = record_index / stride;
+        let chunk_start = chunk.saturating_mul(stride);
+        let base_rows = self
+            .ensure_prefix_index(model)
+            .and_then(|index| index.prefix_rows.get(chunk).copied())
+            .unwrap_or_default();
+        if chunk_start == record_index {
+            return base_rows;
+        }
+        base_rows
+            .saturating_add(self.estimated_rows_for_record_range(model, chunk_start..record_index))
+    }
+
+    fn cached_rows_before_record(
+        &self,
+        width: u16,
+        total_count: usize,
+        record_index: usize,
+    ) -> Option<RowIndex> {
+        let record_index = record_index.min(total_count);
+        if !record_index.is_multiple_of(TRANSCRIPT_RECORD_PREFIX_STRIDE) {
+            return None;
+        }
+        let index = self.prefix_index.as_ref()?;
+        if !index.matches(width, total_count) {
+            return None;
+        }
+        index
+            .prefix_rows
+            .get(record_index / TRANSCRIPT_RECORD_PREFIX_STRIDE)
+            .copied()
+    }
+
+    fn cached_total_rows(&self, width: u16, total_count: usize) -> Option<RowIndex> {
+        let index = self.prefix_index.as_ref()?;
+        if !index.matches(width, total_count) {
+            return None;
+        }
+        Some(persisted_record_rows_to_transcript_rows(
+            index.total_rows(),
+            total_count,
+        ))
     }
 
     fn estimated_total_record_rows(
@@ -991,42 +1021,67 @@ impl TranscriptExtentIndex {
         model: &TranscriptRecordExtentModel<'_>,
     ) -> Option<RowIndex> {
         let total = model.total_count?;
-        let rows = self.estimated_rows_for_record_range(model, 0..total);
+        let rows = self.ensure_prefix_index(model)?.total_rows();
         Some(persisted_record_rows_to_transcript_rows(rows, total))
     }
 
-    fn ensure_record_prefix_estimate(
+    fn ensure_prefix_index(
         &mut self,
         model: &TranscriptRecordExtentModel<'_>,
-    ) -> Option<&RecordPrefixEstimateIndex> {
+    ) -> Option<&TranscriptExtentPrefixIndex> {
         let total = model.total_count?;
         let width = model.width.max(1);
         if self
-            .record_prefix_estimate
+            .prefix_index
             .as_ref()
             .is_some_and(|index| index.matches(width, total))
         {
-            return self.record_prefix_estimate.as_ref();
+            return self.prefix_index.as_ref();
         }
 
         let stride = TRANSCRIPT_RECORD_PREFIX_STRIDE;
-        let mut prefix_rows = Vec::with_capacity(total.saturating_add(stride - 1) / stride + 1);
-        prefix_rows.push(0);
-        let mut rows: RowIndex = 0;
-        let mut start = 0;
-        while start < total {
-            let end = start.saturating_add(stride).min(total);
-            rows = rows.saturating_add(self.estimated_rows_for_record_range(model, start..end));
-            prefix_rows.push(rows);
-            start = end;
-        }
-        self.record_prefix_estimate = Some(RecordPrefixEstimateIndex {
+        let persisted_prefix = model.store.and_then(|store| {
+            let chunks = store.extent_chunks().ok()?;
+            let mut prefix_rows = Vec::with_capacity(chunks.len().saturating_add(1));
+            prefix_rows.push(0);
+            let mut expected_start = 0usize;
+            let mut rows: RowIndex = 0;
+            for chunk in chunks {
+                if chunk.start.get() != expected_start || chunk.record_count == 0 {
+                    return None;
+                }
+                expected_start = chunk.end().get();
+                if expected_start > total {
+                    return None;
+                }
+                rows = rows.saturating_add(chunk.profile.estimated_rows(width));
+                prefix_rows.push(rows);
+            }
+            (expected_start == total).then_some(prefix_rows)
+        });
+        let prefix_rows = persisted_prefix.unwrap_or_else(|| {
+            let mut prefix_rows = Vec::with_capacity(total.saturating_add(stride - 1) / stride + 1);
+            prefix_rows.push(0);
+            let mut rows: RowIndex = 0;
+            let mut start = 0;
+            while start < total {
+                let end = start.saturating_add(stride).min(total);
+                rows = rows.saturating_add(
+                    (end.saturating_sub(start) as RowIndex)
+                        .saturating_mul(model.fallback_rows_per_record),
+                );
+                prefix_rows.push(rows);
+                start = end;
+            }
+            prefix_rows
+        });
+        self.prefix_index = Some(TranscriptExtentPrefixIndex {
             width,
             total_count: total,
             stride,
             prefix_rows,
         });
-        self.record_prefix_estimate.as_ref()
+        self.prefix_index.as_ref()
     }
 
     fn estimated_record_for_row(
@@ -1038,9 +1093,8 @@ impl TranscriptExtentIndex {
         if total == 0 {
             return None;
         }
-        let (chunk_start, chunk_end, chunk_base_rows) = self
-            .ensure_record_prefix_estimate(model)?
-            .chunk_for_row(row)?;
+        let (chunk_start, chunk_end, chunk_base_rows) =
+            self.ensure_prefix_index(model)?.chunk_for_row(row)?;
         if chunk_start >= chunk_end {
             return None;
         }
@@ -1093,7 +1147,7 @@ impl TranscriptExtentIndex {
         self.estimated_rows_for_record_range(model, start..total)
     }
 
-    fn mixed_scrollbar_total_rows(
+    fn extent_total_rows(
         &mut self,
         model: &TranscriptRecordExtentModel<'_>,
         exact_loaded_rows: RowIndex,
@@ -1130,18 +1184,7 @@ impl TranscriptExtentIndex {
         self.estimated_sparse_prefix_rows(&model)
     }
 
-    fn approximate_sparse_suffix_rows(
-        &mut self,
-        records: &SparseTranscriptRecords,
-        active_record_range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
-        store: Option<&SqliteTranscriptStore>,
-        width: u16,
-    ) -> RowIndex {
-        let model = self.record_extent_model(records, active_record_range, store, width);
-        self.estimated_sparse_suffix_rows(&model)
-    }
-
-    fn approximate_mixed_scrollbar_total_rows(
+    fn scrollbar_total_rows(
         &mut self,
         records: &SparseTranscriptRecords,
         active_record_range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
@@ -1150,7 +1193,7 @@ impl TranscriptExtentIndex {
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
         let model = self.record_extent_model(records, active_record_range, store, width);
-        self.mixed_scrollbar_total_rows(&model, exact_loaded_rows)
+        self.extent_total_rows(&model, exact_loaded_rows)
     }
 }
 
@@ -1321,16 +1364,16 @@ pub(crate) struct TranscriptLocalScroll {
     pub(crate) base_scroll: RowIndex,
     pub(crate) next_scroll: RowIndex,
     pub(crate) rows: isize,
+    pub(crate) cursor_row: RowIndex,
     pub(crate) cursor_screen_row: u16,
 }
 
-fn signed_row_delta(before: RowIndex, after: RowIndex) -> Option<isize> {
-    let rows = if after >= before {
+fn signed_row_delta(before: RowIndex, after: RowIndex) -> isize {
+    if after >= before {
         after.saturating_sub(before).min(isize::MAX as RowIndex) as isize
     } else {
         -(before.saturating_sub(after).min(isize::MAX as RowIndex) as isize)
-    };
-    (rows != 0).then_some(rows)
+    }
 }
 
 fn transcript_screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
@@ -1380,26 +1423,39 @@ struct PendingTranscriptProjection {
     hint: Option<TranscriptProjectionHint>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranscriptExactViewport {
+    tape: crate::content::transcript_buf::ExactRowTapeHandle,
+    row_offset: RowIndex,
+    global_total_rows: RowIndex,
+    active_record_range: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranscriptResolvedViewportAnchor {
+    top: TranscriptScrollAnchor,
+    offset_rows: isize,
+    scroll_top: RowIndex,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TranscriptViewportState {
-    top_anchor: Option<TranscriptScrollAnchor>,
-    top_offset_rows: isize,
+    resolved_anchor: Option<TranscriptResolvedViewportAnchor>,
     semantic_anchor: Option<TranscriptSemanticAnchor>,
     mode: TranscriptViewportMode,
     pending_projection: Option<PendingTranscriptProjection>,
-    resolved_scroll_top: Option<RowIndex>,
+    exact_viewport: Option<TranscriptExactViewport>,
     needs_tail_repin: bool,
 }
 
 impl Default for TranscriptViewportState {
     fn default() -> Self {
         Self {
-            top_anchor: None,
-            top_offset_rows: 0,
+            resolved_anchor: None,
             semantic_anchor: None,
             mode: TranscriptViewportMode::Tail,
             pending_projection: None,
-            resolved_scroll_top: None,
+            exact_viewport: None,
             needs_tail_repin: false,
         }
     }
@@ -1615,6 +1671,7 @@ struct TranscriptCursorTarget {
 }
 
 enum TranscriptMaterializationPlan {
+    ExactRowTape(crate::content::transcript_buf::ExactRowTapeProjection),
     Loaded(crate::content::transcript_buf::ProjectionPlan),
     UnloadedGap(SparseProjectionGap),
 }
@@ -1632,6 +1689,8 @@ pub(crate) struct TranscriptProjectionPlan {
     materialization: TranscriptMaterializationPlan,
     row_offset: RowIndex,
     total_rows: RowIndex,
+    planned_loaded_rows: RowIndex,
+    preserve_total_rows: bool,
     requested_scroll: Option<RowIndex>,
     repin_at_semantic_tail: bool,
     cursor_target: Option<TranscriptCursorTarget>,
@@ -1643,10 +1702,24 @@ pub(crate) struct TranscriptProjectionPlan {
     trace_started_at: Option<Instant>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptProjectionHydrationError {
+    pub(crate) required_blocks: usize,
+    pub(crate) missing_blocks: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TranscriptSemanticFarSeek {
+    scroll_top: RowIndex,
+    total_rows: RowIndex,
+    row_anchor: TranscriptRowAnchor,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TranscriptProjectionOptions {
     allow_sparse_placeholders: bool,
     repin_at_semantic_tail: bool,
+    semantic_far_seek: Option<TranscriptSemanticFarSeek>,
 }
 
 struct TranscriptScrollTraceFinishContext {
@@ -1869,6 +1942,53 @@ impl TranscriptDocument {
         let hydrated = self.ensure_hydrated_ids(ids);
         self.enforce_hydrated_budget();
         hydrated
+    }
+
+    fn hydrate_projection_plan(
+        &mut self,
+        lua: &LuaRuntime,
+        theme: &Theme,
+        mut ids: Vec<BlockId>,
+        mut plan: crate::content::transcript_buf::ProjectionPlan,
+    ) -> Result<crate::content::transcript_buf::ProjectionPlan, TranscriptProjectionHydrationError>
+    {
+        loop {
+            let generation_before = self.content.transcript.history.generation();
+            let all_ids_hydrated = self.set_viewport_hydration_ids(&ids);
+            plan = self.content.projection.remeasure_projection_plan(
+                lua,
+                &mut self.content.transcript.history,
+                theme,
+                plan,
+            );
+            let next_ids = self
+                .content
+                .projection
+                .projection_hydration_ids_for_plan(&plan);
+            if next_ids
+                .iter()
+                .all(|id| self.content.transcript.history.is_materialized(*id))
+            {
+                if next_ids != ids {
+                    let _ = self.set_viewport_hydration_ids(&next_ids);
+                }
+                return Ok(plan);
+            }
+            if !all_ids_hydrated
+                && self.content.transcript.history.generation() == generation_before
+                && next_ids == ids
+            {
+                let missing_blocks = next_ids
+                    .iter()
+                    .filter(|id| !self.content.transcript.history.is_materialized(**id))
+                    .count();
+                return Err(TranscriptProjectionHydrationError {
+                    required_blocks: next_ids.len(),
+                    missing_blocks,
+                });
+            }
+            ids = next_ids;
+        }
     }
 
     pub(crate) fn pin_operation_blocks(&mut self, ids: &[BlockId]) -> bool {
@@ -2571,49 +2691,51 @@ impl TranscriptDocument {
     ) -> Option<TranscriptLocalScroll> {
         let viewport_rows = viewport_rows.max(1);
         let base_scroll = self.local_command_scroll_top(fallback_scroll_top);
-        let (rows, cursor_screen_row) = match command {
+        let (cursor_row, next_scroll, cursor_screen_row) = match command {
             DocumentCommand::MoveRows(delta) => {
-                let target_row = Self::add_rows(cursor_row, delta);
+                let cursor_row = add_signed_row(cursor_row, delta);
                 let next_scroll =
-                    crate::smelt_edit::scroll_to_show(base_scroll, target_row, viewport_rows);
-                let rows = signed_row_delta(base_scroll, next_scroll)?;
+                    crate::smelt_edit::scroll_to_show(base_scroll, cursor_row, viewport_rows);
                 (
-                    rows,
-                    transcript_screen_row_or_edge(target_row, next_scroll, viewport_rows),
+                    cursor_row,
+                    next_scroll,
+                    transcript_screen_row_or_edge(cursor_row, next_scroll, viewport_rows),
                 )
             }
             DocumentCommand::PageRows(pages) => {
-                let target_row =
-                    Self::add_rows(cursor_row, (viewport_rows as isize).saturating_mul(pages));
+                let cursor_row =
+                    add_signed_row(cursor_row, (viewport_rows as isize).saturating_mul(pages));
                 let next_scroll =
-                    crate::smelt_edit::scroll_to_show(base_scroll, target_row, viewport_rows);
-                let rows = signed_row_delta(base_scroll, next_scroll)?;
+                    crate::smelt_edit::scroll_to_show(base_scroll, cursor_row, viewport_rows);
                 (
-                    rows,
-                    transcript_screen_row_or_edge(target_row, next_scroll, viewport_rows),
+                    cursor_row,
+                    next_scroll,
+                    transcript_screen_row_or_edge(cursor_row, next_scroll, viewport_rows),
                 )
             }
             DocumentCommand::HalfPageRows(pages) => {
                 let rows = (viewport_rows as isize / 2).max(1).saturating_mul(pages);
-                let target_row = Self::add_rows(cursor_row, rows);
+                let cursor_row = add_signed_row(cursor_row, rows);
                 let next_scroll =
-                    crate::smelt_edit::scroll_to_show(base_scroll, target_row, viewport_rows);
-                let rows = signed_row_delta(base_scroll, next_scroll)?;
+                    crate::smelt_edit::scroll_to_show(base_scroll, cursor_row, viewport_rows);
                 (
-                    rows,
-                    transcript_screen_row_or_edge(target_row, next_scroll, viewport_rows),
+                    cursor_row,
+                    next_scroll,
+                    transcript_screen_row_or_edge(cursor_row, next_scroll, viewport_rows),
                 )
             }
             DocumentCommand::ScrollRows(rows) if rows != 0 => (
-                rows,
+                cursor_row,
+                add_signed_row(base_scroll, rows),
                 transcript_screen_row_or_edge(cursor_row, base_scroll, viewport_rows),
             ),
             _ => return None,
         };
         Some(TranscriptLocalScroll {
             base_scroll,
-            next_scroll: Self::add_rows(base_scroll, rows),
-            rows,
+            next_scroll,
+            rows: signed_row_delta(base_scroll, next_scroll),
+            cursor_row,
             cursor_screen_row,
         })
     }
@@ -2627,6 +2749,26 @@ impl TranscriptDocument {
             .is_some()
     }
 
+    fn exact_viewport_state(
+        &self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<(
+        TranscriptExactViewport,
+        crate::content::transcript_buf::ExactRowTapeState,
+    )> {
+        let exact = self.viewport.state.exact_viewport?;
+        let state = self.content.projection.exact_row_tape_state(
+            lua,
+            &self.content.transcript.history,
+            exact.tape,
+            width,
+            viewport_rows,
+        )?;
+        Some((exact, state))
+    }
+
     pub(crate) fn prime_local_scroll_base(
         &mut self,
         lua: &LuaRuntime,
@@ -2634,11 +2776,21 @@ impl TranscriptDocument {
         viewport_rows: u16,
         scroll_top: RowIndex,
     ) {
-        self.capture_viewport_anchor(
+        let exact_viewport =
+            self.exact_viewport_state(lua, width, viewport_rows)
+                .filter(|(exact, state)| {
+                    state.rows.clamped_scroll.saturating_add(exact.row_offset) == scroll_top
+                });
+        let Some((exact, _)) = exact_viewport else {
+            self.viewport.state.exact_viewport = None;
+            return;
+        };
+        self.capture_viewport_anchor_with_offset(
             lua,
             width,
             scroll_top,
             viewport_rows,
+            exact.row_offset,
             TranscriptScrollAnchor::EstimatedRow(scroll_top),
         );
     }
@@ -2758,7 +2910,16 @@ impl TranscriptDocument {
         row: RowIndex,
     ) -> TranscriptTraceAnchor {
         let anchor = self
-            .content_anchor_at_row(lua, width, row, TranscriptAnchorBias::Top)
+            .cached_local_row_offset(width)
+            .and_then(|row_offset| {
+                self.content_anchor_at_row_with_offset(
+                    lua,
+                    width,
+                    row,
+                    row_offset,
+                    TranscriptAnchorBias::Top,
+                )
+            })
             .map(TranscriptScrollAnchor::Content)
             .unwrap_or(TranscriptScrollAnchor::EstimatedRow(row));
         Self::trace_anchor(anchor)
@@ -2777,6 +2938,9 @@ impl TranscriptDocument {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
             ) => TranscriptProjectionTargetTrace::ReflowStableRow(row),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
+            ) => TranscriptProjectionTargetTrace::StableRowDelta { row, delta },
         }
     }
 
@@ -2784,6 +2948,7 @@ impl TranscriptDocument {
         &mut self,
         width: u16,
         projection_target: crate::content::transcript_buf::ScrollTarget,
+        exact_extent: Option<(RowIndex, RowIndex)>,
     ) -> Option<(TranscriptScrollTraceFrameStart, Option<Instant>)> {
         let projection_target = Self::trace_projection_target(projection_target);
         let (input, record_timings) = {
@@ -2793,10 +2958,28 @@ impl TranscriptDocument {
                 trace.record_timings(),
             )
         };
-        let viewport_anchor_before = self.viewport.state.top_anchor.map(Self::trace_anchor);
+        let viewport_anchor_before = self
+            .viewport
+            .state
+            .resolved_anchor
+            .map(|anchor| Self::trace_anchor(anchor.top));
         let active_record_range_before = Self::trace_record_range(self.records.active_range());
-        let prefix_estimate_before = self.approximate_sparse_prefix_row_offset(width);
-        let suffix_estimate_before = self.approximate_sparse_suffix_rows(width);
+        let (prefix_estimate_before, suffix_estimate_before) = exact_extent
+            .map(|(row_offset, total_rows)| (row_offset, total_rows.saturating_sub(row_offset)))
+            .or_else(|| {
+                self.viewport.state.exact_viewport.map(|exact| {
+                    (
+                        exact.row_offset,
+                        exact.global_total_rows.saturating_sub(exact.row_offset),
+                    )
+                })
+            })
+            .or_else(|| {
+                let row_offset = self.cached_local_row_offset(width)?;
+                let total_rows = self.cached_total_rows(width)?;
+                Some((row_offset, total_rows.saturating_sub(row_offset)))
+            })
+            .unwrap_or_default();
         let exact_observation_count = self.extent_index.exact_observation_count();
         let started_at = record_timings.then(Instant::now);
         Some((
@@ -2841,7 +3024,11 @@ impl TranscriptDocument {
             ctx.row_offset,
         );
         let active_record_range_after = Self::trace_record_range(self.records.active_range());
-        let viewport_anchor_after = self.viewport.state.top_anchor.map(Self::trace_anchor);
+        let viewport_anchor_after = self
+            .viewport
+            .state
+            .resolved_anchor
+            .map(|anchor| Self::trace_anchor(anchor.top));
         let visible_record_or_block_ids = self.visible_block_ids_for_virtual_range(
             rows.clamped_scroll..rows.clamped_scroll.saturating_add(viewport_rows),
             ctx.row_offset,
@@ -2904,22 +3091,47 @@ impl TranscriptDocument {
         if records.is_empty() {
             return;
         }
-        let inline_options = self.content.projection.inline_options().clone();
         self.content.transcript.history.install_stored_projection(
             records
                 .into_iter()
                 .map(|record| (record.block_id, record.stored)),
         );
-        self.content.projection = crate::content::transcript_buf::TranscriptProjection::new();
-        self.content
-            .projection
-            .set_memory_budget(self.memory_budget.rendered_rows);
-        self.content.projection.set_inline_options(inline_options);
+        self.content.projection.invalidate_source_sequence();
     }
 
     fn approximate_average_record_rows(&self, width: u16) -> RowIndex {
         self.extent_index
             .fallback_average_rows_per_loaded_record(&self.records.sparse, width)
+    }
+
+    fn cached_sparse_prefix_row_offset(&self, width: u16) -> Option<RowIndex> {
+        self.extent_index.cached_rows_before_record(
+            width,
+            self.records.total_count()?,
+            self.records.active_range()?.start.get(),
+        )
+    }
+
+    fn cached_local_row_offset(&self, width: u16) -> Option<RowIndex> {
+        if self.records.total_count().is_none() {
+            return Some(0);
+        }
+        self.cached_sparse_prefix_row_offset(width).or_else(|| {
+            let active_record_range = self
+                .records
+                .active_range()
+                .map(|range| (range.start.get(), range.end.get()));
+            self.viewport
+                .state
+                .exact_viewport
+                .filter(|exact| exact.active_record_range == active_record_range)
+                .map(|exact| exact.row_offset)
+        })
+    }
+
+    fn cached_total_rows(&self, width: u16) -> Option<RowIndex> {
+        let total_count = self.records.total_count()?;
+        self.extent_index.cached_total_rows(width, total_count)
     }
 
     fn approximate_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
@@ -2934,33 +3146,17 @@ impl TranscriptDocument {
         )
     }
 
-    fn approximate_sparse_suffix_rows(&mut self, width: u16) -> RowIndex {
-        let store = self
-            .store_cache
-            .store_for_session(self.records.session_dir());
-        self.extent_index.approximate_sparse_suffix_rows(
-            &self.records.sparse,
-            self.records.active_range(),
-            store,
-            width,
-        )
-    }
-
     fn observe_exact_loaded_record_rows(&mut self) {
         let snapshot = self.content.projection.exact_height_snapshot();
         self.extent_index
             .observe_exact_loaded_record_rows(&self.records.sparse, snapshot);
     }
 
-    fn approximate_mixed_scrollbar_total_rows(
-        &mut self,
-        width: u16,
-        exact_loaded_rows: RowIndex,
-    ) -> RowIndex {
+    fn scrollbar_total_rows(&mut self, width: u16, exact_loaded_rows: RowIndex) -> RowIndex {
         let store = self
             .store_cache
             .store_for_session(self.records.session_dir());
-        self.extent_index.approximate_mixed_scrollbar_total_rows(
+        self.extent_index.scrollbar_total_rows(
             &self.records.sparse,
             self.records.active_range(),
             store,
@@ -3009,6 +3205,14 @@ impl TranscriptDocument {
         self.extent_index.clear_exact_local_record_rows();
     }
 
+    #[cfg(test)]
+    pub(crate) fn extent_store_read_count_for_harness(&self) -> usize {
+        self.store_cache
+            .store
+            .as_ref()
+            .map_or(0, |(_, store)| store.extent_read_count())
+    }
+
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
         self.content.projection.set_inline_options(options);
         self.clear_transcript_layout_caches();
@@ -3048,20 +3252,7 @@ impl TranscriptDocument {
             &mut self.content.transcript.history,
             width,
         );
-        self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
-    }
-
-    pub(crate) fn materialize_exact_loaded_block_layout(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-    ) -> Vec<(
-        BlockId,
-        crate::smelt_edit::RowIndex,
-        crate::smelt_edit::RowIndex,
-    )> {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
-        self.materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
+        self.scrollbar_total_rows(width, loaded_rows)
     }
 
     fn materialize_exact_loaded_block_layout_with_offset(
@@ -3069,11 +3260,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         row_offset: RowIndex,
-    ) -> Vec<(
-        BlockId,
-        crate::smelt_edit::RowIndex,
-        crate::smelt_edit::RowIndex,
-    )> {
+    ) -> Vec<(BlockId, RowIndex, RowIndex)> {
         let ids = self.content.transcript.history.order.clone();
         if !self.pin_operation_blocks(&ids) {
             return Vec::new();
@@ -3087,6 +3274,15 @@ impl TranscriptDocument {
             .collect();
         self.unpin_operation_blocks(&ids);
         layout
+    }
+
+    pub(crate) fn materialize_exact_loaded_block_layout(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+    ) -> Vec<(BlockId, RowIndex, RowIndex)> {
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        self.materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
     }
 
     fn block_snapshot_for_block(
@@ -3220,7 +3416,7 @@ impl TranscriptDocument {
         bias: TranscriptAnchorBias,
     ) -> Option<TranscriptContentAnchor> {
         let row_offset = self.approximate_sparse_prefix_row_offset(width);
-        self.content_anchor_at_row_with_offset(lua, width, row, bias, row_offset)
+        self.content_anchor_at_row_with_offset(lua, width, row, row_offset, bias)
     }
 
     fn content_anchor_at_row_with_offset(
@@ -3228,8 +3424,8 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         row: RowIndex,
-        bias: TranscriptAnchorBias,
         row_offset: RowIndex,
+        bias: TranscriptAnchorBias,
     ) -> Option<TranscriptContentAnchor> {
         let row_anchor = self.row_anchor_at_row_with_offset(lua, width, row, row_offset)?;
         let block_id = row_anchor.id.as_block_id()?;
@@ -3285,16 +3481,38 @@ impl TranscriptDocument {
         viewport_rows: u16,
         anchor: TranscriptContentAnchor,
     ) -> Option<RowIndex> {
-        if self.records.total_count().is_some() {
+        let active_changed = if self.records.total_count().is_some() {
             let range = self.record_window_range_around_center(
                 width,
                 anchor.record_index,
                 viewport_rows,
                 true,
             )?;
-            let _ = self.activate_record_window_range(range);
+            self.activate_record_window_range(range)
+        } else {
+            false
+        };
+        let active_record_range = self
+            .records
+            .active_range()
+            .map(|range| (range.start.get(), range.end.get()));
+        let row_offset = if !active_changed {
+            self.exact_viewport_state(lua, width, viewport_rows)
+                .filter(|(exact, _)| exact.active_record_range == active_record_range)
+                .map(|(exact, _)| exact.row_offset)
+        } else {
+            None
         }
-        self.row_for_anchor(lua, width, anchor.row_anchor)
+        .unwrap_or_else(|| self.approximate_sparse_prefix_row_offset(width));
+        self.content
+            .projection
+            .row_for_anchor(
+                lua,
+                &mut self.content.transcript.history,
+                width,
+                anchor.row_anchor,
+            )
+            .map(|row| row.saturating_add(row_offset))
     }
 
     fn row_for_content_anchor_with_offset(
@@ -3322,8 +3540,8 @@ impl TranscriptDocument {
                 lua,
                 width,
                 row,
-                TranscriptAnchorBias::Top,
                 row_offset,
+                TranscriptAnchorBias::Top,
             ) {
                 return Some((anchor, -(offset as isize)));
             }
@@ -3372,7 +3590,11 @@ impl TranscriptDocument {
             return Some(anchor);
         }
 
-        if let Some(TranscriptScrollAnchor::Content(anchor)) = self.viewport.state.top_anchor {
+        if let Some(TranscriptResolvedViewportAnchor {
+            top: TranscriptScrollAnchor::Content(anchor),
+            ..
+        }) = self.viewport.state.resolved_anchor
+        {
             return Some(TranscriptSemanticAnchor {
                 record_index: anchor.record_index,
                 block_id: anchor.block_id,
@@ -3412,8 +3634,15 @@ impl TranscriptDocument {
         anchor_index: usize,
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, StoredBlockWithId)> {
-        let session_dir = self.records.session_dir()?.clone();
-        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
+        let session_dir = self.records.session_dir()?;
+        let fallback_db;
+        let db = if let Some(store) = self.store_cache.cached_store_for_session(session_dir) {
+            &store.db
+        } else {
+            fallback_db =
+                smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
+            &fallback_db
+        };
         let record = match direction {
             TranscriptNavigationDirection::Previous => {
                 let before = anchor_index.checked_sub(1)?;
@@ -3824,6 +4053,78 @@ impl TranscriptDocument {
         self.record_window_range_around_center(width, center, viewport_rows, true)
     }
 
+    fn semantic_far_seek_record_window_range(
+        &self,
+        width: u16,
+        record_index: usize,
+        viewport_rows: u16,
+    ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
+        let total = self.records.total_count()?;
+        if total == 0 {
+            return None;
+        }
+        let start = record_index.min(total.saturating_sub(1));
+        let count = self.record_window_count(width, viewport_rows, total);
+        let end = start.saturating_add(count).min(total);
+        Some(
+            smelt_store::TranscriptRecordOffset::new(start)
+                ..smelt_store::TranscriptRecordOffset::new(end),
+        )
+    }
+
+    fn activate_semantic_far_seek_record_window(
+        &mut self,
+        width: u16,
+        record_index: usize,
+        viewport_rows: u16,
+    ) -> bool {
+        let Some(projection_range) =
+            self.semantic_far_seek_record_window_range(width, record_index, viewport_rows)
+        else {
+            return false;
+        };
+        let cache_range = if self
+            .records
+            .total_count()
+            .is_some_and(|total| total > TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS)
+        {
+            self.records.sparse.cache_range_around(&projection_range)
+        } else {
+            projection_range.clone()
+        };
+        self.activate_record_projection_range(projection_range, cache_range)
+    }
+
+    fn resolve_semantic_far_seek(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        scroll_top: RowIndex,
+        total_rows: RowIndex,
+    ) -> Option<TranscriptSemanticFarSeek> {
+        let (record_index, in_record_row) =
+            self.estimated_record_for_display_row(width, scroll_top)?;
+        let _ = self.activate_semantic_far_seek_record_window(width, record_index, viewport_rows);
+        let record = self
+            .records
+            .sparse
+            .record(smelt_store::TranscriptRecordOffset::new(record_index))?;
+        let block_id = record.block_id;
+        let row_anchor = self.content.projection.row_anchor_for_block(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            block_id,
+            in_record_row,
+        )?;
+        Some(TranscriptSemanticFarSeek {
+            scroll_top,
+            total_rows,
+            row_anchor,
+        })
+    }
+
     fn tail_record_window_range(
         &self,
         width: u16,
@@ -3842,11 +4143,6 @@ impl TranscriptDocument {
         &mut self,
         range: Range<smelt_store::TranscriptRecordOffset>,
     ) -> bool {
-        if self.records.active_range() == Some(&range)
-            && self.records.sparse.range_is_loaded(&range)
-        {
-            return false;
-        }
         let mut projection_range = if self
             .records
             .total_count()
@@ -3861,7 +4157,20 @@ impl TranscriptDocument {
         {
             projection_range = range;
         }
-        let missing_ranges = self.records.sparse.missing_ranges(&projection_range);
+        self.activate_record_projection_range(projection_range.clone(), projection_range)
+    }
+
+    fn activate_record_projection_range(
+        &mut self,
+        projection_range: Range<smelt_store::TranscriptRecordOffset>,
+        cache_range: Range<smelt_store::TranscriptRecordOffset>,
+    ) -> bool {
+        if self.records.active_range() == Some(&projection_range)
+            && self.records.sparse.range_is_loaded(&projection_range)
+        {
+            return false;
+        }
+        let missing_ranges = self.records.sparse.missing_ranges(&cache_range);
         let mut loaded_any = false;
         for missing in missing_ranges {
             let Some(window) =
@@ -3879,7 +4188,7 @@ impl TranscriptDocument {
             return false;
         }
         self.records.active_range = Some(projection_range.clone());
-        self.records.sparse.touch_range(&projection_range);
+        self.records.sparse.touch_range(&cache_range);
         self.records
             .sparse
             .enforce_byte_budget(&projection_range, self.memory_budget.record_windows);
@@ -4028,6 +4337,9 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
                 | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
             ) => TranscriptScrollAnchor::EstimatedRow(row),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
+            ) => TranscriptScrollAnchor::EstimatedRow(add_signed_row(row, delta)),
         }
     }
 
@@ -4051,28 +4363,9 @@ impl TranscriptDocument {
         if anchor_row >= visible_end || top_row >= anchor_window_end {
             return None;
         }
-        let offset = signed_row_delta(anchor_row, top_row).unwrap_or(0);
+        let offset = signed_row_delta(anchor_row, top_row);
         anchor.fallback_row = anchor_row;
         Some((Some(TranscriptScrollAnchor::Content(anchor)), offset))
-    }
-
-    fn capture_viewport_anchor(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        top_row: RowIndex,
-        viewport_rows: u16,
-        fallback: TranscriptScrollAnchor,
-    ) {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
-        self.capture_viewport_anchor_with_offset(
-            lua,
-            width,
-            top_row,
-            viewport_rows,
-            fallback,
-            row_offset,
-        );
     }
 
     fn capture_viewport_anchor_with_offset(
@@ -4081,8 +4374,8 @@ impl TranscriptDocument {
         width: u16,
         top_row: RowIndex,
         viewport_rows: u16,
-        fallback: TranscriptScrollAnchor,
         row_offset: RowIndex,
+        fallback: TranscriptScrollAnchor,
     ) {
         let (top_anchor, top_offset_rows) = match fallback {
             TranscriptScrollAnchor::Tail => (Some(TranscriptScrollAnchor::Tail), 0),
@@ -4128,8 +4421,12 @@ impl TranscriptDocument {
             Some(TranscriptScrollAnchor::Content(_)) => TranscriptViewportMode::Anchored,
             Some(TranscriptScrollAnchor::EstimatedRow(_)) | None => TranscriptViewportMode::FarSeek,
         };
-        self.viewport.state.top_anchor = top_anchor;
-        self.viewport.state.top_offset_rows = top_offset_rows;
+        self.viewport.state.resolved_anchor =
+            top_anchor.map(|top| TranscriptResolvedViewportAnchor {
+                top,
+                offset_rows: top_offset_rows,
+                scroll_top: top_row,
+            });
     }
 
     fn take_viewport_intent(
@@ -4158,24 +4455,112 @@ impl TranscriptDocument {
         total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)))
     }
 
+    fn semantic_far_seek_for_intent(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        intent: &TranscriptScrollIntent,
+    ) -> Option<TranscriptSemanticFarSeek> {
+        let (scroll_top, total_rows) = match intent {
+            TranscriptScrollIntent::ScrollbarFraction {
+                numerator,
+                denominator,
+                total_rows,
+                viewport_rows: gesture_viewport_rows,
+            } => {
+                let denominator = (*denominator).max(1);
+                if *numerator >= denominator {
+                    return None;
+                }
+                let total_rows = (*total_rows).max(RowIndex::from((*gesture_viewport_rows).max(1)));
+                let max_scroll =
+                    Self::max_scroll_for_total(total_rows, (*gesture_viewport_rows).max(1));
+                let scroll_top = ((*numerator).min(denominator) as u128)
+                    .saturating_mul(max_scroll as u128)
+                    .checked_div(denominator as u128)
+                    .unwrap_or(0)
+                    .min(RowIndex::MAX as u128) as RowIndex;
+                (scroll_top, total_rows)
+            }
+            TranscriptScrollIntent::ApproximateRowSeek(row) => {
+                let total_rows = self.approximate_scrollbar_total_for_viewport(lua, width);
+                (
+                    (*row).min(Self::max_scroll_for_total(total_rows, viewport_rows)),
+                    total_rows,
+                )
+            }
+            _ => return None,
+        };
+        self.resolve_semantic_far_seek(lua, width, viewport_rows, scroll_top, total_rows)
+    }
+
+    fn semantic_tail_record_is_materialized(&self) -> bool {
+        let Some(total) = self.records.total_count() else {
+            return true;
+        };
+        if total == 0 {
+            return true;
+        }
+        let Some(active) = self.records.active_range() else {
+            return false;
+        };
+        if active.end.get() < total {
+            return false;
+        }
+        self.records
+            .sparse
+            .record(smelt_store::TranscriptRecordOffset::new(
+                total.saturating_sub(1),
+            ))
+            .is_some_and(|record| {
+                self.content
+                    .transcript
+                    .history
+                    .is_materialized(record.block_id)
+            })
+    }
+
     fn projected_viewport_reached_semantic_tail(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
         rows: crate::smelt_edit::MaterializedRows,
         viewport_rows: u16,
+        row_offset: RowIndex,
+        local_total_rows: RowIndex,
     ) -> bool {
         if let Some(total) = self.records.total_count() {
+            if !self.semantic_tail_record_is_materialized() {
+                return false;
+            }
             let Some(active) = self.records.active_range() else {
                 return false;
             };
-            if active.end.get() < total {
+            let local_scroll = rows.clamped_scroll.saturating_sub(row_offset);
+            if active.end.get() < total
+                || local_scroll.saturating_add(RowIndex::from(viewport_rows.max(1)))
+                    < local_total_rows
+            {
                 return false;
             }
-            return rows
-                .clamped_scroll
-                .saturating_add(RowIndex::from(viewport_rows.max(1)))
-                >= rows.total_rows;
+            let visible_rows = RowIndex::from(viewport_rows.max(1));
+            return (0..visible_rows).rev().any(|offset| {
+                self.content_anchor_at_row_with_offset(
+                    lua,
+                    width,
+                    rows.clamped_scroll.saturating_add(offset),
+                    row_offset,
+                    TranscriptAnchorBias::Top,
+                )
+                .is_some_and(|anchor| {
+                    anchor.record_index.saturating_add(1) == total
+                        && self
+                            .content
+                            .projection
+                            .height_suffix_is_exact(anchor.row_anchor)
+                })
+            });
         }
         let row_offset = self.approximate_sparse_prefix_row_offset(width);
         let loaded_rows = self.content.projection.estimated_total_rows(
@@ -4194,14 +4579,6 @@ impl TranscriptDocument {
             VerticalScroll::Tail
         } else {
             VerticalScroll::Pinned
-        }
-    }
-
-    fn add_rows(row: RowIndex, delta: isize) -> RowIndex {
-        if delta >= 0 {
-            row.saturating_add(delta as RowIndex)
-        } else {
-            row.saturating_sub(delta.unsigned_abs() as RowIndex)
         }
     }
 
@@ -4293,15 +4670,17 @@ impl TranscriptDocument {
         viewport_rows: u16,
         fallback_scroll_top: RowIndex,
     ) -> Option<RowIndex> {
-        match self.viewport.state.top_anchor {
-            Some(TranscriptScrollAnchor::Tail) => Some(fallback_scroll_top),
-            Some(TranscriptScrollAnchor::Content(anchor)) => {
-                self.row_for_content_anchor(lua, width, viewport_rows, anchor)
+        let Some(anchor) = self.viewport.state.resolved_anchor else {
+            return Some(fallback_scroll_top);
+        };
+        match anchor.top {
+            TranscriptScrollAnchor::Tail => Some(fallback_scroll_top),
+            TranscriptScrollAnchor::Content(content) => {
+                self.row_for_content_anchor(lua, width, viewport_rows, content)
             }
-            Some(TranscriptScrollAnchor::EstimatedRow(row)) => Some(row),
-            None => Some(fallback_scroll_top),
+            TranscriptScrollAnchor::EstimatedRow(row) => Some(row),
         }
-        .map(|row| Self::add_rows(row, self.viewport.state.top_offset_rows))
+        .map(|row| add_signed_row(row, anchor.offset_rows))
     }
 
     fn approximate_scrollbar_total_for_viewport(
@@ -4314,83 +4693,73 @@ impl TranscriptDocument {
             &mut self.content.transcript.history,
             width,
         );
-        self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
+        self.scrollbar_total_rows(width, loaded_rows)
     }
 
-    fn exactify_local_delta_target_window(
+    fn activate_record_window_for_local_delta(
         &mut self,
-        lua: &LuaRuntime,
         width: u16,
         viewport_rows: u16,
-        target_row: RowIndex,
+        anchor_record: usize,
+        rows: isize,
     ) -> bool {
-        let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) else {
+        let Some(active) = self.records.active_range().cloned() else {
             return false;
         };
-        if target_row >= loaded_end {
+        let Some(total) = self.records.total_count() else {
+            return false;
+        };
+        if rows == 0 || anchor_record < active.start.get() || anchor_record >= active.end.get() {
             return false;
         }
-        let viewport_rows = RowIndex::from(viewport_rows.max(1));
-        let overscan =
-            viewport_rows.saturating_mul(TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS);
-        let global_start = target_row.saturating_sub(overscan).max(loaded_start);
-        let global_end = target_row
-            .saturating_add(viewport_rows)
-            .saturating_add(overscan)
-            .min(loaded_end);
-        if global_start >= global_end {
-            return false;
+        let base_window_count = self.record_window_count(width, viewport_rows, total);
+        let window_count = base_window_count
+            .saturating_mul(TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER)
+            .min(base_window_count.max(TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS))
+            .min(total);
+        let opposite_context = window_count.saturating_div(4).max(1);
+        let start = if rows < 0 {
+            anchor_record
+                .saturating_add(1)
+                .saturating_add(opposite_context)
+                .saturating_sub(window_count)
+        } else {
+            anchor_record.saturating_sub(opposite_context)
         }
-        let changed = self.content.projection.exactify_rows_for_range(
-            lua,
-            &mut self.content.transcript.history,
-            width,
-            global_start.saturating_sub(loaded_start)..global_end.saturating_sub(loaded_start),
-        );
-        if changed {
-            self.observe_exact_loaded_record_rows();
-        }
-        changed
+        .min(total.saturating_sub(window_count));
+        let end = start.saturating_add(window_count).min(total);
+        let projection_range = smelt_store::TranscriptRecordOffset::new(start)
+            ..smelt_store::TranscriptRecordOffset::new(end);
+        let cache_range = if self.records.session_dir().is_some()
+            && total > TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS
+        {
+            self.records.sparse.cache_range_around(&projection_range)
+        } else {
+            projection_range.clone()
+        };
+        self.activate_record_projection_range(projection_range, cache_range)
     }
 
-    fn activate_record_window_covering_local_delta(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
+    fn local_delta_needs_record_expansion(
+        &self,
+        tape: crate::content::transcript_buf::ExactRowTapeState,
         viewport_rows: u16,
-        target_row: RowIndex,
+        rows: isize,
     ) -> bool {
-        const MAX_EXPANSIONS_PER_DELTA: usize = 4;
-        let mut changed = false;
-        let viewport_row_count = RowIndex::from(viewport_rows.max(1));
-        for _ in 0..MAX_EXPANSIONS_PER_DELTA {
-            let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) else {
-                return changed;
-            };
-            let target_end = target_row.saturating_add(viewport_row_count);
-            if target_row >= loaded_start && target_end <= loaded_end {
-                return changed;
-            }
-            let edge = if target_row < loaded_start {
-                target_row
-            } else {
-                target_end
-            };
-            let Some(range) = self.record_window_expanded_toward_row(
-                width,
-                viewport_rows,
-                edge,
-                loaded_start,
-                loaded_end,
-            ) else {
-                return changed;
-            };
-            if !self.activate_record_window_range(range) {
-                return changed;
-            }
-            changed = true;
-        }
-        changed
+        let (Some(active), Some(total)) = (self.records.active_range(), self.records.total_count())
+        else {
+            return false;
+        };
+        let target = add_signed_row(tape.rows.clamped_scroll, rows);
+        let viewport_rows = RowIndex::from(viewport_rows.max(1));
+        let guard_rows = viewport_rows.saturating_mul(TRANSCRIPT_LOCAL_PAGE_GUARD_VIEWPORTS);
+        (rows < 0 && active.start.get() > 0 && target <= guard_rows)
+            || (rows > 0
+                && active.end.get() < total
+                && target
+                    .saturating_add(viewport_rows)
+                    .saturating_add(guard_rows)
+                    >= tape.rows.total_rows)
     }
 
     fn local_delta_scroll_target(
@@ -4401,34 +4770,72 @@ impl TranscriptDocument {
         fallback_scroll_top: RowIndex,
         rows: isize,
     ) -> crate::content::transcript_buf::ScrollTarget {
-        const MAX_LOCAL_DELTA_REBASES: usize = 4;
-        let base = self
-            .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
-            .unwrap_or(fallback_scroll_top);
-        let initial_row = Self::add_rows(base, rows);
-        let mut row = initial_row;
-        for _ in 0..MAX_LOCAL_DELTA_REBASES {
-            let expanded =
-                self.activate_record_window_covering_local_delta(lua, width, viewport_rows, row);
-            let exactified =
-                self.exactify_local_delta_target_window(lua, width, viewport_rows, row);
-            if !expanded && !exactified {
-                break;
+        let exact_viewport =
+            self.exact_viewport_state(lua, width, viewport_rows)
+                .filter(|(exact, tape)| {
+                    tape.rows.clamped_scroll.saturating_add(exact.row_offset) == fallback_scroll_top
+                });
+        let semantic_viewport_matches = self
+            .viewport
+            .state
+            .resolved_anchor
+            .is_some_and(|anchor| anchor.scroll_top == fallback_scroll_top);
+        if !matches!(
+            self.viewport.state.resolved_anchor,
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(_),
+                ..
+            })
+        ) {
+            if let Some((exact, _)) = exact_viewport {
+                self.capture_viewport_anchor_with_offset(
+                    lua,
+                    width,
+                    fallback_scroll_top,
+                    viewport_rows,
+                    exact.row_offset,
+                    TranscriptScrollAnchor::EstimatedRow(fallback_scroll_top),
+                );
             }
-            let base = self
-                .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
-                .unwrap_or(fallback_scroll_top);
-            let rebased = Self::add_rows(base, rows);
-            row = if rows < 0 {
-                rebased.min(initial_row)
-            } else if rows > 0 {
-                rebased.max(initial_row)
-            } else {
-                rebased
-            };
         }
-
-        crate::content::transcript_buf::ScrollTarget::visible_row(row)
+        let exact_anchor = exact_viewport.and_then(|(_, tape)| tape.top_anchor);
+        let base = exact_viewport
+            .map(|(exact, tape)| tape.rows.clamped_scroll.saturating_add(exact.row_offset))
+            .or_else(|| {
+                semantic_viewport_matches
+                    .then(|| {
+                        self.row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
+                    })
+                    .flatten()
+            })
+            .unwrap_or(fallback_scroll_top);
+        let needs_record_expansion = exact_viewport
+            .map(|(_, tape)| self.local_delta_needs_record_expansion(tape, viewport_rows, rows))
+            .unwrap_or(true);
+        let anchor_record = match self.viewport.state.resolved_anchor {
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(anchor),
+                ..
+            }) if semantic_viewport_matches => Some(anchor.record_index),
+            _ => exact_anchor
+                .and_then(|anchor| anchor.id.as_block_id())
+                .and_then(|block_id| self.record_index_for_block_id(block_id)),
+        };
+        if needs_record_expansion {
+            if let Some(anchor_record) = anchor_record {
+                self.activate_record_window_for_local_delta(
+                    width,
+                    viewport_rows,
+                    anchor_record,
+                    rows,
+                );
+            }
+        }
+        crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+            base,
+            exact_anchor,
+            rows,
+        )
     }
 
     fn scroll_target_for_intent(
@@ -4449,6 +4856,37 @@ impl TranscriptDocument {
                 None,
             ),
             TranscriptScrollIntent::PreserveViewport => {
+                let exact_anchor = self
+                    .exact_viewport_state(lua, width, viewport_rows)
+                    .filter(|(exact, tape)| {
+                        tape.rows.clamped_scroll.saturating_add(exact.row_offset)
+                            == fallback_scroll_top
+                    })
+                    .and_then(|(_, tape)| tape.top_anchor);
+                let semantic_anchor = if exact_anchor.is_none() {
+                    match self.viewport.state.resolved_anchor {
+                        Some(TranscriptResolvedViewportAnchor {
+                            top: TranscriptScrollAnchor::Content(anchor),
+                            ..
+                        }) => {
+                            let _ = self.row_for_content_anchor(lua, width, viewport_rows, anchor);
+                            Some(anchor.row_anchor)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(anchor) = exact_anchor.or(semantic_anchor) {
+                    return (
+                        crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                            fallback_scroll_top,
+                            Some(anchor),
+                            0,
+                        ),
+                        None,
+                    );
+                }
                 let target = match self.row_for_viewport_anchor(
                     lua,
                     width,
@@ -4601,10 +5039,18 @@ impl TranscriptDocument {
             TranscriptScrollIntent::ScrollbarFraction {
                 numerator,
                 denominator,
+                total_rows,
+                viewport_rows: gesture_viewport_rows,
             } => {
-                let total_rows = self.approximate_scrollbar_total_for_viewport(lua, width);
-                let max_scroll = Self::max_scroll_for_total(total_rows, viewport_rows);
                 let denominator = (*denominator).max(1);
+                if *numerator >= denominator {
+                    return (
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        None,
+                    );
+                }
+                let max_scroll =
+                    Self::max_scroll_for_total(*total_rows, (*gesture_viewport_rows).max(1));
                 let row = ((*numerator).min(denominator) as u128)
                     .saturating_mul(max_scroll as u128)
                     .checked_div(denominator as u128)
@@ -4647,6 +5093,91 @@ impl TranscriptDocument {
         })
     }
 
+    fn plan_exact_local_delta(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        fallback_scroll_top: RowIndex,
+        rows: isize,
+    ) -> Option<TranscriptProjectionPlan> {
+        let (exact, tape) = self.exact_viewport_state(lua, width, viewport_rows)?;
+        if tape.rows.clamped_scroll.saturating_add(exact.row_offset) != fallback_scroll_top {
+            return None;
+        }
+        if self.local_delta_needs_record_expansion(tape, viewport_rows, rows) {
+            return None;
+        }
+        let inner = self.content.projection.plan_exact_row_tape_scroll(
+            lua,
+            &self.content.transcript.history,
+            exact.tape,
+            width,
+            rows,
+            viewport_rows,
+        )?;
+        let local_rows = inner.rows();
+        let preserve_total_rows = self.records.total_count().is_some();
+        let total_rows = if preserve_total_rows {
+            exact.global_total_rows
+        } else {
+            exact
+                .global_total_rows
+                .saturating_sub(tape.rows.total_rows)
+                .saturating_add(local_rows.total_rows)
+        };
+        let reaches_loaded_tail = rows > 0
+            && local_rows
+                .clamped_scroll
+                .saturating_add(RowIndex::from(viewport_rows.max(1)))
+                >= local_rows.total_rows
+            && self
+                .records
+                .active_range()
+                .zip(self.records.total_count())
+                .is_none_or(|(active, total)| active.end.get() >= total);
+        if reaches_loaded_tail && !self.semantic_tail_record_is_materialized() {
+            return None;
+        }
+        let repin_at_semantic_tail = reaches_loaded_tail;
+        let row_offset = if preserve_total_rows && repin_at_semantic_tail {
+            total_rows.saturating_sub(local_rows.total_rows)
+        } else {
+            exact.row_offset
+        };
+        let target = local_rows.clamped_scroll.saturating_add(row_offset);
+        let scroll_target = if rows == 0 {
+            crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                target,
+                tape.top_anchor,
+                0,
+            )
+        } else {
+            crate::content::transcript_buf::ScrollTarget::visible_row(target)
+        };
+        let (trace_frame, trace_started_at) = self
+            .start_scroll_trace_frame(width, scroll_target, Some((row_offset, total_rows)))
+            .map_or((None, None), |(frame, started_at)| {
+                (Some(frame), started_at)
+            });
+        Some(TranscriptProjectionPlan {
+            materialization: TranscriptMaterializationPlan::ExactRowTape(inner),
+            row_offset,
+            total_rows,
+            planned_loaded_rows: local_rows.total_rows,
+            preserve_total_rows,
+            requested_scroll: None,
+            repin_at_semantic_tail,
+            cursor_target: None,
+            semantic_anchor: None,
+            scroll_anchor: TranscriptScrollAnchor::EstimatedRow(target),
+            width,
+            viewport_rows,
+            trace_frame,
+            trace_started_at,
+        })
+    }
+
     pub(crate) fn plan_viewport_projection_measured(
         &mut self,
         lua: &LuaRuntime,
@@ -4654,23 +5185,67 @@ impl TranscriptDocument {
         theme: &Theme,
         input: TranscriptViewportProjectionInput,
         viewport_rows: u16,
-    ) -> TranscriptProjectionPlan {
-        let previous_top_anchor = self.viewport.state.top_anchor;
+    ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
+        let previous_top_anchor = self.viewport.state.resolved_anchor.map(|anchor| anchor.top);
+        let active_record_range_before = Self::trace_record_range(self.records.active_range());
         let pending_intent = self.take_viewport_intent(input);
         let intent = pending_intent.intent;
-        let behavior = Self::intent_behavior(&intent);
         let preserve_anchor_intent = matches!(
             intent,
             TranscriptScrollIntent::PreserveViewport | TranscriptScrollIntent::ResizeReflow { .. }
         );
+        let local_delta_rows = match &intent {
+            TranscriptScrollIntent::PreserveViewport => Some(0),
+            TranscriptScrollIntent::UserDelta { rows } => Some(*rows),
+            TranscriptScrollIntent::PageDelta { pages } => {
+                Some(pages.saturating_mul(viewport_rows.max(1) as isize))
+            }
+            _ => None,
+        };
+        if let Some(rows) = local_delta_rows {
+            if let Some(mut plan) = self.plan_exact_local_delta(
+                lua,
+                width,
+                viewport_rows,
+                input.fallback_scroll_top,
+                rows,
+            ) {
+                if preserve_anchor_intent && self.records.total_count().is_some() {
+                    if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
+                        plan.scroll_anchor = anchor;
+                    }
+                }
+                if let Some(trace_frame) = plan.trace_frame.as_mut() {
+                    trace_frame.active_record_range_before = active_record_range_before;
+                }
+                return Ok(plan);
+            }
+        }
+        let behavior = Self::intent_behavior(&intent);
         let semantic_anchor = Self::semantic_anchor_for_intent(&intent);
-        let (scroll_target, cursor_target) = self.scroll_target_for_intent(
-            lua,
-            width,
-            viewport_rows,
-            input.fallback_scroll_top,
-            &intent,
-            pending_intent.hint,
+        let semantic_far_seek =
+            self.semantic_far_seek_for_intent(lua, width, viewport_rows, &intent);
+        let (scroll_target, cursor_target) = semantic_far_seek.map_or_else(
+            || {
+                self.scroll_target_for_intent(
+                    lua,
+                    width,
+                    viewport_rows,
+                    input.fallback_scroll_top,
+                    &intent,
+                    pending_intent.hint,
+                )
+            },
+            |far_seek| {
+                (
+                    crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                        far_seek.scroll_top,
+                        Some(far_seek.row_anchor),
+                        0,
+                    ),
+                    None,
+                )
+            },
         );
         if self.scroll_trace_enabled() && !self.scroll_trace_has_pending_input() {
             self.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
@@ -4691,8 +5266,9 @@ impl TranscriptDocument {
             TranscriptProjectionOptions {
                 allow_sparse_placeholders: behavior.allow_sparse_placeholders,
                 repin_at_semantic_tail: behavior.repin_at_semantic_tail,
+                semantic_far_seek,
             },
-        );
+        )?;
         if preserve_anchor_intent && self.records.total_count().is_some() {
             if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
                 plan.scroll_anchor = anchor;
@@ -4700,7 +5276,10 @@ impl TranscriptDocument {
         }
         plan.cursor_target = cursor_target;
         plan.semantic_anchor = semantic_anchor;
-        plan
+        if let Some(trace_frame) = plan.trace_frame.as_mut() {
+            trace_frame.active_record_range_before = active_record_range_before;
+        }
+        Ok(plan)
     }
 
     pub(crate) fn plan_projection_measured(
@@ -4710,7 +5289,7 @@ impl TranscriptDocument {
         theme: &Theme,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
-    ) -> TranscriptProjectionPlan {
+    ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
         self.plan_projection_measured_with_sparse_placeholders(
             lua,
             width,
@@ -4720,60 +5299,9 @@ impl TranscriptDocument {
             TranscriptProjectionOptions {
                 allow_sparse_placeholders: true,
                 repin_at_semantic_tail: false,
+                semantic_far_seek: None,
             },
         )
-    }
-
-    fn plan_hydrated_projection(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        theme: &Theme,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
-        viewport_rows: u16,
-    ) -> crate::content::transcript_buf::ProjectionPlan {
-        let (mut hydrated_ids, initial_plan) = self.content.projection.projection_hydration_ids(
-            lua,
-            &mut self.content.transcript.history,
-            width,
-            theme,
-            scroll_target,
-            viewport_rows,
-        );
-        let _ = self.set_viewport_hydration_ids(&hydrated_ids);
-        let mut plan = self.content.projection.remeasure_projection_plan(
-            lua,
-            &mut self.content.transcript.history,
-            theme,
-            initial_plan,
-        );
-
-        loop {
-            let plan_ids = self
-                .content
-                .projection
-                .projection_hydration_ids_for_plan(&plan);
-            if plan_ids
-                .iter()
-                .all(|id| hydrated_ids.binary_search(id).is_ok())
-            {
-                let _ = self.set_viewport_hydration_ids(&plan_ids);
-                return plan;
-            }
-
-            hydrated_ids.extend(plan_ids);
-            hydrated_ids.sort_unstable_by_key(|id| id.get());
-            hydrated_ids.dedup();
-            if !self.set_viewport_hydration_ids(&hydrated_ids) {
-                return plan;
-            }
-            plan = self.content.projection.remeasure_projection_plan(
-                lua,
-                &mut self.content.transcript.history,
-                theme,
-                plan,
-            );
-        }
     }
 
     fn plan_projection_measured_with_sparse_placeholders(
@@ -4784,9 +5312,9 @@ impl TranscriptDocument {
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
         options: TranscriptProjectionOptions,
-    ) -> TranscriptProjectionPlan {
+    ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
         let (trace_frame, trace_started_at) = self
-            .start_scroll_trace_frame(width, scroll_target)
+            .start_scroll_trace_frame(width, scroll_target, None)
             .map_or((None, None), |(frame, started_at)| {
                 (Some(frame), started_at)
             });
@@ -4805,7 +5333,8 @@ impl TranscriptDocument {
                 }
             }
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_),
+                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
+                | crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
             ) => {}
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
@@ -4813,22 +5342,88 @@ impl TranscriptDocument {
                 let _ = self.activate_tail_record_window(width, viewport_rows);
             }
         }
-        let mut row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let stable_local_delta = options.semantic_far_seek.is_none()
+            && matches!(
+                scroll_target,
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
+                )
+            );
+        let stable_total_rows = options
+            .semantic_far_seek
+            .map(|far_seek| far_seek.total_rows)
+            .or_else(|| {
+                stable_local_delta
+                    .then(|| {
+                        self.viewport
+                            .state
+                            .exact_viewport
+                            .map(|exact| exact.global_total_rows)
+                    })
+                    .flatten()
+            });
+        let stable_requested_scroll = match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
+            ) => Some(add_signed_row(row, delta)),
+            _ => None,
+        };
+        let active_record_range = self
+            .records
+            .active_range()
+            .map(|range| (range.start.get(), range.end.get()));
+        let stable_row_offset = stable_local_delta
+            .then(|| {
+                self.viewport
+                    .state
+                    .exact_viewport
+                    .filter(|exact| exact.active_record_range == active_record_range)
+                    .map(|exact| exact.row_offset)
+            })
+            .flatten()
+            .or_else(|| match scroll_target {
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::StableRowDelta {
+                        row,
+                        anchor: Some(anchor),
+                        ..
+                    },
+                ) => self
+                    .content
+                    .projection
+                    .row_for_anchor(lua, &mut self.content.transcript.history, width, anchor)
+                    .map(|local_row| row.saturating_sub(local_row)),
+                _ => None,
+            })
+            .or_else(|| {
+                stable_local_delta
+                    .then(|| self.cached_sparse_prefix_row_offset(width))
+                    .flatten()
+            });
+        let mut row_offset = if stable_local_delta {
+            stable_row_offset.unwrap_or_default()
+        } else {
+            self.approximate_sparse_prefix_row_offset(width)
+        };
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let active_range_reaches_tail = self
             .records
             .active_range()
             .zip(self.records.sparse.total_count())
             .is_some_and(|(range, total)| range.end.get() >= total);
-        let requested_scroll = match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
-            ) => Some(row),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
-                | crate::content::transcript_buf::ScrollAnchor::Tail,
-            ) => None,
-        };
+        let requested_scroll = options
+            .semantic_far_seek
+            .map(|far_seek| far_seek.scroll_top)
+            .or(match scroll_target {
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+                ) => Some(row),
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
+                    | crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
+                    | crate::content::transcript_buf::ScrollAnchor::Tail,
+                ) => None,
+            });
         let local_target = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
@@ -4841,17 +5436,41 @@ impl TranscriptDocument {
                 row.saturating_sub(row_offset),
             ),
             crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, anchor, delta },
+            ) => crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                row.saturating_sub(row_offset),
+                anchor,
+                delta,
+            ),
+            crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => crate::content::transcript_buf::ScrollTarget::visible_tail(),
         };
-        let mut inner =
-            self.plan_hydrated_projection(lua, width, theme, local_target, viewport_rows);
+        let (hydration_ids, hydration_plan) = self.content.projection.projection_hydration_ids(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            theme,
+            local_target,
+            viewport_rows,
+        );
+        let mut inner = self.hydrate_projection_plan(lua, theme, hydration_ids, hydration_plan)?;
         let mut loaded_rows = self.content.projection.estimated_total_rows(
             lua,
             &mut self.content.transcript.history,
             width,
         );
-        let mut total_rows = self.approximate_mixed_scrollbar_total_rows(width, loaded_rows);
+        if let Some(far_seek) = options.semantic_far_seek {
+            row_offset = far_seek.scroll_top.saturating_sub(inner.scroll_top());
+        } else if let (Some(requested), Some(total_rows)) =
+            (stable_requested_scroll, stable_total_rows)
+        {
+            let requested = requested.min(Self::max_scroll_for_total(total_rows, viewport_rows));
+            row_offset = requested.saturating_sub(inner.scroll_top());
+        }
+        let preserve_total_rows = self.records.total_count().is_some();
+        let mut total_rows =
+            stable_total_rows.unwrap_or_else(|| self.scrollbar_total_rows(width, loaded_rows));
         let target_reaches_tail = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
@@ -4860,6 +5479,9 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
                 | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
             ) => row >= total_rows.saturating_sub(viewport_row_count),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
+            ) => false,
         };
         if target_reaches_tail && active_range_reaches_tail {
             let planned_as_tail = matches!(
@@ -4869,19 +5491,27 @@ impl TranscriptDocument {
                 )
             );
             if !planned_as_tail && options.repin_at_semantic_tail {
-                inner = self.plan_hydrated_projection(
+                let (tail_hydration_ids, tail_hydration_plan) =
+                    self.content.projection.projection_hydration_ids(
+                        lua,
+                        &mut self.content.transcript.history,
+                        width,
+                        theme,
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        viewport_rows,
+                    );
+                inner = self.hydrate_projection_plan(
                     lua,
-                    width,
                     theme,
-                    crate::content::transcript_buf::ScrollTarget::visible_tail(),
-                    viewport_rows,
-                );
+                    tail_hydration_ids,
+                    tail_hydration_plan,
+                )?;
                 loaded_rows = self.content.projection.estimated_total_rows(
                     lua,
                     &mut self.content.transcript.history,
                     width,
                 );
-                total_rows = self.approximate_mixed_scrollbar_total_rows(width, loaded_rows);
+                total_rows = self.scrollbar_total_rows(width, loaded_rows);
             }
             row_offset = total_rows.saturating_sub(loaded_rows);
         }
@@ -4892,30 +5522,23 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollTarget::Visible(
                     crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
                     | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
-                ) if row < loaded_start => {
+                ) if row < loaded_start
+                    || (row.saturating_add(viewport_row_count) > loaded_end
+                        && loaded_end < total_rows) =>
+                {
                     let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
+                    let row_base = scroll_top.saturating_sub(viewport_row_count / 2);
                     Some(SparseProjectionGap {
                         scroll_top,
-                        row_base: scroll_top
-                            .saturating_sub(viewport_row_count / 2)
-                            .min(loaded_start),
-                        end: loaded_start,
+                        row_base,
+                        end: row_base
+                            .saturating_add(viewport_row_count.saturating_mul(2))
+                            .min(total_rows),
                     })
                 }
                 crate::content::transcript_buf::ScrollTarget::Visible(
-                    crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
-                    | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
-                ) if row >= loaded_end && loaded_end < total_rows => {
-                    let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
-                    Some(SparseProjectionGap {
-                        scroll_top,
-                        row_base: scroll_top
-                            .saturating_sub(viewport_row_count / 2)
-                            .max(loaded_end)
-                            .min(total_rows),
-                        end: total_rows,
-                    })
-                }
+                    crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
+                ) => None,
                 _ => None,
             }
         } else {
@@ -4924,10 +5547,12 @@ impl TranscriptDocument {
         let materialization = sparse_gap
             .map(TranscriptMaterializationPlan::UnloadedGap)
             .unwrap_or(TranscriptMaterializationPlan::Loaded(inner));
-        TranscriptProjectionPlan {
+        Ok(TranscriptProjectionPlan {
             materialization,
             row_offset,
             total_rows,
+            planned_loaded_rows: loaded_rows,
+            preserve_total_rows,
             requested_scroll,
             repin_at_semantic_tail: options.repin_at_semantic_tail,
             cursor_target: None,
@@ -4937,7 +5562,7 @@ impl TranscriptDocument {
             viewport_rows,
             trace_frame,
             trace_started_at,
-        }
+        })
     }
 
     fn project_unloaded_sparse_gap(
@@ -4954,11 +5579,14 @@ impl TranscriptDocument {
             .min(viewport_rows.saturating_mul(2))
             .min(total_rows.saturating_sub(gap.row_base));
         buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
-        self.viewport.state.top_anchor = Some(TranscriptScrollAnchor::EstimatedRow(gap.scroll_top));
-        self.viewport.state.top_offset_rows = 0;
+        self.viewport.state.resolved_anchor = Some(TranscriptResolvedViewportAnchor {
+            top: TranscriptScrollAnchor::EstimatedRow(gap.scroll_top),
+            offset_rows: 0,
+            scroll_top: gap.scroll_top,
+        });
         self.viewport.state.semantic_anchor = None;
         self.viewport.state.mode = TranscriptViewportMode::FarSeek;
-        self.viewport.state.resolved_scroll_top = Some(gap.scroll_top);
+        self.viewport.state.exact_viewport = None;
         self.viewport.state.pending_projection = None;
         crate::smelt_edit::MaterializedRows {
             clamped_scroll: gap.scroll_top,
@@ -4966,6 +5594,32 @@ impl TranscriptDocument {
             total_rows,
             materialized_rows,
         }
+    }
+
+    pub(crate) fn project_hydration_failure(
+        &mut self,
+        buf: &mut Buffer,
+        viewport_rows: u16,
+    ) -> AppliedTranscriptViewport {
+        buf.set_all_lines(vec![
+            "  (transcript unavailable: persisted content could not be hydrated)".to_string(),
+        ]);
+        self.viewport.state.resolved_anchor = Some(TranscriptResolvedViewportAnchor {
+            top: TranscriptScrollAnchor::EstimatedRow(0),
+            offset_rows: 0,
+            scroll_top: 0,
+        });
+        self.viewport.state.semantic_anchor = None;
+        self.viewport.state.mode = TranscriptViewportMode::Anchored;
+        self.viewport.state.exact_viewport = None;
+        self.viewport.state.pending_projection = None;
+        let rows = crate::smelt_edit::MaterializedRows {
+            clamped_scroll: 0,
+            row_base: 0,
+            total_rows: 1,
+            materialized_rows: 1,
+        };
+        self.applied_viewport(rows, viewport_rows, false, VerticalScroll::Pinned, None)
     }
 
     fn applied_viewport(
@@ -4979,7 +5633,11 @@ impl TranscriptDocument {
         let viewport_rows = RowIndex::from(viewport_rows.max(1));
         AppliedTranscriptViewport {
             materialized_rows: rows,
-            top_anchor: self.viewport.state.top_anchor.map(Self::trace_anchor),
+            top_anchor: self
+                .viewport
+                .state
+                .resolved_anchor
+                .map(|anchor| Self::trace_anchor(anchor.top)),
             scrollbar_total_rows: rows.total_rows,
             exact_visible_range: rows.clamped_scroll
                 ..rows
@@ -5003,6 +5661,8 @@ impl TranscriptDocument {
             materialization,
             row_offset,
             total_rows,
+            planned_loaded_rows,
+            preserve_total_rows,
             requested_scroll,
             repin_at_semantic_tail,
             cursor_target,
@@ -5021,6 +5681,11 @@ impl TranscriptDocument {
             trace_started_at,
         };
         let mut rows = match materialization {
+            TranscriptMaterializationPlan::ExactRowTape(exact) => self
+                .content
+                .projection
+                .apply_exact_row_tape_scroll(buf, exact)
+                .expect("exact transcript row tape changed before frame application"),
             TranscriptMaterializationPlan::UnloadedGap(gap) => {
                 let rows = self.project_unloaded_sparse_gap(buf, total_rows, viewport_rows, gap);
                 let scroll_state = self.projected_scroll_state(false);
@@ -5034,6 +5699,19 @@ impl TranscriptDocument {
                 .content
                 .projection
                 .project_planned(lua, buf, &mut self.content.transcript.history, theme, inner),
+        };
+        let exact_tape = self
+            .content
+            .projection
+            .exact_row_tape_handle(rows)
+            .expect("projected transcript rows must belong to the current exact row tape");
+        let local_total_rows = rows.total_rows;
+        let total_rows = if preserve_total_rows {
+            total_rows
+        } else {
+            total_rows
+                .saturating_sub(planned_loaded_rows)
+                .saturating_add(local_total_rows)
         };
         self.observe_exact_loaded_record_rows();
         let cursor_range =
@@ -5060,8 +5738,8 @@ impl TranscriptDocument {
             width,
             rows.clamped_scroll,
             viewport_rows,
-            scroll_anchor,
             row_offset,
+            scroll_anchor,
         );
         let captured_semantic_anchor = self
             .content_anchor_at_or_after_row_with_offset(
@@ -5073,10 +5751,26 @@ impl TranscriptDocument {
             )
             .map(|(anchor, _)| anchor.into());
         self.viewport.state.semantic_anchor = semantic_anchor.or(captured_semantic_anchor);
-        self.viewport.state.resolved_scroll_top = Some(rows.clamped_scroll);
+        let active_record_range = self
+            .records
+            .active_range()
+            .map(|range| (range.start.get(), range.end.get()));
+        self.viewport.state.exact_viewport = Some(TranscriptExactViewport {
+            tape: exact_tape,
+            row_offset,
+            global_total_rows: rows.total_rows,
+            active_record_range,
+        });
         self.viewport.state.pending_projection = None;
         let reached_semantic_tail = repin_at_semantic_tail
-            && self.projected_viewport_reached_semantic_tail(lua, width, rows, viewport_rows);
+            && self.projected_viewport_reached_semantic_tail(
+                lua,
+                width,
+                rows,
+                viewport_rows,
+                row_offset,
+                local_total_rows,
+            );
         let scroll_state = self.projected_scroll_state(reached_semantic_tail);
         if matches!(scroll_state, VerticalScroll::Tail) {
             self.viewport.state.needs_tail_repin = false;
@@ -6210,6 +6904,28 @@ mod document_tests {
     }
 
     #[test]
+    fn zero_height_empty_projection_keeps_exact_row_tape() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let mut document = TranscriptDocument::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(400), Default::default());
+
+        for _ in 0..2 {
+            let plan = document
+                .plan_projection_measured(
+                    &lua,
+                    80,
+                    &theme,
+                    crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    0,
+                )
+                .expect("projection hydration");
+            let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+            assert_eq!(applied.materialized_rows.materialized_rows, 0);
+        }
+    }
+
+    #[test]
     fn sparse_tail_document_reports_virtual_prefix_rows() {
         let lua = LuaRuntime::new();
         let mut source = Transcript::new();
@@ -6258,7 +6974,8 @@ mod document_tests {
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(401), Default::default());
 
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
 
         assert!(rows.total_rows > rows.materialized_rows);
         assert!(rows.row_base >= offset);
@@ -6295,7 +7012,8 @@ mod document_tests {
             10,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(409), Default::default());
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
 
         let frames = document.take_scroll_trace_frames();
         assert_eq!(frames.len(), 1);
@@ -6353,7 +7071,12 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(0),
             viewport_rows,
         );
-        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let applied = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert_eq!(applied.materialized_rows.clamped_scroll, 0);
         assert!(matches!(
@@ -6393,7 +7116,12 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(10),
             viewport_rows,
         );
-        let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let first = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
         assert_eq!(first.materialized_rows.clamped_scroll, 10);
 
         let rewritten_summary = (0..5)
@@ -6426,7 +7154,12 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let applied = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert_eq!(applied.materialized_rows.clamped_scroll, 7);
     }
@@ -6447,7 +7180,8 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(8),
             viewport_rows,
         );
-        let first = document.project_planned(&lua, &mut buf, &theme, plan);
+        let first =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         assert_eq!(first.clamped_scroll, 8);
 
         document.set_scroll_trace_enabled(true);
@@ -6464,7 +7198,12 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let applied = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert_eq!(
             applied.materialized_rows.clamped_scroll,
@@ -6479,7 +7218,10 @@ mod document_tests {
         );
         assert_eq!(
             frames[0].projection_target,
-            TranscriptProjectionTargetTrace::ExactRow(first.clamped_scroll)
+            TranscriptProjectionTargetTrace::StableRowDelta {
+                row: first.clamped_scroll,
+                delta: 0,
+            }
         );
     }
 
@@ -6499,7 +7241,8 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(20),
             viewport_rows,
         );
-        let first = document.project_planned(&lua, &mut buf, &theme, plan);
+        let first =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         assert_eq!(first.clamped_scroll, 20);
 
         document.set_scroll_trace_enabled(true);
@@ -6511,14 +7254,19 @@ mod document_tests {
             width,
             &theme,
             TranscriptViewportProjectionInput {
-                fallback_scroll_top: first.clamped_scroll.saturating_sub(3),
+                fallback_scroll_top: first.clamped_scroll,
                 follow_tail: false,
                 width_changed: false,
                 previous_width: None,
             },
             viewport_rows,
         );
-        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let applied = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert_eq!(applied.materialized_rows.clamped_scroll, 17);
         let frames = document.take_scroll_trace_frames();
@@ -6529,7 +7277,67 @@ mod document_tests {
         );
         assert_eq!(
             frames[0].projection_target,
-            TranscriptProjectionTargetTrace::ExactRow(17)
+            TranscriptProjectionTargetTrace::StableRowDelta { row: 20, delta: -3 }
+        );
+    }
+
+    #[test]
+    fn exact_tape_local_delta_preserves_sparse_global_scrollbar_total() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 6;
+        let records = transcript_records(1_000);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            200..800,
+            None,
+        ));
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(416), Default::default());
+        let loaded_start = document.approximate_sparse_prefix_row_offset(width);
+        let initial_scroll = loaded_start.saturating_add(300);
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(initial_scroll),
+            viewport_rows,
+        );
+        let first = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
+        assert!(
+            first.materialized_rows.total_rows > 600,
+            "test requires a global extent larger than the local record window"
+        );
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: 3 });
+        let plan = document
+            .plan_viewport_projection_measured(
+                &lua,
+                width,
+                &theme,
+                TranscriptViewportProjectionInput {
+                    fallback_scroll_top: first.materialized_rows.clamped_scroll,
+                    follow_tail: false,
+                    width_changed: false,
+                    previous_width: None,
+                },
+                viewport_rows,
+            )
+            .expect("projection hydration");
+        assert!(matches!(
+            plan.materialization,
+            TranscriptMaterializationPlan::ExactRowTape(_)
+        ));
+        let local = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(
+            local.materialized_rows.total_rows, first.materialized_rows.total_rows,
+            "exact local movement must preserve the sparse global scrollbar extent"
         );
     }
 
@@ -6559,7 +7367,12 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let tail = document.project_applied_viewport(&lua, &mut buf, &theme, tail_plan);
+        let tail = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            tail_plan.expect("projection hydration"),
+        );
         assert!(!tail.placeholder_rows_visible);
 
         document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -10_000 });
@@ -6575,16 +7388,24 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let local = document.project_applied_viewport(&lua, &mut buf, &theme, local_plan);
+        let local = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            local_plan.expect("projection hydration"),
+        );
         assert!(
             !local.placeholder_rows_visible,
             "local deltas must stay on exact loaded content instead of sparse placeholders"
         );
         assert!(local.top_anchor.is_some());
 
+        let far_total_rows = document.approximate_scrollbar_total_rows(&lua, width);
         document.set_pending_scroll_intent(TranscriptScrollIntent::ScrollbarFraction {
             numerator: 0,
             denominator: 1,
+            total_rows: far_total_rows,
+            viewport_rows,
         });
         let far_plan = document.plan_viewport_projection_measured(
             &lua,
@@ -6598,7 +7419,12 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let far = document.project_applied_viewport(&lua, &mut buf, &theme, far_plan);
+        let far = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            far_plan.expect("projection hydration"),
+        );
         assert!(
             far.placeholder_rows_visible,
             "far seek intents may expose inert sparse placeholders"
@@ -6628,7 +7454,12 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(loaded_start),
             viewport_rows,
         );
-        let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let first = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
         assert!(!first.placeholder_rows_visible);
         assert!(active_history_contains(&document, "block 60"));
 
@@ -6638,14 +7469,19 @@ mod document_tests {
             width,
             &theme,
             TranscriptViewportProjectionInput {
-                fallback_scroll_top: first.materialized_rows.clamped_scroll.saturating_sub(4),
+                fallback_scroll_top: first.materialized_rows.clamped_scroll,
                 follow_tail: false,
                 width_changed: false,
                 previous_width: None,
             },
             viewport_rows,
         );
-        let local = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let local = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert!(
             !local.placeholder_rows_visible,
@@ -6656,13 +7492,24 @@ mod document_tests {
             .active_range
             .as_ref()
             .expect("active adjacent record window");
-        assert_eq!(active.end.get(), 80);
         assert!(active.start.get() < 60);
+        assert!(active.end.get() >= 80);
+        assert!(
+            active.end.get().saturating_sub(active.start.get())
+                <= document
+                    .record_window_count(width, viewport_rows, records.len())
+                    .saturating_mul(TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER)
+                    .saturating_add(TRANSCRIPT_RECORD_PREFIX_STRIDE.saturating_sub(1))
+                    .min(records.len())
+        );
         assert!(active_history_contains(&document, "block 59"));
         assert!(active_history_contains(&document, "block 60"));
         assert!(matches!(
-            document.viewport.state.top_anchor,
-            Some(TranscriptScrollAnchor::Content(_))
+            document.viewport.state.resolved_anchor,
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(_),
+                ..
+            })
         ));
         assert!(local.materialized_rows.clamped_scroll < first.materialized_rows.clamped_scroll);
     }
@@ -6693,7 +7540,12 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(top),
             viewport_rows,
         );
-        let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let first = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
         assert!(!first.placeholder_rows_visible);
         assert!(active_history_contains(&document, "block 39"));
 
@@ -6703,14 +7555,19 @@ mod document_tests {
             width,
             &theme,
             TranscriptViewportProjectionInput {
-                fallback_scroll_top: first.materialized_rows.clamped_scroll.saturating_add(4),
+                fallback_scroll_top: first.materialized_rows.clamped_scroll,
                 follow_tail: false,
                 width_changed: false,
                 previous_width: None,
             },
             viewport_rows,
         );
-        let local = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let local = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert!(
             !local.placeholder_rows_visible,
@@ -6721,13 +7578,25 @@ mod document_tests {
             .active_range
             .as_ref()
             .expect("active adjacent record window");
-        assert_eq!(active.start.get(), 20);
+        assert!(active.start.get() <= 20);
         assert!(active.end.get() > 40);
+        assert!(
+            active.end.get().saturating_sub(active.start.get())
+                <= document
+                    .record_window_count(width, viewport_rows, records.len())
+                    .saturating_mul(TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER)
+                    .saturating_add(TRANSCRIPT_RECORD_PREFIX_STRIDE.saturating_sub(1))
+                    .min(records.len()),
+            "adjacent window grew beyond its memory bound: active={active:?}"
+        );
         assert!(active_history_contains(&document, "block 39"));
         assert!(active_history_contains(&document, "block 40"));
         assert!(matches!(
-            document.viewport.state.top_anchor,
-            Some(TranscriptScrollAnchor::Content(_))
+            document.viewport.state.resolved_anchor,
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(_),
+                ..
+            })
         ));
         assert!(local.materialized_rows.clamped_scroll > first.materialized_rows.clamped_scroll);
     }
@@ -6762,7 +7631,8 @@ mod document_tests {
             10,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(410), Default::default());
-        let _rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let _rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
 
         let frames = document.take_scroll_trace_frames();
         assert_eq!(frames.len(), 1);
@@ -6795,7 +7665,8 @@ mod document_tests {
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(402), Default::default());
 
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
 
         assert_eq!(rows.clamped_scroll, target);
         assert!(rows.row_base <= target);
@@ -6965,7 +7836,7 @@ mod document_tests {
         let records = transcript_records(100);
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
-            40..48,
+            64..72,
             None,
         ));
         let width = 80;
@@ -6979,19 +7850,23 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(original_top),
             viewport_rows,
         );
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         assert_eq!(rows.clamped_scroll, original_top);
-        assert!(buf.lines().iter().any(|line| line.contains("block 40")));
+        assert!(buf.lines().iter().any(|line| line.contains("block 64")));
 
         let refined_top = original_top.saturating_add(25);
-        document.extent_index.record_rows_estimate_cache.insert(
-            RecordRowsEstimateKey {
-                width,
-                start: 0,
-                end: 40,
-            },
-            refined_top,
-        );
+        for prefix_rows in document
+            .extent_index
+            .prefix_index
+            .as_mut()
+            .expect("extent prefix index")
+            .prefix_rows
+            .iter_mut()
+            .skip(1)
+        {
+            *prefix_rows = prefix_rows.saturating_add(25);
+        }
         let plan = document.plan_viewport_projection_measured(
             &lua,
             width,
@@ -7004,10 +7879,15 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
 
-        assert_eq!(rows.clamped_scroll, refined_top);
-        assert!(buf.lines().iter().any(|line| line.contains("block 40")));
+        assert_eq!(
+            rows.clamped_scroll, original_top,
+            "extent refinement must not move the exact semantic viewport coordinate"
+        );
+        assert_ne!(rows.clamped_scroll, refined_top);
+        assert!(buf.lines().iter().any(|line| line.contains("block 64")));
     }
 
     #[test]
@@ -7103,6 +7983,86 @@ mod document_tests {
 
     fn varied_transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
         varied_transcript(count).history.block_records()
+    }
+
+    fn extent_accuracy_transcript(count: usize) -> Transcript {
+        let mut source = Transcript::new();
+        for idx in 0..count {
+            let marker = format!("extent-{idx:04}");
+            match idx % 6 {
+                0 => {
+                    let lines = if idx % 42 == 0 { 120 } else { 4 + idx % 19 };
+                    source.push(Block::Text {
+                        content: (0..lines)
+                            .map(|line| format!("{marker} short hard line {line}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    });
+                }
+                1 => source.push(Block::Text {
+                    content: format!(
+                        "{marker} {}",
+                        "one very long markdown paragraph with `inline code`, **bold**, and wide 語 text "
+                            .repeat(8 + idx % 23)
+                    ),
+                }),
+                2 => source.push(Block::Text {
+                    content: format!(
+                        "# {marker}\n\n| item | value |\n| --- | ---: |\n| alpha | {idx} |\n\n- {}\n\n```rust\nlet extent = {idx};\n```",
+                        "list content with wrapping pressure ".repeat(4 + idx % 7)
+                    ),
+                }),
+                3 => source.push(Block::Thinking {
+                    title: Some(format!("Reasoning {marker}")),
+                    summary_titles: vec![format!("Summary {idx}")],
+                    content: format!(
+                        "{}\n{}",
+                        "thinking paragraph with several wrapped words ".repeat(5 + idx % 13),
+                        (0..idx % 11)
+                            .map(|line| format!("detail {line}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                    kind: protocol::ReasoningKind::default(),
+                }),
+                4 => source.push(Block::User {
+                    text: format!(
+                        "{marker} {}",
+                        "user request with Unicode 語界 and wrapped context ".repeat(3 + idx % 9)
+                    ),
+                    image_labels: vec![format!("image-{idx}")],
+                    command: false,
+                }),
+                _ => source.push_tool_call(
+                    Block::ToolCall {
+                        call_id: format!("extent-call-{idx}"),
+                        name: "read_file".into(),
+                        summary: protocol::StyledLines::from_plain(format!(
+                            "read {marker}.rs"
+                        )),
+                        args: std::collections::HashMap::from([(
+                            "file_path".into(),
+                            serde_json::json!(format!("src/{marker}.rs")),
+                        )]),
+                    },
+                    smelt_core::transcript_model::ToolState {
+                        status: smelt_core::transcript_model::ToolStatus::Ok,
+                        elapsed: Some(std::time::Duration::from_millis(25)),
+                        output: Some(Box::new(smelt_core::transcript_model::ToolOutput {
+                            content: format!(
+                                "{marker} output\n{}",
+                                "compact tool detail\n".repeat(2 + idx % 5)
+                            ),
+                            is_error: false,
+                            metadata: None,
+                        })),
+                        user_message: None,
+                        preview_output: None,
+                    },
+                ),
+            }
+        }
+        source
     }
 
     fn records_with_ids(
@@ -7377,6 +8337,7 @@ mod document_tests {
             let max_records = document
                 .record_window_count(width, viewport_rows, total)
                 .saturating_mul(TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER)
+                .saturating_add(TRANSCRIPT_RECORD_PREFIX_STRIDE.saturating_sub(1))
                 .min(total);
             let active_len = active.end.get().saturating_sub(active.start.get());
             assert!(
@@ -7390,6 +8351,20 @@ mod document_tests {
             rows.materialized_rows <= max_materialized_rows,
             "scroll step {step} materialized too many rows: max={max_materialized_rows}, rows={rows:?}"
         );
+    }
+
+    fn materialized_viewport_lines(
+        buf: &Buffer,
+        rows: &crate::smelt_edit::MaterializedRows,
+        viewport_rows: u16,
+    ) -> Vec<String> {
+        let start = rows.clamped_scroll.saturating_sub(rows.row_base) as usize;
+        (start
+            ..start
+                .saturating_add(viewport_rows as usize)
+                .min(buf.line_count()))
+            .map(|row| buf.get_line(row).unwrap_or_default().to_string())
+            .collect()
     }
 
     fn active_history_contains(document: &TranscriptDocument, needle: &str) -> bool {
@@ -7424,7 +8399,7 @@ mod document_tests {
                 crate::content::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
-            document.project_planned(&lua, &mut buf, &theme, plan)
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"))
         };
         assert_sparse_projection_is_bounded(&document, &rows, width, viewport_rows, 0);
 
@@ -7441,7 +8416,12 @@ mod document_tests {
                 crate::content::transcript_buf::ScrollTarget::visible_row(requested),
                 viewport_rows,
             );
-            rows = document.project_planned(&lua, &mut buf, &theme, plan);
+            rows = document.project_planned(
+                &lua,
+                &mut buf,
+                &theme,
+                plan.expect("projection hydration"),
+            );
             assert_sparse_projection_is_bounded(&document, &rows, width, viewport_rows, step + 1);
 
             assert!(
@@ -7490,7 +8470,14 @@ mod document_tests {
                 crate::content::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
-            document.project_planned(&lua, &mut buf, &theme, plan)
+            document
+                .project_applied_viewport(
+                    &lua,
+                    &mut buf,
+                    &theme,
+                    plan.expect("projection hydration"),
+                )
+                .materialized_rows
         };
         assert_sparse_projection_is_bounded(&document, &rows, width, viewport_rows, 0);
 
@@ -7499,25 +8486,46 @@ mod document_tests {
                 break;
             }
             let previous = rows.clamped_scroll;
-            let requested = previous.saturating_sub(3);
-            let plan = document.plan_projection_measured(
+            let before = materialized_viewport_lines(&buf, &rows, viewport_rows);
+            document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -3 });
+            let plan = document.plan_viewport_projection_measured(
                 &lua,
                 width,
                 &theme,
-                crate::content::transcript_buf::ScrollTarget::visible_row(requested),
+                TranscriptViewportProjectionInput {
+                    fallback_scroll_top: previous,
+                    follow_tail: false,
+                    width_changed: false,
+                    previous_width: None,
+                },
                 viewport_rows,
             );
-            rows = document.project_planned(&lua, &mut buf, &theme, plan);
+            let applied = document.project_applied_viewport(
+                &lua,
+                &mut buf,
+                &theme,
+                plan.expect("projection hydration"),
+            );
+            rows = applied.materialized_rows;
             assert_sparse_projection_is_bounded(&document, &rows, width, viewport_rows, step + 1);
 
+            let after = materialized_viewport_lines(&buf, &rows, viewport_rows);
             assert_eq!(
-                rows.clamped_scroll, requested,
-                "scroll step {step} did not honor request: previous={previous}, rows={rows:?}, active={:?}",
+                after.len(),
+                before.len(),
+                "scroll step {step} changed visible row count: previous={previous}, rows={rows:?}, active={:?}",
+                document.records.active_range,
+            );
+            assert_eq!(
+                &after[3..],
+                &before[..before.len().saturating_sub(3)],
+                "scroll step {step} did not move by three exact tape rows: previous={previous}, rows={rows:?}, active={:?}",
                 document.records.active_range,
             );
             assert!(
-                buf.lines().iter().any(|line| !line.is_empty()),
-                "scroll step {step} materialized only sparse placeholders: requested={requested}, rows={rows:?}, active={:?}",
+                !applied.placeholder_rows_visible
+                    && buf.lines().iter().any(|line| !line.is_empty()),
+                "scroll step {step} materialized only sparse placeholders: rows={rows:?}, active={:?}",
                 document.records.active_range,
             );
         }
@@ -7550,13 +8558,67 @@ mod document_tests {
             scroll_target,
             ctx.viewport_rows,
         );
-        let rows = document.project_planned(ctx.lua, buf, ctx.theme, plan);
+        let rows =
+            document.project_planned(ctx.lua, buf, ctx.theme, plan.expect("projection hydration"));
         win.apply_materialized_rows(rows);
         win.set_resolved_scroll(rows.clamped_scroll);
         win.ensure_layout(buf, ctx.width);
         win.refresh_document_view_position_from_buffer(buf);
         if let Some(screen_row) = cursor_screen_row {
             win.restore_cursor_screen_row(buf, screen_row);
+        }
+        win.sync_row_render_state(buf, ctx.viewport_rows, std::time::Instant::now());
+        rows
+    }
+
+    fn project_local_delta_into_window(
+        document: &mut TranscriptDocument,
+        win: &mut crate::smelt_edit::Window,
+        buf: &mut Buffer,
+        ctx: ProjectionHarness<'_>,
+        fallback_scroll_top: RowIndex,
+        delta: isize,
+    ) -> crate::smelt_edit::MaterializedRows {
+        let cursor_screen_row = win.cursor_screen_row(ctx.viewport_rows);
+        let drag_endpoint_screen_row = win
+            .document_view_state()
+            .drag_endpoint
+            .and_then(|endpoint| endpoint.row.checked_sub(win.scroll_top()))
+            .filter(|row| *row < RowIndex::from(ctx.viewport_rows))
+            .map(|row| row as u16);
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: delta });
+        let plan = document.plan_viewport_projection_measured(
+            ctx.lua,
+            ctx.width,
+            ctx.theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            ctx.viewport_rows,
+        );
+        let rows = document
+            .project_applied_viewport(ctx.lua, buf, ctx.theme, plan.expect("projection hydration"))
+            .materialized_rows;
+        win.apply_materialized_rows(rows);
+        win.set_resolved_scroll(rows.clamped_scroll);
+        win.ensure_layout(buf, ctx.width);
+        win.refresh_document_view_position_from_buffer(buf);
+        if let Some(screen_row) = cursor_screen_row {
+            win.restore_cursor_screen_row(buf, screen_row);
+        }
+        if let Some(screen_row) = drag_endpoint_screen_row {
+            win.restore_document_view_screen_rows(
+                buf,
+                crate::smelt_edit::DocumentViewScreenRowRestore {
+                    cursor: None,
+                    cursor_selection:
+                        crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection,
+                    drag_endpoint: Some(screen_row),
+                },
+            );
         }
         win.sync_row_render_state(buf, ctx.viewport_rows, std::time::Instant::now());
         rows
@@ -7703,7 +8765,7 @@ mod document_tests {
             width,
             viewport_rows,
         };
-        project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), true);
+        let mut rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), true);
         let top = win.scroll_top();
         let mut state = win.document_view_state();
         state.cursor = crate::smelt_edit::DocPosition {
@@ -7723,23 +8785,33 @@ mod document_tests {
                 break;
             }
             let previous = win.scroll_top();
+            let before = materialized_viewport_lines(&buf, &rows, viewport_rows);
             assert!(
                 win.drag_autoscroll_step(&buf, viewport_rows, -1),
                 "drag step {step} did not move before projection"
             );
             let requested = win.scroll_top();
-            let rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+            rows = project_local_delta_into_window(
+                &mut document,
+                &mut win,
+                &mut buf,
+                ctx(),
+                previous,
+                -1,
+            );
             let state = win.document_view_state();
-            assert!(
-                win.scroll_top() < previous,
-                "drag step {step} stalled or reversed: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}, state={state:?}",
-                win.scroll_top(),
+            let after = materialized_viewport_lines(&buf, &rows, viewport_rows);
+            assert_eq!(
+                after.len(),
+                before.len(),
+                "drag step {step} changed visible row count: previous={previous}, requested={requested}, rows={rows:?}, active={:?}",
                 document.records.active_range,
             );
             assert_eq!(
-                win.scroll_top(),
-                requested,
-                "drag step {step} projection did not honor autoscroll request"
+                &after[1..],
+                &before[..before.len().saturating_sub(1)],
+                "drag step {step} did not move by one exact tape row: previous={previous}, requested={requested}, rows={rows:?}, active={:?}",
+                document.records.active_range,
             );
             assert_eq!(
                 state.drag_endpoint.map(|pos| pos.row),
@@ -7767,7 +8839,12 @@ mod document_tests {
                 crate::content::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
-            full_document.project_planned(&lua, &mut full_buf, &theme, plan)
+            full_document.project_planned(
+                &lua,
+                &mut full_buf,
+                &theme,
+                plan.expect("projection hydration"),
+            )
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -7785,7 +8862,12 @@ mod document_tests {
                 crate::content::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
-            sparse_document.project_planned(&lua, &mut sparse_buf, &theme, plan)
+            sparse_document.project_planned(
+                &lua,
+                &mut sparse_buf,
+                &theme,
+                plan.expect("projection hydration"),
+            )
         };
 
         assert_eq!(sparse_rows.total_rows, full_rows.total_rows);
@@ -7797,6 +8879,98 @@ mod document_tests {
         .expect("scrollbar");
         assert_eq!(bar.total_rows, full_rows.total_rows);
         assert_eq!(bar.viewport_rows, viewport_rows);
+    }
+
+    #[test]
+    fn resumed_sparse_scrollbar_extent_tracks_heterogeneous_rendered_truth() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let viewport_rows = 18;
+        let source = extent_accuracy_transcript(600);
+        let records = source.history.block_records();
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let store =
+            smelt_store::SessionReader::open_database(dir.path().join("session.db")).unwrap();
+
+        for width in [24, 47, 80, 137] {
+            let mut full_document =
+                TranscriptDocument::from_transcript(extent_accuracy_transcript(records.len()));
+            let exact_total = full_document.build_rows(&lua, width, &theme).len() as RowIndex;
+            let exact_layout = full_document.materialize_exact_loaded_block_layout(&lua, width);
+
+            let loaded = LoadedTranscript::tail_from_sqlite_dir(
+                dir.path().to_path_buf(),
+                width,
+                viewport_rows,
+            )
+            .expect("tail transcript");
+            let mut sparse_document = TranscriptDocument::from_loaded_transcript(loaded);
+            let estimated_total = sparse_document.approximate_scrollbar_total_rows(&lua, width);
+            let total_error = estimated_total.abs_diff(exact_total);
+            assert!(
+                total_error.saturating_mul(100) <= exact_total.saturating_mul(10),
+                "width {width} extent error exceeded 10%: exact={exact_total}, estimated={estimated_total}, error={total_error}"
+            );
+            let exact_bar = crate::smelt_edit::ScrollbarState::new(
+                width.saturating_sub(1),
+                exact_total,
+                viewport_rows,
+            )
+            .expect("exact scrollbar");
+            let estimated_bar = crate::smelt_edit::ScrollbarState::new(
+                width.saturating_sub(1),
+                estimated_total,
+                viewport_rows,
+            )
+            .expect("estimated scrollbar");
+
+            for record_index in [records.len() / 4, records.len() / 2, records.len() * 3 / 4] {
+                let mut prefix_document =
+                    TranscriptDocument::from_transcript(extent_accuracy_transcript(record_index));
+                let exact_prefix =
+                    prefix_document.build_rows(&lua, width, &theme).len() as RowIndex;
+                let estimated_prefix = store
+                    .transcript_record_estimated_rows((0..record_index).into(), width)
+                    .unwrap() as RowIndex;
+                let exact_fraction = exact_prefix.saturating_mul(10_000) / exact_total.max(1);
+                let estimated_fraction =
+                    estimated_prefix.saturating_mul(10_000) / estimated_total.max(1);
+                let fraction_error = exact_fraction.abs_diff(estimated_fraction);
+                assert!(
+                    fraction_error <= 500,
+                    "width {width} prefix fraction error exceeded 5 points at record {record_index}: exact={exact_fraction}, estimated={estimated_fraction}, exact_prefix={exact_prefix}, estimated_prefix={estimated_prefix}"
+                );
+                let exact_thumb = exact_bar.metrics(exact_prefix).thumb_top;
+                let estimated_thumb = estimated_bar.metrics(estimated_prefix).thumb_top;
+                assert!(
+                    exact_thumb.abs_diff(estimated_thumb) <= 1,
+                    "width {width} thumb position differed by more than one cell at record {record_index}: exact={exact_thumb}, estimated={estimated_thumb}"
+                );
+            }
+
+            for thumb_top in [4, 8, 13] {
+                let exact_row = exact_bar.metrics(0).scroll_from_thumb_top(thumb_top);
+                let estimated_row = estimated_bar.metrics(0).scroll_from_thumb_top(thumb_top);
+                let exact_block_id = exact_layout
+                    .iter()
+                    .rev()
+                    .find(|(_, first_row, _)| *first_row <= exact_row)
+                    .map(|(block_id, _, _)| *block_id)
+                    .expect("exact block at scrollbar position");
+                let exact_record = full_document
+                    .record_index_for_block_id(exact_block_id)
+                    .expect("exact source record");
+                let estimated_record = sparse_document
+                    .estimated_record_for_display_row(width, estimated_row)
+                    .expect("estimated source record")
+                    .0;
+                assert!(
+                    exact_record.abs_diff(estimated_record) <= records.len() / 20,
+                    "width {width} thumb {thumb_top} selected a source position more than 5% away: exact_record={exact_record}, estimated_record={estimated_record}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7817,7 +8991,12 @@ mod document_tests {
                 crate::content::transcript_buf::ScrollTarget::visible_tail(),
                 viewport_rows,
             );
-            full_document.project_planned(&lua, &mut full_buf, &theme, plan)
+            full_document.project_planned(
+                &lua,
+                &mut full_buf,
+                &theme,
+                plan.expect("projection hydration"),
+            )
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -7967,11 +9146,11 @@ mod document_tests {
         let theme = Theme::default();
         let width = 80;
         let viewport_rows = 6;
-        let record_index = 50;
+        let record_index = 100;
         let top_padding = 2;
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
-        for idx in 0..100 {
+        for idx in 0..200 {
             if idx == record_index {
                 source.push(Block::User {
                     text: format!("user {idx}"),
@@ -7988,7 +9167,7 @@ mod document_tests {
         crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
-            80..100,
+            160..200,
             Some(dir.path().to_path_buf()),
         ));
         let block_id = BlockId::new(record_index as u64);
@@ -8012,7 +9191,8 @@ mod document_tests {
             viewport_rows,
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(911), Default::default());
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         let first_scroll = rows.clamped_scroll;
         let reveal = document
             .record_block_reveal_position(&lua, width, record_index, 0, top_padding, viewport_rows)
@@ -8022,7 +9202,7 @@ mod document_tests {
             reveal.target_row.saturating_sub(rows.clamped_scroll),
             top_padding
         );
-        assert!(active_history_contains(&document, "user 50"));
+        assert!(active_history_contains(&document, "user 100"));
 
         let active_start = document
             .records
@@ -8031,15 +9211,18 @@ mod document_tests {
             .expect("active reveal window")
             .start
             .get();
-        assert!(active_start > 0);
-        document.extent_index.record_rows_estimate_cache.insert(
-            RecordRowsEstimateKey {
-                width,
-                start: 0,
-                end: active_start,
-            },
-            first_scroll.saturating_add(123),
-        );
+        assert!(active_start >= TRANSCRIPT_RECORD_PREFIX_STRIDE);
+        for prefix_rows in document
+            .extent_index
+            .prefix_index
+            .as_mut()
+            .expect("extent prefix index")
+            .prefix_rows
+            .iter_mut()
+            .skip(1)
+        {
+            *prefix_rows = prefix_rows.saturating_add(123);
+        }
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
@@ -8058,7 +9241,8 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         assert_ne!(rows.clamped_scroll, first_scroll);
         let reveal = document
             .record_block_reveal_position(&lua, width, record_index, 0, top_padding, viewport_rows)
@@ -8119,9 +9303,13 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
-        let anchor = match document.viewport.state.top_anchor {
-            Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
+        let rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
+        let anchor = match document.viewport.state.resolved_anchor {
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(anchor),
+                ..
+            }) => anchor,
             other => panic!("expected content viewport anchor, got {other:?}"),
         };
         assert_eq!(anchor.record_index, record_index);
@@ -8161,10 +9349,14 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let _rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let _rows =
+            document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         assert!(active_history_contains(&document, "user 50"));
-        let anchor_after = match document.viewport.state.top_anchor {
-            Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
+        let anchor_after = match document.viewport.state.resolved_anchor {
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(anchor),
+                ..
+            }) => anchor,
             other => panic!("expected preserved content viewport anchor, got {other:?}"),
         };
         assert_eq!(anchor_after.record_index, record_index);
@@ -8291,12 +9483,20 @@ mod document_tests {
             },
             viewport_rows,
         );
-        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        let applied = document.project_applied_viewport(
+            &lua,
+            &mut buf,
+            &theme,
+            plan.expect("projection hydration"),
+        );
 
         assert!(!applied.placeholder_rows_visible);
         assert!(active_history_contains(&document, "block 40"));
-        let anchor = match document.viewport.state.top_anchor {
-            Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
+        let anchor = match document.viewport.state.resolved_anchor {
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(anchor),
+                ..
+            }) => anchor,
             other => panic!("far seek should re-anchor to loaded content, got {other:?}"),
         };
         assert_eq!(anchor.record_index, 40);
@@ -9734,7 +10934,7 @@ mod tests {
     }
 
     #[test]
-    fn approximate_row_seek_uses_record_prefix_estimates() {
+    fn approximate_row_seek_uses_prefix_index() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..300).map(test_record_record).collect::<Vec<_>>();
@@ -9773,7 +10973,7 @@ mod tests {
         let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
             .expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
-        let before = document.approximate_mixed_scrollbar_total_rows(10, 1_000);
+        let before = document.scrollbar_total_rows(10, 1_000);
 
         let active_start = document.records.active_range().unwrap().start.get();
         let block_id = document
@@ -9803,7 +11003,7 @@ mod tests {
         document
             .extent_index
             .observe_exact_loaded_record_rows(&document.records.sparse, snapshot);
-        let after = document.approximate_mixed_scrollbar_total_rows(10, 1_000);
+        let after = document.scrollbar_total_rows(10, 1_000);
 
         assert_eq!(before, after);
     }

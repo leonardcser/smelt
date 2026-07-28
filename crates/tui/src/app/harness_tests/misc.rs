@@ -341,6 +341,166 @@ fn display_only_resume_sets_resume_hint_state() {
 }
 
 #[test]
+fn resume_overlay_materializes_tail_after_collapsed_estimates_move_viewport() {
+    let guard = test_home_guard();
+    {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            text: "resume preview regression".into(),
+            image_labels: Vec::new(),
+            command: false,
+        });
+        for index in 0..80 {
+            let call_id = format!("resume-preview-tool-{index}");
+            app.start_tool(
+                call_id.clone(),
+                "bash".into(),
+                protocol::StyledLines::from_plain(format!("printf tool-{index}")),
+                std::collections::HashMap::new(),
+            );
+            app.finish_tool(
+                &call_id,
+                smelt_core::transcript_model::ToolStatus::Ok,
+                Some(Box::new(smelt_core::transcript_model::ToolOutput {
+                    content: format!("tool-{index} output ").repeat(180),
+                    is_error: false,
+                    metadata: None,
+                })),
+                None,
+            );
+        }
+        app.save_session_and_flush();
+    }
+
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.set_terminal_size(120, 32);
+    app.reconcile_session_catalog()
+        .expect("reconcile resume preview fixture");
+
+    assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
+    app.settle_lua();
+    app.render_silent();
+    app.feed_one(SourceEvent::Tick(50));
+    app.app.tick_timers();
+    app.settle_lua();
+    app.render_silent();
+
+    assert!(app.state().active_modal.is_some());
+    let preview = app
+        .materialized_window_containing("tool-79")
+        .expect("resume preview should materialize the saved tail");
+    assert!(
+        preview
+            .lines
+            .iter()
+            .all(|line| !line.contains("session preview unavailable")),
+        "resume preview rendered the hydration failure placeholder"
+    );
+    let viewport_end = preview
+        .rows
+        .clamped_scroll
+        .saturating_add(u64::from(preview.viewport_rows))
+        .min(preview.rows.total_rows);
+    let materialized = preview.rows.materialized_range();
+    assert!(
+        materialized.start <= preview.rows.clamped_scroll && materialized.end >= viewport_end,
+        "resume preview materialized range {materialized:?} does not cover viewport {}..{viewport_end}",
+        preview.rows.clamped_scroll,
+    );
+}
+
+#[test]
+fn resume_overlay_reports_unhydratable_preview_without_panicking() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..80 {
+            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                content: format!("corrupt preview fixture {index}"),
+            });
+        }
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let preview =
+        crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir.clone(), 59, 22)
+            .expect("load compact preview before corruption");
+    let db_path = session_dir.join("session.db");
+    let db = smelt_store::SessionDb::open(db_path).expect("open preview fixture database");
+    db.connection()
+        .execute(
+            "UPDATE transcript_blocks
+             SET block_json = replace(
+                 block_json,
+                 'corrupt preview fixture 79',
+                 'tampered preview fixture 79'
+             )
+             WHERE record_idx = (SELECT MAX(record_idx) FROM transcript_blocks)",
+            [],
+        )
+        .expect("corrupt preview fixture body");
+    drop(db);
+
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.set_terminal_size(120, 32);
+    app.reconcile_session_catalog()
+        .expect("reconcile corrupt preview fixture");
+    let updated_at_ms = app
+        .app
+        .conversation
+        .sessions()
+        .list_session_entries_result()
+        .expect("list corrupt preview fixture")
+        .into_iter()
+        .find_map(|entry| {
+            (entry.id == session_id)
+                .then_some(entry.status)
+                .and_then(|status| match status {
+                    smelt_core::session::SessionListStatus::Available(meta) => {
+                        Some(meta.updated_at_ms)
+                    }
+                    smelt_core::session::SessionListStatus::Upgradeable { .. }
+                    | smelt_core::session::SessionListStatus::Unavailable(_) => None,
+                })
+        })
+        .expect("corrupt preview fixture catalog metadata");
+    app.app.conversation.store_resume_preview(
+        format!("{session_id}:{updated_at_ms}"),
+        crate::app::transcript::TranscriptDocument::from_loaded_transcript(preview),
+    );
+    assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
+    app.settle_lua();
+    app.render_silent();
+    app.feed_one(SourceEvent::Tick(50));
+    app.app.tick_timers();
+    app.settle_lua();
+    app.render_silent();
+
+    let preview = app
+        .window_lines_containing("session preview unavailable")
+        .expect("resume overlay should report an unavailable preview");
+    assert!(
+        preview
+            .iter()
+            .any(|line| line.contains("persisted content could not be hydrated")),
+        "unavailable preview should explain the hydration failure: {preview:?}"
+    );
+    assert!(
+        preview.iter().all(|line| !line.contains("session missing")),
+        "hydration failure was misreported as a missing session: {preview:?}"
+    );
+    assert!(app.state().active_modal.is_some());
+    app.press(KeyCode::Esc);
+    app.settle_lua();
+    assert!(
+        app.state().active_modal.is_none(),
+        "resume modal should remain closable after preview hydration fails"
+    );
+}
+
+#[test]
 fn shared_session_state_uses_resume_hint_message_state() {
     let mut app = TestApp::builder().build();
     app.install_live_session_for_harness(crate::app::history::live_session_for_test(
@@ -836,7 +996,12 @@ fn transcript_vim_gg_g_and_count_g_use_row_document() {
     assert_eq!(transcript_row_cursor_row(&app), 0);
 
     app.type_char('G');
+    app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), total_rows - 1);
+    assert!(
+        app.transcript_window().following_tail,
+        "vim G should enter transcript tail-follow mode"
+    );
 
     app.type_char('2');
     app.type_char('5');
@@ -1398,40 +1563,336 @@ fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic(
         "resume test must stay sparse, loaded={loaded}, count={count}"
     );
 
-    let mut previous = first_visible_record_index(&app).expect("initial visible record marker");
-    let mut saw_earlier_record = false;
+    let initial = first_visible_record_index(&app).expect("initial visible record marker");
+    let mut earliest = initial;
     for step in 0..140 {
-        let before_scroll = app.transcript_window().scroll_top;
+        let before = transcript_viewport_lines(&app);
         wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
         app.render_silent();
-        let after_scroll = app.transcript_window().scroll_top;
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_up_rows(step, &before, &after, 3);
         let current = first_visible_record_index(&app).unwrap_or_else(|| {
             panic!(
-                "step {step} rendered no visible record marker: scroll={after_scroll}, lines={:?}",
-                transcript_viewport_lines(&app)
+                "step {step} rendered no visible record marker: scroll={}, lines={after:?}",
+                app.transcript_window().scroll_top
             )
         });
-
-        assert!(
-            after_scroll <= before_scroll,
-            "step {step} scrolled back down: before={before_scroll}, after={after_scroll}, lines={:?}",
-            transcript_viewport_lines(&app)
-        );
-        assert!(
-            current <= previous,
-            "step {step} remapped visible content downward: previous record={previous}, current record={current}, scroll={after_scroll}, lines={:?}",
-            transcript_viewport_lines(&app)
-        );
-        saw_earlier_record |= current < previous;
-        previous = current;
-        if after_scroll == 0 {
-            break;
-        }
+        earliest = earliest.min(current);
     }
 
     assert!(
-        saw_earlier_record,
-        "wheel scroll never reached an earlier record"
+        earliest < initial,
+        "wheel scroll never reached an earlier record: initial={initial}, earliest={earliest}"
+    );
+}
+
+#[test]
+fn cold_transcript_wheel_moves_exact_visible_rows() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(78, 18);
+    for index in 0..700 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!(
+                "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
+                "variable wrapped content ".repeat(index % 23),
+            ),
+        });
+    }
+    app.focus_transcript();
+    app.follow_transcript_tail();
+    app.render_silent();
+
+    let before = transcript_viewport_lines(&app);
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    let after = transcript_viewport_lines(&app);
+
+    assert_viewport_shifted_up_rows(0, &before, &after, 3);
+}
+
+#[test]
+fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(700, 78, 1);
+    app.set_transcript_scroll_trace_for_harness(true);
+    app.set_terminal_size(78, 18);
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    let extent_reads = app
+        .app
+        .conversation
+        .transcript_extent_store_read_count_for_harness();
+    let before = transcript_viewport_lines(&app);
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    let after = transcript_viewport_lines(&app);
+
+    assert_viewport_shifted_up_rows(0, &before, &after, 3);
+    let frames = app.take_transcript_scroll_trace_frames_for_harness();
+    let frame = frames.last().expect("first resumed wheel trace frame");
+    assert_eq!(
+        app.app
+            .conversation
+            .transcript_extent_store_read_count_for_harness(),
+        extent_reads,
+        "first resumed wheel after a tiny layout read the source-space extent index: {frame:?}"
+    );
+    assert_eq!(
+        frame.scroll_intent,
+        TranscriptScrollIntent::UserDelta { rows: -3 }
+    );
+    assert!(
+        !frame.placeholder_rows_visible,
+        "first wheel exposed sparse placeholders: {frame:?}"
+    );
+    assert!(
+        matches!(
+            frame.viewport_anchor_after,
+            Some(TranscriptTraceAnchor::Content { .. })
+        ),
+        "first wheel did not finish on a semantic content anchor: {frame:?}"
+    );
+
+    app.set_terminal_size(78, 1);
+    app.render_silent();
+    app.set_terminal_size(78, 18);
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+    let extent_reads = app
+        .app
+        .conversation
+        .transcript_extent_store_read_count_for_harness();
+    let before = transcript_viewport_lines(&app);
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    let after = transcript_viewport_lines(&app);
+    assert_viewport_shifted_up_rows(1, &before, &after, 3);
+    assert_eq!(
+        app.app
+            .conversation
+            .transcript_extent_store_read_count_for_harness(),
+        extent_reads,
+        "first wheel after a transient layout read the source-space extent index"
+    );
+    let frame = app
+        .take_transcript_scroll_trace_frames_for_harness()
+        .into_iter()
+        .last()
+        .expect("post-transient wheel trace frame");
+    assert!(
+        matches!(
+            frame.viewport_anchor_after,
+            Some(TranscriptTraceAnchor::Content { .. })
+        ),
+        "post-transient wheel did not finish on a semantic content anchor: {frame:?}"
+    );
+}
+
+#[test]
+fn resumed_sparse_page_delta_uses_exact_tape_without_extent_reads() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(700, 78, 18);
+    app.set_transcript_scroll_trace_for_harness(true);
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    let before_scroll = app.transcript_window().scroll_top;
+    let rows = app
+        .transcript_window()
+        .materialized_rows()
+        .expect("resumed transcript rows");
+    let viewport_rows = app
+        .transcript_window()
+        .viewport
+        .expect("resumed transcript viewport")
+        .rect
+        .height
+        .max(1);
+    let extent_reads = app
+        .app
+        .conversation
+        .transcript_extent_store_read_count_for_harness();
+
+    app.record_transcript_scroll_intent(
+        "page_up",
+        TranscriptScrollIntent::PageDelta { pages: -1 },
+        before_scroll,
+    );
+    app.render_silent();
+    let frame = app
+        .take_transcript_scroll_trace_frames_for_harness()
+        .into_iter()
+        .last()
+        .expect("page delta trace frame");
+
+    assert_eq!(
+        app.transcript_window().scroll_top,
+        before_scroll.saturating_sub(u64::from(viewport_rows)),
+        "page delta did not move by one exact viewport: {frame:?}"
+    );
+    assert_eq!(
+        app.transcript_window()
+            .materialized_rows()
+            .expect("rows after page delta")
+            .total_rows,
+        rows.total_rows,
+        "page delta changed the stable source-space extent: {frame:?}"
+    );
+    assert_eq!(
+        app.app
+            .conversation
+            .transcript_extent_store_read_count_for_harness(),
+        extent_reads,
+        "local page delta read the source-space extent index"
+    );
+    assert_eq!(
+        frame.scroll_intent,
+        TranscriptScrollIntent::PageDelta { pages: -1 }
+    );
+    assert_eq!(
+        frame.projection_target,
+        TranscriptProjectionTargetTrace::StableRowDelta {
+            row: before_scroll,
+            delta: -(viewport_rows as isize),
+        },
+        "page delta did not target one exact viewport on the local tape"
+    );
+    assert!(
+        !frame.placeholder_rows_visible,
+        "page delta exposed sparse placeholders: {frame:?}"
+    );
+}
+
+#[test]
+fn resumed_session_wheel_moves_exact_visible_rows_end_to_end() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..700 {
+            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                content: format!(
+                    "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
+                    "variable wrapped content ".repeat(index % 23),
+                ),
+            });
+        }
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.set_terminal_size(78, 18);
+    app.load_session_by_id(&session_id);
+    app.focus_transcript();
+    app.render_silent();
+
+    for step in 0..120 {
+        let before = transcript_viewport_lines(&app);
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_up_rows(step, &before, &after, 3);
+    }
+
+    for step in 0..120 {
+        let before = transcript_viewport_lines(&app);
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+        app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_down_rows(step, &before, &after, 3);
+    }
+}
+
+#[test]
+fn resumed_sparse_wheel_moves_exact_visible_rows_across_pages() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    app.set_transcript_scroll_trace_for_harness(true);
+    app.take_transcript_scroll_trace_frames_for_harness();
+    let extent_reads = app
+        .app
+        .conversation
+        .transcript_extent_store_read_count_for_harness();
+    let scrollbar_total_rows = app
+        .transcript_window()
+        .materialized_rows()
+        .expect("resumed transcript rows")
+        .total_rows;
+
+    for step in 0..500 {
+        let before = transcript_viewport_lines(&app);
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_up_rows(step, &before, &after, 3);
+        assert_eq!(
+            app.app
+                .conversation
+                .transcript_extent_store_read_count_for_harness(),
+            extent_reads,
+            "upward local wheel step {step} read the source-space extent index"
+        );
+        let frame = app
+            .take_transcript_scroll_trace_frames_for_harness()
+            .into_iter()
+            .last()
+            .expect("upward local wheel trace frame");
+        assert_eq!(
+            app.transcript_window()
+                .materialized_rows()
+                .expect("rows after upward local wheel step")
+                .total_rows,
+            scrollbar_total_rows,
+            "upward local wheel step {step} changed the source-space scrollbar extent: {frame:?}"
+        );
+    }
+    assert_eq!(
+        app.app
+            .conversation
+            .transcript_extent_store_read_count_for_harness(),
+        extent_reads,
+        "upward local wheel movement read the source-space extent index"
+    );
+    assert_eq!(
+        app.transcript_window()
+            .materialized_rows()
+            .expect("rows after upward local scrolling")
+            .total_rows,
+        scrollbar_total_rows,
+        "upward local scrolling changed the source-space scrollbar extent"
+    );
+
+    for step in 0..500 {
+        let before = transcript_viewport_lines(&app);
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+        app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_down_rows(step, &before, &after, 3);
+        let frame = app
+            .take_transcript_scroll_trace_frames_for_harness()
+            .into_iter()
+            .last()
+            .expect("downward local wheel trace frame");
+        assert_eq!(
+            app.transcript_window()
+                .materialized_rows()
+                .expect("rows after downward local wheel step")
+                .total_rows,
+            scrollbar_total_rows,
+            "downward local wheel step {step} changed the source-space scrollbar extent: {frame:?}"
+        );
+    }
+    assert_eq!(
+        app.app
+            .conversation
+            .transcript_extent_store_read_count_for_harness(),
+        extent_reads,
+        "downward local wheel movement read the source-space extent index"
+    );
+    assert_eq!(
+        app.transcript_window()
+            .materialized_rows()
+            .expect("rows after downward local scrolling")
+            .total_rows,
+        scrollbar_total_rows,
+        "downward local scrolling changed the source-space scrollbar extent"
     );
 }
 
@@ -1507,6 +1968,113 @@ fn resumed_sparse_jump_to_bottom_after_scroll_up_renders_tail() {
     );
 }
 
+fn assert_transcript_window_at_tail(app: &TestApp, label: &str) {
+    let win = app.transcript_window();
+    let viewport = win.viewport.expect("transcript viewport");
+    let max_scroll = viewport
+        .total_rows
+        .saturating_sub(RowIndex::from(viewport.rect.height.max(1)));
+    assert!(
+        win.following_tail,
+        "{label} should pin the transcript at semantic tail"
+    );
+    assert_eq!(
+        win.scroll_top, max_scroll,
+        "{label} should resolve to the exact bottom viewport"
+    );
+}
+
+fn assert_transcript_tail_follows_append(app: &mut TestApp, label: &str) {
+    assert_transcript_window_at_tail(app, label);
+    let append_marker = format!("tail-follow append via {label}");
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: append_marker.clone(),
+    });
+    app.render_silent();
+    let lines = transcript_viewport_lines(app);
+    assert_transcript_window_at_tail(app, label);
+    assert!(
+        lines.iter().any(|line| line.contains(&append_marker)),
+        "{label} did not follow appended tail content: {lines:?}"
+    );
+}
+
+#[test]
+fn resumed_sparse_vim_g_pins_semantic_tail() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    assert!(
+        !app.transcript_window().following_tail,
+        "test setup should leave tail-follow mode"
+    );
+
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_char('G');
+    app.render_silent();
+
+    assert!(
+        app.transcript_window().following_tail,
+        "vim G should pin a resumed transcript to semantic tail"
+    );
+    let lines = transcript_viewport_lines(&app);
+    assert!(
+        lines.iter().any(|line| line.contains("record-025")),
+        "vim G should render the resumed transcript tail: {lines:?}"
+    );
+    assert_transcript_tail_follows_append(&mut app, "vim G");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TranscriptTailInput {
+    MouseWheel,
+    DownArrow,
+    CtrlD,
+    PageDown,
+}
+
+impl TranscriptTailInput {
+    fn press(self, app: &mut TestApp) {
+        match self {
+            Self::MouseWheel => wheel_transcript(app, crossterm::event::MouseEventKind::ScrollDown),
+            Self::DownArrow => app.press(KeyCode::Down),
+            Self::CtrlD => app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Self::PageDown => app.press(KeyCode::PageDown),
+        }
+    }
+}
+
+#[test]
+fn resumed_sparse_downward_inputs_pin_and_follow_semantic_tail() {
+    for input in [
+        TranscriptTailInput::MouseWheel,
+        TranscriptTailInput::DownArrow,
+        TranscriptTailInput::CtrlD,
+        TranscriptTailInput::PageDown,
+    ] {
+        let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+        app.configure_transcript_vim(true, VimMode::Normal);
+        for _ in 0..8 {
+            wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+            app.render_silent();
+        }
+        assert!(
+            !app.transcript_window().following_tail,
+            "{input:?} setup should leave tail-follow mode"
+        );
+
+        for _ in 0..160 {
+            input.press(&mut app);
+            app.render_silent();
+            if app.transcript_window().following_tail {
+                break;
+            }
+        }
+        assert_transcript_tail_follows_append(&mut app, &format!("{input:?}"));
+    }
+}
+
 #[test]
 fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
@@ -1520,19 +2088,16 @@ fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
         "test setup should leave tail-follow"
     );
 
-    let mut previous_scroll = app.transcript_window().scroll_top;
-    for _ in 0..200 {
+    for step in 0..200 {
+        let before = transcript_viewport_lines(&app);
         wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
         app.render_silent();
-        let current_scroll = app.transcript_window().scroll_top;
-        assert!(
-            current_scroll >= previous_scroll,
-            "downward wheel input should never move a sparse viewport backward: {previous_scroll} -> {current_scroll}"
-        );
-        previous_scroll = current_scroll;
+        let after = transcript_viewport_lines(&app);
         if app.transcript_window().following_tail {
+            assert_viewport_shifted_down_at_most_rows(step, &before, &after, 3);
             break;
         }
+        assert_viewport_shifted_down_rows(step, &before, &after, 3);
     }
     assert!(
         app.transcript_window().following_tail,
@@ -1889,38 +2454,26 @@ fn resumed_sparse_near_tail_scroll_down_stays_incremental() {
         app.transcript_window().following_tail,
         "resumed transcript test starts pinned to tail"
     );
-    let bottom_scroll = app.transcript_window().scroll_top;
-
-    for _ in 0..3 {
+    for step in 0..6 {
+        let before = transcript_viewport_lines(&app);
         wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
         app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_up_rows(step, &before, &after, 3);
     }
-    let after_up = app.transcript_window().scroll_top;
-    assert!(
-        after_up.saturating_add(3) < bottom_scroll,
-        "test setup should remain near but off tail after one down tick: bottom={bottom_scroll}, after_up={after_up}"
-    );
     assert!(
         !app.transcript_window().following_tail,
         "wheel up should leave tail-follow mode"
     );
 
+    let before = transcript_viewport_lines(&app);
     wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
     app.render_silent();
-    let after_down = app.transcript_window().scroll_top;
-    assert_eq!(
-        after_down,
-        after_up.saturating_add(3),
-        "near-tail wheel down should move by one wheel tick, not snap to tail; bottom={bottom_scroll}, after_up={after_up}, after_down={after_down}, lines={:?}",
-        transcript_viewport_lines(&app)
-    );
-    assert!(
-        after_down < bottom_scroll,
-        "near-tail wheel down should remain off semantic tail: bottom={bottom_scroll}, after_down={after_down}"
-    );
+    let after = transcript_viewport_lines(&app);
+    assert_viewport_shifted_down_rows(0, &before, &after, 3);
     assert!(
         !app.transcript_window().following_tail,
-        "near-tail wheel down should not re-enter tail-follow"
+        "one near-tail wheel tick should not re-enter tail-follow after scrolling up six ticks"
     );
 }
 
@@ -2175,7 +2728,7 @@ impl TranscriptScrollReplay {
                 }
                 TranscriptReplayStep::ScrollbarFarSeek { rel_row } => {
                     let before = app.transcript_window().scroll_top;
-                    let (row, col, numerator, denominator) =
+                    let (row, col, numerator, denominator, total_rows, viewport_rows) =
                         transcript_scrollbar_point(app, rel_row);
                     app.feed_one(SourceEvent::Term(Event::Mouse(
                         crossterm::event::MouseEvent {
@@ -2193,6 +2746,8 @@ impl TranscriptScrollReplay {
                         TranscriptScrollIntent::ScrollbarFraction {
                             numerator,
                             denominator,
+                            total_rows,
+                            viewport_rows,
                         },
                         before,
                     );
@@ -2278,7 +2833,10 @@ fn transcript_content_point(app: &TestApp, rel_row: u16) -> (u16, u16) {
     )
 }
 
-fn transcript_scrollbar_point(app: &TestApp, rel_row: u16) -> (u16, u16, u64, u64) {
+fn transcript_scrollbar_point(
+    app: &TestApp,
+    rel_row: u16,
+) -> (u16, u16, u64, u64, crate::smelt_edit::RowIndex, u16) {
     let vp = app
         .transcript_window()
         .viewport
@@ -2293,6 +2851,8 @@ fn transcript_scrollbar_point(app: &TestApp, rel_row: u16) -> (u16, u16, u64, u6
         scrollbar.col,
         numerator,
         denominator,
+        scrollbar.total_rows,
+        scrollbar.viewport_rows,
     )
 }
 
@@ -2454,7 +3014,7 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         .expect("previous user marker");
     assert!(
         lines.iter().any(|line| line.contains(previous_marker)),
-        "previous user target was not revealed in the viewport: target={:?}, lines={lines:?}",
+        "previous user target was not revealed in the viewport: target={:?}, lines={lines:?}, frame={frame:?}",
         previous.first_line
     );
 
@@ -2509,38 +3069,55 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
     );
 }
 
-fn visible_anchor_order(frame: &TranscriptScrollTraceFrame) -> Option<u64> {
-    frame
-        .first_visible_content_anchor
-        .map(|anchor| anchor.virtual_row)
+fn semantic_viewport_anchor(
+    frame: &TranscriptScrollTraceFrame,
+) -> Option<(usize, smelt_core::transcript_model::BlockId, RowIndex)> {
+    match frame.viewport_anchor_after {
+        Some(TranscriptTraceAnchor::Content {
+            record_index,
+            block_id,
+            row_offset,
+            ..
+        }) => Some((record_index, block_id, row_offset)),
+        _ => None,
+    }
 }
 
 fn assert_monotonic_visible_anchors(frames: &[TranscriptScrollTraceFrame], upward: bool) {
-    let mut previous = None;
+    let mut previous: Option<(usize, smelt_core::transcript_model::BlockId, RowIndex)> = None;
     let mut compared = 0;
     for frame in frames {
-        let Some(current) = visible_anchor_order(frame) else {
+        let Some(current) = semantic_viewport_anchor(frame) else {
             continue;
         };
         if let Some(previous) = previous {
-            if upward {
-                assert!(
-                    current <= previous,
-                    "visible content anchor moved down during upward replay: previous={previous:?}, current={current:?}, frame={frame:?}"
-                );
+            let movement = if current.0 != previous.0 {
+                Some(current.0.cmp(&previous.0))
+            } else if current.1 == previous.1 {
+                Some(current.2.cmp(&previous.2))
             } else {
-                assert!(
-                    current >= previous,
-                    "visible content anchor moved up during downward replay: previous={previous:?}, current={current:?}, frame={frame:?}"
-                );
+                None
+            };
+            if let Some(movement) = movement {
+                if upward {
+                    assert!(
+                        !movement.is_gt(),
+                        "semantic viewport anchor moved down during upward replay: previous={previous:?}, current={current:?}, frame={frame:?}"
+                    );
+                } else {
+                    assert!(
+                        !movement.is_lt(),
+                        "semantic viewport anchor moved up during downward replay: previous={previous:?}, current={current:?}, frame={frame:?}"
+                    );
+                }
+                compared += 1;
             }
-            compared += 1;
         }
         previous = Some(current);
     }
     assert!(
         compared > 0,
-        "replay did not produce comparable content anchors"
+        "replay did not produce comparable semantic viewport anchors"
     );
 }
 
@@ -2572,10 +3149,7 @@ fn assert_user_delta_targets_exact_rows(frames: &[TranscriptScrollTraceFrame]) {
             continue;
         };
         assert!(
-            matches!(
-                frame.projection_target,
-                TranscriptProjectionTargetTrace::ExactRow(_)
-            ),
+            frame.projection_target.exact_target_row().is_some(),
             "user delta should project through an exact local row: {frame:?}"
         );
     }
@@ -2636,7 +3210,7 @@ fn assert_burst_projection_delta_bounded(
         let TranscriptScrollIntent::UserDelta { .. } = frame.scroll_intent else {
             continue;
         };
-        let TranscriptProjectionTargetTrace::ExactRow(target) = frame.projection_target else {
+        let Some(target) = frame.projection_target.exact_target_row() else {
             panic!("{label} projected user delta through a non-exact target: {frame:?}");
         };
         let delta = target.abs_diff(before_scroll);
@@ -3115,6 +3689,10 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     app.take_transcript_scroll_trace_frames_for_harness();
     app.type_char('g');
     app.type_char('g');
+    let extent_reads = app
+        .app
+        .conversation
+        .transcript_extent_store_read_count_for_harness();
     for _ in 0..80 {
         TranscriptBurstKey::CtrlD.press(&mut app);
     }
@@ -3125,6 +3703,13 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     );
 
     app.render_silent();
+    assert_eq!(
+        app.app
+            .conversation
+            .transcript_extent_store_read_count_for_harness(),
+        extent_reads,
+        "queued local motion after gg read the source-space extent index"
+    );
     let frames = app.take_transcript_scroll_trace_frames_for_harness();
     assert_local_scroll_frames_are_exact_and_fast(&frames);
     assert_user_delta_targets_exact_rows(&frames);
@@ -3151,9 +3736,12 @@ fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
     let initial_record = first_visible_record_index(&app).expect("initial visible record");
     start_transcript_edge_drag(&mut app, TranscriptDragEdge::Top);
     let mut frames = Vec::new();
-    for _ in 0..900 {
+    for tick in 0..900 {
+        let before = transcript_viewport_lines(&app);
         if app.tick_drag_autoscroll_with_transcript_intent() {
             app.render_silent();
+            let after = transcript_viewport_lines(&app);
+            assert_viewport_shifted_up_rows(tick, &before, &after, 1);
             frames.extend(app.take_transcript_scroll_trace_frames_for_harness());
         }
     }
@@ -3187,6 +3775,7 @@ fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
     let mut frames = Vec::new();
     let mut latest = initial_record;
     for tick in 0..320 {
+        let before = transcript_viewport_lines(&app);
         assert!(
             app.tick_drag_autoscroll_with_transcript_intent(),
             "bottom-edge drag tick {tick} stopped before reaching newer content: first={:?}, last={:?}, scroll_top={}, lines={:?}",
@@ -3196,6 +3785,8 @@ fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
             transcript_viewport_lines(&app)
         );
         app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_down_rows(tick, &before, &after, 1);
         frames.extend(app.take_transcript_scroll_trace_frames_for_harness());
         let current = first_visible_record_index(&app).unwrap_or_else(|| {
             panic!(
@@ -3539,7 +4130,7 @@ fn transcript_scrollbar_click_preserves_fraction_intent() {
     app.set_transcript_scroll_trace_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
 
-    let (row, column, _, _) = transcript_scrollbar_point(&app, 3);
+    let (row, column, _, _, _, _) = transcript_scrollbar_point(&app, 3);
     app.feed_one(SourceEvent::Term(Event::Mouse(
         crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -3559,6 +4150,145 @@ fn transcript_scrollbar_click_preserves_fraction_intent() {
         ),
         "scrollbar clicks must preserve a fraction intent instead of collapsing to {:?}",
         frame.scroll_intent
+    );
+}
+
+#[test]
+fn resumed_transcript_scrollbar_drag_is_continuous_through_exact_boundaries() {
+    let mut app = TestApp::builder().build();
+    app.install_sparse_transcript_scroll_fixture(900, 100, 40);
+    app.set_terminal_size(100, 100);
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    let viewport = app
+        .transcript_window()
+        .viewport
+        .expect("transcript viewport");
+    assert_eq!(viewport.rect.height, 95, "regression fixture viewport");
+    let scrollbar = viewport.scrollbar.expect("transcript scrollbar");
+    let initial_metrics = scrollbar.metrics(app.transcript_window().scroll_top);
+    let start_rel_row = initial_metrics.thumb_top;
+    let frozen_total_rows = scrollbar.total_rows;
+    let mouse = |kind, rel_row: u16| {
+        SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            row: viewport.rect.top.saturating_add(rel_row),
+            column: scrollbar.col,
+            modifiers: KeyModifiers::empty(),
+        }))
+    };
+
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        start_rel_row,
+    ));
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    let mut previous_pointer = None;
+    let mut previous_thumb = None;
+    for pointer_row in [73, 72, 71, 70, 69] {
+        app.feed_one(mouse(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            pointer_row,
+        ));
+        app.render_silent();
+
+        let frames = app.take_transcript_scroll_trace_frames_for_harness();
+        let frame = frames.last().expect("scrollbar drag frame");
+        let window = app.transcript_window();
+        let current_viewport = window.viewport.expect("current transcript viewport");
+        let current_scrollbar = current_viewport.scrollbar.expect("current scrollbar");
+        let thumb_top = current_scrollbar.metrics(window.scroll_top).thumb_top;
+
+        assert!(
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::ScrollbarFraction { .. }
+            ),
+            "scrollbar drag collapsed frozen source geometry to a numeric row: {frame:?}"
+        );
+        assert!(
+            matches!(
+                frame.projection_target,
+                crate::app::transcript_scroll_trace::TranscriptProjectionTargetTrace::StableRowDelta {
+                    delta: 0,
+                    ..
+                }
+            ),
+            "scrollbar drag did not resolve through an exact semantic anchor: {frame:?}"
+        );
+        assert_eq!(
+            current_scrollbar.total_rows, frozen_total_rows,
+            "scrollbar extent changed during frozen drag geometry: {frame:?}"
+        );
+        assert!(
+            thumb_top.abs_diff(pointer_row) <= 1,
+            "painted thumb left the pointer at exact-tape boundary: pointer={pointer_row}, thumb={thumb_top}, frame={frame:?}"
+        );
+        if let (Some(previous_pointer), Some(previous_thumb)) = (previous_pointer, previous_thumb) {
+            assert_eq!(previous_pointer - pointer_row, 1);
+            assert!(
+                thumb_top <= previous_thumb && previous_thumb.abs_diff(thumb_top) <= 1,
+                "one-cell drag caused a discontinuous thumb jump: previous={previous_thumb}, current={thumb_top}, frame={frame:?}"
+            );
+        }
+        assert!(
+            !frame.placeholder_rows_visible,
+            "committed scrollbar content must be exact: {frame:?}"
+        );
+        assert!(
+            frame.first_visible_content_anchor.is_some()
+                && frame.last_visible_content_anchor.is_some(),
+            "committed scrollbar viewport lacks exact semantic anchors: {frame:?}"
+        );
+        assert!(
+            transcript_viewport_lines(&app)
+                .iter()
+                .any(|line| line.contains("record-")),
+            "committed scrollbar viewport exposed no semantic transcript content: {frame:?}"
+        );
+        let materialized_rows = frame
+            .materialized_range
+            .end
+            .saturating_sub(frame.materialized_range.start);
+        assert!(
+            materialized_rows <= u64::from(viewport.rect.height).saturating_mul(3),
+            "scrollbar seek materialized an unbounded row range: {frame:?}"
+        );
+        let active = frame
+            .active_record_range_after
+            .expect("semantic seek active record range");
+        assert!(
+            active.end.saturating_sub(active.start) <= 512,
+            "scrollbar seek activated an unbounded source window: {frame:?}"
+        );
+
+        previous_pointer = Some(pointer_row);
+        previous_thumb = Some(thumb_top);
+    }
+
+    let scroll_before_release = app.transcript_window().scroll_top;
+    let thumb_before_release = previous_thumb.expect("dragged thumb");
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        69,
+    ));
+    app.render_silent();
+    let window = app.transcript_window();
+    let release_scrollbar = window
+        .viewport
+        .and_then(|viewport| viewport.scrollbar)
+        .expect("release scrollbar");
+    assert_eq!(
+        window.scroll_top, scroll_before_release,
+        "release snapped viewport"
+    );
+    assert_eq!(
+        release_scrollbar.metrics(window.scroll_top).thumb_top,
+        thumb_before_release,
+        "release snapped scrollbar thumb"
     );
 }
 
@@ -3840,6 +4570,69 @@ fn wheel_transcript(app: &mut TestApp, kind: crossterm::event::MouseEventKind) {
             modifiers: KeyModifiers::empty(),
         },
     )));
+}
+
+fn assert_viewport_shifted_up_rows(step: usize, before: &[String], after: &[String], rows: usize) {
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "wheel-up step {step} changed viewport line count: before={before:?}, after={after:?}"
+    );
+    let overlap = before.len().saturating_sub(rows);
+    assert!(
+        overlap > 0,
+        "wheel-up step {step} needs more viewport rows than movement: before={before:?}"
+    );
+    assert_eq!(
+        &after[rows..rows + overlap],
+        &before[..overlap],
+        "wheel-up step {step} did not shift by exactly {rows} visible rows"
+    );
+}
+
+fn assert_viewport_shifted_down_rows(
+    step: usize,
+    before: &[String],
+    after: &[String],
+    rows: usize,
+) {
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "wheel-down step {step} changed viewport line count: before={before:?}, after={after:?}"
+    );
+    let overlap = before.len().saturating_sub(rows);
+    assert!(
+        overlap > 0,
+        "wheel-down step {step} needs more viewport rows than movement: before={before:?}"
+    );
+    assert!(
+        after[..overlap] == before[rows..rows + overlap],
+        "wheel-down step {step} did not shift by exactly {rows} visible rows: before={before:?}, after={after:?}, expected_overlap={:?}, actual_overlap={:?}",
+        &before[rows..rows + overlap],
+        &after[..overlap],
+    );
+}
+
+fn assert_viewport_shifted_down_at_most_rows(
+    step: usize,
+    before: &[String],
+    after: &[String],
+    max_rows: usize,
+) {
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "wheel-down step {step} changed viewport line count: before={before:?}, after={after:?}"
+    );
+    let actual_rows = (1..=max_rows).find(|&rows| {
+        let overlap = before.len().saturating_sub(rows);
+        overlap > 0 && after[..overlap] == before[rows..rows + overlap]
+    });
+    assert!(
+        actual_rows.is_some(),
+        "wheel-down step {step} did not shift downward by 1..={max_rows} visible rows: before={before:?}, after={after:?}"
+    );
 }
 
 fn assert_viewport_shifted_down_one_row(step: usize, before: &[String], after: &[String]) {

@@ -612,6 +612,15 @@ impl TestApp {
         self.publish_session_catalog_commit(&command, &receipt);
     }
 
+    /// Mark a canonical fixture as requiring a supported schema upgrade.
+    pub fn seed_upgradeable_session(&self, id: &str, version: i32) {
+        let db = smelt_store::SessionDb::open(self.session_dir_for_id(id).join("session.db"))
+            .expect("open upgradeable session fixture");
+        db.connection()
+            .pragma_update(None, "user_version", version)
+            .expect("downgrade fixture schema version");
+    }
+
     /// Seed a session directory with no readable canonical database.
     pub fn seed_unavailable_session(&self, id: &str) {
         std::fs::create_dir_all(self.session_dir_for_id(id))

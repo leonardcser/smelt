@@ -75,7 +75,20 @@ pub(super) fn prepare_transcript_window(
         let Some(buf) = ui.buf_mut(request.buf) else {
             return;
         };
-        let applied = transcript.project_applied_viewport(lua, buf, theme, plan);
+        let applied = match plan {
+            Ok(plan) => transcript.project_applied_viewport(lua, buf, theme, plan),
+            Err(error) => {
+                smelt_perf::perf::record_value(
+                    "transcript:projection_hydration_failure:required_blocks",
+                    error.required_blocks as u64,
+                );
+                smelt_perf::perf::record_value(
+                    "transcript:projection_hydration_failure:missing_blocks",
+                    error.missing_blocks as u64,
+                );
+                transcript.project_hydration_failure(buf, viewport_rows)
+            }
+        };
         let desired_scroll_state = applied.scroll_state;
         transcript_cursor_range = applied.cursor_range;
         let tdata = applied.materialized_rows;

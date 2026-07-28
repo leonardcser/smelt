@@ -17,6 +17,29 @@ SQLite after receipt publication; it is the only derived persistent session
 projection. Writable startup changes `ready` and `running` turns to `interrupted`,
 and never automatically resends provider work.
 
+## Schema migration policy
+
+Schema discovery is read-only and distinguishes the current version, supported
+older versions, future versions, and unrecognized databases. Startup, catalog
+reconciliation, session listing, and picker preview never migrate canonical
+storage. Explicit resume upgrades only the selected supported older session;
+`smelt session migrate` exposes the same operation for deliberate single-session
+or sequential bulk maintenance.
+
+Migration acquires the stable root lease and, for supported older schemas, the
+legacy in-directory lease in a fixed order. It validates canonical identity
+before writing and runs the existing schema migration in one SQLite transaction.
+Unlike writable runtime open, this migration-only owner does not claim
+`writer_owner`, recover blobs, or interrupt nonterminal turns. Future,
+unrecognized, and corrupt databases remain unmodified. A supported identity-less
+database with canonical session content is corrupt; one containing only storage
+metadata or request audits is an orphan and is never migrated. Explicit
+`smelt session quarantine-orphans` cleanup revalidates such an orphan under the
+same root-first lease order and moves its complete directory into `.quarantine`
+without deleting it. Active writers remain in place and are reported as busy.
+After a successful migration the disposable catalog projection is refreshed,
+while resume continues through the bounded transcript path.
+
 ## Purpose
 
 Replace the current multi-owner persistence orchestration with one concrete,

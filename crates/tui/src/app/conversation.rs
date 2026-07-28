@@ -378,6 +378,13 @@ impl ConversationRuntime {
             .prime_local_scroll_base(lua, width, viewport_rows, scroll_top);
     }
 
+    #[cfg(test)]
+    pub(crate) fn transcript_extent_store_read_count_for_harness(&self) -> usize {
+        self.document
+            .transcript
+            .extent_store_read_count_for_harness()
+    }
+
     pub(crate) fn set_pending_transcript_projection(
         &mut self,
         intent: super::transcript_scroll_trace::TranscriptScrollIntent,

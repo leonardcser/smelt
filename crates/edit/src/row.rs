@@ -6,6 +6,15 @@ use smelt_term::Rect;
 
 pub type RowIndex = u64;
 
+pub fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
+    let magnitude = RowIndex::try_from(delta.unsigned_abs()).unwrap_or(RowIndex::MAX);
+    if delta >= 0 {
+        row.saturating_add(magnitude)
+    } else {
+        row.saturating_sub(magnitude)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DocumentHandle(pub u64);
 
@@ -645,6 +654,15 @@ pub fn row_to_usize(row: RowIndex) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_row_arithmetic_saturates_at_both_bounds() {
+        assert_eq!(add_signed_row(5, 3), 8);
+        assert_eq!(add_signed_row(5, -3), 2);
+        assert_eq!(add_signed_row(2, -3), 0);
+        assert_eq!(add_signed_row(RowIndex::MAX - 1, 3), RowIndex::MAX);
+        assert_eq!(add_signed_row(5, isize::MIN), 0);
+    }
 
     #[test]
     fn static_rows_document_materializes_and_copies_ranges() {

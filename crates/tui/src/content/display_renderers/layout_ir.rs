@@ -2018,6 +2018,35 @@ mod tests {
     }
 
     #[test]
+    fn large_markdown_tail_range_matches_measured_rows() {
+        let layout = BlockLayout::Leaf(LayoutLeaf::Markdown(MarkdownSpec {
+            content: "x".repeat(2_100_000),
+            dim: false,
+            italic: false,
+            inline: false,
+        }));
+        let width = 51;
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_with_options(&layout, width, &options);
+        let row_count = 43;
+        let row_start = measured - row_count;
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+
+        let rendered = {
+            let mut out = LineBuilder::new(&mut buf, &theme, width);
+            let rendered = render_layout_ir_range_into(
+                &mut out, &layout, width, row_start, row_count, &options,
+            );
+            let outcome = out.finish();
+            assert_eq!(outcome.line_count, rendered as usize);
+            rendered
+        };
+
+        assert_eq!(rendered, row_count);
+    }
+
+    #[test]
     fn guttered_markdown_range_render_stays_bounded() {
         let content = (0..2_000)
             .map(|i| format!("Paragraph {i}: {}", "alpha beta gamma delta ".repeat(6)))

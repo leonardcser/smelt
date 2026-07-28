@@ -9,8 +9,8 @@ use crate::content::render_plan::{
 };
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
-    clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
-    DocRange, MaterializedRows, RowBreak, RowIndex,
+    add_signed_row, clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput,
+    DisplayRow, DisplayRows, DocRange, MaterializedRows, RowBreak, RowIndex,
 };
 use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
@@ -56,6 +56,12 @@ pub(crate) struct TranscriptExactHeightSnapshot {
     pub(crate) observations: Vec<TranscriptExactHeightObservation>,
 }
 
+#[derive(Clone, Copy)]
+struct ProjectedRowIdentity {
+    exact: ProjectionAnchor,
+    content: Option<ProjectionAnchor>,
+}
+
 #[derive(Default)]
 struct VisibleProjectionState {
     materialized: Option<MaterializedProjection>,
@@ -65,8 +71,8 @@ struct VisibleProjectionState {
     row_base: RowIndex,
     /// Total rows in the logical transcript represented by the visible projection.
     total_rows: RowIndex,
-    /// Rendered-row anchors for the materialized rows, parallel to the backing buffer lines.
-    row_anchors: Vec<Option<ProjectionAnchor>>,
+    /// Exact and content-aware identities for each backing buffer line.
+    row_identities: Vec<ProjectedRowIdentity>,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     full_rows: Option<CachedRows>,
 }
@@ -105,6 +111,7 @@ pub(crate) struct TranscriptProjectionCounters {
     pub full_row_builds: usize,
     pub display_layouts: usize,
     pub exact_height_measured_blocks: usize,
+    pub projection_planning_passes: usize,
     pub range_materialized_blocks: usize,
     pub max_range_materialized_blocks: usize,
     pub range_materialized_rows: usize,
@@ -519,6 +526,10 @@ impl TranscriptHeightIndex {
             .position(|node| node.id.as_block_id() == Some(id))
     }
 
+    fn node_index(&self, id: RenderNodeId) -> Option<usize> {
+        self.nodes.iter().position(|node| node.id == id)
+    }
+
     fn node_index_before_or_at_row(&self, row: RowIndex) -> Option<usize> {
         if self.nodes.is_empty() {
             return None;
@@ -780,7 +791,7 @@ pub(crate) struct TranscriptSearchLayoutEntry {
     pub(crate) rows: RowIndex,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProjectKey {
     generation: u64,
     width: u16,
@@ -791,7 +802,7 @@ struct ProjectKey {
     mode: ProjectionMode,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectionMode {
     Visible { viewport_rows: u16 },
 }
@@ -810,6 +821,30 @@ pub(crate) struct ProjectionPlan {
     viewport_rows: u16,
     row_window: std::ops::Range<RowIndex>,
     node_range: std::ops::Range<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExactRowTapeHandle {
+    key: ProjectKey,
+    rows: MaterializedRows,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExactRowTapeState {
+    pub(crate) rows: MaterializedRows,
+    pub(crate) top_anchor: Option<TranscriptRowAnchor>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExactRowTapeProjection {
+    key: ProjectKey,
+    rows: MaterializedRows,
+}
+
+impl ExactRowTapeProjection {
+    pub(crate) fn rows(self) -> MaterializedRows {
+        self.rows
+    }
 }
 
 struct ProjectionRequest {
@@ -887,6 +922,10 @@ impl ProjectionPlan {
         self.node_range.clone()
     }
 
+    pub(crate) fn scroll_top(&self) -> RowIndex {
+        self.scroll_top
+    }
+
     fn row_window(&self) -> std::ops::Range<RowIndex> {
         self.row_window.clone()
     }
@@ -896,6 +935,11 @@ impl ProjectionPlan {
 pub(crate) enum ScrollAnchor {
     ExactRow(RowIndex),
     ReflowStableRow(RowIndex),
+    StableRowDelta {
+        row: RowIndex,
+        anchor: Option<TranscriptRowAnchor>,
+        delta: isize,
+    },
     Tail,
 }
 
@@ -903,6 +947,7 @@ impl ScrollAnchor {
     fn as_scroll_top(self) -> RowIndex {
         match self {
             Self::ExactRow(row) | Self::ReflowStableRow(row) => row,
+            Self::StableRowDelta { row, delta, .. } => add_signed_row(row, delta),
             Self::Tail => RowIndex::MAX,
         }
     }
@@ -921,6 +966,14 @@ impl ScrollTarget {
 
     pub(crate) fn visible_reflow_stable_row(row: RowIndex) -> Self {
         Self::Visible(ScrollAnchor::ReflowStableRow(row))
+    }
+
+    pub(crate) fn visible_stable_row_delta(
+        row: RowIndex,
+        anchor: Option<TranscriptRowAnchor>,
+        delta: isize,
+    ) -> Self {
+        Self::Visible(ScrollAnchor::StableRowDelta { row, anchor, delta })
     }
 
     pub(crate) fn visible_tail() -> Self {
@@ -954,7 +1007,7 @@ struct ProjectRows<'a> {
     texts: &'a mut Vec<String>,
     pending: &'a mut Vec<PendingRow>,
     layout: &'a mut Vec<LayoutEntry>,
-    row_anchors: &'a mut Vec<Option<ProjectionAnchor>>,
+    row_identities: &'a mut Vec<ProjectedRowIdentity>,
 }
 
 struct MaterializedTranscriptRange {
@@ -963,7 +1016,7 @@ struct MaterializedTranscriptRange {
     texts: Vec<String>,
     pending: Vec<PendingRow>,
     layout: Vec<LayoutEntry>,
-    row_anchors: Vec<Option<ProjectionAnchor>>,
+    row_identities: Vec<ProjectedRowIdentity>,
 }
 
 fn base_layout_key(width: u16) -> LayoutKey {
@@ -1351,9 +1404,9 @@ impl TranscriptProjection {
             .saturating_mul(std::mem::size_of::<LayoutEntry>())
             .saturating_add(
                 self.visible
-                    .row_anchors
+                    .row_identities
                     .capacity()
-                    .saturating_mul(std::mem::size_of::<Option<ProjectionAnchor>>()),
+                    .saturating_mul(std::mem::size_of::<ProjectedRowIdentity>()),
             );
         let full_rows_bytes = self
             .visible
@@ -1404,6 +1457,17 @@ impl TranscriptProjection {
 
     pub(crate) fn exact_height_snapshot(&self) -> TranscriptExactHeightSnapshot {
         self.measurements.active.exact_height_snapshot()
+    }
+
+    pub(crate) fn height_suffix_is_exact(&self, anchor: TranscriptRowAnchor) -> bool {
+        self.measurements
+            .active
+            .node_index(anchor.id)
+            .is_some_and(|index| {
+                self.measurements.active.nodes[index..]
+                    .iter()
+                    .all(|node| node.exact_height.is_some())
+            })
     }
 
     pub(crate) fn invalidate_renderer_if_changed(
@@ -1535,8 +1599,16 @@ impl TranscriptProjection {
         self.visible.materialized = None;
         self.visible.block_layout.clear();
         self.visible.row_base = 0;
-        self.visible.row_anchors.clear();
+        self.visible.row_identities.clear();
         self.visible.total_rows = 0;
+    }
+
+    pub(crate) fn invalidate_source_sequence(&mut self) {
+        self.render_plan = RenderPlan::empty();
+        self.measurements.clear();
+        self.clear_visible_state();
+        self.visible.full_rows = None;
+        self.projection_generation = self.projection_generation.wrapping_add(1);
     }
 
     fn invalidate_presentation_projection(&mut self) {
@@ -1767,6 +1839,60 @@ impl TranscriptProjection {
         self.exactify_node_indices(env, history, (range.start..end).collect())
     }
 
+    fn stable_row_delta_hydration_range(
+        &self,
+        anchor: ProjectionAnchor,
+        delta: isize,
+        viewport_rows: u16,
+    ) -> Option<std::ops::Range<usize>> {
+        let ProjectionAnchor::Node { id, .. } = anchor else {
+            return None;
+        };
+        let anchor_index = self.measurements.active.node_index(id)?;
+        let distance = delta.unsigned_abs();
+        let viewport_nodes = usize::from(viewport_rows.max(1));
+        let (start, end) = if delta < 0 {
+            (
+                anchor_index.saturating_sub(distance),
+                anchor_index.saturating_add(viewport_nodes),
+            )
+        } else {
+            (
+                anchor_index,
+                anchor_index
+                    .saturating_add(distance)
+                    .saturating_add(viewport_nodes),
+            )
+        };
+        Some(start..end.min(self.measurements.active.nodes.len()))
+    }
+
+    fn exactify_stable_row_delta_path(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        anchor: ProjectionAnchor,
+        delta: isize,
+    ) {
+        let ProjectionAnchor::Node { id, .. } = anchor else {
+            return;
+        };
+        let Some(anchor_index) = self.measurements.active.node_index(id) else {
+            return;
+        };
+        let distance = delta.unsigned_abs();
+        let range = if delta < 0 {
+            anchor_index.saturating_sub(distance)..anchor_index.saturating_add(1)
+        } else {
+            anchor_index
+                ..anchor_index
+                    .saturating_add(distance)
+                    .saturating_add(1)
+                    .min(self.measurements.active.nodes.len())
+        };
+        let _ = self.exactify_node_range(env, history, range);
+    }
+
     fn exactify_row_range(
         &mut self,
         env: TranscriptRenderEnv<'_>,
@@ -1778,7 +1904,8 @@ impl TranscriptProjection {
         }
         let mut changed_any = false;
         let mut node_range = self.measurements.active.node_range_for_rows(rows.clone());
-        for _ in 0..8 {
+        let pass_budget = self.measurements.active.nodes.len().saturating_add(1);
+        for _ in 0..pass_budget {
             let changed = self.exactify_node_range(env.clone(), history, node_range.clone());
             changed_any |= changed;
             let total_rows = self.measurements.active.total_rows();
@@ -1795,18 +1922,8 @@ impl TranscriptProjection {
             }
             node_range = refined;
         }
-        changed_any |= self.exactify_node_range(env, history, node_range.clone());
-        self.measurements.active.refresh_prefix_rows();
-        let total_rows = self.measurements.active.total_rows();
-        let end = rows.end.min(total_rows);
-        let refined = if rows.start < end {
-            self.measurements
-                .active
-                .node_range_for_rows(rows.start..end)
-        } else {
-            0..0
-        };
-        (refined, changed_any)
+        smelt_perf::perf::record_value("transcript:row_index:exactify_budget_exhausted", 1);
+        (node_range, changed_any)
     }
 
     pub(crate) fn row_range_hydration_ids(
@@ -1831,23 +1948,6 @@ impl TranscriptProjection {
         ids.sort_unstable_by_key(|id| id.get());
         ids.dedup();
         ids
-    }
-
-    pub(crate) fn exactify_rows_for_range(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        history: &mut BlockHistory,
-        width: u16,
-        rows: std::ops::Range<RowIndex>,
-    ) -> bool {
-        if rows.start >= rows.end {
-            return false;
-        }
-        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
-        self.prepare_row_index_with_env(env.clone(), history, width);
-        let (_, changed) = self.exactify_row_range(env, history, rows);
-        self.measurements.remember_active();
-        changed
     }
 
     fn rebuild_row_index_with_env(
@@ -2255,6 +2355,26 @@ impl TranscriptProjection {
             })
     }
 
+    fn exact_materialized_row_anchor(&self, row: RowIndex) -> Option<TranscriptRowAnchor> {
+        let anchor = row
+            .checked_sub(self.visible.row_base)
+            .and_then(|local| usize::try_from(local).ok())
+            .and_then(|local| self.visible.row_identities.get(local))
+            .map(|identity| identity.exact)?;
+        match anchor {
+            ProjectionAnchor::Node { id, row_offset } => {
+                Some(TranscriptRowAnchor { id, row_offset })
+            }
+            ProjectionAnchor::RenderedBlockRow { id, row_offset }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { id, row_offset, .. } => {
+                Some(TranscriptRowAnchor {
+                    id: RenderNodeId::Block(id),
+                    row_offset,
+                })
+            }
+        }
+    }
+
     pub(crate) fn block_ids_for_node_index(&self, index: usize) -> Option<Vec<BlockId>> {
         self.render_plan.block_ids_for_node(index)
     }
@@ -2270,6 +2390,20 @@ impl TranscriptProjection {
         self.measurements
             .active
             .row_for_node_anchor(anchor.id, anchor.row_offset)
+    }
+
+    pub(crate) fn row_anchor_for_block(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        block_id: BlockId,
+        row_offset: RowIndex,
+    ) -> Option<TranscriptRowAnchor> {
+        self.prepare_layout(lua, history, width);
+        let index = self.render_plan.index_for_block(block_id)?;
+        let id = self.render_plan.node(index)?.id();
+        Some(TranscriptRowAnchor { id, row_offset })
     }
 
     fn display_offset_for_node_row(
@@ -2343,10 +2477,19 @@ impl TranscriptProjection {
     ) -> Option<ProjectionAnchor> {
         let anchor = row
             .checked_sub(self.visible.row_base)
-            .and_then(|local| self.visible.row_anchors.get(local as usize))
-            .and_then(|anchor| *anchor)
+            .and_then(|local| usize::try_from(local).ok())
+            .and_then(|local| self.visible.row_identities.get(local))
+            .and_then(|identity| identity.content)
             .or_else(|| self.measurements.active.scroll_anchor_at_row(row))?;
         Some(self.anchor_with_display_offset(history, theme, anchor))
+    }
+
+    fn exact_row_anchor_for(&self, row: RowIndex) -> Option<ProjectionAnchor> {
+        row.checked_sub(self.visible.row_base)
+            .and_then(|local| usize::try_from(local).ok())
+            .and_then(|local| self.visible.row_identities.get(local))
+            .map(|identity| identity.exact)
+            .or_else(|| self.measurements.active.scroll_anchor_at_row(row))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2359,11 +2502,18 @@ impl TranscriptProjection {
         scroll_target: ScrollTarget,
         viewport_rows: u16,
     ) -> (Vec<BlockId>, ProjectionPlan) {
+        let viewport_rows = viewport_rows.max(1);
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         let anchor = match scroll_target {
             ScrollTarget::Visible(ScrollAnchor::ReflowStableRow(row)) => {
                 self.stable_row_anchor_for(history, theme, row)
             }
+            ScrollTarget::Visible(ScrollAnchor::StableRowDelta { row, anchor, .. }) => anchor
+                .map(|anchor| ProjectionAnchor::Node {
+                    id: anchor.id,
+                    row_offset: anchor.row_offset,
+                })
+                .or_else(|| self.exact_row_anchor_for(row)),
             ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::Tail) => None,
         };
         self.prepare_row_index_with_env(env.clone(), history, width);
@@ -2382,7 +2532,21 @@ impl TranscriptProjection {
             viewport_rows,
         };
         let plan = self.plan_projection_from_prepared(history, theme, &request);
-        let ids = self.projection_hydration_ids_for_plan(&plan);
+        let mut ids = self.projection_hydration_ids_for_plan(&plan);
+        if let (Some(anchor), ScrollTarget::Visible(ScrollAnchor::StableRowDelta { delta, .. })) =
+            (anchor, scroll_target)
+        {
+            if let Some(range) = self.stable_row_delta_hydration_range(anchor, delta, viewport_rows)
+            {
+                ids.extend(range.flat_map(|index| {
+                    self.render_plan
+                        .block_ids_for_node(index)
+                        .unwrap_or_default()
+                }));
+            }
+        }
+        ids.sort_unstable_by_key(|id| id.get());
+        ids.dedup();
         (ids, plan)
     }
 
@@ -2442,11 +2606,18 @@ impl TranscriptProjection {
         viewport_rows: u16,
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
+        let viewport_rows = viewport_rows.max(1);
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         let anchor = match scroll_target {
             ScrollTarget::Visible(ScrollAnchor::ReflowStableRow(row)) => {
                 self.stable_row_anchor_for(history, theme, row)
             }
+            ScrollTarget::Visible(ScrollAnchor::StableRowDelta { row, anchor, .. }) => anchor
+                .map(|anchor| ProjectionAnchor::Node {
+                    id: anchor.id,
+                    row_offset: anchor.row_offset,
+                })
+                .or_else(|| self.exact_row_anchor_for(row)),
             ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::Tail) => None,
         };
         self.prepare_row_index_with_env(env.clone(), history, width);
@@ -2498,6 +2669,11 @@ impl TranscriptProjection {
         theme: &Theme,
         mut request: ProjectionRequest,
     ) -> ProjectionPlan {
+        if let (Some(anchor), ScrollTarget::Visible(ScrollAnchor::StableRowDelta { delta, .. })) =
+            (request.target.anchor, request.target.requested)
+        {
+            self.exactify_stable_row_delta_path(env.clone(), history, anchor, delta);
+        }
         if let Some(
             ProjectionAnchor::RenderedBlockRow { id, .. }
             | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. },
@@ -2509,7 +2685,13 @@ impl TranscriptProjection {
             }
         }
         let mut plan = self.plan_projection_from_prepared(history, theme, &request);
-        for _ in 0..8 {
+        let pass_budget = self.measurements.active.nodes.len().saturating_add(1);
+        for _ in 0..pass_budget {
+            #[cfg(test)]
+            {
+                self.counters.projection_planning_passes =
+                    self.counters.projection_planning_passes.saturating_add(1);
+            }
             self.pin_display_node_range(plan.node_range());
             let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
             request.key = self.project_key(
@@ -2528,16 +2710,8 @@ impl TranscriptProjection {
             }
             plan = refined;
         }
-        self.pin_display_node_range(plan.node_range());
-        let _ = self.exactify_node_range(env, history, plan.node_range());
-        request.key = self.project_key(
-            request.key.width,
-            plan.key.renderer_generation,
-            plan.key.renderer_cache_key,
-            request.target.requested,
-            request.viewport_rows,
-        );
-        self.plan_projection_from_prepared(history, theme, &request)
+        smelt_perf::perf::record_value("transcript:projection:planning_budget_exhausted", 1);
+        plan
     }
 
     fn scroll_top_for_anchor(
@@ -2622,6 +2796,12 @@ impl TranscriptProjection {
             .target
             .anchor
             .and_then(|anchor| self.scroll_top_for_anchor(history, theme, anchor))
+            .map(|row| match request.target.requested.anchor() {
+                ScrollAnchor::StableRowDelta { delta, .. } => add_signed_row(row, delta),
+                ScrollAnchor::ExactRow(_)
+                | ScrollAnchor::ReflowStableRow(_)
+                | ScrollAnchor::Tail => row,
+            })
             .unwrap_or_else(|| request.target.requested.as_scroll_top());
         let scroll_top = clamp_scroll(requested_scroll_top, total_rows, request.viewport_rows);
         let visible_rows = request.viewport_rows.max(1) as RowIndex;
@@ -2630,7 +2810,11 @@ impl TranscriptProjection {
         // preloaded so nearby scrolls can reuse the materialized buffer.
         let preload_rows = visible_rows / 2;
         let row_window = match request.target.requested {
-            ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::ReflowStableRow(_)) => {
+            ScrollTarget::Visible(
+                ScrollAnchor::ExactRow(_)
+                | ScrollAnchor::ReflowStableRow(_)
+                | ScrollAnchor::StableRowDelta { .. },
+            ) => {
                 let start = scroll_top.saturating_sub(preload_rows);
                 let end = viewport_end.saturating_add(preload_rows).min(total_rows);
                 start..end
@@ -2652,6 +2836,118 @@ impl TranscriptProjection {
             row_window,
             node_range,
         }
+    }
+
+    pub(crate) fn exact_row_tape_handle(
+        &self,
+        rows: MaterializedRows,
+    ) -> Option<ExactRowTapeHandle> {
+        let key = self.last_project_key()?;
+        let materialized_rows = self.visible.row_identities.len() as RowIndex;
+        if rows.row_base != self.visible.row_base
+            || rows.total_rows != self.visible.total_rows
+            || rows.materialized_rows != materialized_rows
+        {
+            return None;
+        }
+        Some(ExactRowTapeHandle { key, rows })
+    }
+
+    fn resolve_exact_row_tape(
+        &self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &BlockHistory,
+        handle: ExactRowTapeHandle,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<ExactRowTapeState> {
+        let viewport_rows = viewport_rows.max(1);
+        let key = self.last_project_key()?;
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        let materialized_rows = self.visible.row_identities.len() as RowIndex;
+        if key != handle.key
+            || key.width != width
+            || key.renderer_generation != env.renderer_generation
+            || key.renderer_cache_key != env.renderer_cache_key
+            || key.presentation_generation != self.presentation.generation()
+            || key.row_generation != self.projection_generation
+            || key.mode != (ProjectionMode::Visible { viewport_rows })
+            || self.render_plan.history_generation != history.generation()
+            || self.render_plan.group_generation != lua.transcript_group_generation()
+            || self.render_plan.group_cache_key != lua.transcript_group_cache_key()
+            || handle.rows.row_base != self.visible.row_base
+            || handle.rows.total_rows != self.visible.total_rows
+            || handle.rows.materialized_rows != materialized_rows
+        {
+            return None;
+        }
+        Some(ExactRowTapeState {
+            rows: handle.rows,
+            top_anchor: self.exact_materialized_row_anchor(handle.rows.clamped_scroll),
+        })
+    }
+
+    pub(crate) fn exact_row_tape_state(
+        &self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &BlockHistory,
+        handle: ExactRowTapeHandle,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<ExactRowTapeState> {
+        self.resolve_exact_row_tape(lua, history, handle, width, viewport_rows)
+    }
+
+    pub(crate) fn plan_exact_row_tape_scroll(
+        &self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &BlockHistory,
+        handle: ExactRowTapeHandle,
+        width: u16,
+        delta: isize,
+        viewport_rows: u16,
+    ) -> Option<ExactRowTapeProjection> {
+        let viewport_rows = viewport_rows.max(1);
+        let state = self.resolve_exact_row_tape(lua, history, handle, width, viewport_rows)?;
+        let current_scroll = state.rows.clamped_scroll;
+        let target = add_signed_row(current_scroll, delta);
+        let delta_rows = RowIndex::try_from(delta.unsigned_abs()).ok()?;
+        if current_scroll.abs_diff(target) != delta_rows {
+            return None;
+        }
+        let max_scroll = self
+            .visible
+            .total_rows
+            .saturating_sub(RowIndex::from(viewport_rows));
+        if target > max_scroll {
+            return None;
+        }
+        let target = clamp_scroll(target, self.visible.total_rows, viewport_rows);
+        let materialized_rows = self.visible.row_identities.len() as RowIndex;
+        let materialized_end = self.visible.row_base.saturating_add(materialized_rows);
+        let viewport_end = target.saturating_add(RowIndex::from(viewport_rows));
+        if target < self.visible.row_base || viewport_end > materialized_end {
+            return None;
+        }
+
+        Some(ExactRowTapeProjection {
+            key: handle.key,
+            rows: MaterializedRows {
+                clamped_scroll: target,
+                row_base: self.visible.row_base,
+                total_rows: self.visible.total_rows,
+                materialized_rows,
+            },
+        })
+    }
+
+    pub(crate) fn apply_exact_row_tape_scroll(
+        &self,
+        buf: &Buffer,
+        plan: ExactRowTapeProjection,
+    ) -> Option<MaterializedRows> {
+        self.target_has_projection(plan.key, buf)
+            .then_some(plan.rows)
     }
 
     /// Render a bounded row window into `buf`.
@@ -2749,6 +3045,7 @@ impl TranscriptProjection {
             || prev.renderer_cache_key != key.renderer_cache_key
             || prev.presentation_generation != key.presentation_generation
             || prev.row_generation != key.row_generation
+            || prev.mode != key.mode
         {
             return None;
         }
@@ -2757,19 +3054,20 @@ impl TranscriptProjection {
             return None;
         }
 
+        let viewport_rows = viewport_rows.max(1);
         let total_rows = self.visible.total_rows;
         let clamped_scroll = clamp_scroll(row, total_rows, viewport_rows);
-        let materialized_end = self
-            .visible
-            .row_base
-            .saturating_add(buf.line_count() as RowIndex);
-        let viewport_end = clamped_scroll.saturating_add(viewport_rows as RowIndex);
+        let materialized_rows = self.visible.row_identities.len() as RowIndex;
+        let materialized_end = self.visible.row_base.saturating_add(materialized_rows);
+        let viewport_end = clamped_scroll
+            .saturating_add(RowIndex::from(viewport_rows))
+            .min(total_rows);
         if clamped_scroll >= self.visible.row_base && viewport_end <= materialized_end {
             return Some(MaterializedRows {
                 clamped_scroll,
                 row_base: self.visible.row_base,
                 total_rows,
-                materialized_rows: buf.line_count() as RowIndex,
+                materialized_rows,
             });
         }
         None
@@ -2813,7 +3111,7 @@ impl TranscriptProjection {
             }
         }
         self.visible.block_layout = materialized.layout;
-        self.visible.row_anchors = materialized.row_anchors;
+        self.visible.row_identities = materialized.row_identities;
         self.visible.row_base = row_base;
         self.visible.total_rows = total_rows;
         self.mark_projected_into(plan.key, buf);
@@ -2857,12 +3155,12 @@ impl TranscriptProjection {
         let mut texts = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(end.saturating_sub(start));
-        let mut row_anchors = Vec::new();
+        let mut row_identities = Vec::new();
         let mut rows = ProjectRows {
             texts: &mut texts,
             pending: &mut pending,
             layout: &mut layout,
-            row_anchors: &mut row_anchors,
+            row_identities: &mut row_identities,
         };
 
         let block_indices = start..end;
@@ -2881,6 +3179,7 @@ impl TranscriptProjection {
             );
         }
 
+        debug_assert_eq!(texts.len(), row_identities.len());
         smelt_perf::perf::record_value("transcript:collect_nodes_range:rows", texts.len() as u64);
         #[cfg(test)]
         {
@@ -2896,7 +3195,7 @@ impl TranscriptProjection {
             texts,
             pending,
             layout,
-            row_anchors,
+            row_identities,
         }
     }
 
@@ -2959,9 +3258,15 @@ impl TranscriptProjection {
         let gap_end = node_start.saturating_add(gap).min(node_end);
         let gap_start = clip_start.max(node_start);
         let gap_clip_end = clip_end.min(gap_end);
-        for _ in gap_start..gap_clip_end {
+        for row in gap_start..gap_clip_end {
             rows.texts.push(String::new());
-            rows.row_anchors.push(None);
+            rows.row_identities.push(ProjectedRowIdentity {
+                exact: ProjectionAnchor::Node {
+                    id,
+                    row_offset: row.saturating_sub(node_start),
+                },
+                content: None,
+            });
         }
 
         let block_id = id.as_block_id();
@@ -3003,12 +3308,20 @@ impl TranscriptProjection {
                             decoration: dec,
                         });
                     }
-                    rows.row_anchors.push(block_id.map(|id| {
-                        ProjectionAnchor::rendered_block_row(
+                    rows.row_identities.push(ProjectedRowIdentity {
+                        exact: ProjectionAnchor::Node {
                             id,
-                            local_row_start.saturating_add(r as RowIndex),
-                        )
-                    }));
+                            row_offset: gap
+                                .saturating_add(local_row_start)
+                                .saturating_add(r as RowIndex),
+                        },
+                        content: block_id.map(|id| {
+                            ProjectionAnchor::rendered_block_row(
+                                id,
+                                local_row_start.saturating_add(r as RowIndex),
+                            )
+                        }),
+                    });
                 }
             }
         }
@@ -4318,6 +4631,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn exact_row_tape_handle_rejects_stale_projection_generations() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        for index in 0..20 {
+            transcript.push(Block::Text {
+                content: format!("row {index}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(24), Default::default());
+        let plan = projection.plan_projection_measured(
+            &lua,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_row(5),
+            5,
+        );
+        let rows =
+            projection.project_planned(&lua, &mut buf, &mut transcript.history, &theme, plan);
+        let handle = projection
+            .exact_row_tape_handle(rows)
+            .expect("exact row tape handle");
+        assert!(projection
+            .exact_row_tape_state(&lua, &transcript.history, handle, 80, 5)
+            .is_some());
+
+        projection.invalidate_theme();
+
+        assert!(projection
+            .exact_row_tape_state(&lua, &transcript.history, handle, 80, 5)
+            .is_none());
+    }
+
+    #[test]
     fn visible_projection_matches_fresh_after_markdown_table_growth() {
         let mut transcript = Transcript::new();
         transcript.push(Block::User {
@@ -5186,6 +5535,78 @@ pub(crate) mod tests {
         assert!(
             rows.total_rows < 125,
             "the requested numeric row should be clamped against exact heights"
+        );
+    }
+
+    #[test]
+    fn visible_projection_converges_after_many_large_estimate_corrections() {
+        let lua = test_lua();
+        lua.lua
+            .load(
+                r#"
+                require("smelt.transcript")
+                smelt.transcript.extend_renderer("many-estimate-corrections", function(next, block, ctx)
+                  if block.kind == "tool" and block.name == "estimated_large_exact_short" then
+                    return smelt.layout.text("exact row " .. block.call_id)
+                  end
+                  return next(block, ctx)
+                end, { cache_key = "many-estimate-corrections:v1" })
+                "#,
+            )
+            .exec()
+            .expect("register estimate correction renderer");
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        let estimated_large_output = "estimated row\n".repeat(7_500);
+        for index in 0..20 {
+            transcript.push_tool_call(
+                Block::ToolCall {
+                    call_id: format!("short-{index}"),
+                    name: "estimated_large_exact_short".into(),
+                    summary: protocol::StyledLines::from_plain(format!("short {index}")),
+                    args: std::collections::HashMap::new(),
+                },
+                ToolState {
+                    status: ToolStatus::Ok,
+                    elapsed: None,
+                    output: Some(Box::new(ToolOutput {
+                        content: estimated_large_output.clone(),
+                        is_error: false,
+                        metadata: None,
+                    })),
+                    user_message: None,
+                    preview_output: None,
+                },
+            );
+        }
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(104), Default::default());
+
+        let rows = project_with_lua(
+            &mut projection,
+            &lua,
+            &mut buf,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_row(66_515),
+            13,
+        );
+
+        assert!(rows.materialized_rows > 0);
+        assert!(rows.clamped_scroll >= rows.row_base);
+        assert!(
+            rows.clamped_scroll.saturating_add(13)
+                <= rows.row_base.saturating_add(rows.materialized_rows)
+        );
+        let planning_passes = projection.counters().projection_planning_passes;
+        assert!(
+            planning_passes > 8,
+            "fixture must exercise more than the old arbitrary pass cap"
+        );
+        assert!(
+            planning_passes <= 21,
+            "planning exceeded one progress pass per node plus convergence: {planning_passes}"
         );
     }
 
@@ -7148,6 +7569,7 @@ pub(crate) mod tests {
         let record = smelt_core::Block::Text {
             content: content.clone(),
         };
+        let content_hash = record.content_hash();
         let indexed_text = format!("resume benchmark block {block_idx}");
         smelt_store::StoredTranscriptBlock {
             block_idx: block_idx as u64,
@@ -7155,7 +7577,7 @@ pub(crate) mod tests {
             kind: record.kind().to_string(),
             tool_call_id: None,
             tool_name: None,
-            content_hash: (block_idx as u64).saturating_add(1).to_string(),
+            content_hash: content_hash.to_string(),
             estimated_text_bytes: content.len() as u64,
             preview_text: format!("resume benchmark response {block_idx}"),
             indexed_text,
@@ -7229,13 +7651,9 @@ pub(crate) mod tests {
         let tail_load_ms = elapsed_ms(tail_load_start.elapsed());
         let mut tail_buf = Buffer::new(crate::smelt_edit::BufId(94), Default::default());
         let tail_render_start = std::time::Instant::now();
-        let tail_plan = tail_document.plan_projection_measured(
-            &lua,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
+        let tail_plan = tail_document
+            .plan_projection_measured(&lua, 100, &theme, ScrollTarget::visible_tail(), 40)
+            .expect("resume benchmark projection hydration");
         let tail_rows = tail_document.project_planned(&lua, &mut tail_buf, &theme, tail_plan);
         let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
         let tail_alloc_after = smelt_perf::alloc::snapshot();
@@ -7252,7 +7670,10 @@ pub(crate) mod tests {
             "display-only resume did not observe the record-backed fixture size"
         );
 
-        smelt_core::session::delete(&session_id).expect("delete resume benchmark session");
+        drop(tail_document);
+        sessions
+            .delete(&session_id)
+            .expect("delete resume benchmark session");
         smelt_perf::perf::set_enabled(false);
         eprintln!(
             "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=record_backed target_bytes={} generated_bytes={} records={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} tail_bytes_allocated={} tail_bytes_deallocated={} tail_current_bytes_before={} tail_current_bytes_after={} tail_retained_bytes={}",
