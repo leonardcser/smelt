@@ -286,8 +286,8 @@ impl TuiApp {
         }
     }
 
-    /// Apply a resolved `InputOutcome` to app state. Command handlers update
-    /// `pending_quit` directly; this covers start-agent, exec, and continue cases.
+    /// Apply a resolved `InputOutcome` after the submitted prompt has been
+    /// committed. Command handlers can then safely open prompt-owned UI.
     pub(crate) fn apply_input_outcome(
         &mut self,
         outcome: InputOutcome,
@@ -299,8 +299,10 @@ impl TuiApp {
                 let turn = self.begin_agent_turn(display, content);
                 self.conversation.set_active(turn);
             }
-            InputOutcome::Exec(handle) => {
-                self.overlays.install_execution(handle);
+            InputOutcome::Command(line) => {
+                if let CommandAction::Exec(handle) = run_command(self, &line) {
+                    self.overlays.install_execution(handle);
+                }
             }
             InputOutcome::Continue => {}
         }

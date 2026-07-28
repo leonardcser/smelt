@@ -75,3 +75,7 @@ end
 local win = smelt.prompt.win()
 win:on("text_changed", update)
 win:on("resized", update)
+smelt.events.on("cmd_pre", function()
+  local buf = prompt_buf()
+  if buf then buf:clear_ns(ns) end
+end)

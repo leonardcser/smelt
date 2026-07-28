@@ -35,6 +35,41 @@ fn slash_completion_tab_accepts_command_name() {
     assert_eq!(app.state().prompt_text, "/tab-accept-regression ");
 }
 
+#[test]
+fn partial_model_command_tab_then_enter_opens_model_picker() {
+    let mut app = TestApp::builder().build();
+    app.set_available_models(vec![smelt_core::config::ResolvedModel {
+        key: "anthropic/claude-sonnet-4".into(),
+        provider_name: "anthropic".into(),
+        model_name: "claude-sonnet-4".into(),
+        display_name: None,
+        api_base: "https://api.anthropic.com".into(),
+        api_key_env: "ANTHROPIC_API_KEY".into(),
+        provider_type: "anthropic".into(),
+        config: protocol::ModelConfig::default(),
+    }]);
+
+    app.type_text("/mode");
+    app.press(KeyCode::Tab);
+    assert_eq!(app.state().prompt_text, "/model ");
+
+    app.press(KeyCode::Enter);
+
+    let state = app.state();
+    assert!(
+        state.notification.is_none(),
+        "opening the model picker should not report an error: {:?}",
+        state.notification
+    );
+    assert!(state.picker_count > 0, "Enter should open the model picker");
+    assert_eq!(state.prompt_text, "");
+    let frame = app.render_to_frame().text();
+    assert!(
+        !frame.contains("[test/test-model]"),
+        "the submitted command's argument placeholder remained visible:\n{frame}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fast_slash_command_updates_session_state_for_supported_model() {
     let mut app = TestApp::builder().build();

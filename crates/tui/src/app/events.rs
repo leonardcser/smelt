@@ -1,6 +1,6 @@
 use crate::app::{
-    CommandAction, EventOutcome, InputOutcome, PendingChordPolicy, PromptWorkState, QueueStage,
-    QueuedInput, TuiApp,
+    EventOutcome, InputOutcome, PendingChordPolicy, PromptWorkState, QueueStage, QueuedInput,
+    TuiApp,
 };
 
 use crate::input::Action;
@@ -1074,23 +1074,16 @@ impl TuiApp {
         let parsed = crate::commands::parse_command_line(trimmed);
 
         if let crate::commands::ParsedCommand::Slash { name, .. } = &parsed {
-            if !self.has_command_name(name) {
-                return InputOutcome::StartAgent;
-            }
+            return if self.has_command_name(name) {
+                InputOutcome::Command(trimmed.to_string())
+            } else {
+                InputOutcome::StartAgent
+            };
         }
-
-        match crate::commands::run_command(self, trimmed) {
-            CommandAction::Exec(handle) => return InputOutcome::Exec(handle),
-            CommandAction::Continue => {}
-        }
-        if matches!(parsed, crate::commands::ParsedCommand::Slash { .. })
-            || crate::commands::prompt_quit_alias(trimmed)
+        if crate::commands::prompt_quit_alias(trimmed)
+            || (trimmed.starts_with('!') && !is_from_paste)
         {
-            return InputOutcome::Continue;
-        }
-        // Shell escapes (`!cmd`) skip agent start, but pasted content starting with `!` does not.
-        if trimmed.starts_with('!') && !is_from_paste {
-            return InputOutcome::Continue;
+            return InputOutcome::Command(trimmed.to_string());
         }
 
         InputOutcome::StartAgent

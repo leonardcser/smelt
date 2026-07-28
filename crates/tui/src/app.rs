@@ -798,7 +798,7 @@ pub(crate) struct ShellPanel {
 pub(crate) enum InputOutcome {
     Continue,
     StartAgent,
-    Exec(crate::commands::ExecHandle),
+    Command(String),
 }
 
 /// Mutable timer state shared across event handlers.
