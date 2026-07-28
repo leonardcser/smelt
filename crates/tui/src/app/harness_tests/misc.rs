@@ -3047,6 +3047,19 @@ fn transcript_drag_selection_command_does_not_pre_scroll_as_local_delta() {
 }
 
 #[test]
+fn transcript_append_during_bottom_drag_preserves_sparse_anchor() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.install_sparse_transcript_scroll_fixture(512, 103, 13);
+
+    app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+    app.transcript_scroll_probe_render();
+    app.transcript_scroll_probe_append(193);
+    app.transcript_scroll_probe_render();
+    app.transcript_scroll_probe_append(193);
+    app.transcript_scroll_probe_render();
+}
+
+#[test]
 fn transcript_resize_reflow_preserves_sparse_anchor_after_prefix_width_change() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.install_sparse_transcript_scroll_fixture(256, 40, 36);

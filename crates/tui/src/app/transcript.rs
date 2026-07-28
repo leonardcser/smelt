@@ -1098,8 +1098,20 @@ impl TranscriptExtentIndex {
         model: &TranscriptRecordExtentModel<'_>,
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
-        if let Some(estimated_total) = self.estimated_total_record_rows(model) {
-            return estimated_total;
+        if let Some(total) = model.total_count {
+            let mut total_rows = self.estimated_total_record_rows(model).unwrap_or_default();
+            if model
+                .active_range
+                .as_ref()
+                .is_some_and(|range| range.end >= total)
+            {
+                // Tail windows can include live blocks that are not in persisted row estimates yet.
+                total_rows = total_rows.max(
+                    self.estimated_sparse_prefix_rows(model)
+                        .saturating_add(exact_loaded_rows),
+                );
+            }
+            return total_rows;
         }
 
         self.estimated_sparse_prefix_rows(model)
