@@ -33,6 +33,7 @@ pub(crate) struct SessionStatusSnapshot {
     pub(crate) reasoning_pending: bool,
     pub(crate) fast_supported: bool,
     pub(crate) fast_active: bool,
+    pub(crate) context_state: &'static str,
     pub(crate) context_tokens: Option<u32>,
     pub(crate) context_window: Option<u32>,
     pub(crate) context_stale: bool,
@@ -823,6 +824,14 @@ impl AgentLuaHost<'_> {
         smelt_core::lua::reg::LuaReg::new(move || token.release())
     }
 
+    pub(crate) fn context_recalculation_registration(
+        &mut self,
+        label: String,
+    ) -> smelt_core::lua::reg::LuaReg {
+        let token = self.app.busy_stack.push_context_recalculation_token(label);
+        smelt_core::lua::reg::LuaReg::new(move || token.release())
+    }
+
     pub(crate) fn is_busy(&self) -> bool {
         self.app.busy_stack.is_busy()
     }
@@ -1468,8 +1477,18 @@ impl SessionLuaHost<'_> {
         self.app.set_fast_mode(enabled);
     }
 
+    fn context_recalculating(&self) -> bool {
+        self.app.working.is_compacting() || self.app.busy_stack.context_recalculating()
+    }
+
     pub(crate) fn session_status(&self) -> SessionStatusSnapshot {
         let session = self.app.conversation.session();
+        let context_recalculating = self.context_recalculating();
+        let context_tokens = if context_recalculating {
+            None
+        } else {
+            session.display_context_tokens()
+        };
         SessionStatusSnapshot {
             active_model: self.app.core.config.active_model().cloned(),
             cost: session.session_cost_usd,
@@ -1479,14 +1498,22 @@ impl SessionLuaHost<'_> {
             reasoning_pending: self.app.reasoning_effort_pending(),
             fast_supported: self.app.fast_mode_supported(),
             fast_active: self.app.fast_mode_active(),
-            context_tokens: session.display_context_tokens(),
+            context_state: if context_recalculating {
+                "recalculating"
+            } else {
+                "ready"
+            },
+            context_tokens,
             context_window: self.app.core.config.context_window,
-            context_stale: session
-                .display_context_tokens_stale(&self.app.active_context_token_identity()),
+            context_stale: context_tokens.is_some()
+                && session.display_context_tokens_stale(&self.app.active_context_token_identity()),
         }
     }
 
     pub(crate) fn session_context_tokens(&self) -> Option<u32> {
+        if self.context_recalculating() {
+            return None;
+        }
         self.app.conversation.session().display_context_tokens()
     }
 

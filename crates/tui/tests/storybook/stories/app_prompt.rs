@@ -323,13 +323,14 @@ app_story!(prompt_stash_row_truncates, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(prompt_compacting_keeps_token_counter_visible, |ctx| {
-    // A narrow prompt bar during compaction should keep the token counter
-    // visible even when secondary chrome needs to drop.
+app_story!(prompt_compacting_hides_stale_token_counter, |ctx| {
+    // Compaction rewrites model history, so the previous provider reading is
+    // hidden until the checkpointed foreground request reports fresh usage.
     ctx.set_viewport(28, 8);
     ctx.set_context_window(Some(25_000));
     ctx.set_context_tokens(19_500);
-    ctx.run_lua("_G._busy_handle = smelt.work.busy('compacting')");
+    ctx.run_lua("_G._busy_handle = smelt.work._context_recalculation('compacting')");
+    ctx.push_compaction_preview("");
     ctx.assert_snapshot();
 });
 
@@ -338,7 +339,7 @@ app_story!(prompt_working_bar_width_ladder, |ctx| {
     // label, compact spinner, then the token strip without orphan spacing.
     ctx.set_context_window(Some(25_000));
     ctx.set_context_tokens(19_500);
-    ctx.run_lua("_G._busy_handle = smelt.work.busy('compacting')");
+    ctx.run_lua("_G._busy_handle = smelt.work.busy('indexing')");
 
     for width in [48, 36, 28, 20, 16] {
         ctx.set_viewport(width, 8);

@@ -16,9 +16,7 @@ dim: 48 8
   4  10   1 fg=Rgb { r: 220, g: 220, b: 220 } attrs=bold
   4  11   1 fg=Rgb { r: 238, g: 238, b: 238 } attrs=bold
   4  12   1 fg=Rgb { r: 251, g: 251, b: 251 } attrs=bold
-  4  13   1 fg=Rgb { r: 255, g: 255, b: 255 } attrs=bold
-  4  14   1 fg=Rgb { r: 251, g: 251, b: 251 } attrs=bold
-  4  16  18 fg=AnsiValue(237)
+  4  14  20 fg=AnsiValue(237)
   4  34  12 fg=AnsiValue(244)
   4  47   1 fg=AnsiValue(237)
   5   1   1 fg=Black bg=White

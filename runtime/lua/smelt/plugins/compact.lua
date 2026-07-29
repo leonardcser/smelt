@@ -471,7 +471,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 end
 
 local function summarize_by_group_boundary_with_busy(history, instructions, done)
-	local handle = smelt.work.busy("compacting")
+	local handle = smelt.work._context_recalculation("compacting")
 	summarize_by_group_boundary(history, instructions, handle, done)
 end
 

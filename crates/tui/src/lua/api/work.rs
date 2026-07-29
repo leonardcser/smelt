@@ -33,6 +33,15 @@ concurrently; the most recently pushed label wins for display.",
             }))
         },
     )?;
+    m.private_fn(
+        "_context_recalculation",
+        &["label"],
+        |_, label: String| -> LuaResult<LuaReg> {
+            Ok(crate::lua::with_agent_host(|host| {
+                host.context_recalculation_registration(label)
+            }))
+        },
+    )?;
     m.fn_(
         "guard",
         "Return an opaque snapshot of the current work lifecycle. Pass it to guarded APIs or `work.guard_current` so late async callbacks can avoid committing after cancellation or turn replacement.",

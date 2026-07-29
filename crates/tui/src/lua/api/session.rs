@@ -501,7 +501,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "status",
-        "Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.",
+        "Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { state, tokens, window, stale, marker }, cost }`. Context state is `ready` or `recalculating`; tokens are `nil` while recalculating. Markers are `*` for pending config and `?` for stale readings.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
@@ -536,6 +536,7 @@ pub(super) fn register(
                 out.set("fast", fast)?;
 
                 let context = lua.create_table()?;
+                context.set("state", status.context_state)?;
                 context.set("tokens", status.context_tokens)?;
                 context.set("window", status.context_window)?;
                 context.set("stale", status.context_stale)?;
@@ -547,7 +548,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "context_tokens",
-        "Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Use `status().context` for stale markers; stale counts are display-only and are not used as authoritative request baselines.",
+        "Latest non-background provider-reported active-context token count, or `nil` before the first usage report and while `status().context.state` is `recalculating`. During other in-flight requests this may be the previous turn's reading until the provider sends a fresh usage update. Use `status().context` for display state and stale markers; stale counts are display-only and are not used as authoritative request baselines.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(

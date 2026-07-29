@@ -633,9 +633,15 @@ pub(crate) struct BusyStack {
 
 #[derive(Default)]
 struct BusyStackState {
-    entries: Vec<(u64, String)>,
+    entries: Vec<BusyStackEntry>,
     next_id: u64,
     since: Option<Instant>,
+}
+
+struct BusyStackEntry {
+    id: u64,
+    label: String,
+    context_recalculating: bool,
 }
 
 pub(crate) struct BusyToken {
@@ -655,11 +661,23 @@ pub use smelt_core::signals::WorkBusyEntry;
 
 impl BusyStack {
     pub(crate) fn push(&mut self, label: String) -> u64 {
-        self.push_entry(label).0
+        self.push_entry(label, false).0
     }
 
     pub(crate) fn push_token(&mut self, label: String) -> BusyToken {
-        let (id, state) = self.push_entry(label);
+        self.push_token_with_context_state(label, false)
+    }
+
+    pub(crate) fn push_context_recalculation_token(&mut self, label: String) -> BusyToken {
+        self.push_token_with_context_state(label, true)
+    }
+
+    fn push_token_with_context_state(
+        &mut self,
+        label: String,
+        context_recalculating: bool,
+    ) -> BusyToken {
+        let (id, state) = self.push_entry(label, context_recalculating);
         BusyToken {
             state: std::rc::Rc::downgrade(&state),
             id,
@@ -669,6 +687,7 @@ impl BusyStack {
     fn push_entry(
         &mut self,
         label: String,
+        context_recalculating: bool,
     ) -> (u64, std::rc::Rc<std::cell::RefCell<BusyStackState>>) {
         let mut state = self.state.borrow_mut();
         state.next_id += 1;
@@ -676,7 +695,11 @@ impl BusyStack {
         if state.entries.is_empty() {
             state.since = Some(Instant::now());
         }
-        state.entries.push((id, label));
+        state.entries.push(BusyStackEntry {
+            id,
+            label,
+            context_recalculating,
+        });
         drop(state);
         (id, std::rc::Rc::clone(&self.state))
     }
@@ -701,7 +724,15 @@ impl BusyStack {
             .borrow()
             .entries
             .last()
-            .map(|(_, label)| label.clone())
+            .map(|entry| entry.label.clone())
+    }
+
+    pub(crate) fn context_recalculating(&self) -> bool {
+        self.state
+            .borrow()
+            .entries
+            .iter()
+            .any(|entry| entry.context_recalculating)
     }
 
     /// Elapsed time since the first token was pushed, or `None` when empty.
@@ -722,20 +753,16 @@ impl BusyStack {
             .borrow()
             .entries
             .iter()
-            .map(|(id, label)| WorkBusyEntry {
-                id: *id,
-                label: label.clone(),
+            .map(|entry| WorkBusyEntry {
+                id: entry.id,
+                label: entry.label.clone(),
             })
             .collect()
     }
 }
 
 fn release_busy_entry(state: &mut BusyStackState, id: u64) -> bool {
-    if let Some(position) = state
-        .entries
-        .iter()
-        .position(|(entry_id, _)| *entry_id == id)
-    {
+    if let Some(position) = state.entries.iter().position(|entry| entry.id == id) {
         state.entries.remove(position);
         if state.entries.is_empty() {
             state.since = None;
@@ -3367,6 +3394,19 @@ mod tests {
 
         assert!(!token.release());
         assert!(!stack.is_busy());
+    }
+
+    #[test]
+    fn context_recalculation_busy_token_survives_stale_release_after_clear() {
+        let mut stack = BusyStack::default();
+        let cleared = stack.push_context_recalculation_token("old compaction".to_owned());
+        stack.clear();
+        let active = stack.push_context_recalculation_token("new compaction".to_owned());
+
+        assert!(!cleared.release());
+        assert!(stack.context_recalculating());
+        assert!(active.release());
+        assert!(!stack.context_recalculating());
     }
 
     #[test]

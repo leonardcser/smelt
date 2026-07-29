@@ -1749,6 +1749,18 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
 
 #[test]
 fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
+    fn compacted_marker_count(app: &TestApp) -> usize {
+        let history = app.conversation_probe().transcript().history();
+        (0..history.len())
+            .filter(|index| {
+                history
+                    .block_id_at(*index)
+                    .and_then(|id| history.block_kind(id))
+                    == Some("compacted")
+            })
+            .count()
+    }
+
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     for idx in 0..24 {
@@ -1818,6 +1830,7 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         });
         app.drive_lua_tasks();
     }
+    assert_eq!(compacted_marker_count(&app), 1);
 
     let (replacement, coordinates) = match rx
         .try_recv()
@@ -1838,6 +1851,7 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         turn_id: 42,
         update: coordinates.canonical_delta(protocol::ModelHistoryIndex::ZERO, replacement_history),
     }));
+    assert_eq!(compacted_marker_count(&app), 1);
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
         turn_id: 42,
         delta: protocol::CanonicalHistoryDelta {
@@ -1885,6 +1899,7 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
     drop(app);
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
+    assert_eq!(compacted_marker_count(&resumed), 1);
     assert_eq!(resumed.session_message_count(), compacted_prefix_len + 2);
     let resumed_history = resumed.session_history_range(0..resumed.session_message_count());
     assert!(matches!(

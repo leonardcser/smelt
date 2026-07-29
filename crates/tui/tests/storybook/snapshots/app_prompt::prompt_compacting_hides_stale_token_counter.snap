@@ -2,11 +2,11 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
+─────── compacting ────────
 
 
 
-
-─ ✿ ────────── 19.5k (78%) ─
+─ ✿ compacting… ────────────
 
 ────────────────────────────
  ○ normal           1:1 100%

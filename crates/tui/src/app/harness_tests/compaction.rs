@@ -1,5 +1,35 @@
 use super::*;
 
+async fn read_json_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+    use tokio::io::AsyncReadExt;
+
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk).await.expect("read request headers");
+        assert!(read > 0, "request ended before headers");
+        request.extend_from_slice(&chunk[..read]);
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().expect("content length"))
+        })
+        .expect("request content-length");
+    while request.len() < header_end + content_length {
+        let read = stream.read(&mut chunk).await.expect("read request body");
+        assert!(read > 0, "request ended before body");
+        request.extend_from_slice(&chunk[..read]);
+    }
+    serde_json::from_slice(&request[header_end..header_end + content_length]).expect("JSON request")
+}
+
 #[test]
 fn compact_command_shows_preview_before_first_delta() {
     let mut app = TestApp::builder().build();
@@ -18,6 +48,14 @@ fn compact_command_shows_preview_before_first_delta() {
         app.conversation_probe().transcript().history().block(preview_id),
         Some(smelt_core::transcript_model::Block::CompactionPreview { summary })
             if summary.is_empty()
+    ));
+    assert!(app.run_lua(
+        r#"
+        assert(smelt.session.context_tokens() == nil)
+        local context = smelt.session.status().context
+        assert(context.state == "recalculating")
+        assert(context.tokens == nil)
+        "#,
     ));
     let frame = app.render_to_frame().text();
     assert!(frame.contains("compacting"), "frame: {frame}");
@@ -409,43 +447,15 @@ async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() 
                 .is_none(),
             "response should replace the transient preview"
         );
+        assert!(app.run_lua(r#"assert(smelt.session.status().context.state == "ready")"#));
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn real_engine_responses_compaction_streams_preview_before_response() {
     use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
-
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
-        let mut request = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        let header_end = loop {
-            let read = stream.read(&mut chunk).await.expect("read request headers");
-            assert!(read > 0, "request ended before headers");
-            request.extend_from_slice(&chunk[..read]);
-            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                break index + 4;
-            }
-        };
-        let headers = String::from_utf8_lossy(&request[..header_end]);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().expect("content length"))
-            })
-            .expect("request content-length");
-        while request.len() < header_end + content_length {
-            let read = stream.read(&mut chunk).await.expect("read request body");
-            assert!(read > 0, "request ended before body");
-            request.extend_from_slice(&chunk[..read]);
-        }
-        serde_json::from_slice(&request[header_end..header_end + content_length])
-            .expect("JSON request")
-    }
 
     fn sse(events: &[&str]) -> String {
         events
@@ -477,7 +487,7 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept provider request");
-        let request = read_request(&mut stream).await;
+        let request = read_json_request(&mut stream).await;
         assert_eq!(request["stream"], true, "compaction request must stream");
         let headers = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {full_len}\r\nConnection: close\r\n\r\n"
@@ -587,6 +597,303 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
 
     let _ = release_tx.send(());
     server.await.expect("mock provider server");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
+    use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    fn one_shot_response(id: &str, text: &str, input_tokens: u32) -> String {
+        let message_id = format!("{id}_message");
+        let events = [
+            serde_json::json!({
+                "type": "response.created",
+                "response": { "id": id, "status": "in_progress", "output": [] }
+            }),
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "item_id": message_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": text
+            }),
+            serde_json::json!({
+                "type": "response.output_text.done",
+                "item_id": message_id,
+                "output_index": 0,
+                "content_index": 0,
+                "text": text
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": text, "annotations": [] }]
+                }
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": id,
+                    "status": "completed",
+                    "output": [{
+                        "id": message_id,
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": text, "annotations": [] }]
+                    }],
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": 3,
+                        "total_tokens": input_tokens + 3
+                    }
+                }
+            }),
+        ];
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
+    }
+
+    async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write one-shot response");
+        stream.shutdown().await.expect("shutdown response");
+    }
+
+    fn compacted_block_count(app: &TestApp) -> usize {
+        let history = app.conversation_probe().transcript().history();
+        (0..history.len())
+            .filter(|index| {
+                history
+                    .block_id_at(*index)
+                    .and_then(|id| history.block_kind(id))
+                    == Some("compacted")
+            })
+            .count()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let address = listener.local_addr().expect("mock provider address");
+    let summary = [
+        "SUMMARY_HEAD_MUST_BE_CAPPED",
+        "summary line 02",
+        "summary line 03",
+        "summary line 04",
+        "summary line 05",
+        "summary line 06",
+        "summary line 07",
+        "summary line 08",
+        "summary line 09",
+        "summary line 10",
+        "summary line 11",
+        "SUMMARY_TAIL_MUST_BE_VISIBLE",
+    ]
+    .join("\n");
+    let server_summary = summary.clone();
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept provider request");
+            let request = read_json_request(&mut stream).await;
+            let request_text = request.to_string();
+            let (id, content, input_tokens) = if request_index == 0 {
+                assert!(
+                    request_text.contains("CONTEXT CHECKPOINT COMPACTION"),
+                    "first request should compact context: {request_text}"
+                );
+                ("resp_compaction", server_summary.as_str(), 120)
+            } else {
+                assert!(
+                    request_text.contains("SUMMARY_TAIL_MUST_BE_VISIBLE"),
+                    "foreground request should use checkpointed model history: {request_text}"
+                );
+                assert!(
+                    !request_text.contains("old user 1"),
+                    "foreground request should omit the compacted prefix: {request_text}"
+                );
+                ("resp_foreground", "foreground complete", 55)
+            };
+            write_response(&mut stream, &one_shot_response(id, content, input_tokens)).await;
+        }
+        if let Ok(Ok((mut stream, _))) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await
+        {
+            let request = read_json_request(&mut stream).await;
+            panic!("unexpected third provider request: {request}");
+        }
+    });
+
+    let engine_cwd = tempfile::tempdir().expect("create engine cwd");
+    let config_dir = engine_cwd.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("create test config");
+    std::fs::write(
+        config_dir.join("early.lua"),
+        r#"smelt.builtins.disable({ plugins = { "title", "predict" } })"#,
+    )
+    .expect("write early init");
+    let engine = engine::start(
+        engine::EngineConfig::new(
+            engine_cwd.path().to_path_buf(),
+            Arc::new(engine::clock::RealClock),
+        ),
+        Box::new(engine::tools::EmptyDispatcher),
+    );
+    let mut app = TestApp::builder()
+        .with_cwd(engine_cwd.path())
+        .with_lua_load_paths(&config_dir, None)
+        .with_engine(engine)
+        .build();
+    app.set_terminal_size(80, 24);
+    app.use_model(smelt_core::config::ResolvedModel {
+        key: "mock/compact".into(),
+        provider_name: "mock".into(),
+        model_name: "compact".into(),
+        display_name: None,
+        api_base: format!("http://{address}"),
+        api_key_env: String::new(),
+        provider_type: "openai".into(),
+        config: protocol::ModelConfig::default(),
+    });
+    app.set_context_window(Some(200));
+    let mut settings = app.core_probe().config.settings.clone();
+    settings.auto_compact = true;
+    settings.compact_threshold = 0.5;
+    settings.compact_keep_recent_groups = 2.0;
+    app.set_settings_for_harness(settings);
+    for index in 1..=3 {
+        let user = format!("old user {index}");
+        app.commit_request_history_item(
+            protocol::HistoryItem::user(protocol::Content::text(user.clone())),
+            Some(smelt_core::transcript_model::Block::User {
+                text: user,
+                image_labels: Vec::new(),
+                command: false,
+            }),
+        );
+        let assistant = format!("old assistant {index}");
+        app.commit_request_history_item(
+            protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text(assistant.clone())),
+                None,
+                Vec::new(),
+            )),
+            Some(smelt_core::transcript_model::Block::Text { content: assistant }),
+        );
+    }
+    app.set_context_token_baseline_for_harness(Some(20));
+    app.follow_transcript_tail();
+    app.render_to_frame();
+    let submitted = "new unaccounted context ".repeat(30);
+    app.start_submitted_turn(&submitted);
+
+    let mut terminal_output = Vec::new();
+    let mut waiting_frame = None;
+    let mut preview_frame = None;
+    let mut marker_count_after_response = None;
+    let mut marker_count_after_history_update = None;
+    let mut final_frame = None;
+    let mut saw_turn_complete = false;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !saw_turn_complete {
+            let output = app
+                .app
+                .core
+                .engine
+                .recv_output()
+                .await
+                .expect("engine stopped during one-shot compaction");
+            let is_prepare_request = matches!(
+                &output,
+                engine::EngineOutput::HostCall(engine::HostCall::PrepareRequest { .. })
+            );
+            let is_compaction_response = matches!(
+                &output,
+                engine::EngineOutput::Event(protocol::EngineEvent::EngineAskResponse { .. })
+            );
+            let is_history_update = matches!(
+                &output,
+                engine::EngineOutput::Event(protocol::EngineEvent::HistoryUpdated { .. })
+            );
+            saw_turn_complete = matches!(
+                &output,
+                engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete { .. })
+            );
+
+            app.app
+                .dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
+            let frame = app.render_to_frame().text();
+            if is_prepare_request && waiting_frame.is_none() && frame.contains("compacting") {
+                waiting_frame = Some(frame.clone());
+            }
+            if frame.contains("SUMMARY_TAIL_MUST_BE_VISIBLE") {
+                preview_frame = Some(frame.clone());
+            }
+            if is_compaction_response {
+                marker_count_after_response = Some(compacted_block_count(&app));
+            }
+            if is_history_update {
+                marker_count_after_history_update = Some(compacted_block_count(&app));
+            }
+            final_frame = Some(frame);
+        }
+    })
+    .await
+    .expect("one-shot compaction turn timed out");
+
+    server.await.expect("mock provider server");
+    let waiting_frame = waiting_frame.expect("waiting compaction frame");
+    assert!(waiting_frame.contains("compacting"));
+    let preview_frame = preview_frame.expect("one-shot compaction preview frame");
+    assert!(preview_frame.contains("SUMMARY_TAIL_MUST_BE_VISIBLE"));
+    assert!(
+        !preview_frame.contains("SUMMARY_HEAD_MUST_BE_CAPPED"),
+        "one-shot preview should retain only the summary tail:\n{preview_frame}"
+    );
+    assert_eq!(marker_count_after_response, Some(1));
+    assert_eq!(marker_count_after_history_update, Some(1));
+    assert_eq!(compacted_block_count(&app), 1);
+    assert!(app
+        .conversation_probe()
+        .transcript_compaction_preview_id()
+        .is_none());
+    let final_frame = final_frame.expect("final foreground frame");
+    assert!(final_frame.contains("foreground complete"));
+    assert!(
+        final_frame.contains("58 (28%)"),
+        "foreground usage should restore authoritative context:\n{final_frame}"
+    );
+    assert!(
+        !waiting_frame.contains("10%"),
+        "stale context usage remained visible while compacting:\n{waiting_frame}"
+    );
 }
 
 #[test]
