@@ -154,7 +154,7 @@ smelt.settings.transcript = {
       edit_file = "collapsed",
       edit_notebook = "expanded",
     },
-    groups = { explore = "collapsed", lsp = "collapsed" },
+    groups = { explore = "collapsed", lsp = "collapsed", web = "collapsed" },
   },
   limits = {
     tool_rows = 20,

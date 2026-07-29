@@ -252,6 +252,27 @@ function M.register()
       })
     end,
   })
+
+  smelt.transcript.groups.register({
+    name = "web",
+    cache_key = "smelt.transcript.group.web:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = {
+      kind = "tool",
+      names = {
+        "web_search",
+        "web_fetch",
+      },
+    },
+    render = function(group, ctx)
+      return render_terminal_tool_group(group, ctx, {
+        name = "web",
+        label = tool_group_label,
+      })
+    end,
+  })
 end
 
 package.loaded["smelt.transcript.builtins"] = M

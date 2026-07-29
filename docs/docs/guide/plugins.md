@@ -634,8 +634,9 @@ Transcript history stays flat, but the display can group adjacent matching
 blocks. The built-in `explore` group combines broad discovery through
 `read_file`, `grep`, `glob`, `outline`, and `find_symbol`. Focused semantic
 inspection through `inspect_symbol`, `inspect_symbol_at`, `find_definition`,
-`find_references`, and `diagnostics` uses the built-in `lsp` group. Language
-server status and rename operations remain standalone, while background-process
+`find_references`, and `diagnostics` uses the built-in `lsp` group. Adjacent
+`web_search` and `web_fetch` calls use the built-in `web` group. Language server
+status and rename operations remain standalone, while background-process
 completion notes use their own group. User fold state is session-local.
 
 Quick display preferences live in `smelt.settings.transcript`:
@@ -645,7 +646,7 @@ smelt.settings.transcript = {
   view = {
     blocks = { thinking = "peek" },
     tools = { read_file = "collapsed", grep = "collapsed", glob = "collapsed" },
-    groups = { explore = "collapsed", lsp = "collapsed" },
+    groups = { explore = "collapsed", lsp = "collapsed", web = "collapsed" },
   },
   limits = { tool_rows = 20, thinking_peek_rows = 4 },
 }

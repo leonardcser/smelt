@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* web_search rust unicode width crate
+  1. unicode-width - crates.io
+  2. unicode-segmentation - crates.io
+
+* web_fetch https://docs.rs/unicode-width/latest/unicode_width/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                         1:1 100%

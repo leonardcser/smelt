@@ -406,6 +406,7 @@ app_story!(present_plan_tool_states, |ctx| {
 
 app_story!(web_tool_states, |ctx| {
     ctx.set_viewport(76, 18);
+    ctx.run_lua("smelt.settings.transcript.view.groups = { web = false }");
     ctx.tool_call(
         "web_fetch",
         &[

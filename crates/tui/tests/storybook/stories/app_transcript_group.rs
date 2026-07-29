@@ -120,6 +120,32 @@ app_story!(lsp_tool_group_states, |ctx| {
     ctx.assert_snapshot_named("expanded");
 });
 
+app_story!(web_tool_group_states, |ctx| {
+    ctx.set_viewport(90, 24);
+    ctx.tool_call(
+        "web_search",
+        &[("query", json!("rust unicode width crate"))],
+        "1. unicode-width - crates.io\n2. unicode-segmentation - crates.io",
+        Some(330),
+    );
+    ctx.tool_call(
+        "web_fetch",
+        &[
+            (
+                "url",
+                json!("https://docs.rs/unicode-width/latest/unicode_width/"),
+            ),
+            ("prompt", json!("Find the latest release version")),
+        ],
+        "The latest release is 0.2.2.",
+        Some(820),
+    );
+    ctx.assert_snapshot_named("collapsed");
+
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot_named("expanded");
+});
+
 app_story!(background_process_group_states, |ctx| {
     ctx.set_viewport(76, 14);
     ctx.push_background_process_completed("4210", Some(0));
