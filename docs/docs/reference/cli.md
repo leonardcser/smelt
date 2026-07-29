@@ -164,10 +164,10 @@ the platform temporary directory when `XDG_RUNTIME_DIR` is unset.
 
 `smelt upgrade` options:
 
-| Flag                 | Description                                                          |
-| -------------------- | -------------------------------------------------------------------- |
-| `--channel stable`   | Use the newest tagged GitHub release and prebuilt artifact (default) |
-| `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main`  |
+| Flag                 | Description                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `--channel stable`   | Use the newest tagged GitHub release and prebuilt artifact (default)                      |
+| `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main --package smelt-agent` |
 
 `smelt upgrade check` accepts the same `--channel` flag and never installs.
 

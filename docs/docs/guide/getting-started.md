@@ -16,7 +16,7 @@
 === "From Source"
 
     ```bash
-    cargo install --git https://github.com/leonardcser/smelt.git
+    cargo install --git https://github.com/leonardcser/smelt.git smelt-agent
     ```
 
 ## Run
