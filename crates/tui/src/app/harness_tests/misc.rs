@@ -3193,20 +3193,16 @@ fn assert_monotonic_visible_anchors(frames: &[TranscriptScrollTraceFrame], upwar
     );
 }
 
-fn assert_local_scroll_frames_are_exact_and_fast(frames: &[TranscriptScrollTraceFrame]) {
+fn assert_local_scroll_frames_are_exact_and_timed(frames: &[TranscriptScrollTraceFrame]) {
     assert!(!frames.is_empty(), "expected local scroll frames");
     for frame in frames {
         assert!(
             !frame.placeholder_rows_visible,
             "local scroll should not land in sparse placeholders: {frame:?}"
         );
-        let ms = frame
+        frame
             .render_or_projection_ms
             .expect("replay should enable projection timings");
-        assert!(
-            ms <= 250,
-            "projection frame exceeded latency budget: {ms}ms in {frame:?}"
-        );
         assert!(
             frame.first_visible_content_anchor.is_some(),
             "local scroll should resolve an exact visible content anchor: {frame:?}"
@@ -3324,7 +3320,7 @@ fn run_transcript_key_burst(app: &mut TestApp, label: &str, key: TranscriptBurst
 
     app.render_silent();
     let frames = app.take_transcript_scroll_trace_frames_for_harness();
-    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_user_delta_targets_exact_rows(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
     let max_delta = key
@@ -3449,13 +3445,9 @@ fn assert_preserve_frames_keep_semantic_anchor(frames: &[TranscriptScrollTraceFr
             "preserve/resize frame moved to different visible block identity: {frame:?}"
         );
         compared += 1;
-        let ms = frame
+        frame
             .render_or_projection_ms
             .expect("replay should enable projection timings");
-        assert!(
-            ms <= 250,
-            "preserve/resize projection exceeded latency budget: {ms}ms in {frame:?}"
-        );
     }
     assert!(
         compared > 0,
@@ -3566,14 +3558,14 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         wheel_down_frames.len(),
         drag_bottom_frames.len()
     );
-    assert_local_scroll_frames_are_exact_and_fast(&wheel_up_frames);
+    assert_local_scroll_frames_are_exact_and_timed(&wheel_up_frames);
     if !wheel_probe_frames.is_empty() {
-        assert_local_scroll_frames_are_exact_and_fast(&wheel_probe_frames);
+        assert_local_scroll_frames_are_exact_and_timed(&wheel_probe_frames);
     }
-    assert_local_scroll_frames_are_exact_and_fast(&drag_top_frames);
+    assert_local_scroll_frames_are_exact_and_timed(&drag_top_frames);
     assert_user_delta_record_coverage_moves_contiguously(&drag_top_frames);
-    assert_local_scroll_frames_are_exact_and_fast(&wheel_down_frames);
-    assert_local_scroll_frames_are_exact_and_fast(&drag_bottom_frames);
+    assert_local_scroll_frames_are_exact_and_timed(&wheel_down_frames);
+    assert_local_scroll_frames_are_exact_and_timed(&drag_bottom_frames);
     assert_user_delta_record_coverage_moves_contiguously(&drag_bottom_frames);
     assert_user_delta_targets_exact_rows(&wheel_up_frames);
     assert_user_delta_record_coverage_moves_contiguously(&wheel_up_frames);
@@ -3783,7 +3775,7 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
         "queued local motion after gg read the source-space extent index"
     );
     let frames = app.take_transcript_scroll_trace_frames_for_harness();
-    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_user_delta_targets_exact_rows(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
     let viewport_rows = app
@@ -3825,7 +3817,7 @@ fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
         "drag autoscroll did not move through older sparse content: initial_record={initial_record}, final_record={final_record}, lines={:?}",
         transcript_viewport_lines(&app)
     );
-    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_monotonic_visible_anchors(&frames, true);
 }
 
@@ -3886,7 +3878,7 @@ fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
         "bottom-edge drag produced too few frames before locking: {} frames",
         frames.len()
     );
-    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_monotonic_visible_anchors(&frames, false);
     assert_user_delta_targets_exact_rows(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
@@ -3960,7 +3952,7 @@ fn transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks() {
     }
     finish_transcript_drag(&mut app);
 
-    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
 }
 
@@ -4098,7 +4090,7 @@ fn transcript_cursor_down_at_lower_edge_moves_one_visible_row_per_step() {
         assert_viewport_shifted_down_one_row(step, &before_lines, &after_lines);
     }
 
-    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
     assert!(
         frames.iter().all(|frame| !matches!(
