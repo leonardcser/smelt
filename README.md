@@ -19,7 +19,6 @@
 </p>
 
 > [!WARNING]
-
 > smelt is in active development. Use the latest pre-release tag and update
 > often; interfaces may still change between releases.
 
