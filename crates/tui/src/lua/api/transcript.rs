@@ -619,15 +619,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["target", "opts"],
         |_, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
             let opts = opts.unwrap_or_default();
-            let _align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
+            let align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
             let move_cursor = opts.move_cursor.unwrap_or(true);
-            Ok(crate::lua::try_with_conversation_host(|host| {
-                host.reveal_transcript_target(
+            Ok(crate::lua::try_with_conversation_host(|host| match align {
+                LuaTranscriptRevealAlign::Top => host.reveal_transcript_target_at_top(
                     &target.session_id,
                     target.record_index,
                     target.block_id,
                     move_cursor,
-                )
+                ),
             })
             .unwrap_or(false))
         },

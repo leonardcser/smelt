@@ -63,6 +63,77 @@ fn prompt_bottom_chrome_click_focuses_prompt() {
 }
 
 #[test]
+fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().with_ephemeral(true).build();
+    app.set_terminal_size(80, 16);
+    for turn in 0..4 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            text: format!("user turn {turn}"),
+            image_labels: Vec::new(),
+            command: false,
+        });
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: (0..18)
+                .map(|line| format!("assistant turn {turn} line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+    }
+    app.render_silent();
+    app.focus_prompt();
+    app.render_silent();
+
+    let top_win = app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.top.win")
+        .expect("visible top scroll pill");
+    let top_buf = app
+        .ui_probe()
+        .named_buf("smelt.scroll_pills.top.buf")
+        .expect("top scroll pill buffer");
+    let label_before = app
+        .ui_probe()
+        .buf(top_buf)
+        .and_then(|buf| buf.get_line(0))
+        .expect("top scroll pill label before click")
+        .to_string();
+    let pill_rect = app
+        .ui_probe()
+        .win(top_win)
+        .and_then(|win| win.viewport)
+        .expect("top scroll pill viewport")
+        .rect;
+    let cursor_before = app.transcript_window().effective_endpoint();
+
+    assert_eq!(app.state().app_focus, AppFocus::Prompt);
+    assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: pill_rect.top,
+        column: pill_rect.left.saturating_add(1),
+        modifiers: KeyModifiers::empty(),
+    })));
+
+    app.render_silent();
+    assert_eq!(app.state().app_focus, AppFocus::Prompt);
+    assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+    assert_eq!(app.transcript_window().effective_endpoint(), cursor_before);
+    let top_buf = app
+        .ui_probe()
+        .named_buf("smelt.scroll_pills.top.buf")
+        .expect("top scroll pill should remain visible after click");
+    let label_after = app
+        .ui_probe()
+        .buf(top_buf)
+        .and_then(|buf| buf.get_line(0))
+        .expect("top scroll pill label after click")
+        .to_string();
+    assert_ne!(label_after, label_before);
+}
+
+#[test]
 fn wheel_scroll_in_visual_mode_preserves_cursor_screen_row() {
     let mut app = row_document_transcript_app(100, true);
 

@@ -114,7 +114,7 @@ local function open_top(width)
   })
   win:on("press", function()
     if state.top_target then
-      smelt.transcript.reveal(state.top_target, { align = "top", move_cursor = true })
+      smelt.transcript.reveal(state.top_target, { align = "top", move_cursor = false })
     end
   end)
   state.top_buf = buf

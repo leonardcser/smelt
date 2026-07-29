@@ -519,7 +519,7 @@ impl ConversationLuaHost<'_> {
         self.app.conversation.committed_transcript_view()
     }
 
-    pub(crate) fn reveal_transcript_target(
+    pub(crate) fn reveal_transcript_target_at_top(
         &mut self,
         session_id: &str,
         record_index: usize,
@@ -529,7 +529,7 @@ impl ConversationLuaHost<'_> {
         self.app.conversation.session().id == session_id
             && self
                 .app
-                .reveal_transcript_target(record_index, block_id, move_cursor)
+                .reveal_transcript_target_at_top(record_index, block_id, move_cursor)
     }
 
     pub(crate) fn transcript_node_at_row(

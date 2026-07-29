@@ -1224,7 +1224,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert_eq!(row_lookup_calls, 0);
     assert_eq!(revealed_block_id, 1);
     assert_eq!(reveal_align, "top");
-    assert!(reveal_moves_cursor);
+    assert!(!reveal_moves_cursor);
 
     let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua
         .load(

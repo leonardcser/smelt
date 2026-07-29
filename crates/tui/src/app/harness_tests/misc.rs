@@ -2972,9 +2972,19 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
         !frame.placeholder_rows_visible,
         "semantic block reveal must not expose sparse placeholders: {frame:?}"
     );
-    assert!(
-        frame.first_visible_content_anchor.is_some(),
-        "semantic block reveal must resolve an exact content anchor: {frame:?}"
+    let first_visible = frame
+        .first_visible_content_anchor
+        .expect("semantic block reveal must resolve an exact content anchor");
+    assert_eq!(
+        first_visible.node_id,
+        crate::content::render_plan::RenderNodeId::Block(
+            smelt_core::transcript_model::BlockId::new(block.block_id),
+        ),
+        "semantic block reveal must align its target block to the viewport top: {frame:?}"
+    );
+    assert_eq!(
+        first_visible.virtual_row, frame.resolved_scroll_top,
+        "semantic block reveal must align its target content to the viewport top: {frame:?}"
     );
     match frame.scroll_intent {
         TranscriptScrollIntent::RevealBlock {
@@ -2993,6 +3003,68 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
         }
         ref intent => panic!("semantic user navigation collapsed to wrong intent: {intent:?}"),
     }
+}
+
+#[test]
+fn resumed_sparse_top_scroll_pill_click_advances_without_extra_scroll() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(340, 78, 18);
+    app.focus_prompt();
+    app.render_silent();
+
+    let target_before = previous_user_record_index(&app);
+    let cursor_before = app.transcript_window().effective_endpoint();
+    let top_win = app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.top.win")
+        .expect("visible sparse top scroll pill");
+    let top_buf = app
+        .ui_probe()
+        .named_buf("smelt.scroll_pills.top.buf")
+        .expect("sparse top scroll pill buffer");
+    let label_before = app
+        .ui_probe()
+        .buf(top_buf)
+        .and_then(|buf| buf.get_line(0))
+        .expect("sparse top scroll pill label before click")
+        .to_string();
+    assert_eq!(parse_record_index(&label_before), Some(target_before));
+    let pill_rect = app
+        .ui_probe()
+        .win(top_win)
+        .and_then(|win| win.viewport)
+        .expect("sparse top scroll pill viewport")
+        .rect;
+
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: pill_rect.top,
+        column: pill_rect.left.saturating_add(1),
+        modifiers: KeyModifiers::empty(),
+    })));
+    app.render_silent();
+
+    assert_eq!(app.state().app_focus, AppFocus::Prompt);
+    assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+    assert_eq!(app.transcript_window().effective_endpoint(), cursor_before);
+    let target_after = previous_user_record_index(&app);
+    assert!(
+        target_after < target_before,
+        "top pill should advance after one click without a repairing scroll: before={target_before}, after={target_after}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    let top_buf = app
+        .ui_probe()
+        .named_buf("smelt.scroll_pills.top.buf")
+        .expect("top pill should remain available for the next previous-user jump");
+    let label_after = app
+        .ui_probe()
+        .buf(top_buf)
+        .and_then(|buf| buf.get_line(0))
+        .expect("sparse top scroll pill label after click");
+    assert_ne!(label_after, label_before);
+    assert_eq!(parse_record_index(label_after), Some(target_after));
 }
 
 #[test]

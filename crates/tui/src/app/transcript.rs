@@ -10156,7 +10156,7 @@ impl TuiApp {
         self.reveal_transcript_block(record_index, None, top_padding, cursor)
     }
 
-    pub(crate) fn reveal_transcript_target(
+    pub(crate) fn reveal_transcript_target_at_top(
         &mut self,
         record_index: usize,
         block_id: BlockId,
