@@ -657,6 +657,13 @@ impl RenderPlan {
         }
     }
 
+    pub(crate) fn representative_block_id_for_node(&self, index: usize) -> Option<BlockId> {
+        match self.nodes.get(index)? {
+            RenderNode::Block { id, .. } => Some(*id),
+            RenderNode::Group(group) => group.child_ids.first().copied(),
+        }
+    }
+
     pub(crate) fn node_default_view_state(
         &self,
         policy: &TranscriptDefaultViewPolicy,

@@ -2375,8 +2375,8 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn block_ids_for_node_index(&self, index: usize) -> Option<Vec<BlockId>> {
-        self.render_plan.block_ids_for_node(index)
+    pub(crate) fn representative_block_id_for_node_index(&self, index: usize) -> Option<BlockId> {
+        self.render_plan.representative_block_id_for_node(index)
     }
 
     pub(crate) fn row_for_anchor(

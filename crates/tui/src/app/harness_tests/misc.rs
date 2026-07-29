@@ -4375,7 +4375,7 @@ fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
         matches!(
             frame.scroll_intent,
             TranscriptScrollIntent::SearchJump {
-                anchor: crate::app::transcript::TranscriptSearchAnchor::Content { .. },
+                anchor: crate::app::transcript::TranscriptSearchAnchor::Content(_),
                 ..
             }
         ),

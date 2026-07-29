@@ -1321,8 +1321,16 @@ struct TranscriptContentAnchor {
     block_id: BlockId,
     intra_block_row: RowIndex,
     bias: TranscriptAnchorBias,
-    row_anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+    row_anchor: TranscriptRowAnchor,
     fallback_row: RowIndex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptNodeAnchor {
+    record_index: usize,
+    block_id: BlockId,
+    node_index: usize,
+    row_anchor: TranscriptRowAnchor,
 }
 
 // Durable origin for semantic transcript navigation. Search/reveal intents set this
@@ -1341,6 +1349,16 @@ impl From<TranscriptContentAnchor> for TranscriptSemanticAnchor {
             record_index: anchor.record_index,
             block_id: anchor.block_id,
             row_offset: anchor.intra_block_row,
+        }
+    }
+}
+
+impl From<TranscriptNodeAnchor> for TranscriptSemanticAnchor {
+    fn from(anchor: TranscriptNodeAnchor) -> Self {
+        Self {
+            record_index: anchor.record_index,
+            block_id: anchor.block_id,
+            row_offset: anchor.row_anchor.row_offset,
         }
     }
 }
@@ -1476,28 +1494,18 @@ pub(crate) struct TranscriptViewportProjectionInput {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TranscriptSearchAnchor {
-    Content {
-        record_index: usize,
-        block_id: BlockId,
-        node_index: usize,
-        row_anchor: TranscriptRowAnchor,
-    },
+    Content(TranscriptNodeAnchor),
     EstimatedRow(RowIndex),
 }
 
 impl TranscriptSearchAnchor {
     pub(crate) fn position_key(self, byte_col: usize) -> TranscriptSearchPositionKey {
         match self {
-            Self::Content {
-                record_index,
-                node_index,
-                row_anchor,
-                ..
-            } => TranscriptSearchPositionKey {
+            Self::Content(anchor) => TranscriptSearchPositionKey {
                 kind: 0,
-                major: record_index as u64,
-                node_index: node_index as u64,
-                row_offset: row_anchor.row_offset,
+                major: anchor.record_index as u64,
+                node_index: anchor.node_index as u64,
+                row_offset: anchor.row_anchor.row_offset,
                 byte_col,
             },
             Self::EstimatedRow(row) => TranscriptSearchPositionKey {
@@ -1512,27 +1520,7 @@ impl TranscriptSearchAnchor {
 
     fn same_position(self, other: Self) -> bool {
         match (self, other) {
-            (
-                Self::Content {
-                    record_index: left_record,
-                    block_id: left_block,
-                    node_index: left_node,
-                    row_anchor: left_anchor,
-                    ..
-                },
-                Self::Content {
-                    record_index: right_record,
-                    block_id: right_block,
-                    node_index: right_node,
-                    row_anchor: right_anchor,
-                    ..
-                },
-            ) => {
-                left_record == right_record
-                    && left_block == right_block
-                    && left_node == right_node
-                    && left_anchor == right_anchor
-            }
+            (Self::Content(left), Self::Content(right)) => left == right,
             (Self::EstimatedRow(left), Self::EstimatedRow(right)) => left == right,
             _ => false,
         }
@@ -2866,19 +2854,9 @@ impl TranscriptDocument {
                 row_offset: *row_offset,
             }),
             TranscriptScrollIntent::SearchJump {
-                anchor:
-                    TranscriptSearchAnchor::Content {
-                        record_index,
-                        block_id,
-                        row_anchor,
-                        ..
-                    },
+                anchor: TranscriptSearchAnchor::Content(anchor),
                 ..
-            } => Some(TranscriptSemanticAnchor {
-                record_index: *record_index,
-                block_id: *block_id,
-                row_offset: row_anchor.row_offset,
-            }),
+            } => Some((*anchor).into()),
             _ => None,
         }
     }
@@ -3408,17 +3386,6 @@ impl TranscriptDocument {
         self.activate_record_window_range(range)
     }
 
-    fn content_anchor_at_row(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        row: RowIndex,
-        bias: TranscriptAnchorBias,
-    ) -> Option<TranscriptContentAnchor> {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
-        self.content_anchor_at_row_with_offset(lua, width, row, row_offset, bias)
-    }
-
     fn content_anchor_at_row_with_offset(
         &mut self,
         lua: &LuaRuntime,
@@ -3428,6 +3395,15 @@ impl TranscriptDocument {
         bias: TranscriptAnchorBias,
     ) -> Option<TranscriptContentAnchor> {
         let row_anchor = self.row_anchor_at_row_with_offset(lua, width, row, row_offset)?;
+        self.content_anchor_for_row_anchor(row_anchor, row, bias)
+    }
+
+    fn content_anchor_for_row_anchor(
+        &self,
+        row_anchor: TranscriptRowAnchor,
+        fallback_row: RowIndex,
+        bias: TranscriptAnchorBias,
+    ) -> Option<TranscriptContentAnchor> {
         let block_id = row_anchor.id.as_block_id()?;
         let record_index = self.record_index_for_block_id(block_id)?;
         Some(TranscriptContentAnchor {
@@ -3436,7 +3412,32 @@ impl TranscriptDocument {
             intra_block_row: row_anchor.row_offset,
             bias,
             row_anchor,
-            fallback_row: row,
+            fallback_row,
+        })
+    }
+
+    fn node_anchor_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+    ) -> Option<TranscriptNodeAnchor> {
+        let node = self.node_metadata_at_row(lua, width, row)?;
+        let block_id = self
+            .content
+            .projection
+            .representative_block_id_for_node_index(node.index)?;
+        let record_index = self
+            .record_index_for_block_id(block_id)
+            .or_else(|| self.stored_record_index_for_block_idx(block_id.get()))?;
+        Some(TranscriptNodeAnchor {
+            record_index,
+            block_id,
+            node_index: node.index,
+            row_anchor: TranscriptRowAnchor {
+                id: node.id,
+                row_offset: node.row_offset,
+            },
         })
     }
 
@@ -3446,32 +3447,39 @@ impl TranscriptDocument {
         width: u16,
         row: RowIndex,
     ) -> TranscriptSearchAnchor {
-        let Some(node) = self.node_metadata_at_row(lua, width, row) else {
-            return TranscriptSearchAnchor::EstimatedRow(row);
+        self.node_anchor_at_row(lua, width, row)
+            .map(TranscriptSearchAnchor::Content)
+            .unwrap_or(TranscriptSearchAnchor::EstimatedRow(row))
+    }
+
+    fn semantic_row_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        record_index: usize,
+    ) -> Option<RowIndex> {
+        let active_changed = if self.records.total_count().is_some() {
+            let range =
+                self.record_window_range_around_center(width, record_index, viewport_rows, true)?;
+            self.activate_record_window_range(range)
+        } else {
+            false
         };
-        let Some(block_id) = self
-            .content
-            .projection
-            .block_ids_for_node_index(node.index)
-            .and_then(|ids| ids.first().copied())
-        else {
-            return TranscriptSearchAnchor::EstimatedRow(row);
-        };
-        let Some(record_index) = self
-            .record_index_for_block_id(block_id)
-            .or_else(|| self.stored_record_index_for_block_idx(block_id.get()))
-        else {
-            return TranscriptSearchAnchor::EstimatedRow(row);
-        };
-        TranscriptSearchAnchor::Content {
-            record_index,
-            block_id,
-            node_index: node.index,
-            row_anchor: TranscriptRowAnchor {
-                id: node.id,
-                row_offset: node.row_offset,
-            },
-        }
+        let active_record_range = self
+            .records
+            .active_range()
+            .map(|range| (range.start.get(), range.end.get()));
+        Some(
+            if !active_changed {
+                self.exact_viewport_state(lua, width, viewport_rows)
+                    .filter(|(exact, _)| exact.active_record_range == active_record_range)
+                    .map(|(exact, _)| exact.row_offset)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| self.approximate_sparse_prefix_row_offset(width)),
+        )
     }
 
     fn row_for_content_anchor(
@@ -3481,38 +3489,9 @@ impl TranscriptDocument {
         viewport_rows: u16,
         anchor: TranscriptContentAnchor,
     ) -> Option<RowIndex> {
-        let active_changed = if self.records.total_count().is_some() {
-            let range = self.record_window_range_around_center(
-                width,
-                anchor.record_index,
-                viewport_rows,
-                true,
-            )?;
-            self.activate_record_window_range(range)
-        } else {
-            false
-        };
-        let active_record_range = self
-            .records
-            .active_range()
-            .map(|range| (range.start.get(), range.end.get()));
-        let row_offset = if !active_changed {
-            self.exact_viewport_state(lua, width, viewport_rows)
-                .filter(|(exact, _)| exact.active_record_range == active_record_range)
-                .map(|(exact, _)| exact.row_offset)
-        } else {
-            None
-        }
-        .unwrap_or_else(|| self.approximate_sparse_prefix_row_offset(width));
-        self.content
-            .projection
-            .row_for_anchor(
-                lua,
-                &mut self.content.transcript.history,
-                width,
-                anchor.row_anchor,
-            )
-            .map(|row| row.saturating_add(row_offset))
+        let row_offset =
+            self.semantic_row_offset(lua, width, viewport_rows, anchor.record_index)?;
+        self.row_for_content_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
     fn row_for_content_anchor_with_offset(
@@ -3523,6 +3502,40 @@ impl TranscriptDocument {
         row_offset: RowIndex,
     ) -> Option<RowIndex> {
         self.row_for_anchor_with_offset(lua, width, anchor.row_anchor, row_offset)
+    }
+
+    fn row_for_node_anchor_with_offset(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: TranscriptNodeAnchor,
+        row_offset: RowIndex,
+    ) -> Option<RowIndex> {
+        if let Some(row) =
+            self.row_for_anchor_with_offset(lua, width, anchor.row_anchor, row_offset)
+        {
+            return Some(row);
+        }
+        let row_anchor = self.content.projection.row_anchor_for_block(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            anchor.block_id,
+            anchor.row_anchor.row_offset,
+        )?;
+        self.row_for_anchor_with_offset(lua, width, row_anchor, row_offset)
+    }
+
+    fn row_for_node_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        anchor: TranscriptNodeAnchor,
+    ) -> Option<RowIndex> {
+        let row_offset =
+            self.semantic_row_offset(lua, width, viewport_rows, anchor.record_index)?;
+        self.row_for_node_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
     fn content_anchor_at_or_after_row_with_offset(
@@ -3575,7 +3588,7 @@ impl TranscriptDocument {
                 block_id,
                 intra_block_row,
                 bias: TranscriptAnchorBias::Top,
-                row_anchor: crate::content::transcript_buf::TranscriptRowAnchor {
+                row_anchor: TranscriptRowAnchor {
                     id: crate::content::render_plan::RenderNodeId::Block(block_id),
                     row_offset: intra_block_row,
                 },
@@ -4629,15 +4642,11 @@ impl TranscriptDocument {
         hint: Option<TranscriptProjectionHint>,
     ) -> Option<RowIndex> {
         match anchor {
-            TranscriptSearchAnchor::Content {
-                record_index,
-                row_anchor,
-                ..
-            } => {
+            TranscriptSearchAnchor::Content(node_anchor) => {
                 if self.records.total_count().is_some() {
                     let range = self.record_window_range_around_center(
                         width,
-                        record_index,
+                        node_anchor.record_index,
                         viewport_rows,
                         true,
                     )?;
@@ -4657,7 +4666,8 @@ impl TranscriptDocument {
                     }
                     _ => None,
                 };
-                hinted_row.or_else(|| self.row_for_anchor(lua, width, row_anchor))
+                hinted_row
+                    .or_else(|| self.row_for_node_anchor(lua, width, viewport_rows, node_anchor))
             }
             TranscriptSearchAnchor::EstimatedRow(row) => Some(row),
         }
@@ -5077,10 +5087,11 @@ impl TranscriptDocument {
         if target.start_byte_col > target.end_byte_col {
             return None;
         }
-        let TranscriptSearchAnchor::Content { row_anchor, .. } = target.anchor else {
+        let TranscriptSearchAnchor::Content(anchor) = target.anchor else {
             return None;
         };
-        let row = self.row_for_anchor(lua, width, row_anchor)?;
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row = self.row_for_node_anchor_with_offset(lua, width, anchor, row_offset)?;
         Some(DocRange {
             start: DocPosition {
                 row,
@@ -5893,7 +5904,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
-    ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
+    ) -> Option<TranscriptRowAnchor> {
         let row_offset = self.approximate_sparse_prefix_row_offset(width);
         self.row_anchor_at_row_with_offset(lua, width, row, row_offset)
     }
@@ -5904,7 +5915,7 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
         row_offset: RowIndex,
-    ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
+    ) -> Option<TranscriptRowAnchor> {
         let local_row =
             self.exact_loaded_row_for_virtual_content_row_with_offset(lua, width, row, row_offset)?;
         self.content.projection.row_anchor_at_row(
@@ -5919,7 +5930,7 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+        anchor: TranscriptRowAnchor,
     ) -> Option<crate::smelt_edit::RowIndex> {
         let row_offset = self.approximate_sparse_prefix_row_offset(width);
         self.row_for_anchor_with_offset(lua, width, anchor, row_offset)
@@ -5929,7 +5940,7 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+        anchor: TranscriptRowAnchor,
         row_offset: RowIndex,
     ) -> Option<crate::smelt_edit::RowIndex> {
         self.content
@@ -5945,7 +5956,7 @@ impl TranscriptDocument {
         position: crate::smelt_edit::DocPosition,
     ) -> TranscriptPositionAnchor {
         TranscriptPositionAnchor {
-            anchor: self.content_anchor_at_row(lua, width, position.row, TranscriptAnchorBias::Top),
+            anchor: self.node_anchor_at_row(lua, width, position.row),
             position,
         }
     }
@@ -5958,7 +5969,7 @@ impl TranscriptDocument {
     ) -> crate::smelt_edit::DocPosition {
         let row = anchor
             .anchor
-            .and_then(|anchor| self.row_for_content_anchor(lua, width, 20, anchor))
+            .and_then(|anchor| self.row_for_node_anchor(lua, width, 20, anchor))
             .unwrap_or(anchor.position.row);
         crate::smelt_edit::DocPosition {
             row,
@@ -9325,11 +9336,11 @@ mod document_tests {
                 byte_col: 0,
             },
         );
-        let position_content_anchor = position_anchor
+        let position_node_anchor = position_anchor
             .anchor
-            .expect("position preservation should store a content anchor");
-        assert_eq!(position_content_anchor.record_index, record_index);
-        assert_eq!(position_content_anchor.block_id, block_id);
+            .expect("position preservation should store a node anchor");
+        assert_eq!(position_node_anchor.record_index, record_index);
+        assert_eq!(position_node_anchor.block_id, block_id);
 
         assert!(document.activate_record_window_range(
             smelt_store::TranscriptRecordOffset::new(80)
@@ -9362,6 +9373,103 @@ mod document_tests {
         assert_eq!(anchor_after.record_index, record_index);
         assert_eq!(anchor_after.block_id, block_id);
         assert_eq!(anchor_after.intra_block_row, anchor.intra_block_row);
+    }
+
+    #[test]
+    fn node_anchors_follow_child_block_when_group_identity_changes() {
+        let lua = LuaRuntime::new();
+        let width = 80;
+        let mut source = Transcript::new();
+        for (index, name) in ["read_file", "grep"].into_iter().enumerate() {
+            source.push_tool_call(
+                Block::ToolCall {
+                    call_id: format!("group-call-{index}"),
+                    name: name.into(),
+                    summary: format!("{name} complete").into(),
+                    args: HashMap::new(),
+                },
+                ToolState {
+                    status: ToolStatus::Ok,
+                    elapsed: Some(Duration::from_millis(1)),
+                    output: Some(Box::new(smelt_core::transcript_model::ToolOutput {
+                        content: format!("{name} output"),
+                        is_error: false,
+                        metadata: None,
+                    })),
+                    user_message: None,
+                    preview_output: None,
+                },
+            );
+        }
+        let first_child = source.history.order[0];
+        let mut document = TranscriptDocument::from_transcript(source);
+        let original = document
+            .node_metadata_at_row(&lua, width, 0)
+            .expect("built-in explore group");
+        assert!(matches!(
+            original.id,
+            crate::content::render_plan::RenderNodeId::Group(_)
+        ));
+        let position = DocPosition {
+            row: original.first_row + original.rows - 1,
+            byte_col: 0,
+        };
+        let anchor = document.position_anchor(&lua, width, position);
+        assert_eq!(
+            anchor.anchor.expect("stable group anchor").block_id,
+            first_child
+        );
+        let search_anchor = document.search_anchor_at_row(&lua, width, position.row);
+        assert!(matches!(
+            search_anchor,
+            TranscriptSearchAnchor::Content(anchor) if anchor.block_id == first_child
+        ));
+
+        lua.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "replacement_explore",
+                  cache_key = "replacement:v1",
+                  priority = 1000,
+                  min = 2,
+                  default_view = "collapsed",
+                  selector = {
+                    kind = "tool",
+                    names = { "read_file", "grep" },
+                    terminal = true,
+                  },
+                  render = function()
+                    return smelt.layout.vbox({
+                      smelt.layout.text("replacement"),
+                      smelt.layout.text("details"),
+                    })
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .expect("register replacement transcript group");
+
+        let resolved = document.resolve_position_anchor(&lua, width, anchor);
+        let replacement = document
+            .node_metadata_at_row(&lua, width, resolved.row)
+            .expect("replacement group at resolved cursor");
+        assert!(matches!(
+            replacement.id,
+            crate::content::render_plan::RenderNodeId::Group(_)
+        ));
+        assert_ne!(replacement.id, original.id);
+        assert!(resolved.row >= replacement.first_row);
+        assert!(resolved.row < replacement.first_row + replacement.rows);
+
+        let resolved_search = document
+            .row_for_search_anchor(&lua, width, 20, search_anchor, 0, None)
+            .expect("search anchor follows replacement group");
+        let search_replacement = document
+            .node_metadata_at_row(&lua, width, resolved_search)
+            .expect("replacement group at resolved search row");
+        assert_eq!(search_replacement.id, replacement.id);
     }
 
     #[test]
@@ -9742,7 +9850,7 @@ fn transcript_history_role(history: &BlockHistory, id: BlockId) -> &'static str 
 
 #[derive(Clone, Copy)]
 pub(super) struct TranscriptPositionAnchor {
-    anchor: Option<TranscriptContentAnchor>,
+    anchor: Option<TranscriptNodeAnchor>,
     position: crate::smelt_edit::DocPosition,
 }
 

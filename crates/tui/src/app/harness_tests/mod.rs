@@ -19,6 +19,7 @@ mod process_status;
 mod prompt;
 mod resources;
 mod search;
+mod transcript_folds;
 mod vim;
 
 fn ask_messages(cmds: Vec<protocol::UiCommand>) -> Vec<(String, Vec<protocol::Message>)> {
