@@ -1444,9 +1444,19 @@ struct PendingTranscriptProjection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TranscriptExactViewport {
     tape: crate::content::transcript_buf::ExactRowTapeHandle,
+    width: u16,
     row_offset: RowIndex,
     global_total_rows: RowIndex,
     active_record_range: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadedRowOffsetPolicy {
+    /// Interpret rows from the currently rendered loaded projection. Falls back
+    /// to the sparse prefix estimate when no matching exact viewport is active.
+    RenderedViewportOrEstimate,
+    /// Interpret rows in semantic sparse space while planning a new projection.
+    SparseEstimate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2945,12 +2955,16 @@ impl TranscriptDocument {
         let (prefix_estimate_before, suffix_estimate_before) = exact_extent
             .map(|(row_offset, total_rows)| (row_offset, total_rows.saturating_sub(row_offset)))
             .or_else(|| {
-                self.viewport.state.exact_viewport.map(|exact| {
-                    (
-                        exact.row_offset,
-                        exact.global_total_rows.saturating_sub(exact.row_offset),
-                    )
-                })
+                self.viewport
+                    .state
+                    .exact_viewport
+                    .filter(|exact| exact.width == width)
+                    .map(|exact| {
+                        (
+                            exact.row_offset,
+                            exact.global_total_rows.saturating_sub(exact.row_offset),
+                        )
+                    })
             })
             .or_else(|| {
                 let row_offset = self.cached_local_row_offset(width)?;
@@ -3082,6 +3096,34 @@ impl TranscriptDocument {
             .fallback_average_rows_per_loaded_record(&self.records.sparse, width)
     }
 
+    fn active_record_range_key(&self) -> Option<(usize, usize)> {
+        self.records
+            .active_range()
+            .map(|range| (range.start.get(), range.end.get()))
+    }
+
+    fn current_rendered_loaded_row_offset(&self, width: u16) -> Option<RowIndex> {
+        let active_record_range = self.active_record_range_key();
+        self.viewport
+            .state
+            .exact_viewport
+            .filter(|exact| {
+                exact.width == width && exact.active_record_range == active_record_range
+            })
+            .map(|exact| exact.row_offset)
+    }
+
+    fn loaded_row_offset(&mut self, width: u16, policy: LoadedRowOffsetPolicy) -> RowIndex {
+        match policy {
+            LoadedRowOffsetPolicy::RenderedViewportOrEstimate => self
+                .current_rendered_loaded_row_offset(width)
+                .unwrap_or_else(|| self.approximate_sparse_prefix_row_offset(width)),
+            LoadedRowOffsetPolicy::SparseEstimate => {
+                self.approximate_sparse_prefix_row_offset(width)
+            }
+        }
+    }
+
     fn cached_sparse_prefix_row_offset(&self, width: u16) -> Option<RowIndex> {
         self.extent_index.cached_rows_before_record(
             width,
@@ -3094,17 +3136,8 @@ impl TranscriptDocument {
         if self.records.total_count().is_none() {
             return Some(0);
         }
-        self.cached_sparse_prefix_row_offset(width).or_else(|| {
-            let active_record_range = self
-                .records
-                .active_range()
-                .map(|range| (range.start.get(), range.end.get()));
-            self.viewport
-                .state
-                .exact_viewport
-                .filter(|exact| exact.active_record_range == active_record_range)
-                .map(|exact| exact.row_offset)
-        })
+        self.cached_sparse_prefix_row_offset(width)
+            .or_else(|| self.current_rendered_loaded_row_offset(width))
     }
 
     fn cached_total_rows(&self, width: u16) -> Option<RowIndex> {
@@ -3149,7 +3182,8 @@ impl TranscriptDocument {
         width: u16,
         row: RowIndex,
     ) -> Option<RowIndex> {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         self.exact_loaded_row_for_virtual_content_row_with_offset(lua, width, row, row_offset)
     }
 
@@ -3174,7 +3208,8 @@ impl TranscriptDocument {
         width: u16,
         mut node: crate::content::transcript_buf::TranscriptNodeRow,
     ) -> crate::content::transcript_buf::TranscriptNodeRow {
-        let offset = self.approximate_sparse_prefix_row_offset(width);
+        let offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         node.first_row = node.first_row.saturating_add(offset);
         node
     }
@@ -3259,7 +3294,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
         self.materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
     }
 
@@ -3478,7 +3513,9 @@ impl TranscriptDocument {
             } else {
                 None
             }
-            .unwrap_or_else(|| self.approximate_sparse_prefix_row_offset(width)),
+            .unwrap_or_else(|| {
+                self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate)
+            }),
         )
     }
 
@@ -3890,7 +3927,8 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        let offset = self.approximate_sparse_prefix_row_offset(width);
+        let offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         let mut layout = self.content.projection.materialize_search_layout(
             lua,
             &mut self.content.transcript.history,
@@ -3919,7 +3957,8 @@ impl TranscriptDocument {
                 entries: Vec::new(),
             };
         }
-        let offset = self.approximate_sparse_prefix_row_offset(width);
+        let offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         let mut layout = self
             .content
             .projection
@@ -4241,7 +4280,7 @@ impl TranscriptDocument {
                 .is_none()
                 .then_some((0, loaded_rows));
         }
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
         Some((row_offset, row_offset.saturating_add(loaded_rows)))
     }
 
@@ -4575,7 +4614,7 @@ impl TranscriptDocument {
                 })
             });
         }
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
         let loaded_rows = self.content.projection.estimated_total_rows(
             lua,
             &mut self.content.transcript.history,
@@ -4666,8 +4705,8 @@ impl TranscriptDocument {
                     }
                     _ => None,
                 };
-                hinted_row
-                    .or_else(|| self.row_for_node_anchor(lua, width, viewport_rows, node_anchor))
+                self.row_for_node_anchor(lua, width, viewport_rows, node_anchor)
+                    .or(hinted_row)
             }
             TranscriptSearchAnchor::EstimatedRow(row) => Some(row),
         }
@@ -5082,6 +5121,7 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
+        row_offset: RowIndex,
         target: TranscriptCursorTarget,
     ) -> Option<DocRange> {
         if target.start_byte_col > target.end_byte_col {
@@ -5090,7 +5130,6 @@ impl TranscriptDocument {
         let TranscriptSearchAnchor::Content(anchor) = target.anchor else {
             return None;
         };
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
         let row = self.row_for_node_anchor_with_offset(lua, width, anchor, row_offset)?;
         Some(DocRange {
             start: DocPosition {
@@ -5369,6 +5408,7 @@ impl TranscriptDocument {
                         self.viewport
                             .state
                             .exact_viewport
+                            .filter(|exact| exact.width == width)
                             .map(|exact| exact.global_total_rows)
                     })
                     .flatten()
@@ -5388,7 +5428,9 @@ impl TranscriptDocument {
                 self.viewport
                     .state
                     .exact_viewport
-                    .filter(|exact| exact.active_record_range == active_record_range)
+                    .filter(|exact| {
+                        exact.width == width && exact.active_record_range == active_record_range
+                    })
                     .map(|exact| exact.row_offset)
             })
             .flatten()
@@ -5414,7 +5456,7 @@ impl TranscriptDocument {
         let mut row_offset = if stable_local_delta {
             stable_row_offset.unwrap_or_default()
         } else {
-            self.approximate_sparse_prefix_row_offset(width)
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate)
         };
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let active_range_reaches_tail = self
@@ -5725,8 +5767,8 @@ impl TranscriptDocument {
                 .saturating_add(local_total_rows)
         };
         self.observe_exact_loaded_record_rows();
-        let cursor_range =
-            cursor_target.and_then(|target| self.resolve_cursor_target(lua, width, target));
+        let cursor_range = cursor_target
+            .and_then(|target| self.resolve_cursor_target(lua, width, row_offset, target));
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
         rows.row_base = rows.row_base.saturating_add(row_offset);
         let viewport_rows_count = RowIndex::from(viewport_rows.max(1));
@@ -5768,6 +5810,7 @@ impl TranscriptDocument {
             .map(|range| (range.start.get(), range.end.get()));
         self.viewport.state.exact_viewport = Some(TranscriptExactViewport {
             tape: exact_tape,
+            width,
             row_offset,
             global_total_rows: rows.total_rows,
             active_record_range,
@@ -5809,7 +5852,8 @@ impl TranscriptDocument {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         let end = start.saturating_add(count);
         if count == 0 || end <= start {
             return DisplayRows::empty();
@@ -5905,7 +5949,8 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<TranscriptRowAnchor> {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         self.row_anchor_at_row_with_offset(lua, width, row, row_offset)
     }
 
@@ -5932,7 +5977,8 @@ impl TranscriptDocument {
         width: u16,
         anchor: TranscriptRowAnchor,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         self.row_for_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
@@ -6104,7 +6150,8 @@ impl TranscriptDocument {
         theme: &Theme,
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let row_offset =
+            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
         if range.end.row < row_offset || (range.end.row == row_offset && range.end.byte_col == 0) {
             return crate::smelt_edit::CopyOutput::default();
         }

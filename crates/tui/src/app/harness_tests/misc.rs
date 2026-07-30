@@ -1548,6 +1548,187 @@ fn resumed_sparse_bottom_click_keeps_clicked_row_and_viewport() {
     );
 }
 
+const SPARSE_SELECTION_RECORD_COUNT: usize = 900;
+const SPARSE_SELECTION_WIDTH: u16 = 78;
+const SPARSE_SELECTION_HEIGHT: u16 = 18;
+const SPARSE_SELECTION_SCROLL_UP_STEPS: usize = 60;
+const VISIBLE_RECORD_MARKER: &str = "record-";
+const VISIBLE_RECORD_MARKER_WIDTH: usize = "record-0000".len();
+const VISIBLE_RECORD_HIT_BYTE_OFFSET: usize = 2;
+
+struct VisibleTranscriptWord {
+    screen_row: u16,
+    screen_col: u16,
+    abs_row: RowIndex,
+    byte_col: usize,
+    text: String,
+    visible_lines: Vec<String>,
+    materialized_rows: crate::smelt_edit::MaterializedRows,
+}
+
+fn visible_transcript_record_word(app: &TestApp) -> VisibleTranscriptWord {
+    let win = app.transcript_window();
+    let vp = win.viewport.expect("transcript viewport after scroll");
+    let materialized = win
+        .materialized_rows()
+        .expect("sparse transcript should be row-backed");
+    let scroll_top = win.scroll_top();
+    let pad_left = win.gutter_pad_left;
+    let buf = app.ui_probe().buf(win.buf).expect("transcript buffer");
+    let local_scroll = win.local_visual_row(scroll_top) as usize;
+    let visible_end = local_scroll
+        .saturating_add(vp.rect.height as usize)
+        .min(buf.line_count());
+    let (line_idx, byte_col, text) = (local_scroll..visible_end)
+        .find_map(|idx| {
+            let line = buf.get_line(idx)?;
+            let byte_col = line.find(VISIBLE_RECORD_MARKER)?;
+            let end = byte_col
+                .saturating_add(VISIBLE_RECORD_MARKER_WIDTH)
+                .min(line.len());
+            Some((
+                idx,
+                byte_col,
+                smelt_buffer::text::slice(line, byte_col..end).to_string(),
+            ))
+        })
+        .expect("visible record marker");
+    let line = buf.get_line(line_idx).expect("clicked line");
+    let hit_col = smelt_buffer::text::byte_to_cell(
+        line,
+        byte_col.saturating_add(VISIBLE_RECORD_HIT_BYTE_OFFSET),
+    ) as u16;
+    let abs_row = materialized.absolute_row(line_idx as RowIndex);
+    VisibleTranscriptWord {
+        screen_row: vp.rect.top + abs_row.saturating_sub(scroll_top) as u16,
+        screen_col: vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(pad_left)
+            .saturating_add(hit_col),
+        abs_row,
+        byte_col,
+        text,
+        visible_lines: transcript_viewport_lines(app),
+        materialized_rows: materialized,
+    }
+}
+
+fn assert_visible_word_direct_copy_round_trip(app: &mut TestApp, target: &VisibleTranscriptWord) {
+    let direct = app
+        .app
+        .copy_document_rows(
+            crate::app::TRANSCRIPT_WIN,
+            crate::smelt_edit::DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: target.abs_row,
+                    byte_col: target.byte_col,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: target.abs_row,
+                    byte_col: target.byte_col + target.text.len(),
+                },
+            },
+        )
+        .map(|out| out.kill_ring)
+        .unwrap_or_default();
+    assert_eq!(
+        direct, target.text,
+        "direct row copy failed before mouse: abs_row={}, byte_col={}, materialized_rows={:?}, visible_lines={:?}",
+        target.abs_row, target.byte_col, target.materialized_rows, target.visible_lines
+    );
+}
+
+fn click_visible_transcript_word(app: &mut TestApp, target: &VisibleTranscriptWord) {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: target.screen_row,
+            column: target.screen_col,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+}
+
+fn scroll_sparse_transcript_away_from_tail(app: &mut TestApp) {
+    for _ in 0..SPARSE_SELECTION_SCROLL_UP_STEPS {
+        wheel_transcript(app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+}
+
+fn expected_vim_inner_word(target: &VisibleTranscriptWord) -> &str {
+    target
+        .text
+        .split('-')
+        .next()
+        .expect("record marker word before hyphen")
+}
+
+fn resumed_sparse_selection_app() -> (TestApp, tempfile::TempDir) {
+    resumed_heterogeneous_transcript_app(
+        SPARSE_SELECTION_RECORD_COUNT,
+        SPARSE_SELECTION_WIDTH,
+        SPARSE_SELECTION_HEIGHT,
+    )
+}
+
+#[test]
+fn resumed_sparse_transcript_double_click_copies_visible_word_after_scroll() {
+    let (mut app, _dir) = resumed_sparse_selection_app();
+    app.configure_transcript_vim(true, crate::smelt_edit::VimMode::Normal);
+    scroll_sparse_transcript_away_from_tail(&mut app);
+
+    let target = visible_transcript_record_word(&app);
+    assert_visible_word_direct_copy_round_trip(&mut app, &target);
+
+    for _ in 0..2 {
+        click_visible_transcript_word(&mut app, &target);
+    }
+
+    let copied = app.core_probe().clipboard.kill_ring.current();
+    assert_eq!(
+        copied, target.text,
+        "visible_lines={:?}",
+        target.visible_lines
+    );
+}
+
+#[test]
+fn resumed_sparse_transcript_vim_iw_copies_visible_word_after_scroll() {
+    let (mut app, _dir) = resumed_sparse_selection_app();
+    app.configure_transcript_vim(true, crate::smelt_edit::VimMode::Normal);
+    scroll_sparse_transcript_away_from_tail(&mut app);
+
+    let target = visible_transcript_record_word(&app);
+    assert_visible_word_direct_copy_round_trip(&mut app, &target);
+    click_visible_transcript_word(&mut app, &target);
+    assert_eq!(
+        transcript_row_cursor_row(&app),
+        target.abs_row,
+        "single click placed cursor on wrong row before viw; visible_lines={:?}",
+        target.visible_lines
+    );
+
+    for key in ['v', 'i', 'w', 'y'] {
+        app.type_char(key);
+    }
+
+    let copied = app.core_probe().clipboard.kill_ring.current();
+    assert_eq!(
+        copied,
+        expected_vim_inner_word(&target),
+        "visible_lines={:?}",
+        target.visible_lines
+    );
+}
+
 #[test]
 fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic() {
     let count = 260;
