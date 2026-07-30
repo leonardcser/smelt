@@ -1121,6 +1121,7 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
               revealed_block = {
                 block_id = target.block_id,
                 align = opts and opts.align or nil,
+                top_padding = opts and opts.top_padding or nil,
                 move_cursor = opts and opts.move_cursor or nil,
               }
               return true
@@ -1193,8 +1194,9 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         row_lookup_calls,
         revealed_block_id,
         reveal_align,
+        reveal_top_padding,
         reveal_moves_cursor,
-    ): (bool, bool, i64, String, i64, i64, String, bool) = lua
+    ): (bool, bool, i64, String, i64, i64, String, i64, bool) = lua
         .load(
             r#"
             __set_blocks({ { block_id = 1, role = "user", first_line = "previous message" } })
@@ -1212,6 +1214,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
               __row_lookup_calls(),
               revealed.block_id,
               revealed.align,
+              revealed.top_padding,
               revealed.move_cursor
             "#,
         )
@@ -1224,6 +1227,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert_eq!(row_lookup_calls, 0);
     assert_eq!(revealed_block_id, 1);
     assert_eq!(reveal_align, "top");
+    assert_eq!(reveal_top_padding, 1);
     assert!(!reveal_moves_cursor);
 
     let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua

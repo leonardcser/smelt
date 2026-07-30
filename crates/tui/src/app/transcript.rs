@@ -5039,10 +5039,10 @@ impl TranscriptDocument {
                         None,
                     );
                 }
+                // The semantic target was resolved against the current exact layout. Treating
+                // that row as reflow-stable would reinterpret it through an older projection.
                 (
-                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
-                        reveal.scroll_top,
-                    ),
+                    crate::content::transcript_buf::ScrollTarget::visible_row(reveal.scroll_top),
                     None,
                 )
             }
@@ -10268,6 +10268,7 @@ impl TuiApp {
         &mut self,
         record_index: usize,
         block_id: BlockId,
+        top_padding: crate::smelt_edit::RowIndex,
         move_cursor: bool,
     ) -> bool {
         if !self
@@ -10277,7 +10278,7 @@ impl TuiApp {
         {
             return false;
         }
-        self.reveal_transcript_block(record_index, Some(block_id), 0, move_cursor)
+        self.reveal_transcript_block(record_index, Some(block_id), top_padding, move_cursor)
     }
 
     fn reveal_transcript_block(

@@ -3014,7 +3014,7 @@ fn resumed_sparse_top_scroll_pill_click_advances_without_extra_scroll() {
     app.render_silent();
 
     let target_before = previous_user_record_index(&app);
-    let cursor_before = app.transcript_window().effective_endpoint();
+    let cursor_before = app.transcript_window().document_view_state().cursor;
     let top_win = app
         .ui_probe()
         .named_win("smelt.scroll_pills.top.win")
@@ -3047,7 +3047,10 @@ fn resumed_sparse_top_scroll_pill_click_advances_without_extra_scroll() {
 
     assert_eq!(app.state().app_focus, AppFocus::Prompt);
     assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
-    assert_eq!(app.transcript_window().effective_endpoint(), cursor_before);
+    assert_eq!(
+        app.transcript_window().document_view_state().cursor,
+        cursor_before
+    );
     let target_after = previous_user_record_index(&app);
     assert!(
         target_after < target_before,

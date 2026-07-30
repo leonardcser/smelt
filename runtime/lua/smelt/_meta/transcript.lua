@@ -78,7 +78,7 @@ transcript.loaded_text_expensive = nil
 transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.move_cursor` defaults to true.
+--- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.
 ---@type fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean
 transcript.reveal = nil
 

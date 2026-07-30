@@ -65,6 +65,8 @@ pub enum LuaTranscriptRevealAlign {
 pub struct LuaTranscriptRevealOpts {
     /// Target alignment within the transcript viewport. Currently only `top`.
     pub align: Option<LuaTranscriptRevealAlign>,
+    /// Rows to reserve above the target. Defaults to zero.
+    pub top_padding: Option<crate::smelt_edit::RowIndex>,
     /// Move the transcript cursor to the target. Defaults to true.
     pub move_cursor: Option<bool>,
 }
@@ -615,17 +617,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "reveal",
-        "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.move_cursor` defaults to true.",
+        "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.",
         &["target", "opts"],
         |_, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
             let opts = opts.unwrap_or_default();
             let align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
+            let top_padding = opts.top_padding.unwrap_or_default();
             let move_cursor = opts.move_cursor.unwrap_or(true);
             Ok(crate::lua::try_with_conversation_host(|host| match align {
                 LuaTranscriptRevealAlign::Top => host.reveal_transcript_target_at_top(
                     &target.session_id,
                     target.record_index,
                     target.block_id,
+                    top_padding,
                     move_cursor,
                 ),
             })

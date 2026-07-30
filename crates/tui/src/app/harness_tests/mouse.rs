@@ -85,52 +85,74 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
     app.focus_prompt();
     app.render_silent();
 
-    let top_win = app
-        .ui_probe()
-        .named_win("smelt.scroll_pills.top.win")
-        .expect("visible top scroll pill");
-    let top_buf = app
-        .ui_probe()
-        .named_buf("smelt.scroll_pills.top.buf")
-        .expect("top scroll pill buffer");
-    let label_before = app
-        .ui_probe()
-        .buf(top_buf)
-        .and_then(|buf| buf.get_line(0))
-        .expect("top scroll pill label before click")
-        .to_string();
-    let pill_rect = app
-        .ui_probe()
-        .win(top_win)
-        .and_then(|win| win.viewport)
-        .expect("top scroll pill viewport")
-        .rect;
-    let cursor_before = app.transcript_window().effective_endpoint();
+    let cursor_before = app.transcript_window().document_view_state().cursor;
 
-    assert_eq!(app.state().app_focus, AppFocus::Prompt);
-    assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
-    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        row: pill_rect.top,
-        column: pill_rect.left.saturating_add(1),
-        modifiers: KeyModifiers::empty(),
-    })));
+    for click in 1..=2 {
+        let top_win = app
+            .ui_probe()
+            .named_win("smelt.scroll_pills.top.win")
+            .expect("visible top scroll pill");
+        let top_buf = app
+            .ui_probe()
+            .named_buf("smelt.scroll_pills.top.buf")
+            .expect("top scroll pill buffer");
+        let label_before = app
+            .ui_probe()
+            .buf(top_buf)
+            .and_then(|buf| buf.get_line(0))
+            .expect("top scroll pill label before click")
+            .to_string();
+        let pill_rect = app
+            .ui_probe()
+            .win(top_win)
+            .and_then(|win| win.viewport)
+            .expect("top scroll pill viewport")
+            .rect;
 
-    app.render_silent();
-    assert_eq!(app.state().app_focus, AppFocus::Prompt);
-    assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
-    assert_eq!(app.transcript_window().effective_endpoint(), cursor_before);
-    let top_buf = app
-        .ui_probe()
-        .named_buf("smelt.scroll_pills.top.buf")
-        .expect("top scroll pill should remain visible after click");
-    let label_after = app
-        .ui_probe()
-        .buf(top_buf)
-        .and_then(|buf| buf.get_line(0))
-        .expect("top scroll pill label after click")
-        .to_string();
-    assert_ne!(label_after, label_before);
+        assert_eq!(app.state().app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: pill_rect.top,
+            column: pill_rect.left.saturating_add(1),
+            modifiers: KeyModifiers::empty(),
+        })));
+
+        app.render_silent();
+        assert_eq!(app.state().app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+        assert_eq!(
+            app.transcript_window().document_view_state().cursor,
+            cursor_before
+        );
+        let viewport_lines = transcript_viewport_lines(&app);
+        let target_screen_row = viewport_lines
+            .iter()
+            .position(|line| line.contains(label_before.trim()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "click {click} should reveal its user message: label={label_before:?}, lines={viewport_lines:?}"
+                )
+            });
+        assert_eq!(
+            target_screen_row, 2,
+            "click {click} should clear the top pill and panel padding: {viewport_lines:?}"
+        );
+        let top_buf = app
+            .ui_probe()
+            .named_buf("smelt.scroll_pills.top.buf")
+            .expect("top scroll pill should remain visible after click");
+        let label_after = app
+            .ui_probe()
+            .buf(top_buf)
+            .and_then(|buf| buf.get_line(0))
+            .expect("top scroll pill label after click")
+            .to_string();
+        assert_ne!(
+            label_after, label_before,
+            "click {click} should advance to the previous user message"
+        );
+    }
 }
 
 #[test]

@@ -723,6 +723,7 @@
 
 ---@class smelt.transcript.RevealOpts
 ---@field align? smelt.transcript.RevealAlign Target alignment within the transcript viewport. Currently only `top`.
+---@field top_padding? integer Rows to reserve above the target. Defaults to zero.
 ---@field move_cursor? boolean Move the transcript cursor to the target. Defaults to true.
 
 --- Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.

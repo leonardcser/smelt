@@ -1034,6 +1034,7 @@ the selector metadata and the virtual-node renderer.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `align` | [smelt.transcript.RevealAlign](types.md#smelttranscriptrevealalign) |  | Target alignment within the transcript viewport. Currently only `top`. |
+| `top_padding` | `integer` |  | Rows to reserve above the target. Defaults to zero. |
 | `move_cursor` | `boolean` |  | Move the transcript cursor to the target. Defaults to true. |
 
 ### `smelt.transcript.Stream`

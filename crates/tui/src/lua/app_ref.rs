@@ -525,12 +525,16 @@ impl ConversationLuaHost<'_> {
         session_id: &str,
         record_index: usize,
         block_id: smelt_core::transcript_model::BlockId,
+        top_padding: crate::smelt_edit::RowIndex,
         move_cursor: bool,
     ) -> bool {
         self.app.conversation.session().id == session_id
-            && self
-                .app
-                .reveal_transcript_target_at_top(record_index, block_id, move_cursor)
+            && self.app.reveal_transcript_target_at_top(
+                record_index,
+                block_id,
+                top_padding,
+                move_cursor,
+            )
     }
 
     pub(crate) fn transcript_node_at_row(
