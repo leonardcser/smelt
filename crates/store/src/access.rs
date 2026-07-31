@@ -2914,6 +2914,50 @@ mod tests {
     }
 
     #[test]
+    fn matching_transcript_records_relink_replaced_history() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        let record = transcript_record(0, 0, "user", "user-0");
+
+        let mut initial = empty_commit(SESSION_ID, 0);
+        initial.history.final_len = crate::HistoryLen::new(1);
+        initial.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
+            String::new(),
+            vec![(
+                "fuzz.png".to_string(),
+                "data:image/png;base64,AAAA".to_string(),
+            )],
+        ))];
+        initial.transcript_records = Some(TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
+            records: vec![record.clone()],
+        });
+        writer.commit_session(&initial).unwrap();
+        if writer.is_staged() {
+            writer.publish().unwrap();
+        }
+
+        let mut replacement = empty_commit(SESSION_ID, writer.store_head().unwrap().revision.get());
+        replacement.expected = writer.store_head().unwrap();
+        replacement.history.final_len = crate::HistoryLen::new(1);
+        replacement.history.items = vec![protocol::HistoryItem::user(protocol::Content::text(""))];
+        replacement.transcript_records = Some(TranscriptRecordSuffix {
+            start: TranscriptRecordIndex::ZERO,
+            records: vec![record.clone()],
+        });
+        writer.commit_session(&replacement).unwrap();
+        publish_and_release(writer);
+
+        assert_eq!(
+            SessionReader::open_existing(root.path().join(SESSION_ID))
+                .unwrap()
+                .read_all_transcript_records()
+                .unwrap(),
+            vec![record]
+        );
+    }
+
+    #[test]
     fn maintenance_repair_preserves_semantic_links_and_detaches_mismatches() {
         let root = tempfile::tempdir().unwrap();
         let summary_history = protocol::compaction_summary_content("retained summary");

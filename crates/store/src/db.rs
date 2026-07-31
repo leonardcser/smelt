@@ -2078,13 +2078,16 @@ fn apply_canonical_update_in_transaction(
         .changes(conn)
         .map_err(session_commit_failure_from_store_error)?;
     let transcript_records_changed = match (&command.transcript_records, prepared.record_start) {
-        (Some(transcript_records), Some(start)) => !history::transcript_record_suffix_matches(
-            conn,
-            start,
-            &transcript_records.records,
-            compression,
-        )
-        .map_err(session_commit_failure_from_store_error)?,
+        (Some(transcript_records), Some(start)) => {
+            history_changed
+                || !history::transcript_record_suffix_matches(
+                    conn,
+                    start,
+                    &transcript_records.records,
+                    compression,
+                )
+                .map_err(session_commit_failure_from_store_error)?
+        }
         _ => false,
     };
     let changed = force_revision
