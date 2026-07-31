@@ -867,13 +867,12 @@ mod tests {
     }
 
     async fn spawn_sse_responses(
-        event: String,
+        events: Vec<String>,
         preceding_server_errors: usize,
-        response_count: usize,
     ) -> (String, tokio::task::JoinHandle<usize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let total_responses = preceding_server_errors + response_count;
+        let total_responses = preceding_server_errors + events.len();
         let server = tokio::spawn(async move {
             for response_index in 0..total_responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -881,6 +880,7 @@ mod tests {
                 let response = if response_index < preceding_server_errors {
                     "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 9\r\nconnection: close\r\n\r\ntemporary".to_string()
                 } else {
+                    let event = &events[response_index - preceding_server_errors];
                     format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                         event.len(),
@@ -925,14 +925,14 @@ mod tests {
             .await
     }
 
-    fn cyber_policy_event(message: &str) -> String {
+    fn failed_response_event(code: &str, message: &str) -> String {
         format!(
             "data: {}\n\n",
             serde_json::json!({
                 "type": "response.failed",
                 "response": {
                     "error": {
-                        "code": "cyber_policy",
+                        "code": code,
                         "message": message,
                     }
                 }
@@ -940,10 +940,18 @@ mod tests {
         )
     }
 
+    fn cyber_policy_event(message: &str) -> String {
+        failed_response_event("cyber_policy", message)
+    }
+
+    fn completed_response_event() -> String {
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n".to_string()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cyber_policy_sse_is_classified_and_retried_three_times() {
         const MESSAGE: &str = "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
-        let (api_base, server) = spawn_sse_responses(cyber_policy_event(MESSAGE), 0, 4).await;
+        let (api_base, server) = spawn_sse_responses(vec![cyber_policy_event(MESSAGE); 4], 0).await;
         let cancel = CancellationToken::new();
         let retries = std::sync::Mutex::new(Vec::new());
         let attempt_errors = std::sync::Mutex::new(Vec::new());
@@ -978,7 +986,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cyber_policy_retry_budget_is_independent_of_earlier_server_errors() {
         const MESSAGE: &str = "This content was flagged for possible cybersecurity risk.";
-        let (api_base, server) = spawn_sse_responses(cyber_policy_event(MESSAGE), 1, 4).await;
+        let (api_base, server) = spawn_sse_responses(vec![cyber_policy_event(MESSAGE); 4], 1).await;
         let cancel = CancellationToken::new();
         let retries = std::sync::Mutex::new(Vec::new());
         let attempt_errors = std::sync::Mutex::new(Vec::new());
@@ -1017,6 +1025,40 @@ mod tests {
                 (Duration::from_secs(1), 3),
                 (Duration::from_secs(2), 4),
             ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overloaded_sse_is_retried_with_backoff_and_recovers() {
+        const MESSAGE: &str = "Our servers are currently overloaded. Please try again later.";
+        let overloaded = failed_response_event("server_error", MESSAGE);
+        let events = vec![overloaded.clone(), overloaded, completed_response_event()];
+        let (api_base, server) = spawn_sse_responses(events, 0).await;
+        let cancel = CancellationToken::new();
+        let retries = std::sync::Mutex::new(Vec::new());
+        let attempt_errors = std::sync::Mutex::new(Vec::new());
+        let on_retry = |delay, attempt| retries.lock().unwrap().push((delay, attempt));
+        let on_attempt = |info: RequestAttemptInfo<'_>| {
+            if let Err(error) = info.result {
+                attempt_errors.lock().unwrap().push(error.to_string());
+            }
+        };
+        let mut opts = ChatOptions::new(&cancel);
+        opts.on_retry = Some(&on_retry);
+        opts.on_attempt = Some(&on_attempt);
+
+        request_openai_stream(&api_base, &opts)
+            .await
+            .expect("request should recover after overloaded responses");
+
+        assert_eq!(server.await.unwrap(), 3);
+        assert_eq!(
+            attempt_errors.into_inner().unwrap(),
+            vec![format!("server error 0: {MESSAGE}"); 2]
+        );
+        assert_eq!(
+            retries.into_inner().unwrap(),
+            vec![(Duration::from_millis(500), 1), (Duration::from_secs(1), 2),]
         );
     }
 
