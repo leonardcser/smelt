@@ -346,6 +346,64 @@ fn record_links_match_history_suffix(
         })
 }
 
+fn transcript_index_for_checkpoint(
+    transcript: &BlockHistory,
+    materialized_history: &[HistoryItem],
+    history_len: usize,
+    first_live_index: usize,
+    mut history_range: impl FnMut(std::ops::Range<usize>) -> Vec<HistoryItem>,
+) -> usize {
+    if let Some(index) =
+        transcript.first_block_index_for_history_origin_at_or_after(first_live_index)
+    {
+        return index;
+    }
+    if first_live_index >= history_len {
+        return transcript.len();
+    }
+    if materialized_history.len() == history_len {
+        return fallback_transcript_index_for_history_index(materialized_history, first_live_index);
+    }
+    // Sparse sessions retain transcript records but read canonical history on demand.
+    // Advance from the nearest loaded origin across any unoriginated history blocks.
+    if let Some((block_index, history_index)) =
+        transcript
+            .order
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(block_index, id)| match transcript.block_origin(*id) {
+                Some(smelt_core::BlockOrigin::History(history_index))
+                    if history_index < first_live_index =>
+                {
+                    Some((block_index, history_index))
+                }
+                _ => None,
+            })
+    {
+        let history_start = history_index.saturating_add(1);
+        let history = history_range(history_start..first_live_index);
+        if history.len() == first_live_index.saturating_sub(history_start) {
+            let intervening_blocks = history.iter().map(fallback_history_item_block_count).sum();
+            return block_index
+                .saturating_add(1)
+                .saturating_add(intervening_blocks)
+                .min(transcript.len());
+        }
+    }
+    // A fully unoriginated sparse tail has no forward or backward anchor. Its
+    // canonical retained suffix still gives an exact offset from transcript end.
+    let retained_history = history_range(first_live_index..history_len);
+    if retained_history.len() == history_len.saturating_sub(first_live_index) {
+        let retained_blocks = retained_history
+            .iter()
+            .map(fallback_history_item_block_count)
+            .sum::<usize>();
+        return transcript.len().saturating_sub(retained_blocks);
+    }
+    fallback_transcript_index_for_history_index(materialized_history, first_live_index)
+}
+
 fn fallback_transcript_index_for_history_index(
     history: &[HistoryItem],
     history_index: usize,
@@ -633,6 +691,36 @@ mod tests {
             0,
             &assistant
         ));
+    }
+
+    #[test]
+    fn sparse_checkpoint_boundary_counts_back_from_unoriginated_tail() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "compacted prefix".into(),
+        });
+        transcript.push(Block::Text {
+            content: "retained assistant".into(),
+        });
+        let history = [
+            HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("compacted prefix")),
+                None,
+                Vec::new(),
+            )),
+            HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("retained assistant")),
+                None,
+                Vec::new(),
+            )),
+        ];
+
+        let index =
+            transcript_index_for_checkpoint(&transcript.history, &[], history.len(), 1, |range| {
+                history[range].to_vec()
+            });
+
+        assert_eq!(index, 1);
     }
 
     #[test]
@@ -1952,24 +2040,16 @@ impl TuiApp {
         let block = Block::Compacted {
             summary: checkpoint.summary.clone(),
         };
-        if let Some(index) = self
-            .conversation
-            .transcript()
-            .history()
-            .first_block_index_for_history_origin_at_or_after(first_live_index)
-        {
-            let index = self.suppress_duplicate_carried_tail_before(index);
-            self.conversation
-                .insert_checkpoint_marker(index, first_live_index, block);
-        } else {
-            let index = fallback_transcript_index_for_history_index(
-                &self.conversation.session().history,
-                first_live_index,
-            );
-            let index = self.suppress_duplicate_carried_tail_before(index);
-            self.conversation
-                .insert_checkpoint_marker(index, first_live_index, block);
-        }
+        let index = transcript_index_for_checkpoint(
+            self.conversation.transcript().history(),
+            &self.conversation.session().history,
+            self.conversation.history_len(),
+            first_live_index,
+            |range| self.conversation.history_range(range),
+        );
+        let index = self.suppress_duplicate_carried_tail_before(index);
+        self.conversation
+            .insert_checkpoint_marker(index, first_live_index, block);
     }
 
     fn install_live_context_checkpoint(

@@ -2146,6 +2146,117 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
 }
 
 #[test]
+fn sparse_resume_compaction_skips_unoriginated_compacted_prefix() {
+    const EXCHANGE_COUNT: usize = 300;
+    const HISTORY_LEN: usize = EXCHANGE_COUNT * 2 + 1;
+    const RETAINED_HISTORY_INDEX: usize = HISTORY_LEN - 1;
+    const SUMMARY: &str = "sparse retained checkpoint summary";
+
+    fn compacted_marker_index(app: &TestApp) -> Option<usize> {
+        let history = app.conversation_probe().transcript().history();
+        (0..history.len()).find(|index| {
+            history
+                .block_id_at(*index)
+                .and_then(|id| history.block_kind(id))
+                == Some("compacted")
+        })
+    }
+
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..EXCHANGE_COUNT {
+            app.commit_request_history_item(
+                HistoryItem::user(Content::text(format!("user {index}"))),
+                Some(Block::User {
+                    text: format!("user {index}"),
+                    image_labels: Vec::new(),
+                    command: false,
+                }),
+            );
+            app.session_append_history(HistoryItem::assistant(AssistantStep::terminal(
+                Some(Content::text(format!("assistant {index}"))),
+                None,
+                Vec::new(),
+            )));
+            // Streaming assistant blocks are intentionally not linked to a canonical
+            // history row.
+            app.push_transcript_block(Block::Text {
+                content: format!("assistant {index}"),
+            });
+        }
+        // Tool turns commonly produce consecutive assistant history items. The
+        // retained terminal response must remain after the preceding unoriginated
+        // assistant or tool blocks rather than after the last originated user block.
+        app.session_append_history(HistoryItem::assistant(AssistantStep::terminal(
+            Some(Content::text("retained terminal assistant")),
+            None,
+            Vec::new(),
+        )));
+        app.push_transcript_block(Block::Text {
+            content: "retained terminal assistant".into(),
+        });
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    assert!(resumed.session_snapshot().history.is_empty());
+    let initial_loaded_len = resumed.conversation_probe().transcript().history().len();
+    assert!(
+        initial_loaded_len < HISTORY_LEN,
+        "test requires a bounded sparse transcript tail"
+    );
+    assert!(resumed.run_lua(&format!(
+        r#"assert(smelt.session.checkpoint({{
+            summary = {SUMMARY:?},
+            first_live_message_index = {RETAINED_HISTORY_INDEX},
+            tokens_before = 100,
+        }}))"#
+    )));
+
+    let marker_index = compacted_marker_index(&resumed).expect("live compacted marker");
+    assert_eq!(
+        marker_index + 2,
+        resumed.conversation_probe().transcript().history().len(),
+        "marker should sit immediately before the retained assistant block"
+    );
+    resumed.save_session_and_flush();
+
+    let durable_marker = smelt_store::SessionReader::open_existing(resumed.session_dir())
+        .unwrap()
+        .read_all_transcript_records()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "compacted")
+        .expect("compacted marker persisted as a transcript record");
+    let origin: smelt_core::BlockOrigin =
+        serde_json::from_str(durable_marker.origin_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        origin,
+        smelt_core::BlockOrigin::Checkpoint {
+            history_index: RETAINED_HISTORY_INDEX,
+        }
+    );
+    drop(resumed);
+
+    let mut reloaded = TestApp::builder().build_without_test_home_reset(&guard);
+    reloaded.load_session_by_id(&session_id);
+    let marker_index = compacted_marker_index(&reloaded).expect("resumed compacted marker");
+    assert_eq!(
+        marker_index + 2,
+        reloaded.conversation_probe().transcript().history().len(),
+        "resumed marker should remain immediately before the retained assistant block"
+    );
+    assert!(reloaded.run_lua("smelt.transcript.fold_kind('compacted', 'open')"));
+    assert!(
+        reloaded.render_to_frame().text().contains(SUMMARY),
+        "resumed compacted marker should remain expandable"
+    );
+}
+
+#[test]
 fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() {
     let guard = test_home_guard();
     let session_id = {
