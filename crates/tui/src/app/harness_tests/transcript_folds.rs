@@ -2,8 +2,9 @@ use super::*;
 use smelt_core::transcript_model::ViewState;
 
 fn finish_tool(app: &mut TestApp, call_id: &str, name: &str, content: &str) {
-    app.tool_started(call_id, name, std::collections::HashMap::new());
+    let invocation_id = app.tool_started(call_id, name, std::collections::HashMap::new());
     app.tool_finished(
+        invocation_id,
         call_id,
         protocol::ToolOutcome {
             content: content.into(),

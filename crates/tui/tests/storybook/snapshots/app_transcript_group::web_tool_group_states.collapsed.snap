@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-* web ×2
+* web ×2                                                                         14:37:03
   web_search rust unicode width crate
   web_fetch https://docs.rs/unicode-width/latest/unicode_width/
 

@@ -227,7 +227,7 @@ function M.render(group, ctx)
   if kind == "background_process_completed" then
     return render_background_process_completed_group(group, ctx)
   end
-  if kind == "explore" or kind == "lsp" then
+  if kind == "explore" or kind == "lsp" or kind == "web" then
     return render_terminal_tool_group(group, ctx, {
       name = kind,
       label = tool_group_label,
@@ -305,12 +305,6 @@ function M.register()
         "web_fetch",
       },
     },
-    render = function(group, ctx)
-      return render_terminal_tool_group(group, ctx, {
-        name = "web",
-        label = tool_group_label,
-      })
-    end,
   })
 end
 

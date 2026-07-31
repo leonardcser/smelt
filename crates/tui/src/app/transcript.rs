@@ -9449,6 +9449,8 @@ mod document_tests {
                 ToolState {
                     status: ToolStatus::Ok,
                     elapsed: Some(Duration::from_millis(1)),
+                    called_at_ms: None,
+                    elapsed_active: false,
                     output: Some(Box::new(smelt_core::transcript_model::ToolOutput {
                         content: format!("{name} output"),
                         is_error: false,
@@ -9497,13 +9499,16 @@ mod document_tests {
                     names = { "read_file", "grep" },
                     terminal = true,
                   },
-                  render = function()
-                    return smelt.layout.vbox({
-                      smelt.layout.text("replacement"),
-                      smelt.layout.text("details"),
-                    })
-                  end,
                 })
+                smelt.transcript.extend_renderer("test.replacement_explore", function(next, node, ctx)
+                  if node.kind ~= "group" or node.name ~= "replacement_explore" then
+                    return next(node, ctx)
+                  end
+                  return smelt.layout.vbox({
+                    smelt.layout.text("replacement"),
+                    smelt.layout.text("details"),
+                  })
+                end, { cache_key = "test.replacement_explore:v1" })
                 "#,
             )
             .exec()

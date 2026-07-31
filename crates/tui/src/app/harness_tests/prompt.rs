@@ -365,12 +365,12 @@ fn request_queue_bindings_steer_running_turn() {
 fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);
-    app.tool_started(
+    let tool_a = app.tool_started(
         "tool-a",
         "read_file",
         std::collections::HashMap::from([("file_path".to_string(), serde_json::json!("a.rs"))]),
     );
-    app.tool_started(
+    let tool_b = app.tool_started(
         "tool-b",
         "read_file",
         std::collections::HashMap::from([("file_path".to_string(), serde_json::json!("b.rs"))]),
@@ -388,16 +388,16 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
         is_error: false,
         metadata: None,
     };
-    app.tool_finished("tool-a", finished(), Some(10));
+    app.tool_finished(tool_a, "tool-a", finished(), Some(10));
 
-    assert_eq!(app.pending_tool_call_ids(), ["tool-b"]);
+    assert_eq!(app.pending_tool_invocation_ids(), [tool_b]);
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.render_to_frame().text().contains("queued follow-up"));
     assert!(!app.transcript_buffer_text().contains("queued follow-up"));
 
-    app.tool_finished("tool-b", finished(), Some(20));
+    app.tool_finished(tool_b, "tool-b", finished(), Some(20));
 
-    assert!(app.pending_tool_call_ids().is_empty());
+    assert!(app.pending_tool_invocation_ids().is_empty());
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.render_to_frame().text().contains("queued follow-up"));
     assert!(!app.transcript_buffer_text().contains("queued follow-up"));
