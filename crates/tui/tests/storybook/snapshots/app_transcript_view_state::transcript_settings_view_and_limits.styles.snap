@@ -7,6 +7,7 @@ dim: 86 14
   0   1   5 attrs=dim
   0   7  10 fg=Rgb { r: 255, g: 255, b: 255 }
   0  17  12 fg=Rgb { r: 253, g: 151, b: 31 }
+  0  75  10 attrs=dim
   1   2  18 fg=AnsiValue(9)
   2   2   9 fg=AnsiValue(9)
   3   2  15 attrs=dim

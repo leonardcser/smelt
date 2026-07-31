@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* glob **/*.rs in crates/tui/tests
+* glob **/*.rs in crates/tui/tests                           14:37:03
   0 files
 
 

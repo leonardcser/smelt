@@ -77,6 +77,24 @@ pub enum ToolExecutionMode {
     Sequential,
 }
 
+/// Process-unique identity for one model-initiated tool invocation.
+///
+/// Provider call IDs are semantic data and are not required to be unique. This
+/// identity is allocated by the engine and routes the invocation's live events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InvocationId(u64);
+
+impl InvocationId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// A tool defined in Lua. Sent from TUI to engine so the engine
 /// can include it in LLM tool definitions and proxy execution back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,16 +401,23 @@ pub enum EngineEvent {
 
     /// A tool call has started.
     ToolStarted {
+        invocation_id: InvocationId,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
+        called_at_ms: u64,
     },
 
     /// Incremental output from a running tool (stdout/stderr lines).
-    ToolOutput { call_id: String, chunk: String },
+    ToolOutput {
+        invocation_id: InvocationId,
+        call_id: String,
+        chunk: String,
+    },
 
     /// A tool call has finished.
     ToolFinished {
+        invocation_id: InvocationId,
         call_id: String,
         result: ToolOutcome,
         elapsed_ms: Option<u64>,
@@ -402,21 +427,25 @@ pub enum EngineEvent {
     /// call shape so the UI can render one terminal block without first showing
     /// a pending or preview state.
     ToolRejected {
+        invocation_id: InvocationId,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
         summary: StyledLines,
         result: ToolOutcome,
         elapsed_ms: Option<u64>,
+        called_at_ms: u64,
     },
 
     /// Engine needs user permission before executing a tool.
     RequestPermission {
         request_id: u64,
+        invocation_id: InvocationId,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
         approval_patterns: Vec<String>,
+        called_at_ms: u64,
         /// Styled summary of the pending call - both the dialog body
         /// header and any auto-approval pattern matching read this.
         summary: StyledLines,
@@ -499,6 +528,7 @@ pub enum EngineEvent {
     /// Engine needs the TUI to execute a Lua-defined tool.
     ToolDispatch {
         request_id: u64,
+        invocation_id: InvocationId,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
@@ -511,6 +541,7 @@ pub enum EngineEvent {
     /// resumes the standard Allow / Deny / Ask flow.
     ToolEvaluationRequest {
         request_id: u64,
+        invocation_id: InvocationId,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
@@ -833,6 +864,7 @@ pub enum UiCommand {
     /// Result of a tool execution (response to `ToolDispatch`).
     ToolResult {
         request_id: u64,
+        invocation_id: InvocationId,
         call_id: String,
         content: String,
         is_error: bool,
@@ -849,11 +881,10 @@ pub enum UiCommand {
 
     /// Side-call from Lua to a core tool.
     /// The engine runs the named tool and replies with
-    /// `EngineEvent::CoreToolResult`. The parent `call_id` is
-    /// reused so streamed output (e.g. `ToolOutput`) is grouped under
-    /// the visible tool invocation.
+    /// `EngineEvent::CoreToolResult`.
     CallCoreTool {
         request_id: u64,
+        parent_invocation_id: InvocationId,
         parent_call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,

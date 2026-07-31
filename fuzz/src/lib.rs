@@ -1094,6 +1094,10 @@ fn placeholder_chord_pair(
 /// branches in `handle_engine_event`.
 const CALL_ID_BUCKETS: u8 = 8;
 
+fn fuzz_invocation_id(id: u8) -> protocol::InvocationId {
+    protocol::InvocationId::new(u64::from(id % CALL_ID_BUCKETS))
+}
+
 fn call_id_string(id: u8) -> String {
     format!("call-{:02x}", id % CALL_ID_BUCKETS)
 }
@@ -1131,6 +1135,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
                             metadata: None,
                         },
                         elapsed_ms: None,
+                        called_at_ms: Some(i as u64),
                     };
                     protocol::HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
                         Some(Content::text(body)),
@@ -1149,7 +1154,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
 /// what it cares about from scratch.
 struct Snapshot {
     agent_running: bool,
-    pending: Vec<String>,
+    pending: Vec<protocol::InvocationId>,
     streaming: tui::app::test_harness::StreamingState,
     session_messages: usize,
     queued_messages: usize,
@@ -1180,7 +1185,7 @@ impl Snapshot {
         let prompt_selection_range = app.prompt_selection_range();
         Self {
             agent_running: app.agent_running(),
-            pending: app.pending_tool_call_ids(),
+            pending: app.pending_tool_invocation_ids(),
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
@@ -1258,9 +1263,9 @@ where
 }
 
 /// Post-dispatch invariant tied to a specific `FuzzOp`. Holds just the
-/// payload the check needs (e.g. `call_id`); the pre/post `Snapshot`s carry
-/// everything else. Variants gated on `agent_running` self-skip in idle
-/// dispatch, where the relevant event arms are no-ops.
+/// payload the check needs; the pre/post `Snapshot`s carry everything else.
+/// Variants gated on `agent_running` self-skip in idle dispatch, where the
+/// relevant event arms are no-ops.
 enum PostCheck {
     None,
     /// `Text` commits any streaming text buffer. Cascade: `flush_streaming_text`
@@ -1268,20 +1273,19 @@ enum PostCheck {
     TextFlushed,
     /// `Thinking { content }` commits any streaming thinking buffer.
     ThinkingFlushed,
-    /// `ToolStarted` flushes streaming text + thinking and adds `call_id`
-    /// to pending.
+    /// `ToolStarted` flushes streaming text + thinking and adds the invocation
+    /// identity to pending.
     ToolStarted {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
     },
-    /// `ToolOutput` for an already-pending `call_id` is a pure append to
-    /// that tool's output; the pending entry stays put.
+    /// `ToolOutput` for an already-pending invocation is a pure append to that
+    /// tool's output; the pending entry stays put.
     ToolOutput {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
     },
-    /// `ToolFinished` clears `call_id` from pending - but only verifiable
-    /// when it was actually present beforehand.
+    /// `ToolFinished` clears the invocation from pending when it was present.
     ToolFinished {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
     },
     /// `ExecDone` runs `finalize_exec`, which clears `stream_exec_id`.
     ExecCleared,
@@ -1380,44 +1384,51 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 );
             }
         }
-        PostCheck::ToolOutput { call_id } => {
-            if pre.pending.iter().any(|p| p == &call_id) {
-                let count = post.pending.iter().filter(|p| *p == &call_id).count();
+        PostCheck::ToolOutput { invocation_id } => {
+            if pre.pending.contains(&invocation_id) {
+                let count = post
+                    .pending
+                    .iter()
+                    .filter(|id| **id == invocation_id)
+                    .count();
                 assert!(
                     count == 1,
-                    "ToolOutput({call_id}) disturbed pending entry: {count} entries, pre {:?} post {:?}",
+                    "ToolOutput({invocation_id:?}) disturbed pending entry: {count} entries, pre {:?} post {:?}",
                     pre.pending,
                     post.pending
                 );
             }
         }
-        PostCheck::ToolStarted { call_id } => {
+        PostCheck::ToolStarted { invocation_id } => {
             if pre.agent_running {
-                let was_pending = pre.pending.iter().any(|p| p == &call_id);
-                if !was_pending {
+                if !pre.pending.contains(&invocation_id) {
                     // Fresh ToolStarted flushes streaming text + thinking
                     // before pushing the tool block.
                     assert!(
                         !post.streaming.text && !post.streaming.thinking,
-                        "ToolStarted({call_id}) left streaming active: {:?}",
+                        "ToolStarted({invocation_id:?}) left streaming active: {:?}",
                         post.streaming
                     );
                 }
                 // Duplicate dispatch must be a no-op on pending; either way,
-                // the call_id ends up in `pending` exactly once.
-                let count = post.pending.iter().filter(|p| *p == &call_id).count();
+                // the invocation ends up in `pending` exactly once.
+                let count = post
+                    .pending
+                    .iter()
+                    .filter(|id| **id == invocation_id)
+                    .count();
                 assert!(
                     count == 1,
-                    "ToolStarted({call_id}) yields {count} pending entries, expected 1: {:?}",
+                    "ToolStarted({invocation_id:?}) yields {count} pending entries, expected 1: {:?}",
                     post.pending
                 );
             }
         }
-        PostCheck::ToolFinished { call_id } => {
-            if pre.pending.iter().any(|p| p == &call_id) {
+        PostCheck::ToolFinished { invocation_id } => {
+            if pre.pending.contains(&invocation_id) {
                 assert!(
-                    !post.pending.iter().any(|p| p == &call_id),
-                    "ToolFinished({call_id}) left pending entry: {:?}",
+                    !post.pending.contains(&invocation_id),
+                    "ToolFinished({invocation_id:?}) left pending entry: {:?}",
                     post.pending
                 );
             }
@@ -1862,30 +1873,37 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             tool_name,
             args,
         } => {
+            let invocation_id = fuzz_invocation_id(call_id);
             let cid = call_id_string(call_id);
             let ev = SourceEvent::engine(EngineEvent::ToolStarted {
-                call_id: cid.clone(),
+                invocation_id,
+                call_id: cid,
                 tool_name,
                 args: args.into_map(),
+                called_at_ms: u64::from(call_id),
             });
-            (Some(ev), PostCheck::ToolStarted { call_id: cid })
+            (Some(ev), PostCheck::ToolStarted { invocation_id })
         }
         FuzzOp::EngineToolOutput { call_id, chunk } => {
+            let invocation_id = fuzz_invocation_id(call_id);
             let cid = call_id_string(call_id);
             let ev = SourceEvent::engine(EngineEvent::ToolOutput {
-                call_id: cid.clone(),
+                invocation_id,
+                call_id: cid,
                 chunk,
             });
-            (Some(ev), PostCheck::ToolOutput { call_id: cid })
+            (Some(ev), PostCheck::ToolOutput { invocation_id })
         }
         FuzzOp::EngineToolFinish {
             call_id,
             is_error,
             content,
         } => {
+            let invocation_id = fuzz_invocation_id(call_id);
             let cid = call_id_string(call_id);
             let ev = SourceEvent::engine(EngineEvent::ToolFinished {
-                call_id: cid.clone(),
+                invocation_id,
+                call_id: cid,
                 result: ToolOutcome {
                     content,
                     is_error,
@@ -1893,7 +1911,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 },
                 elapsed_ms: Some(0),
             });
-            (Some(ev), PostCheck::ToolFinished { call_id: cid })
+            (Some(ev), PostCheck::ToolFinished { invocation_id })
         }
         FuzzOp::ExecOutput(s) => (Some(SourceEvent::ExecOutput(s)), PostCheck::None),
         FuzzOp::ExecDone(code) => (Some(SourceEvent::ExecDone(code)), PostCheck::ExecCleared),
@@ -1975,12 +1993,14 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             args,
         } => {
             let ev = SourceEvent::engine(EngineEvent::RequestPermission {
+                invocation_id: protocol::InvocationId::new(u64::from(req_id)),
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
                 args: args.into_map(),
                 approval_patterns: Vec::new(),
                 summary: protocol::style::StyledLines::from_plain(summary),
+                called_at_ms: u64::from(req_id),
             });
             (Some(ev), PostCheck::PermissionRequested)
         }
@@ -1992,12 +2012,14 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let mut args = std::collections::HashMap::new();
             args.insert("command".to_string(), serde_json::Value::String(command));
             let ev = SourceEvent::engine(EngineEvent::RequestPermission {
+                invocation_id: protocol::InvocationId::new(u64::from(req_id)),
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name: "bash".to_string(),
                 args,
                 approval_patterns: Vec::new(),
                 summary: protocol::style::StyledLines::from_plain("bash".to_string()),
+                called_at_ms: u64::from(req_id),
             });
             (Some(ev), PostCheck::PermissionRequested)
         }
@@ -2011,6 +2033,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             args,
         } => {
             let ev = SourceEvent::engine(EngineEvent::ToolDispatch {
+                invocation_id: protocol::InvocationId::new(u64::from(req_id)),
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
@@ -2025,6 +2048,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             args,
         } => {
             let ev = SourceEvent::engine(EngineEvent::ToolEvaluationRequest {
+                invocation_id: protocol::InvocationId::new(u64::from(req_id)),
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,

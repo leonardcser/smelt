@@ -766,6 +766,7 @@ fn confirm_test_permissions() -> smelt_core::permissions::Permissions {
 
 fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
     smelt_core::ConfirmRequest {
+        invocation_id: protocol::InvocationId::new(request_id),
         call_id: format!("call-{request_id}"),
         tool_name: "test_tool".into(),
         args: std::collections::HashMap::new(),
@@ -845,7 +846,7 @@ fn request_permission_auto_denies_when_applied_turn_mode_denies() {
     app.set_applied_mode(protocol::AgentMode::parse("deny").unwrap());
 
     let mut pending = vec![crate::app::PendingTool {
-        call_id: "call-11".into(),
+        invocation_id: protocol::InvocationId::new(11),
         name: "test_tool".into(),
     }];
     let ctrl = dispatch_confirm_request(&mut app, confirm_req(11), &mut pending);
@@ -869,15 +870,20 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
 
     app.feed_one(SourceEvent::engine(
         protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(12),
             request_id: 12,
             call_id: "call-12".into(),
             tool_name: "test_tool".into(),
             args: std::collections::HashMap::new(),
             approval_patterns: Vec::new(),
+            called_at_ms: 0,
             summary: protocol::StyledLines::from_plain("test tool"),
         },
     ));
-    assert_eq!(app.pending_tool_call_ids(), vec!["call-12"]);
+    assert_eq!(
+        app.pending_tool_invocation_ids(),
+        vec![protocol::InvocationId::new(12)]
+    );
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::HistoryUpdated {
         turn_id,
@@ -893,7 +899,7 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
     app.assert_invariants();
 
     app.resolve_first_confirm(false, Some("skip".into()));
-    assert!(app.pending_tool_call_ids().is_empty());
+    assert!(app.pending_tool_invocation_ids().is_empty());
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::HistoryUpdated {
         turn_id,
         update: protocol::CanonicalHistoryDelta::new(0, Vec::new()),
@@ -919,6 +925,7 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
 
     app.feed_one(SourceEvent::engine(
         protocol::EngineEvent::ToolEvaluationRequest {
+            invocation_id: protocol::InvocationId::new(91),
             request_id: 91,
             call_id: "call-91".into(),
             tool_name: "test_tool".into(),
@@ -976,6 +983,7 @@ fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
     let _ = app.drain_engine_sends();
     app.feed_one(SourceEvent::engine(
         protocol::EngineEvent::ToolEvaluationRequest {
+            invocation_id: protocol::InvocationId::new(91),
             request_id: 91,
             call_id: "call-91".into(),
             tool_name: "scoped_path_probe".into(),
@@ -1004,11 +1012,13 @@ fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
 
     app.feed_one(SourceEvent::engine(
         protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(91),
             request_id: 92,
             call_id: "call-91".into(),
             tool_name: "scoped_path_probe".into(),
             args: std::collections::HashMap::new(),
             approval_patterns: Vec::new(),
+            called_at_ms: 0,
             summary: protocol::StyledLines::from_plain("path probe"),
         },
     ));
@@ -1364,6 +1374,7 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
     );
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(91),
         request_id: 91,
         call_id: "plan-draft".into(),
         tool_name: "present_plan".into(),
@@ -1453,6 +1464,7 @@ fn present_plan_existing_path_approves_without_overwriting_plan_body() {
     );
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(92),
         request_id: 92,
         call_id: "plan-approve".into(),
         tool_name: "present_plan".into(),
@@ -1492,6 +1504,7 @@ fn present_plan_dismiss_does_not_echo_plan_body() {
     );
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(94),
         request_id: 94,
         call_id: "plan-dismiss".into(),
         tool_name: "present_plan".into(),
@@ -1523,6 +1536,7 @@ fn present_plan_dialog_tracks_terminal_width_on_resize() {
     );
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(93),
         request_id: 93,
         call_id: "plan-resize".into(),
         tool_name: "present_plan".into(),
@@ -1568,6 +1582,7 @@ fn public_status_open_question_needs_attention() {
     );
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(77),
         request_id: 77,
         call_id: "status-question".into(),
         tool_name: "ask_user_question".into(),
@@ -1617,6 +1632,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
     );
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(77),
         request_id: 77,
         call_id: "aq-questions".into(),
         tool_name: "ask_user_question".into(),

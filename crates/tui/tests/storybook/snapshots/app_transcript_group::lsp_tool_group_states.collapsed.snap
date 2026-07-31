@@ -1,9 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 595
-expression: frame.text()
+expression: text
 ---
-* lsp ×5
+* lsp ×5                                                                         14:37:03
   inspect_symbol RenderNode, enum, crates/tui/**/*.rs
   inspect_symbol_at crates/tui/src/content/render_plan.rs:26:17
   find_definition crates/tui/src/content/render_plan.rs:44:19

@@ -1,5 +1,6 @@
 use crate::app::{PendingTool, SessionControl, TuiApp};
 use protocol::EngineEvent;
+use smelt_core::content::stream_parser::ToolStart;
 use smelt_core::transcript_model::{Block, ToolOutput, ToolStatus};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::ConfirmRequest;
@@ -70,23 +71,41 @@ impl TuiApp {
     fn begin_tool_block_for_engine_event(
         &mut self,
         pending: &mut Vec<PendingTool>,
-        call_id: String,
-        tool_name: String,
-        summary: protocol::StyledLines,
-        args: std::collections::HashMap<String, serde_json::Value>,
+        start: ToolStart,
     ) {
-        if pending.iter().any(|p| p.call_id == call_id) {
+        let ToolStart {
+            invocation_id,
+            call_id,
+            name: tool_name,
+            summary,
+            args,
+            called_at_ms,
+            ..
+        } = start;
+        if pending
+            .iter()
+            .any(|pending| pending.invocation_id == invocation_id)
+        {
             return;
         }
         self.flush_streaming_thinking();
         self.flush_streaming_text();
         if !self.promote_tool_draft(
+            invocation_id,
             call_id.clone(),
             tool_name.clone(),
             summary.clone(),
             args.clone(),
+            called_at_ms,
         ) {
-            self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
+            self.start_tool_at(
+                invocation_id,
+                call_id.clone(),
+                tool_name.clone(),
+                summary,
+                args.clone(),
+                called_at_ms,
+            );
         }
         self.core.signals.emit_dyn(
             "tool_start",
@@ -97,7 +116,7 @@ impl TuiApp {
         );
         self.pump_lua();
         pending.push(PendingTool {
-            call_id,
+            invocation_id,
             name: tool_name,
         });
     }
@@ -105,14 +124,17 @@ impl TuiApp {
     fn finish_tool_for_engine_event(
         &mut self,
         pending: &mut Vec<PendingTool>,
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         result: protocol::ToolOutcome,
         elapsed_ms: Option<u64>,
         status: ToolStatus,
     ) {
         let mut finished_tool_name: Option<String> = None;
         let mut finished_is_error = false;
-        if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
+        if let Some(idx) = pending
+            .iter()
+            .position(|pending| pending.invocation_id == invocation_id)
+        {
             let removed = pending.remove(idx);
             finished_tool_name = Some(removed.name.clone());
             finished_is_error = result.is_error;
@@ -122,7 +144,7 @@ impl TuiApp {
                 metadata: result.metadata,
             }));
             let elapsed = elapsed_ms.map(Duration::from_millis);
-            self.finish_tool(&call_id, status, output, elapsed);
+            self.finish_tool(invocation_id, status, output, elapsed);
         }
         if let Some(tool_name) = finished_tool_name {
             self.core.signals.emit_dyn(
@@ -270,9 +292,13 @@ impl TuiApp {
                 );
                 SessionControl::Continue
             }
-            EngineEvent::ToolOutput { call_id, chunk } => {
+            EngineEvent::ToolOutput {
+                invocation_id,
+                chunk,
+                ..
+            } => {
                 assistant_output_started = true;
-                self.append_active_output(&call_id, &chunk);
+                self.append_active_output(invocation_id, &chunk);
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
@@ -409,9 +435,11 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
+                invocation_id,
                 call_id,
                 tool_name,
                 args,
+                called_at_ms,
             } => {
                 assistant_output_started = true;
                 let summary = self.resolve_tool_summary_for_engine_event(
@@ -419,13 +447,25 @@ impl TuiApp {
                     &args,
                     protocol::StyledLines::empty(),
                 );
-                self.begin_tool_block_for_engine_event(pending, call_id, tool_name, summary, args);
+                self.begin_tool_block_for_engine_event(
+                    pending,
+                    ToolStart {
+                        invocation_id,
+                        call_id,
+                        name: tool_name,
+                        summary,
+                        args,
+                        preview_output: None,
+                        called_at_ms,
+                    },
+                );
                 SessionControl::Continue
             }
             EngineEvent::ToolFinished {
-                call_id,
+                invocation_id,
                 result,
                 elapsed_ms,
+                ..
             } => {
                 assistant_output_started = true;
                 let status = if result.is_error {
@@ -433,41 +473,62 @@ impl TuiApp {
                 } else {
                     ToolStatus::Ok
                 };
-                self.finish_tool_for_engine_event(pending, call_id, result, elapsed_ms, status);
+                self.finish_tool_for_engine_event(
+                    pending,
+                    invocation_id,
+                    result,
+                    elapsed_ms,
+                    status,
+                );
                 SessionControl::Continue
             }
             EngineEvent::ToolRejected {
+                invocation_id,
                 call_id,
                 tool_name,
                 args,
                 summary,
                 result,
                 elapsed_ms,
+                called_at_ms,
             } => {
                 assistant_output_started = true;
                 let summary =
                     self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
                 self.begin_tool_block_for_engine_event(
                     pending,
-                    call_id.clone(),
-                    tool_name,
-                    summary,
-                    args,
+                    ToolStart {
+                        invocation_id,
+                        call_id: call_id.clone(),
+                        name: tool_name,
+                        summary,
+                        args,
+                        preview_output: None,
+                        called_at_ms,
+                    },
                 );
                 let status = if result.is_error {
                     ToolStatus::Err
                 } else {
                     ToolStatus::Denied
                 };
-                self.finish_tool_for_engine_event(pending, call_id, result, elapsed_ms, status);
+                self.finish_tool_for_engine_event(
+                    pending,
+                    invocation_id,
+                    result,
+                    elapsed_ms,
+                    status,
+                );
                 SessionControl::Continue
             }
             EngineEvent::RequestPermission {
                 request_id,
+                invocation_id,
                 call_id,
                 tool_name,
                 args,
                 approval_patterns,
+                called_at_ms,
                 summary,
             } => {
                 assistant_output_started = true;
@@ -478,12 +539,18 @@ impl TuiApp {
                     crate::lua::scope_app(self, || lua.tool_paths_for_workspace(&tool_name, &args));
                 self.begin_tool_block_for_engine_event(
                     pending,
-                    call_id.clone(),
-                    tool_name.clone(),
-                    summary.clone(),
-                    args.clone(),
+                    ToolStart {
+                        invocation_id,
+                        call_id: call_id.clone(),
+                        name: tool_name.clone(),
+                        summary: summary.clone(),
+                        args: args.clone(),
+                        preview_output: None,
+                        called_at_ms,
+                    },
                 );
                 SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
+                    invocation_id,
                     call_id,
                     tool_name,
                     args,
@@ -567,7 +634,6 @@ impl TuiApp {
                         avg_tps: None,
                         display_tps: None,
                         interrupted: false,
-                        tool_elapsed: std::collections::HashMap::new(),
                     });
                     self.core
                         .signals
@@ -599,16 +665,18 @@ impl TuiApp {
             },
             EngineEvent::ToolDispatch {
                 request_id,
+                invocation_id,
                 call_id,
                 tool_name,
                 args,
             } => {
                 // Plugins open their own confirm dialogs via `smelt.dialog.open` inside `execute`.
-                self.handle_tool_call(request_id, call_id, tool_name, args);
+                self.handle_tool_call(request_id, invocation_id, call_id, tool_name, args);
                 SessionControl::Continue
             }
             EngineEvent::ToolEvaluationRequest {
                 request_id,
+                invocation_id: _,
                 call_id: _,
                 tool_name,
                 args,

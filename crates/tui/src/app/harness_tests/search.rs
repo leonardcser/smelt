@@ -505,14 +505,14 @@ fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
     let mut app = searchable_transcript_app();
     let mut args = std::collections::HashMap::new();
     args.insert("pattern".to_string(), serde_json::json!("needle"));
-    app.start_tool(
+    let invocation_id = app.start_tool(
         "glob-call-1".into(),
         "glob".into(),
         protocol::StyledLines::from_plain("**/*.rs"),
         args,
     );
     app.finish_tool(
-        "glob-call-1",
+        invocation_id,
         smelt_core::transcript_model::ToolStatus::Ok,
         Some(Box::new(smelt_core::transcript_model::ToolOutput {
             content: "src/a.rs\nsrc/b.rs".into(),

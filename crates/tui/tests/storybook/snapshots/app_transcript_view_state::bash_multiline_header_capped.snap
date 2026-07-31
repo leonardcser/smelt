@@ -1,12 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 488
-expression: frame.text()
+expression: text
 ---
-* bash line one
-  line two
-  line three
-  … 3 lines below
+* bash line one                                                              14:37:03
+       line two
+       line three
+       … 3 lines below
   done
 
 

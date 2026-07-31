@@ -290,7 +290,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     let mut sent_engine_ask = false;
     let mut got_response = false;
     let mut turn_completed = false;
-    let mut tool_dispatch_request_id: Option<u64> = None;
+    let mut tool_dispatch: Option<(u64, protocol::InvocationId)> = None;
 
     tokio::time::timeout(TEST_DEADLINE, async {
         loop {
@@ -306,11 +306,12 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                 }
                 Some(EngineEvent::ToolDispatch {
                     request_id,
+                    invocation_id,
                     call_id,
                     ..
                 }) => {
                     assert_eq!(call_id, TOOL_CALL_ID);
-                    tool_dispatch_request_id = Some(request_id);
+                    tool_dispatch = Some((request_id, invocation_id));
                     if !sent_engine_ask {
                         sent_engine_ask = true;
                         handle.send(UiCommand::SetTurnModel {
@@ -338,9 +339,10 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                 Some(EngineEvent::EngineAskResponse { id, .. }) if id == ask_id => {
                     got_response = true;
                     // Unblock the tool so the engine can complete its turn.
-                    if let Some(rid) = tool_dispatch_request_id {
+                    if let Some((request_id, invocation_id)) = tool_dispatch {
                         handle.send(UiCommand::ToolResult {
-                            request_id: rid,
+                            request_id,
+                            invocation_id,
                             call_id: TOOL_CALL_ID.into(),
                             content: "tool finished".into(),
                             is_error: false,
@@ -700,6 +702,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
             }
             Some(EngineEvent::ToolDispatch {
                 request_id,
+                invocation_id,
                 call_id,
                 ..
             }) => {
@@ -712,6 +715,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
                 });
                 handle.send(UiCommand::ToolResult {
                     request_id,
+                    invocation_id,
                     call_id,
                     content: "done".into(),
                     is_error: false,

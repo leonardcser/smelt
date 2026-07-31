@@ -103,7 +103,7 @@ impl TypeIndex {
             let anchor = self.anchor(stripped);
             format!("[{ty}](types.md#{anchor})")
         } else {
-            format!("`{ty}`")
+            format!("`{}`", ty.replace('|', "\\|"))
         }
     }
 }
@@ -1458,22 +1458,34 @@ fn split_token(s: &str) -> (&str, &str) {
 }
 
 /// Split `<type> <description>` while respecting the LuaCATS depth
-/// rules - spaces inside `()`/`[]`/`<>`/`{}` belong to the type, not
-/// the description.
+/// rules. Spaces inside `()`/`[]`/`<>`/`{}`, after a function return
+/// colon, or around a union operator belong to the type.
 fn split_type_and_doc(s: &str) -> (String, String) {
     let bytes = s.as_bytes();
     let mut depth: i32 = 0;
     let mut end = bytes.len();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
             b'(' | b'[' | b'<' | b'{' => depth += 1,
             b')' | b']' | b'>' | b'}' => depth = depth.saturating_sub(1),
             b' ' | b'\t' if depth == 0 => {
+                let mut next = i;
+                while next < bytes.len() && matches!(bytes[next], b' ' | b'\t') {
+                    next += 1;
+                }
+                let previous = s[..i].trim_end().as_bytes().last().copied();
+                let following = bytes.get(next).copied();
+                if matches!(previous, Some(b':' | b'|')) || following == Some(b'|') {
+                    i = next;
+                    continue;
+                }
                 end = i;
                 break;
             }
             _ => {}
         }
+        i += 1;
     }
     let ty = s[..end].trim().to_string();
     let doc = s[end..].trim().to_string();
@@ -1587,6 +1599,59 @@ fn repo_root() -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_type_and_doc_respects_balanced_delimiters() {
+        assert_eq!(
+            split_type_and_doc("table<string, string> Optional map."),
+            (
+                "table<string, string>".to_string(),
+                "Optional map.".to_string()
+            )
+        );
+        assert_eq!(
+            split_type_and_doc("fun(value: string, opts?: { strict: boolean }): nil Callback."),
+            (
+                "fun(value: string, opts?: { strict: boolean }): nil".to_string(),
+                "Callback.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn split_type_and_doc_keeps_required_callback_return_type() {
+        assert_eq!(
+            split_type_and_doc(
+                "fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node Complete replacement renderer."
+            ),
+            (
+                "fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node".to_string(),
+                "Complete replacement renderer.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn split_type_and_doc_keeps_optional_callback_return_type() {
+        assert_eq!(
+            split_type_and_doc(
+                "fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node | nil Optional renderer."
+            ),
+            (
+                "fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node | nil".to_string(),
+                "Optional renderer.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn linkify_type_escapes_markdown_table_pipes() {
+        let index = TypeIndex::new(&[], &[]);
+        assert_eq!(
+            index.linkify_type("string|smelt.layout.Node|nil"),
+            "`string\\|smelt.layout.Node\\|nil`"
+        );
+    }
 
     #[test]
     fn generated_region_replacement_preserves_surrounding_prose() {

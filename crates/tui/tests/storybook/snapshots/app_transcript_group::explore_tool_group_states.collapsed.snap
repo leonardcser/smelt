@@ -1,9 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 595
-expression: frame.text()
+expression: text
 ---
-* explore ×5
+* explore ×5                                                                     14:37:03
   read_file src/lib.rs
   grep "render_group" in crates/tui/src
   glob **/*.rs in crates/tui/src

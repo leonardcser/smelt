@@ -2,7 +2,6 @@ use crate::lua::shared::{
     RegisteredTranscriptGroup, TranscriptGroupBucket, TranscriptGroupFieldMatch,
     TranscriptGroupRegistry, TranscriptGroupSelector, TranscriptGroupSpec,
 };
-use crate::lua::LuaHandle;
 use mlua::prelude::*;
 
 pub(crate) fn cache_key_hash(registry: &TranscriptGroupRegistry) -> u64 {
@@ -210,7 +209,6 @@ fn parse_bucket(value: mlua::Value) -> LuaResult<Option<TranscriptGroupBucket>> 
 }
 
 pub(crate) fn parse_registration(
-    lua: &Lua,
     spec: mlua::Table,
     order: u64,
 ) -> LuaResult<RegisteredTranscriptGroup> {
@@ -225,8 +223,6 @@ pub(crate) fn parse_registration(
     let selector_table = spec.get::<mlua::Table>("selector")?;
     let selector = parse_selector(selector_table)?;
     let bucket = parse_bucket(spec.get::<mlua::Value>("bucket")?)?;
-    let render = spec.get::<mlua::Function>("render")?;
-    let handle = LuaHandle::from_func(lua, render)?;
     Ok(RegisteredTranscriptGroup {
         spec: TranscriptGroupSpec {
             name,
@@ -238,7 +234,6 @@ pub(crate) fn parse_registration(
             selector,
             bucket,
         },
-        render: handle,
         token: order,
     })
 }

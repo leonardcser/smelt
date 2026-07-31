@@ -158,6 +158,7 @@ impl HeadlessApp {
     fn handle_tool_dispatch(
         &mut self,
         request_id: u64,
+        invocation_id: protocol::InvocationId,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
@@ -165,6 +166,7 @@ impl HeadlessApp {
         let Some(lua) = self.lua.as_ref() else {
             self.core.engine.send(UiCommand::ToolResult {
                 request_id,
+                invocation_id,
                 call_id,
                 content: format!("tool not found: {tool_name}"),
                 is_error: true,
@@ -175,6 +177,7 @@ impl HeadlessApp {
         if !lua.tool_available_for(&tool_name, crate::lua::ToolVisibility::Headless) {
             self.core.engine.send(UiCommand::ToolResult {
                 request_id,
+                invocation_id,
                 call_id,
                 content: format!("tool not available in headless mode: {tool_name}"),
                 is_error: true,
@@ -190,8 +193,11 @@ impl HeadlessApp {
             lua.execute_tool(
                 &tool_name,
                 &args,
-                request_id,
-                &call_id,
+                crate::lua::ToolCallIds {
+                    invocation_id,
+                    request_id,
+                    call_id: &call_id,
+                },
                 crate::lua::ToolEnv {
                     mode,
                     session_id: &session_id,
@@ -208,6 +214,7 @@ impl HeadlessApp {
             } => {
                 self.core.engine.send(UiCommand::ToolResult {
                     request_id,
+                    invocation_id,
                     call_id,
                     content,
                     is_error,
@@ -238,6 +245,7 @@ impl HeadlessApp {
             {
                 self.core.engine.send(UiCommand::ToolResult {
                     request_id: invocation.request_id,
+                    invocation_id: invocation.invocation_id,
                     call_id,
                     content,
                     is_error,
@@ -280,12 +288,14 @@ impl HeadlessApp {
             }
             EngineEvent::ToolDispatch {
                 request_id,
+                invocation_id,
                 call_id,
                 tool_name,
                 args,
             } => {
                 self.handle_tool_dispatch(
                     *request_id,
+                    *invocation_id,
                     call_id.clone(),
                     tool_name.clone(),
                     args.clone(),
@@ -415,7 +425,8 @@ impl HeadlessApp {
         let mut total_usage = protocol::TokenUsage::default();
         let mut last_tps: Option<f64> = None;
         let mut total_cost = 0.0_f64;
-        let mut pending_tools: HashMap<String, (String, String, String)> = HashMap::new();
+        let mut pending_tools: HashMap<protocol::InvocationId, (String, String, String)> =
+            HashMap::new();
 
         let mut interrupted = false;
         loop {
@@ -460,29 +471,34 @@ impl HeadlessApp {
                     final_message = content.clone();
                 }
                 EngineEvent::ToolStarted {
-                    call_id,
+                    invocation_id,
                     tool_name,
                     args,
+                    ..
                 } => {
                     let mut arg_keys: Vec<String> = args.keys().cloned().collect();
                     arg_keys.sort();
                     let summary = format!("{tool_name}({})", arg_keys.join(", "));
                     pending_tools
-                        .insert(call_id.clone(), (tool_name.clone(), summary, String::new()));
+                        .insert(*invocation_id, (tool_name.clone(), summary, String::new()));
                 }
-                EngineEvent::ToolOutput { call_id, chunk }
-                    if self.sink.format == OutputFormat::Text && self.sink.verbose =>
-                {
-                    if let Some((_, _, output)) = pending_tools.get_mut(call_id) {
+                EngineEvent::ToolOutput {
+                    invocation_id,
+                    chunk,
+                    ..
+                } if self.sink.format == OutputFormat::Text && self.sink.verbose => {
+                    if let Some((_, _, output)) = pending_tools.get_mut(invocation_id) {
                         output.push_str(chunk);
                     }
                 }
                 EngineEvent::ToolFinished {
-                    call_id,
+                    invocation_id,
                     result,
                     elapsed_ms,
+                    ..
                 } => {
-                    let (name, summary, output) = pending_tools.remove(call_id).unwrap_or_default();
+                    let (name, summary, output) =
+                        pending_tools.remove(invocation_id).unwrap_or_default();
                     if self.sink.format == OutputFormat::Text {
                         let display_output = if !self.sink.verbose {
                             String::new()
@@ -740,7 +756,13 @@ mod tests {
     #[test]
     fn headless_rejects_ui_only_tool_dispatch() {
         let (mut app, mut cmd_rx) = headless_app_with_cmd_rx(true);
-        app.handle_tool_dispatch(7, "call-1".into(), "ui_only_probe".into(), HashMap::new());
+        app.handle_tool_dispatch(
+            7,
+            protocol::InvocationId::new(1),
+            "call-1".into(),
+            "ui_only_probe".into(),
+            HashMap::new(),
+        );
 
         match cmd_rx.try_recv().unwrap() {
             UiCommand::ToolResult {

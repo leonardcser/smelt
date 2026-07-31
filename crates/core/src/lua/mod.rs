@@ -32,6 +32,14 @@ pub use task::{
     TaskEvent, TaskScope, ToolEnv, ToolInvocationContext,
 };
 
+/// Identifiers carried together through one plugin tool execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolCallIds<'a> {
+    pub invocation_id: protocol::InvocationId,
+    pub request_id: u64,
+    pub call_id: &'a str,
+}
+
 /// Outcome of invoking a plugin tool handler.
 pub enum ToolExecResult {
     /// Handler returned synchronously; forward content to the engine immediately.

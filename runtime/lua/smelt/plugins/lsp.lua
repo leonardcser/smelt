@@ -452,13 +452,16 @@ local function configure_transcript_defaults()
   end
 
   local defaults = smelt.transcript and smelt.transcript.defaults
-  if not defaults or type(defaults.__tool_collapsed_details) ~= "table" then return end
+  if not defaults then return end
   for _, name in ipairs(COLLAPSED_TOOLS) do
-    defaults.__tool_collapsed_details[name] = function(block)
-      local metadata = block.output and block.output.metadata
-      if type(metadata) ~= "table" or type(metadata.display_count) ~= "table" then return nil end
-      return defaults.display_count_text(block)
-    end
+    add_reg(smelt.transcript.register_tool(name, {
+      cache_key = "smelt.plugin.lsp." .. name .. ":v1",
+      compact = function(block)
+        local metadata = block.output and block.output.metadata
+        if type(metadata) ~= "table" or type(metadata.display_count) ~= "table" then return nil end
+        return defaults.display_count_text(block)
+      end,
+    }))
   end
 end
 

@@ -5,7 +5,6 @@
 //! Width and theme are intentionally absent from these types.
 
 use crate::content::highlight::DiffIr;
-use crate::transcript_model::ToolStatus;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_TOOL_BLOCK_ROWS: u16 = 20;
@@ -78,31 +77,6 @@ pub struct CodeSpec {
     pub lang: String,
 }
 
-/// Dynamic elapsed-time text. The cached IR stores the tool identity and style;
-/// the renderer resolves current seconds from `ToolState` when available.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ElapsedSpec {
-    pub call_id: String,
-    pub status: ToolStatus,
-    pub fallback_secs: Option<u64>,
-    pub hl_group: Option<String>,
-    pub dim: bool,
-    pub selectable: bool,
-}
-
-/// Format a visible tool elapsed value, omitting sub-second and confirmation states.
-pub fn tool_elapsed_text(status: ToolStatus, secs: u64) -> Option<String> {
-    (!matches!(status, ToolStatus::Confirm) && secs >= 1).then(|| {
-        if secs < 60 {
-            format!("{secs}s")
-        } else if secs < 3600 {
-            format!("{}m{}s", secs / 60, secs % 60)
-        } else {
-            format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-        }
-    })
-}
-
 /// Width-dependent horizontal separator leaf.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeparatorSpec {
@@ -145,7 +119,6 @@ pub enum LayoutLeaf {
     Line(LineSpec),
     Markdown(MarkdownSpec),
     Code(CodeSpec),
-    Elapsed(ElapsedSpec),
     Separator(SeparatorSpec),
     SourceView(SourceViewIr),
 }
@@ -159,7 +132,6 @@ pub enum LuaLeaf {
     Line(LineSpec),
     Markdown(MarkdownSpec),
     Code(CodeSpec),
-    Elapsed(ElapsedSpec),
     Separator(SeparatorSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
@@ -194,6 +166,14 @@ pub struct GutterSpec {
     pub text: String,
     #[serde(default)]
     pub styled: bool,
+}
+
+/// Declarative request to recompute the containing top-level render node.
+/// Compilation strips this wrapper from display IR and records its schedule as
+/// cache metadata, so it never changes measurement, rendering, or selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshSpec {
+    pub after_ms: u64,
 }
 
 /// Leading row chrome applied after capping/wrapping. This is the general form
@@ -251,6 +231,10 @@ pub enum BlockLayout<L = LuaLeaf> {
         child: Box<BlockLayout<L>>,
         spec: CapSpec,
     },
+    Refresh {
+        child: Box<BlockLayout<L>>,
+        spec: RefreshSpec,
+    },
 }
 
 pub type LayoutNode<L = LuaLeaf> = BlockLayout<L>;
@@ -281,7 +265,8 @@ impl<L> BlockLayout<L> {
             | BlockLayout::RowPrefix { child, .. }
             | BlockLayout::Panel { child, .. }
             | BlockLayout::Style { child, .. }
-            | BlockLayout::Cap { child, .. } => {
+            | BlockLayout::Cap { child, .. }
+            | BlockLayout::Refresh { child, .. } => {
                 child.collect_leaves(out);
             }
         }

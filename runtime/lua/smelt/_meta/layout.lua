@@ -19,10 +19,6 @@ layout.code = nil
 ---@type fun(opts: table): smelt.layout.Node
 layout.diff = nil
 
---- Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.
----@type fun(elapsed: any, opts: table?): smelt.layout.Node
-layout.elapsed = nil
-
 --- Explicit zero-row layout node. Use this instead of returning nil when a renderer intentionally hides content.
 ---@type fun(): smelt.layout.Node
 layout.empty = nil
@@ -50,6 +46,10 @@ layout.markdown = nil
 --- Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.
 ---@type fun(child: any, opts: table?): smelt.layout.Node
 layout.panel = nil
+
+--- Return `child` unchanged while requesting that its containing top-level transcript node be rendered again after `opts.after_ms`. The positive delay is declarative cache metadata and does not affect measurement, rendering, or selection.
+---@type fun(child: any, opts: table): smelt.layout.Node
+layout.refresh = nil
 
 --- Apply row chrome to `child` after the child has produced rows. `opts.first` is a styled line or string for row 1; `opts.rest` is used for every later row and defaults to `opts.first`. Prefix spans keep their own `selectable` flags: set `selectable = false` for pure chrome, leave it true for copyable labels. The widest prefix consumes display width before wrapping/measuring the child, so prefixed rows stay within the layout width. Put this outside `layout.cap` when cap markers should inherit the same row chrome.
 ---@type fun(child: any, opts: table): smelt.layout.Node

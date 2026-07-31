@@ -627,11 +627,11 @@ impl AgentLuaHost<'_> {
                 decision: crate::lua::api::confirm::decision_label(&choice),
             }),
         );
+        let invocation_id = entry.req.invocation_id;
         let request_id = entry.req.request_id;
-        let call_id = entry.req.call_id.clone();
         let tool_name = entry.req.tool_name.clone();
         self.app
-            .handle_confirm_resolve(choice, message, request_id, &call_id, &tool_name);
+            .handle_confirm_resolve(choice, message, invocation_id, request_id, &tool_name);
     }
 
     pub(crate) fn cancel_engine_work(&mut self) {

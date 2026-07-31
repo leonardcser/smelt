@@ -1449,6 +1449,7 @@ fn enter_worktree_tool_changes_the_process_cwd() {
     app.clear_actions();
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(96),
         request_id: 96,
         call_id: "enter-worktree".into(),
         tool_name: "enter_worktree".into(),
@@ -1515,6 +1516,7 @@ fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
     app.clear_actions();
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(91),
         request_id: 91,
         call_id: "switch-cwd".into(),
         tool_name: "switch_cwd".into(),
@@ -1617,6 +1619,7 @@ fn concurrent_model_tool_cannot_commit_a_cwd_change() {
     app.clear_actions();
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(93),
         request_id: 93,
         call_id: "concurrent-cwd".into(),
         tool_name: "concurrent_cwd_probe".into(),
@@ -1640,6 +1643,7 @@ fn concurrent_model_tool_cannot_commit_a_cwd_change() {
                     content,
                     is_error: true,
                     metadata: None,
+                    ..
                 } if call_id == "concurrent-cwd"
                     && content == "cwd-changing model tools must use sequential execution"
             )
@@ -1675,6 +1679,7 @@ fn cancelled_sequential_tool_discards_its_pending_cwd_change() {
     app.start_turn(42);
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(94),
         request_id: 94,
         call_id: "cancelled-cwd".into(),
         tool_name: "cancelled_cwd_probe".into(),
@@ -1756,6 +1761,7 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
 
     app.complete_lua_tool(
         smelt_core::lua::ToolInvocationContext {
+            invocation_id: protocol::InvocationId::new(99),
             request_id: 99,
             execution_mode: protocol::ToolExecutionMode::Concurrent,
         },
@@ -1825,6 +1831,7 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
     app.clear_actions();
 
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(92),
         request_id: 92,
         call_id: "failed-switch-cwd".into(),
         tool_name: "switch_cwd".into(),
@@ -1863,6 +1870,7 @@ fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
             content,
             is_error: true,
             metadata: Some(metadata),
+            ..
         } if call_id == "failed-switch-cwd"
             && content.starts_with("cwd change:")
             && content.contains("Original tool result:\ncwd:")
@@ -1902,6 +1910,7 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
     let _ = app.drain_engine_sends();
     app.clear_actions();
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(95),
         request_id: 95,
         call_id: "enter-broken-worktree".into(),
         tool_name: "enter_worktree".into(),
@@ -1935,6 +1944,7 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
                     content,
                     is_error,
                     metadata,
+                    ..
                 } if call_id == "enter-broken-worktree" => {
                     Some((content, *is_error, metadata.as_ref()))
                 }
@@ -2682,14 +2692,14 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     app.set_terminal_size(100, 30);
-    app.start_tool(
+    let invocation_id = app.start_tool(
         "reload-call-1".into(),
         "bash".into(),
         protocol::StyledLines::from_plain("echo reload"),
         std::collections::HashMap::new(),
     );
     app.finish_tool(
-        "reload-call-1",
+        invocation_id,
         smelt_core::transcript_model::ToolStatus::Ok,
         Some(Box::new(smelt_core::transcript_model::ToolOutput {
             content: "reload output".into(),

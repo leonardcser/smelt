@@ -35,11 +35,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |_, ()| {
             let ms = crate::host::try_with_core(|core| {
-                core.clock
-                    .system_now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64
+                engine::clock::unix_time_ms(core.clock.as_ref())
             })
             .unwrap_or(0);
             Ok(ms)

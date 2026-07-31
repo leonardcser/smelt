@@ -1,12 +1,11 @@
-local transcript_defaults = require("smelt.transcript.defaults")
-
 local function trim(s)
   return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-transcript_defaults.__tool_body_renderers.switch_cwd = function()
-  return nil
-end
+smelt.transcript.register_tool("switch_cwd", {
+  cache_key = "smelt.tool-presentation.switch_cwd:v1",
+  body = function() return nil end,
+})
 
 smelt.tools.register({
   name = "switch_cwd",

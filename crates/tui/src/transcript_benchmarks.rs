@@ -2149,7 +2149,6 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         avg_tps: None,
         display_tps: None,
         interrupted: false,
-        tool_elapsed: std::collections::HashMap::new(),
     };
     let (sample, snapshot) = capture_hot_path_sample("turn_complete", history_len, || {
         app.app

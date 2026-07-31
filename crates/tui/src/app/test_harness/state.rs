@@ -70,15 +70,13 @@ impl TestApp {
         self.app.agent_is_running()
     }
 
-    /// Snapshot the pending tool `call_id`s on the active turn. Empty
-    /// vector when no turn is active. Used by transitional invariants
-    /// that need to compare pending state before vs. after an event
-    /// (e.g. asserting a `ToolFinished` actually cleared its entry).
-    pub fn pending_tool_call_ids(&self) -> Vec<String> {
+    /// Snapshot the pending invocation identities on the active turn. Returns
+    /// an empty vector when no turn is active.
+    pub fn pending_tool_invocation_ids(&self) -> Vec<protocol::InvocationId> {
         self.app
             .conversation
             .active()
-            .map(|ag| ag.pending.iter().map(|pt| pt.call_id.clone()).collect())
+            .map(|turn| turn.pending.iter().map(|tool| tool.invocation_id).collect())
             .unwrap_or_default()
     }
 
@@ -352,7 +350,7 @@ impl TestApp {
         {
             let cancel = self.app.resolve_confirm(
                 (choice, message),
-                &req.call_id,
+                req.invocation_id,
                 req.request_id,
                 &req.tool_name,
             );

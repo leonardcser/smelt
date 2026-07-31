@@ -1,6 +1,6 @@
 //! Built-in transcript group rendering. These stories drive adjacent terminal
 //! tool calls through the real app pipeline so virtual tool-group nodes are
-//! planned by Rust and rendered by the bundled Lua group renderers.
+//! planned by Rust and rendered through the bundled Lua root renderer.
 
 use serde_json::json;
 

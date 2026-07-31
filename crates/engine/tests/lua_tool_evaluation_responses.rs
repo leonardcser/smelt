@@ -371,12 +371,14 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                     }
                     Ok(Some(EngineEvent::ToolDispatch {
                         request_id,
+                        invocation_id,
                         call_id,
                         ..
                     })) => {
                         dispatches += 1;
                         handle.send(UiCommand::ToolResult {
                             request_id,
+                            invocation_id,
                             call_id,
                             content: "ok".into(),
                             is_error: false,

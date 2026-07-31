@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* read_file crates/tui/src/app.rs:120-159
+* read_file crates/tui/src/app.rs:120-159                    14:37:03
   0 lines
 
 

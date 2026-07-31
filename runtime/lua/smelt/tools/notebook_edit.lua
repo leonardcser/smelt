@@ -29,20 +29,22 @@ local function preview_layout(meta)
   return smelt.layout.vbox({ smelt.layout.text(title), body })
 end
 
-transcript_defaults.__tool_body_renderers.edit_notebook = function(block)
-  return preview_layout((block.output and block.output.metadata) or {})
-end
-
-transcript_defaults.__tool_collapsed_details.edit_notebook = function(block)
-  local meta = (block.output and block.output.metadata) or block.args or {}
-  local mode = meta.edit_mode or "replace"
-  local cell_type = meta.cell_type or ""
-  local cell_label = cell_type ~= "" and (cell_type .. " cell") or "cell"
-  local lines = smelt.text.line_count(meta.new_source or "")
-  if mode == "delete" then return "deleted " .. cell_label end
-  local verb = ({ insert = "inserted", replace = "replaced" })[mode] or (mode .. "d")
-  return verb .. " " .. cell_label .. ", " .. tostring(lines) .. " lines"
-end
+smelt.transcript.register_tool("edit_notebook", {
+  cache_key = "smelt.tool-presentation.edit_notebook:v1",
+  body = function(block)
+    return preview_layout((block.output and block.output.metadata) or {})
+  end,
+  compact = function(block)
+    local meta = (block.output and block.output.metadata) or block.args or {}
+    local mode = meta.edit_mode or "replace"
+    local cell_type = meta.cell_type or ""
+    local cell_label = cell_type ~= "" and (cell_type .. " cell") or "cell"
+    local lines = smelt.text.line_count(meta.new_source or "")
+    if mode == "delete" then return "deleted " .. cell_label end
+    local verb = ({ insert = "inserted", replace = "replaced" })[mode] or (mode .. "d")
+    return verb .. " " .. cell_label .. ", " .. tostring(lines) .. " lines"
+  end,
+})
 
 smelt.tools.register({
   name = "edit_notebook",

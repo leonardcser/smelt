@@ -8,6 +8,7 @@ dim: 80 22
   0   7   2 fg=Rgb { r: 255, g: 255, b: 255 }
   0   9   4 fg=Rgb { r: 253, g: 151, b: 31 }
   0  13   9 fg=Rgb { r: 255, g: 255, b: 255 }
+  0  69  10 attrs=dim
   5   0  80 fg=AnsiValue(208)
   6   1   4 fg=AnsiValue(208)
   7   1  22 attrs=dim

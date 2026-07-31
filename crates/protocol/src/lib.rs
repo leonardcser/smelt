@@ -22,9 +22,10 @@ pub mod usage;
 pub use content::{Content, ContentPart};
 pub use event::{
     AgentProjectContext, AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex, Decision,
-    EngineAskError, EngineAskErrorKind, EngineEvent, ModelHistoryCoordinates, ModelHistoryIndex,
-    ModelHistorySource, PersistenceScope, ReasoningKind, StartTurnInput, StartTurnPayload, ToolDef,
-    ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
+    EngineAskError, EngineAskErrorKind, EngineEvent, InvocationId, ModelHistoryCoordinates,
+    ModelHistoryIndex, ModelHistorySource, PersistenceScope, ReasoningKind, StartTurnInput,
+    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
+    UiCommand,
 };
 pub use history::{
     apply_history_append, classify_user_history_content, compaction_summary_content,

@@ -126,7 +126,6 @@ pub struct TranscriptGroupBucket {
 
 pub struct RegisteredTranscriptGroup {
     pub spec: TranscriptGroupSpec,
-    pub render: LuaHandle,
     pub token: u64,
 }
 
@@ -219,6 +218,9 @@ pub struct LuaShared {
     pub remember: Mutex<crate::config::RememberConfig>,
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
     pub messages: Arc<Mutex<crate::messages::Messages>>,
+    /// Session-long clock used by transcript rendering without re-entering the
+    /// scoped frontend host. Shared by replacement Lua generations.
+    clock: Arc<Mutex<Arc<dyn engine::clock::Clock>>>,
     /// Bundled `smelt.<dotted>` module names the user has opted out of via
     /// `smelt.builtins.disable{}` in `early.lua`. Read by `autoload_modules`
     /// to skip the matching `require()` calls. Names use the dotted module
@@ -351,6 +353,7 @@ pub struct LuaHostServices {
     pub messages: Arc<Mutex<crate::messages::Messages>>,
     pub next_buf_id: Arc<AtomicU64>,
     pub next_callback_id: Arc<AtomicU64>,
+    clock: Arc<Mutex<Arc<dyn engine::clock::Clock>>>,
     lua_handle_ledger: Arc<LuaHandleLedger>,
 }
 
@@ -361,6 +364,7 @@ impl Default for LuaHostServices {
             messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
             next_buf_id: Arc::new(AtomicU64::new(LUA_BUF_ID_BASE)),
             next_callback_id: Arc::new(AtomicU64::new(1)),
+            clock: Arc::new(Mutex::new(Arc::new(engine::clock::RealClock))),
             lua_handle_ledger: Arc::new(LuaHandleLedger::default()),
         }
     }
@@ -405,6 +409,7 @@ impl Default for LuaShared {
             remember: Mutex::new(crate::config::RememberConfig::default()),
             tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
             messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
+            clock: Arc::new(Mutex::new(Arc::new(engine::clock::RealClock))),
             disabled_modules: Mutex::new(HashSet::new()),
             native_module_names: Mutex::new(HashSet::new()),
             cli_flag_specs: Mutex::new(Vec::new()),
@@ -431,6 +436,7 @@ impl LuaShared {
             messages: host.messages,
             next_buf_id: host.next_buf_id,
             next_id: host.next_callback_id,
+            clock: host.clock,
             lua_handle_ledger: host.lua_handle_ledger,
             ..Self::default()
         }
@@ -442,8 +448,17 @@ impl LuaShared {
             messages: Arc::clone(&self.messages),
             next_buf_id: Arc::clone(&self.next_buf_id),
             next_callback_id: Arc::clone(&self.next_id),
+            clock: Arc::clone(&self.clock),
             lua_handle_ledger: Arc::clone(&self.lua_handle_ledger),
         }
+    }
+
+    pub fn set_clock(&self, clock: Arc<dyn engine::clock::Clock>) {
+        *self.clock.lock().unwrap_or_else(|error| error.into_inner()) = clock;
+    }
+
+    pub fn clock(&self) -> Arc<dyn engine::clock::Clock> {
+        Arc::clone(&self.clock.lock().unwrap_or_else(|error| error.into_inner()))
     }
 
     pub(crate) fn lua_handle_ledger(&self) -> Arc<LuaHandleLedger> {

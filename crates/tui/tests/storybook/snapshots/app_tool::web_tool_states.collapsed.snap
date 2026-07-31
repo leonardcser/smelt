@@ -1,11 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 464
-expression: frame.text()
+expression: text
 ---
-* web_fetch https://example.com/release
+* web_fetch https://example.com/release                            14:37:03
 
-* web_search rust unicode width crate
+* web_search rust unicode width crate                              14:37:03
 
 
 

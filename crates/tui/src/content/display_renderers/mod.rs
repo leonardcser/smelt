@@ -143,6 +143,8 @@ mod tests {
         ToolState {
             status: ToolStatus::Pending,
             elapsed: None,
+            called_at_ms: None,
+            elapsed_active: true,
             output: None,
             user_message: None,
             preview_output: None,

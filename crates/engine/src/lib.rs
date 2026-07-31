@@ -399,10 +399,17 @@ pub struct EventInjector {
 }
 
 impl EventInjector {
-    pub fn inject_tool_output(&self, call_id: String, chunk: String) {
-        let _ = self
-            .event_tx
-            .send(EngineEvent::ToolOutput { call_id, chunk });
+    pub fn inject_tool_output(
+        &self,
+        invocation_id: protocol::InvocationId,
+        call_id: String,
+        chunk: String,
+    ) {
+        let _ = self.event_tx.send(EngineEvent::ToolOutput {
+            invocation_id,
+            call_id,
+            chunk,
+        });
     }
 }
 
@@ -583,11 +590,12 @@ mod tests {
         assert!(matches!(cmd, UiCommand::Cancel));
 
         let _ = event_tx.send(EngineEvent::ToolOutput {
+            invocation_id: protocol::InvocationId::new(1),
             call_id: "id".into(),
             chunk: "x".into(),
         });
         match handle.recv().await.unwrap() {
-            EngineEvent::ToolOutput { call_id, chunk } => {
+            EngineEvent::ToolOutput { call_id, chunk, .. } => {
                 assert_eq!(call_id, "id");
                 assert_eq!(chunk, "x");
             }
@@ -640,9 +648,9 @@ mod tests {
     async fn event_injector_forwards_tool_output() {
         let (mut handle, _cmd_rx, _event_tx) = EngineHandle::for_test();
         let injector = handle.injector();
-        injector.inject_tool_output("c".into(), "out".into());
+        injector.inject_tool_output(protocol::InvocationId::new(1), "c".into(), "out".into());
         match handle.recv().await.unwrap() {
-            EngineEvent::ToolOutput { call_id, chunk } => {
+            EngineEvent::ToolOutput { call_id, chunk, .. } => {
                 assert_eq!(call_id, "c");
                 assert_eq!(chunk, "out");
             }

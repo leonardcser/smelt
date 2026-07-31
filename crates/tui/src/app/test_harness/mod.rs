@@ -235,6 +235,7 @@ pub struct TestAppBuilder {
     cwd: Option<std::path::PathBuf>,
     ephemeral: bool,
     model_available: bool,
+    wall_time: Option<SystemTime>,
     engine: Option<EngineHandle>,
 }
 
@@ -251,6 +252,7 @@ impl Default for TestAppBuilder {
             cwd: None,
             ephemeral: false,
             model_available: true,
+            wall_time: None,
             engine: None,
         }
     }
@@ -307,6 +309,11 @@ impl TestAppBuilder {
 
     pub fn without_model(mut self) -> Self {
         self.model_available = false;
+        self
+    }
+
+    pub fn with_wall_time(mut self, wall_time: SystemTime) -> Self {
+        self.wall_time = Some(wall_time);
         self
     }
 
@@ -411,7 +418,10 @@ impl TestAppBuilder {
         })
         .unwrap();
 
-        let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
+        let clock = Arc::new(VirtualClock::new(
+            Instant::now(),
+            self.wall_time.unwrap_or_else(SystemTime::now),
+        ));
         let xdg_config = home.join("config");
         let xdg_state = home.join("state");
         let xdg_cache = home.join("cache");

@@ -50,8 +50,8 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 | `right_gravity` | `boolean` |  | If true, the mark sticks with text inserted to its right. |
 | `end_right_gravity` | `boolean` |  | Right-gravity flag for the end-of-range cursor. |
 | `hl_group` | `string` |  | Theme group whose style is applied as the highlight base. |
-| `fg` | `string | integer[] | { ansi: integer } | { rgb: integer[] }` |  | Foreground override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`. |
-| `bg` | `string | integer[] | { ansi: integer } | { rgb: integer[] }` |  | Background override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`. |
+| `fg` | `string \| integer[] \| { ansi: integer } \| { rgb: integer[] }` |  | Foreground override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`. |
+| `bg` | `string \| integer[] \| { ansi: integer } \| { rgb: integer[] }` |  | Background override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`. |
 | `bold` | `boolean` |  | Force-bold the highlight. |
 | `dim` | `boolean` |  | Force-dim the highlight. |
 | `italic` | `boolean` |  | Force-italic the highlight. |
@@ -74,7 +74,7 @@ Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous b
 | `readonly` | `boolean` |  | When true, UI editing operations cannot mutate the buffer. |
 | `editable` | `boolean` |  | Enable undo history for plugin-managed editable buffers. |
 | `undo` | `integer` |  | Undo history entry limit when `editable = true` (defaults to 100). |
-| `mode` | `"plain"|"markdown"|"md"|"code"` |  | Attach a parser-backed renderer to the buffer. |
+| `mode` | `"plain"\|"markdown"\|"md"\|"code"` |  | Attach a parser-backed renderer to the buffer. |
 | `lang` | `string` |  | Syntax language token required by `mode = "code"`. |
 | `diff_base` | `string` |  | When `mode = "code"`, render the buffer source as an inline diff against this base text. |
 
@@ -137,7 +137,7 @@ handler can dismiss the dialog or resolve the blocking `open` call.
 | --- | --- | --- | --- |
 | `key` | `string` | yes | Chord string (e.g. `"q"`, `"<Esc>"`, `"ctrl-j"`). |
 | `hint` | `string` |  | Optional one-line hint surfaced in the dialog footer. |
-| `on_press` | `fun(ctx: any):` | yes | any Handler invoked when the key fires. |
+| `on_press` | `fun(ctx: any): any` | yes | Handler invoked when the key fires. |
 
 ### `smelt.dialog.MenuItem`
 
@@ -158,11 +158,11 @@ Options accepted by `smelt.dialog.menu`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `selected` | `integer` |  | 1-based starting cursor (default 1). |
-| `shortcuts` | `"submit"|"select"|false` |  | Digit-key behavior. Default `"submit"`. |
+| `shortcuts` | `"submit"\|"select"\|false` |  | Digit-key behavior. Default `"submit"`. |
 | `numbered` | `boolean` |  | Show the dim ` N. ` prefix (default true). |
 | `wrap` | `boolean` |  | Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning. |
 | `wrap_width` | `integer` |  | Initial wrap width used before the first resize event. |
-| `on_submit` | `fun(ctx: any):` |  | any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`. |
+| `on_submit` | `fun(ctx: any): any` |  | Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`. |
 
 ### `smelt.dialog.Opts`
 
@@ -187,9 +187,9 @@ setting both raises.
 | `resizable` | `boolean` |  | Set `false` to disable the default top-edge resize handle. |
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Dialog-level key bindings (merged with built-ins). |
 | `close_with_q` | `boolean` |  | Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input. |
-| `on_submit` | `fun(ctx: any):` |  | any Handler invoked on Enter; default resolves with the focused leaf. |
-| `on_dismiss` | `fun():` |  | nil Handler invoked when the dialog is dismissed. |
-| `on_close` | `fun(ctx: any):` |  | nil Handler invoked once whenever the dialog resolves or closes. |
+| `on_submit` | `fun(ctx: any): any` |  | Handler invoked on Enter; default resolves with the focused leaf. |
+| `on_dismiss` | `fun(): nil` |  | Handler invoked when the dialog is dismissed. |
+| `on_close` | `fun(ctx: any): nil` |  | Handler invoked once whenever the dialog resolves or closes. |
 
 ### `smelt.dialog.Panel`
 
@@ -209,15 +209,15 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `items` | `any[]` |  | | fun(): any[] Eager item table or a lazy producer; re-evaluated by `on_query`. |
-| `render` | `fun(item: any):` | yes | table Per-item `{ text, marks }` table - see `smelt.list.new`. |
-| `filter` | `fun(item: any):` |  | boolean Predicate applied during `set_filter` / `refresh`. |
+| `items` | `any[] \| fun(): any[]` |  | Eager item table or a lazy producer; re-evaluated by `on_query`. |
+| `render` | `fun(item: any): table` | yes | Per-item `{ text, marks }` table - see `smelt.list.new`. |
+| `filter` | `fun(item: any): boolean` |  | Predicate applied during `set_filter` / `refresh`. |
 | `placeholder` | `string` |  | Input placeholder; defaults to `""`. |
 | `empty_text` | `string` |  | Shown in the list when nothing matches. |
-| `on_open` | `fun(ctx: any):` |  | nil Fires once after the input/list have been built. |
-| `on_query` | `fun(query: string, ctx: any):` |  | nil Fires on every keystroke; default re-applies `filter`. |
-| `on_submit` | `fun(ctx: any):` |  | any Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil. |
-| `on_dismiss` | `fun():` |  | nil Fires when the dialog is dismissed. |
+| `on_open` | `fun(ctx: any): nil` |  | Fires once after the input/list have been built. |
+| `on_query` | `fun(query: string, ctx: any): nil` |  | Fires on every keystroke; default re-applies `filter`. |
+| `on_submit` | `fun(ctx: any): any` |  | Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil. |
+| `on_dismiss` | `fun(): nil` |  | Fires when the dialog is dismissed. |
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Extra dialog-level keymaps merged on top of navigation bindings. |
 | `title` | `string` |  | Forwarded to `smelt.dialog.open`. |
 | `height` | `any` |  | Forwarded to `smelt.dialog.open`. |
@@ -375,10 +375,10 @@ Opaque block-layout node returned by `smelt.layout.*` constructors and accepted 
 | `set_items_preserve` | `fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)` | yes |  |
 | `set_filter` | `fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)` | yes |  |
 | `set_render` | `fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)` | yes |  |
-| `visible` | `fun(self: smelt.list.List):` | yes | any[] |
-| `size` | `fun(self: smelt.list.List):` | yes | integer |
-| `selected_index` | `fun(self: smelt.list.List):` | yes | integer? |
-| `selected` | `fun(self: smelt.list.List):` | yes | any |
+| `visible` | `fun(self: smelt.list.List): any[]` | yes |  |
+| `size` | `fun(self: smelt.list.List): integer` | yes |  |
+| `selected_index` | `fun(self: smelt.list.List): integer?` | yes |  |
+| `selected` | `fun(self: smelt.list.List): any` | yes |  |
 | `set_cursor` | `fun(self: smelt.list.List, i: integer)` | yes |  |
 | `move_cursor` | `fun(self: smelt.list.List, delta: integer)` | yes |  |
 
@@ -400,10 +400,10 @@ the rest configure how data is sourced, filtered, and rendered.
 | `leaf` | [smelt.win.Win](types.md#smeltwinwin) | yes | Selectable list leaf (typically from `smelt.dialog.list`). |
 | `buf` | [smelt.buf.Buf](types.md#smeltbufbuf) | yes | Backing buffer that mirrors the rendered rows. |
 | `items` | `any[]` |  | Initial item set. Mutate via `:set_items(...)` later if needed. |
-| `render` | `fun(item: any):` | yes | smelt.list.Row Returns `{ text, spans?, marks? }` per visible row. |
-| `filter` | `fun(item: any):` |  | boolean Predicate re-run on `:set_filter` / `:refresh`. |
+| `render` | `fun(item: any): smelt.list.Row` | yes | Returns `{ text, spans?, marks? }` per visible row. |
+| `filter` | `fun(item: any): boolean` |  | Predicate re-run on `:set_filter` / `:refresh`. |
 | `empty_text` | `string` |  | Placeholder line shown when no row passes the filter. |
-| `anchor` | `"top"|"bottom"` |  | Render short lists at the top or bottom of the viewport. Defaults to "top". |
+| `anchor` | `"top"\|"bottom"` |  | Render short lists at the top or bottom of the viewport. Defaults to "top". |
 
 ### `smelt.list.Row`
 
@@ -428,7 +428,7 @@ MCP server config accepted by `smelt.mcp.register`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `type` | `string` |  | Server kind. Only `"local"` (the default) is supported. |
-| `command` | `string|string[]` |  | Executable + leading argv. Either a string (`"my-server"`) or a list (`{"my-server", "--flag"}`). |
+| `command` | `string\|string[]` |  | Executable + leading argv. Either a string (`"my-server"`) or a list (`{"my-server", "--flag"}`). |
 | `args` | `string[]` |  | Trailing arguments appended after `command`. |
 | `description` | `string` |  | Human-readable description shown by `/mcp`. |
 | `env` | `table<string, string>` |  | Extra environment variables to set on the child process. |
@@ -454,7 +454,7 @@ Overlay drag configuration table. Use `true` for the floating default: title chr
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `title` | `boolean` |  | When true, the overlay chrome moves the overlay unless a resize handle owns the cell. |
-| `body` | `boolean | "inert"` |  | `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves. |
+| `body` | `boolean \| "inert"` |  | `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves. |
 
 ### `smelt.overlay.Keymap`
 
@@ -474,28 +474,28 @@ Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.l
 | --- | --- | --- | --- |
 | `layout` | `smelt.ui.layout` | yes | Layout tree to render inside the overlay. |
 | `name` | `string` |  | Stable name used to hot-reload this overlay in place. |
-| `title` | `string | table` |  | Optional title rendered in the overlay border. |
+| `title` | `string \| table` |  | Optional title rendered in the overlay border. |
 | `border` | `table` |  | Border style override; parsed with the shared border vocabulary. |
-| `anchor` | `"dock_bottom"|"dock_top"|"dock_left"|"dock_right"|"center"|"screen_at"|"win"` |  | Where to place the overlay. Defaults to `dock_bottom`. |
+| `anchor` | `"dock_bottom"\|"dock_top"\|"dock_left"\|"dock_right"\|"center"\|"screen_at"\|"win"` |  | Where to place the overlay. Defaults to `dock_bottom`. |
 | `above_rows` | `integer` |  | Rows to keep clear above the bottom dock, typically the statusline height. |
-| `target` | `smelt.win.Win | integer` |  | Target window for `anchor = "win"`. |
+| `target` | `smelt.win.Win \| integer` |  | Target window for `anchor = "win"`. |
 | `attach` | `string` |  | Alignment point for `anchor = "win"` such as `nw`, `center`, or `se`. |
 | `row` | `integer` |  | Screen row offset for `anchor = "screen_at"`. |
 | `col` | `integer` |  | Screen column offset for `anchor = "screen_at"`. |
 | `row_offset` | `integer` |  | Row offset for `anchor = "win"`. |
 | `col_offset` | `integer` |  | Column offset for `anchor = "win"`. |
 | `corner` | `string` |  | Corner used by `anchor = "screen_at"` (`nw`, `ne`, `sw`, or `se`). |
-| `width` | `integer | string | table` |  | Overlay width constraint. Accepts cells, `"N%"`, `"fit"`, `"fill"`, `"min:N"`, `"max:N"`, `"ratio:N/M"`, or long table form. |
-| `height` | `integer | string | table` |  | Overlay height constraint. Same vocabulary as `width`. |
-| `max_width` | `integer | string | table` |  | Optional upper bound applied after width resolves. |
-| `max_height` | `integer | string | table` |  | Optional upper bound applied after height resolves. |
-| `min_width` | `integer | string | table` |  | Optional lower bound applied after width resolves. |
-| `min_height` | `integer | string | table` |  | Optional lower bound applied after height resolves. |
+| `width` | `integer \| string \| table` |  | Overlay width constraint. Accepts cells, `"N%"`, `"fit"`, `"fill"`, `"min:N"`, `"max:N"`, `"ratio:N/M"`, or long table form. |
+| `height` | `integer \| string \| table` |  | Overlay height constraint. Same vocabulary as `width`. |
+| `max_width` | `integer \| string \| table` |  | Optional upper bound applied after width resolves. |
+| `max_height` | `integer \| string \| table` |  | Optional upper bound applied after height resolves. |
+| `min_width` | `integer \| string \| table` |  | Optional lower bound applied after width resolves. |
+| `min_height` | `integer \| string \| table` |  | Optional lower bound applied after height resolves. |
 | `modal` | `boolean` |  | Whether the overlay blocks input behind it. Defaults to true. |
 | `blocks_agent` | `boolean` |  | Whether the overlay should block agent progress while open. |
 | `z` | `integer` |  | Z-index. Higher overlays render above lower overlays. |
-| `draggable` | `boolean | smelt.overlay.DragConfig` |  | Enable or configure mouse dragging. |
-| `resizable` | `boolean | smelt.overlay.ResizeConfig` |  | Enable or configure mouse resize handles. |
+| `draggable` | `boolean \| smelt.overlay.DragConfig` |  | Enable or configure mouse dragging. |
+| `resizable` | `boolean \| smelt.overlay.ResizeConfig` |  | Enable or configure mouse resize handles. |
 | `keymaps` | [smelt.overlay.Keymap[]](types.md#smeltoverlaykeymap) |  | Overlay-scoped key bindings. |
 
 ### `smelt.overlay.Overlay`
@@ -638,8 +638,8 @@ A workspace permission rule (one tool with N patterns, persisted to disk).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `items` | `(string|smelt.picker.Item)[]` | yes | Items to filter. |
-| `placement` | `"center"|"bottom"|"cursor"|"prompt_docked"` |  | Picker placement. Defaults to "prompt_docked" for this wrapper. |
+| `items` | `(string\|smelt.picker.Item)[]` | yes | Items to filter. |
+| `placement` | `"center"\|"bottom"\|"cursor"\|"prompt_docked"` |  | Picker placement. Defaults to "prompt_docked" for this wrapper. |
 | `on_select` | `fun(item: smelt.picker.Item)` |  | Live selection callback. |
 
 ### `smelt.picker.FuzzyResult`
@@ -669,8 +669,8 @@ Options for the low-level non-blocking picker handle constructor.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `items` | `(string | smelt.picker.Item)[]` | yes | Initial picker rows. Must be non-empty. |
-| `placement` | `"center"|"bottom"|"cursor"|"prompt_docked"` |  | Where to place the picker. Defaults to `center`. |
+| `items` | `(string \| smelt.picker.Item)[]` | yes | Initial picker rows. Must be non-empty. |
+| `placement` | `"center"\|"bottom"\|"cursor"\|"prompt_docked"` |  | Where to place the picker. Defaults to `center`. |
 
 ### `smelt.picker.OpenResult`
 
@@ -698,14 +698,14 @@ sets ranked in Lua.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `detect` | `fun(text: string, cpos: integer):` | yes | integer? Detect the active trigger and return its 0-based anchor byte offset. |
-| `items` | `fun(anchor: integer, text: string, cpos: integer):` | yes | table[] Build a full candidate set for Lua-side ranking. |
-| `query` | `fun(text: string, anchor: integer, cpos: integer):` | yes | string Query used for Lua-side ranking. |
-| `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
+| `detect` | `fun(text: string, cpos: integer): integer?` | yes | Detect the active trigger and return its 0-based anchor byte offset. |
+| `items` | `fun(anchor: integer, text: string, cpos: integer): table[]` | yes | Build a full candidate set for Lua-side ranking. |
+| `query` | `fun(text: string, anchor: integer, cpos: integer): string` | yes | Query used for Lua-side ranking. |
+| `accept` | `fun(item: table, anchor: integer, action: string): nil` | yes | Splice the accepted candidate into the prompt. |
 | `manual` | `boolean` |  | Whether Tab can open this completer when no picker is active. |
 | `auto` | `boolean` |  | Set false to prevent text_changed from auto-opening this completer. |
 | `accept_single` | `boolean` |  | Set false to keep a manual Tab picker open when there is exactly one match. |
-| `on_select` | `fun(item: table):` |  | nil Live selection callback. |
+| `on_select` | `fun(item: table): nil` |  | Live selection callback. |
 
 ### `smelt.prompt.MatchesCompleterSpec`
 
@@ -714,10 +714,10 @@ already-ranked providers.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `detect` | `fun(text: string, cpos: integer):` | yes | integer? Detect the active trigger and return its 0-based anchor byte offset. |
-| `matches` | `fun(anchor: integer, text: string, cpos: integer, limit: integer):` | yes | table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states. |
-| `query` | `fun(text: string, anchor: integer, cpos: integer):` |  | string Query identity used to distinguish user edits from provider refreshes. |
-| `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
+| `detect` | `fun(text: string, cpos: integer): integer?` | yes | Detect the active trigger and return its 0-based anchor byte offset. |
+| `matches` | `fun(anchor: integer, text: string, cpos: integer, limit: integer): table[]\|table` | yes | Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states. |
+| `query` | `fun(text: string, anchor: integer, cpos: integer): string` |  | Query identity used to distinguish user edits from provider refreshes. |
+| `accept` | `fun(item: table, anchor: integer, action: string): nil` | yes | Splice the accepted candidate into the prompt. |
 | `manual` | `boolean` |  | Whether Tab can open this completer when no picker is active. |
 | `auto` | `boolean` |  | Set false to prevent text_changed from auto-opening this completer. |
 | `accept_single` | `boolean` |  | Set false to keep a manual Tab picker open when there is exactly one match. |
@@ -725,7 +725,7 @@ already-ranked providers.
 | `poll_ms` | `integer` |  | Refresh interval while `matches` returns `{ scanning = true }` or `{ searching = true }`. |
 | `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |
 | `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
-| `on_select` | `fun(item: table):` |  | nil Live selection callback. |
+| `on_select` | `fun(item: table): nil` |  | Live selection callback. |
 
 ### `smelt.prompt.PickerItem`
 
@@ -751,16 +751,16 @@ omit it for single-shot behaviour.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `items` | [smelt.prompt.PickerItem[]](types.md#smeltpromptpickeritem) |  | | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer. |
-| `provider` | `fun(query: string, limit: integer):` |  | table Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`. |
+| `items` | `smelt.prompt.PickerItem[] \| fun(): smelt.prompt.PickerItem[]` |  | Eager list or lazy producer. |
+| `provider` | `fun(query: string, limit: integer): table` |  | Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`. |
 | `limit` | `integer` |  | Maximum rows requested from `provider`; defaults to 200. |
 | `poll_ms` | `integer` |  | Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`. |
 | `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |
 | `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
-| `on_select` | `fun(item: smelt.prompt.PickerItem):` |  | nil Fires on every cursor move. |
-| `on_enter` | `fun(item: smelt.prompt.PickerItem, idx: integer):` |  | nil Persistent-mode accept handler. |
-| `rank` | `fun(items: table[], query: string, original: smelt.prompt.PickerItem[]):` |  | integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order. |
-| `on_dismiss` | `fun():` |  | nil Fires on Esc/Ctrl-C. |
+| `on_select` | `fun(item: smelt.prompt.PickerItem): nil` |  | Fires on every cursor move. |
+| `on_enter` | `fun(item: smelt.prompt.PickerItem, idx: integer): nil` |  | Persistent-mode accept handler. |
+| `rank` | `fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[]` |  | Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order. |
+| `on_dismiss` | `fun(): nil` |  | Fires on Esc/Ctrl-C. |
 
 ### `smelt.provider.Config`
 
@@ -771,7 +771,7 @@ Spec accepted by `smelt.provider.register`.
 | `type` | `string` |  | Provider kind tag (`"openai"`, `"anthropic"`, etc.). |
 | `api_base` | `string` |  | Base URL the engine talks to. |
 | `api_key_env` | `string` |  | Environment variable that holds the bearer token. |
-| `models` | `string|smelt.provider.Model[]` |  | Models offered by this provider. |
+| `models` | `string\|smelt.provider.Model[]` |  | Models offered by this provider. |
 
 ### `smelt.provider.Model`
 
@@ -880,7 +880,7 @@ Colorscheme table with optional metadata and a required `groups` map. `syntax` s
 | `name` | `string` |  | Display name for this colorscheme. |
 | `syntax` | `string` |  | Bundled syntect/two-face syntax theme name for code highlighting. |
 | `light` | `boolean` |  | Whether this colorscheme is light. Omit to use terminal background detection. |
-| `groups` | `table<string, string | smelt.theme.StyleDecl>` | yes | Highlight groups keyed by group name. |
+| `groups` | `table<string, string \| smelt.theme.StyleDecl>` | yes | Highlight groups keyed by group name. |
 
 ### `smelt.tools.PermissionDefaults`
 
@@ -929,13 +929,13 @@ Semantic transcript block snapshot passed to the root renderer.
 | --- | --- | --- | --- |
 | `id` | `integer` | yes | Stable block id within the session. |
 | `index` | `integer` | yes | Zero-based block index in transcript order. |
-| `kind` | `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted"` | yes | Block kind. |
+| `kind` | `"user"\|"assistant"\|"thinking"\|"tool"\|"group"\|"code"\|"exec"\|"mode"\|"process_status"\|"compacted"\|"compaction_preview"` | yes | Block kind. |
 | `text` | `string` |  | User/mode/process text. |
 | `user_lines` | `table` |  | User text as styled span lines, including slash/ref/image accents. |
 | `content` | `string` |  | Assistant/thinking/code content. |
 | `title` | `string` |  | Latest structured reasoning-summary title. |
 | `summary_titles` | `string[]` |  | Ordered structured reasoning-summary title history. |
-| `reasoning_kind` | `"summary"|"raw"` |  | Reasoning source for thinking blocks. |
+| `reasoning_kind` | `"summary"\|"raw"` |  | Reasoning source for thinking blocks. |
 | `image_labels` | `string[]` |  | User image labels. |
 | `icon` | `string` |  | Mode icon. |
 | `hl_group` | `string` |  | Mode/process highlight group. |
@@ -945,11 +945,10 @@ Semantic transcript block snapshot passed to the root renderer.
 | `args` | `table` |  | Tool arguments. |
 | `summary` | `any` |  | Tool styled summary lines or compacted summary text. |
 | `summary_text` | `string` |  | Tool summary flattened to plain text. |
-| `status` | `"pending"|"confirm"|"ok"|"err"|"denied"` |  | Tool status. |
-| `status_hl` | `string` |  | Tool status highlight group. |
-| `elapsed` | `table` |  | Dynamic elapsed descriptor for `smelt.layout.elapsed`. |
-| `elapsed_secs` | `integer` |  | Terminal/static tool elapsed seconds. |
-| `elapsed_text` | `string` |  | Terminal/static tool elapsed label. |
+| `status` | `"pending"\|"confirm"\|"ok"\|"err"\|"denied"` |  | Tool status. |
+| `called_at_ms` | `integer` |  | Invocation start as Unix epoch milliseconds. |
+| `elapsed_ms` | `integer` |  | Best-known execution duration in milliseconds. |
+| `elapsed_active` | `boolean` |  | True only while elapsed time can continue advancing. |
 | `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
 | `preview_output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Immutable pending output snapshot for a promoted finished draft. |
@@ -961,6 +960,12 @@ Semantic transcript block snapshot passed to the root renderer.
 | `exit_code` | `integer` |  | Background process exit code when known. |
 | `command` | `string` |  | Exec command. |
 | `command_spans` | `table` |  | Exec command as one styled span line, including the `!` accent. |
+| `group_kind` | `string` |  | Registered semantic group name. |
+| `bucket` | `string` |  | Stable planner bucket for a group. |
+| `view_state` | `"collapsed"\|"peek"\|"expanded"` |  | Effective group or child view state. |
+| `children` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Ordered semantic child snapshots for a group. |
+| `child_ids` | `integer[]` |  | Ordered stable block ids for a group. |
+| `child_count` | `integer` |  | Number of semantic children in a group. |
 
 ### `smelt.transcript.Context`
 
@@ -968,10 +973,12 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `view_state` | `"collapsed"|"peek"|"expanded"|"trimmed_head"|"trimmed_tail"` | yes | Effective view state for the node currently being rendered. |
+| `view_state` | `"collapsed"\|"peek"\|"expanded"\|"trimmed_head"\|"trimmed_tail"` | yes | Effective view state for the node currently being rendered. |
 | `renderer_generation` | `integer` | yes | Current renderer generation used for cache invalidation. |
 | `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |
 | `limits` | `table` | yes | Numeric product row budgets such as `tool_output_rows`. |
+| `now_ms` | `integer` | yes | Unix epoch milliseconds shared by the complete top-level render pass. |
+| `render` | `fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node` | yes | Re-enter the composed root renderer for a semantic child. |
 
 ### `smelt.transcript.Cursor`
 
@@ -1004,13 +1011,13 @@ Group selector declared through `smelt.transcript.groups.register`.
 | `event` | `string` |  | Match typed process status event type. |
 | `event_type` | `string` |  | Alias for `event`. |
 | `process_id` | `string` |  | Match typed background process id. |
-| `exit_code` | `integer|string` |  | Match typed background process exit code. |
-| `fields` | `table<string,string|integer>` |  | Exact block-field matches such as `{ event = "background_process_completed" }`. |
+| `exit_code` | `integer\|string` |  | Match typed background process exit code. |
+| `fields` | `table<string,string\|integer>` |  | Exact block-field matches such as `{ event = "background_process_completed" }`. |
 
 ### `smelt.transcript.GroupSpec`
 
-Declarative transcript group registration. The host owns planning; Lua owns
-the selector metadata and the virtual-node renderer.
+Declarative transcript group registration. The host owns planning; the root
+transcript renderer owns presentation for the resulting semantic group node.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1018,10 +1025,9 @@ the selector metadata and the virtual-node renderer.
 | `cache_key` | `string` |  | Persisted layout cache key; omit to opt out while active. |
 | `priority` | `integer` |  | Higher priority plans first. Defaults to 0. |
 | `min` | `integer` |  | Minimum adjacent matching blocks required. Defaults to 2. |
-| `default_view` | `"collapsed"|"peek"|"expanded"` |  | Initial presentation when the group first appears. |
+| `default_view` | `"collapsed"\|"peek"\|"expanded"` |  | Initial presentation when the group first appears. |
 | `selector` | [smelt.transcript.GroupSelector](types.md#smelttranscriptgroupselector) | yes | Declarative block matcher. |
-| `bucket` | `string|string[]` |  | Stable field names used to split adjacent matching runs. |
-| `render` | `fun(group: table, ctx: smelt.transcript.Context):` | yes | table Virtual group renderer. |
+| `bucket` | `string\|string[]` |  | Stable field names used to split adjacent matching runs. |
 
 ### `smelt.transcript.NavigationOpts`
 
@@ -1054,6 +1060,37 @@ Transcript-shaped streaming renderer for plugin-owned buffers. Append model text
 | --- | --- | --- | --- |
 | `width` | `integer` |  | Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters. |
 
+### `smelt.transcript.StyledSpan`
+
+One span in a styled tool title. Style attributes may be supplied directly or through `style`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `text` | `string` |  | Span text. The positional field `[1]` is also accepted. |
+| `style` | [smelt.transcript.StyledSpanStyle](types.md#smelttranscriptstyledspanstyle) |  | Nested style attributes. |
+| `syntax` | `string` |  | Syntax language used to highlight the span text. |
+| `hl` | `string` |  | Theme highlight group. |
+| `fg` | `string` |  | Foreground color. |
+| `bg` | `string` |  | Background color. |
+| `dim` | `boolean` |  | Whether to dim the text. |
+| `bold` | `boolean` |  | Whether to render bold text. |
+| `italic` | `boolean` |  | Whether to render italic text. |
+| `selectable` | `boolean` |  | Whether copied transcript text includes this span. |
+| `title_suffix` | `boolean` |  | Whether this span is transient pending-state title metadata. |
+
+### `smelt.transcript.StyledSpanStyle`
+
+Style attributes accepted on one styled title span.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `hl` | `string` |  | Theme highlight group. |
+| `fg` | `string` |  | Foreground color. |
+| `bg` | `string` |  | Background color. |
+| `dim` | `boolean` |  | Whether to dim the text. |
+| `bold` | `boolean` |  | Whether to render bold text. |
+| `italic` | `boolean` |  | Whether to render italic text. |
+
 ### `smelt.transcript.Target`
 
 Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.
@@ -1064,6 +1101,22 @@ Stable semantic transcript navigation target. Pass the target directly to `smelt
 | `role` | [smelt.transcript.Role](types.md#smelttranscriptrole) | yes | Semantic block role. |
 | `first_line` | `string` | yes | First source line, suitable for navigation labels. |
 
+### `smelt.transcript.ToolBodyOptions`
+
+Options passed to focused tool body and draft callbacks.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `gutter` | `string` |  | Prefix rendered before each body line. |
+
+### `smelt.transcript.ToolHeaderOptions`
+
+Options accepted by the default tool header renderer.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `hl` | `string` |  | Status marker highlight group. |
+
 ### `smelt.transcript.ToolOutput`
 
 Tool output snapshot passed to transcript renderers.
@@ -1073,6 +1126,21 @@ Tool output snapshot passed to transcript renderers.
 | `content` | `string` | yes | Captured output text. |
 | `is_error` | `boolean` | yes | True when the tool result is an error. |
 | `metadata` | `table` |  | Tool-specific structured metadata. |
+
+### `smelt.transcript.ToolPresentation`
+
+Public presentation policy for one tool name. A complete `render` callback
+takes precedence; otherwise the default renderer composes the focused pieces.
+Registrations are immutable snapshots.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cache_key` | `string` |  | Stable persisted-layout key. Omit for dynamic presentation state. |
+| `render` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node` |  | Complete replacement renderer. |
+| `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |
+| `body` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Expanded body renderer. Return nil to suppress the body. |
+| `draft` | `fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Draft body renderer. Return nil to suppress the body. |
+| `compact` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.layout.Node\|nil` |  | Collapsed detail renderer. Return nil to suppress the detail. |
 
 ### `smelt.transcript.View`
 
@@ -1156,8 +1224,8 @@ Window-owned row background highlight. Ranges use absolute visual rows and an ex
 | `end` | `integer` |  | Exclusive absolute visual row end. Defaults to `start + 1`. |
 | `cursor` | `boolean` |  | When true, highlight the current cursor row instead of a fixed range. |
 | `hl_group` | `string` |  | Theme highlight group to resolve at render time. Default `CursorLine`. |
-| `mode` | `"always"|"focused"` |  | Paint always or only while the window is focused. Default `always`. |
-| `width` | `"full"|"content"` |  | Paint the full window row, including gutter and padding, or only the content region. Default `full`. |
+| `mode` | `"always"\|"focused"` |  | Paint always or only while the window is focused. Default `always`. |
+| `width` | `"full"\|"content"` |  | Paint the full window row, including gutter and padding, or only the content region. Default `full`. |
 
 ### `smelt.win.Win`
 

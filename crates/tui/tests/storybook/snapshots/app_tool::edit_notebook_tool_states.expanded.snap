@@ -1,16 +1,16 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
 * edit_notebook analysis.ipynb
 
-* edit_notebook analysis.ipynb
+* edit_notebook analysis.ipynb                                             14:37:03
    1 - import pandas
    2 - df = pandas.read_csv('data.csv')
    1 + import pandas as pd
    2 + df = pd.read_csv("data.csv")
 
-* edit_notebook analysis.ipynb
+* edit_notebook analysis.ipynb                                             14:37:03
    1   print("new cell")
 
 

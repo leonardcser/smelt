@@ -1,26 +1,25 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 515
-expression: frame.text()
+expression: text
 ---
 * edit_file src/lib.rs
 
-* edit_file src/pending.rs
+* edit_file src/pending.rs                                                 14:37:03
 
-* edit_file src/lib.rs
+* edit_file src/lib.rs                                                     14:37:03
    1 - fn add(a: i32, b: i32) -> i32 {
    2 -     a + b
    1 + fn add(a: i64, b: i64) -> i64 {
    2 +     a.checked_add(b).expect("overflow")
    3   }
 
-* edit_file runtime/lua/smelt/plugins/compact.lua
+* edit_file runtime/lua/smelt/plugins/compact.lua                          14:37:03
    1   line 1
    2 - Use them as evidence for task priority and return instructions.
    2 + Use them as evidence for task priority and return/resume instructions.
    3   line 3
 
-* edit_file src/lib.rs
+* edit_file src/lib.rs                                                     14:37:03
   old_string not found in src/lib.rs
 
 

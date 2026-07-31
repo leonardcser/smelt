@@ -212,6 +212,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .ok_or_else(|| {
                         mlua::Error::external("process.run_streaming: app unavailable")
                     })?;
+                let invocation_id = crate::lua::current_tool_invocation()
+                    .map(|invocation| invocation.invocation_id)
+                    .ok_or_else(|| {
+                        mlua::Error::external(
+                            "process.run_streaming: no active tool invocation",
+                        )
+                    })?;
                 let cwd = shared_run_streaming.evaluation_cwd();
                 let sink = shared_run_streaming.resume_sink();
                 let cancel = crate::lua::current_task_cancel();
@@ -224,7 +231,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 };
                 tokio::spawn(async move {
                     let on_line = |line: String| {
-                        injector.inject_tool_output(call_id.clone(), line);
+                        injector.inject_tool_output(invocation_id, call_id.clone(), line);
                     };
                     let out = process::run_streaming_with_shell(
                         &command,

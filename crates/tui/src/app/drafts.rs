@@ -284,10 +284,12 @@ impl TuiApp {
 
     pub(crate) fn promote_tool_draft(
         &mut self,
+        invocation_id: protocol::InvocationId,
         call_id: String,
         tool_name: String,
         summary: protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
+        called_at_ms: u64,
     ) -> bool {
         let (stream_id, finished) = self.conversation.tool_draft_state(&call_id);
         let preview_output = if finished {
@@ -299,11 +301,13 @@ impl TuiApp {
         let promoted = self.conversation.promote_tool_draft(
             stream_id.clone(),
             ToolStart {
+                invocation_id,
                 call_id,
                 name: tool_name,
                 summary,
                 args,
                 preview_output,
+                called_at_ms,
             },
             self.core.clock.instant_now(),
         );

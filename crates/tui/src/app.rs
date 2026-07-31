@@ -945,7 +945,7 @@ pub(crate) enum CommandTurnStart {
 }
 
 pub(crate) struct PendingTool {
-    pub(crate) call_id: String,
+    pub(crate) invocation_id: protocol::InvocationId,
     pub(crate) name: String,
 }
 
@@ -1555,6 +1555,7 @@ impl TuiApp {
         env: Arc<engine::env::RuntimeEnv>,
         options: TuiAppOptions,
     ) -> Self {
+        lua.core_shared().set_clock(Arc::clone(&clock));
         let TuiAppOptions {
             startup_auth_error,
             app_events,
@@ -3117,11 +3118,16 @@ impl TuiApp {
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
             let next_draft_render_delay = self.next_tool_draft_render_delay();
+            let next_transcript_refresh_delay = self
+                .conversation
+                .next_transcript_refresh_at()
+                .map(|deadline| deadline.saturating_duration_since(now));
             let next_idle_delay = [
                 next_timer_delay,
                 next_notification_delay,
                 next_keymap_delay,
                 next_draft_render_delay,
+                next_transcript_refresh_delay,
             ]
             .into_iter()
             .flatten()

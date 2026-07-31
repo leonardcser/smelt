@@ -447,6 +447,9 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
         "Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.",
         &["request_id", "call_id", "result"],
         |lua, (request_id, call_id, result): (u64, String, mlua::Table)| -> LuaResult<()> {
+            let invocation_id = crate::lua::current_tool_invocation()
+                .map(|invocation| invocation.invocation_id)
+                .ok_or_else(|| mlua::Error::external("tools.resolve: no active tool invocation"))?;
             let content: String = result.get("content").unwrap_or_default();
             let is_error: bool = result.get("is_error").unwrap_or(false);
             let metadata = result
@@ -456,6 +459,7 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             crate::host::with_core(|core| {
                 core.engine.send(protocol::UiCommand::ToolResult {
                     request_id,
+                    invocation_id,
                     call_id,
                     content,
                     is_error,
@@ -516,10 +520,14 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
         |lua,
          (request_id, parent_call_id, tool_name, args): (u64, String, String, mlua::Table)|
          -> LuaResult<()> {
+            let parent_invocation_id = crate::lua::current_tool_invocation()
+                .map(|invocation| invocation.invocation_id)
+                .ok_or_else(|| mlua::Error::external("tools.call: no active tool invocation"))?;
             let arg_map = lua_table_to_args(lua, &args);
             crate::host::with_core(|core| {
                 core.engine.send(protocol::UiCommand::CallCoreTool {
                     request_id,
+                    parent_invocation_id,
                     parent_call_id,
                     tool_name,
                     args: arg_map,

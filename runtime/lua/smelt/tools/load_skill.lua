@@ -1,10 +1,11 @@
 -- Built-in load_skill tool. Fetches a skill body via `smelt.skills.content`.
 
-local transcript_defaults = require("smelt.transcript.defaults")
-
-transcript_defaults.__tool_collapsed_details.load_skill = function(block)
-  return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
-end
+smelt.transcript.register_tool("load_skill", {
+  cache_key = "smelt.tool-presentation.load_skill:v1",
+  compact = function(block)
+    return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
+  end,
+})
 
 smelt.tools.register({
   name = "load_skill",

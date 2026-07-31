@@ -72,9 +72,6 @@ pub struct TurnMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_tps: Option<f64>,
     pub interrupted: bool,
-    /// Per-tool-call elapsed times, keyed by call_id.
-    #[serde(default)]
-    pub tool_elapsed: HashMap<String, u64>,
 }
 
 /// Per-level token budgets for budget-based thinking.
@@ -233,20 +230,6 @@ mod tests {
         assert!(u.context_tokens.is_none());
         assert!(u.prompt_tokens.is_none());
         assert!(u.completion_tokens.is_none());
-    }
-
-    // ---- TurnMeta ----
-
-    #[test]
-    fn turn_meta_tool_elapsed_defaults_to_empty_on_deserialize() {
-        let m: TurnMeta = serde_json::from_value(json!({
-            "elapsed_ms": 123,
-            "avg_tps": null,
-            "interrupted": false
-        }))
-        .unwrap();
-        assert_eq!(m.elapsed_ms, 123);
-        assert!(m.tool_elapsed.is_empty());
     }
 
     // ---- ModelConfigOverrides ----

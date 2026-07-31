@@ -350,68 +350,48 @@ impl TestApp {
 
     /// Agent / working / streaming coherence plus pending-tool bookkeeping.
     pub fn assert_session_invariants(&self) {
-        // Active agent turn: pending tool call_ids must be unique. A
-        // duplicate means `ToolStarted` was processed twice for the same
-        // call without an intervening `ToolFinished`, which corrupts the
-        // tool-widget state.
-        if let Some(ag) = self.app.conversation.active() {
-            let mut seen = std::collections::HashSet::with_capacity(ag.pending.len());
-            for pt in &ag.pending {
+        // Every pending invocation has one distinct nonterminal transcript block.
+        if let Some(turn) = self.app.conversation.active() {
+            let mut seen = std::collections::HashSet::with_capacity(turn.pending.len());
+            for pending in &turn.pending {
                 assert!(
-                    seen.insert(pt.call_id.as_str()),
-                    "duplicate pending tool call_id {:?} in turn {}",
-                    pt.call_id,
-                    ag.turn_id
+                    seen.insert(pending.invocation_id),
+                    "duplicate pending invocation {:?} in turn {}",
+                    pending.invocation_id,
+                    turn.turn_id
                 );
-                // Every pending call_id must have a matching `ToolState`
-                // sidecar that's still in flight. A missing entry means
-                // the transcript was rebuilt without restoring the tool
-                // state; a terminal status means the pending bookkeeping
-                // wasn't cleared when the tool finished - both corrupt
-                // the tool widget.
-                let state = self
+                let block_id = self
                     .app
                     .conversation
-                    .transcript()
-                    .history()
-                    .tool_state(&pt.call_id);
+                    .active_tool_block_id(pending.invocation_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "pending invocation {:?} has no active transcript block",
+                            pending.invocation_id
+                        )
+                    });
                 assert!(
-                    state.is_some(),
-                    "pending tool {:?} has no ToolState entry in transcript history",
-                    pt.call_id,
+                    self.app
+                        .conversation
+                        .transcript()
+                        .history()
+                        .tool_state(block_id)
+                        .is_some_and(|state| !state.is_terminal()),
+                    "pending invocation {:?} has no nonterminal transcript state",
+                    pending.invocation_id
                 );
-                if let Some(state) = state {
-                    assert!(
-                        !state.is_terminal(),
-                        "pending tool {:?} has terminal ToolState",
-                        pt.call_id,
-                    );
-                }
             }
         }
 
-        // Reverse direction of every `ToolState` key must
-        // correspond to a `Block::ToolCall` in transcript history. A
-        // missing block means `gc_tool_states` failed to drop a state
-        // that no longer has a live block, or `set_history` left state
-        // behind.
+        // Every tool sidecar belongs directly to a tool block.
         let history = self.app.conversation.transcript().history();
-        for (call_id, _) in history.tool_states() {
-            let exists = history
-                .order
-                .iter()
-                .filter_map(|id| history.block(*id))
-                .any(|b| {
-                    matches!(
-                        b,
-                        smelt_core::transcript_model::Block::ToolCall { call_id: cid, .. }
-                            if cid == call_id
-                    )
-                });
+        for (block_id, _) in history.tool_states() {
             assert!(
-                exists,
-                "tool_state {:?} has no matching Block::ToolCall in history",
-                call_id,
+                matches!(
+                    history.block(block_id),
+                    Some(smelt_core::transcript_model::Block::ToolCall { .. })
+                ),
+                "tool_state for {block_id:?} has no matching Block::ToolCall in history",
             );
         }
 

@@ -1,15 +1,14 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 472
-expression: frame.text()
+expression: text
 ---
 * bash cargo test -p smelt-tui app::drafts
 
-* bash sleep 5  (timeout: 2m 0s)
+* bash sleep 5  (timeout: 2m 0s)                               14:37:03
 
-* bash git status --short
+* bash git status --short                                      14:37:03
 
-* bash cat missing.txt
+* bash cat missing.txt                                         14:37:03
   cat: missing.txt: No such file or directory
 
 

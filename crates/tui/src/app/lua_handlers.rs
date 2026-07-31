@@ -913,11 +913,12 @@ impl TuiApp {
         &mut self,
         choice: ConfirmChoice,
         message: Option<String>,
+        invocation_id: protocol::InvocationId,
         request_id: u64,
-        call_id: &str,
         tool_name: &str,
     ) {
-        let should_cancel = self.resolve_confirm((choice, message), call_id, request_id, tool_name);
+        let should_cancel =
+            self.resolve_confirm((choice, message), invocation_id, request_id, tool_name);
         if should_cancel {
             self.finish_turn(crate::app::TurnEnd::Cancelled);
             self.conversation.clear_active();

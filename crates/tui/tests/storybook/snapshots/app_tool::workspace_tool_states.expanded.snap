@@ -1,10 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* enter_worktree native-worktree-support
+* enter_worktree native-worktree-support                                         14:37:03
 
-* switch_cwd /repo/.worktrees/native-worktree-support
+* switch_cwd /repo/.worktrees/native-worktree-support                            14:37:03
 
 
 

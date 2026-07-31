@@ -118,6 +118,7 @@ fn tool_history() -> Vec<HistoryItem> {
                     metadata: None,
                 },
                 elapsed_ms: Some(12),
+                called_at_ms: Some(1_742_573_823_000),
             }],
         )),
     ]
@@ -138,6 +139,7 @@ fn assert_committed_tool_invocation(history: &[HistoryItem]) {
     assert_eq!(invocation.result.content, "persisted\n");
     assert!(!invocation.result.is_error);
     assert_eq!(invocation.elapsed_ms, Some(12));
+    assert_eq!(invocation.called_at_ms, Some(1_742_573_823_000));
 }
 
 fn assert_model_history_tool_messages(messages: &[protocol::Message]) {

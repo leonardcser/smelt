@@ -117,7 +117,7 @@ fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.
 
 Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render all group children through the bundled default block renderer.
+Render all group children through the configured root renderer and middleware.
 
 ## `smelt.transcript.defaults.render_llm_markdown`
 
@@ -212,10 +212,10 @@ Render a tool block for the current transcript view state.
 ## `smelt.transcript.defaults.render_tool_body`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.transcript.ToolBodyOptions`](types.md#smelttranscripttoolbodyoptions), [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a tool body. Drafts can provide an explicit best-effort preview;
 completed tools fall back to raw output or their structured body renderer.
@@ -223,10 +223,10 @@ completed tools fall back to raw output or their structured body renderer.
 ## `smelt.transcript.defaults.render_tool_full`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a full tool block using the current generic primitives and explicit item
 construction.
@@ -234,10 +234,10 @@ construction.
 ## `smelt.transcript.defaults.render_tool_header`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolHeaderOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.transcript.ToolHeaderOptions`](types.md#smelttranscripttoolheaderoptions), [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render the default one-line tool header.
 
@@ -267,10 +267,10 @@ a rendered-row cap. Body renderers use this for expanded/tail previews.
 ## `smelt.transcript.defaults.render_tool_summary`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a compact tool summary: header plus an optional detail line.
 
@@ -309,10 +309,10 @@ Render user text.
 ## `smelt.transcript.defaults.tool_collapsed_detail`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): string|smelt.layout.Node|nil
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Return a compact tool detail for collapsed tool blocks.
 

@@ -1,12 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 542
-expression: frame.text()
+expression: text
 ---
-* edit_file src/lib.rs
+* edit_file src/lib.rs                                                     14:37:03
   read_file must be called before edit_file
 
-* edit_file src/blocked.rs
+* edit_file src/blocked.rs                                                 14:37:03
 
 
 

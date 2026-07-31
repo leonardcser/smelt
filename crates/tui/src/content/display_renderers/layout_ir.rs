@@ -9,9 +9,8 @@ use crate::content::source_view::{render_source_view, SourceView, SourceViewTarg
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
-    solve_hbox_widths_with_fit, tool_elapsed_text, BlockLayout, CodeSpec, ElapsedSpec, GutterSpec,
-    IrLeaf, LayoutIr, LineSpec, MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec,
-    StyleSpec, TextSpec,
+    solve_hbox_widths_with_fit, BlockLayout, CodeSpec, GutterSpec, IrLeaf, LayoutIr, LineSpec,
+    MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
@@ -221,6 +220,16 @@ fn render_layout_ir_range(
             history,
             inline_options,
         ),
+        BlockLayout::Refresh { child, .. } => render_layout_ir_range(
+            out,
+            child,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
+        ),
     }
 }
 
@@ -317,6 +326,9 @@ fn measure_layout_ir_full_with_gutter(
                 .len()
                 .min(u16::MAX as usize) as u16
         }
+        BlockLayout::Refresh { child, .. } => {
+            measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options)
+        }
     }
 }
 
@@ -328,7 +340,7 @@ fn render_ir_leaf(
     row_start: u16,
     row_count: u16,
     gutter: Option<&GutterSpec>,
-    history: Option<&BlockHistory>,
+    _history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
 ) -> u16 {
     match leaf {
@@ -345,9 +357,6 @@ fn render_ir_leaf(
             inline_options,
         ),
         IrLeaf::Code(spec) => render_code_spec(out, spec, width, row_start, row_count, gutter),
-        IrLeaf::Elapsed(spec) => {
-            render_elapsed_spec(out, spec, row_start, row_count, gutter, history)
-        }
         IrLeaf::Separator(spec) => {
             render_separator_spec(out, spec, width, row_start, row_count, gutter)
         }
@@ -372,7 +381,6 @@ fn measure_ir_leaf(
         IrLeaf::Line(spec) => measure_line_spec(spec),
         IrLeaf::Markdown(spec) => measure_markdown_spec(spec, width, inline_options),
         IrLeaf::Code(spec) => measure_code_spec(spec, width),
-        IrLeaf::Elapsed(_) => 1,
         IrLeaf::Separator(spec) => measure_separator_spec(spec),
         IrLeaf::SourceView(smelt_core::content::block_layout::SourceViewIr::Diff(cache)) => {
             smelt_core::content::highlight::measure_diff_ir(
@@ -831,48 +839,6 @@ fn code_block_from_spec(spec: &CodeSpec) -> smelt_core::content::code_block::Cod
         spec.content.lines().collect()
     };
     parse_code_block(&lines, &spec.lang)
-}
-
-fn render_elapsed_spec(
-    out: &mut LineBuilder,
-    spec: &ElapsedSpec,
-    row_start: u16,
-    row_count: u16,
-    gutter: Option<&GutterSpec>,
-    history: Option<&BlockHistory>,
-) -> u16 {
-    if row_start > 0 || row_count == 0 {
-        return 0;
-    }
-    if let Some(gutter) = gutter {
-        out.print_gutter(&gutter.text);
-    }
-    let text = elapsed_text_for_spec(spec, history);
-    out.save_style();
-    if let Some(group) = spec.hl_group.as_deref() {
-        out.set_hl(intern(group));
-    }
-    if spec.dim {
-        out.set_dim();
-    }
-    let meta = SpanMeta {
-        selectable: spec.selectable,
-        copy_as: None,
-        action: None,
-    };
-    out.print_with_meta(&text, meta);
-    out.pop_style();
-    out.newline();
-    1
-}
-
-fn elapsed_text_for_spec(spec: &ElapsedSpec, history: Option<&BlockHistory>) -> String {
-    let (status, secs) = history
-        .and_then(|history| history.tool_state(&spec.call_id))
-        .map(|state| (state.status, state.elapsed.map(|elapsed| elapsed.as_secs())))
-        .unwrap_or((spec.status, spec.fallback_secs));
-    secs.and_then(|secs| tool_elapsed_text(status, secs))
-        .unwrap_or_default()
 }
 
 fn render_separator_spec(
@@ -1820,9 +1786,9 @@ fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16 {
         }
         BlockLayout::Panel { child, spec } => intrinsic_layout_width(child, total_width)
             .saturating_add(spec.padding.saturating_mul(2)),
-        BlockLayout::Style { child, .. } | BlockLayout::Cap { child, .. } => {
-            intrinsic_layout_width(child, total_width)
-        }
+        BlockLayout::Style { child, .. }
+        | BlockLayout::Cap { child, .. }
+        | BlockLayout::Refresh { child, .. } => intrinsic_layout_width(child, total_width),
     }
 }
 
@@ -1862,7 +1828,6 @@ fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
             .map(display_width_u16)
             .max()
             .unwrap_or(0),
-        IrLeaf::Elapsed(_) => 8,
         IrLeaf::Separator(spec) => styled_spans_width(&spec.label).min(u16::MAX as usize) as u16,
         IrLeaf::SourceView(_) => total_width,
     }

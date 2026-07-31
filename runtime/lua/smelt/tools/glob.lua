@@ -22,12 +22,14 @@ local function glob_collapsed_detail(block)
   return smelt.text.line_count((output and output.content) or "") .. " files"
 end
 
-transcript_defaults.__tool_body_renderers.glob = function(block, ctx)
-  if not block.output then return nil end
-  return transcript_defaults.render_tool_output_tail(block.output, ctx)
-end
-
-transcript_defaults.__tool_collapsed_details.glob = glob_collapsed_detail
+smelt.transcript.register_tool("glob", {
+  cache_key = "smelt.tool-presentation.glob:v1",
+  body = function(block, ctx)
+    if not block.output then return nil end
+    return transcript_defaults.render_tool_output_tail(block.output, ctx)
+  end,
+  compact = glob_collapsed_detail,
+})
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "glob",

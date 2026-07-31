@@ -654,7 +654,8 @@ smelt.settings.transcript = {
 
 Register custom display-only groups with `smelt.transcript.groups.register`.
 Selectors are declarative so Rust can plan adjacent runs without calling Lua for
-every block; the renderer is ordinary Lua layout code.
+every block. Group registration contains planning metadata only. Present the
+resulting semantic group node through ordinary root-renderer middleware.
 
 ```lua
 local layout = smelt.layout
@@ -662,7 +663,7 @@ local defaults = require("smelt.transcript.defaults")
 
 smelt.transcript.groups.register({
   name = "cargo-test-batch",
-  cache_key = "my.cargo-test-batch:v1",
+  cache_key = "my.cargo-test-batch-plan:v1",
   min = 2,
   default_view = "collapsed",
   selector = {
@@ -671,18 +672,24 @@ smelt.transcript.groups.register({
     terminal = true,
     fields = { ["args.description"] = "Run cargo tests" },
   },
-  render = function(group, ctx)
-    local summary = layout.text("ran " .. tostring(group.child_count) .. " test commands")
-    if group.view_state ~= "expanded" then return summary end
-    return layout.vbox({ summary, defaults.render_group_children(group, ctx) })
-  end,
 })
+
+smelt.transcript.extend_renderer("my.cargo-test-batch", function(next, node, ctx)
+  if node.kind ~= "group" or node.name ~= "cargo-test-batch" then
+    return next(node, ctx)
+  end
+
+  local summary = layout.text("ran " .. tostring(node.child_count) .. " test commands")
+  if ctx.view_state ~= "expanded" then return summary end
+  return layout.vbox({ summary, defaults.render_group_children(node, ctx) })
+end, { cache_key = "my.cargo-test-batch-renderer:v1" })
 ```
 
 Use `bucket = "args.package"` or `bucket = { "name", "args.package" }` when one
 rule matches several categories but should split adjacent runs by field value.
-Omit `cache_key` only for intentionally uncached renderers; otherwise bump it
-whenever output can change across restarts.
+Omitting either cache key opts the corresponding planner or renderer state out of
+persisted display-layout caching. Bump a key whenever its output can change across
+restarts.
 
 ## Custom tools
 
@@ -728,9 +735,44 @@ Return either a plain string (success) or `{ content, is_error }`. From inside
 Set `override = true` to replace a built-in tool of the same name. Use
 `smelt.tools.unregister(name)` to take it back out.
 
-To customize how a tool appears in the transcript, extend the transcript
-renderer and dispatch on `block.kind == "tool"` / `block.name`; return any
-`smelt.layout` tree.
+Register tool presentation separately from execution. Focused callbacks let the
+default renderer retain its status marker, inline duration, invocation time, and
+body hierarchy while replacing semantic pieces:
+
+```lua
+smelt.transcript.register_tool("present_plan", {
+  cache_key = "my.present-plan-presentation:v1",
+  title = function(tool, ctx)
+    return tool.args.title or tool.args.plan_path or "plan"
+  end,
+  body = function(tool, ctx)
+    return smelt.layout.markdown(tool.args.plan or tool.output.content or "")
+  end,
+  compact = function(tool, ctx)
+    return tool.args.plan_path
+  end,
+})
+```
+
+Use `render` instead when the plugin must own the complete visual result,
+including the status marker and both timing values. Returning a static layout
+also omits all refresh work:
+
+```lua
+smelt.transcript.register_tool("present_plan", {
+  cache_key = "my.present-plan-complete:v1",
+  render = function(tool, ctx)
+    return smelt.layout.vbox({
+      smelt.layout.text("plan: " .. (tool.args.title or "untitled")),
+      smelt.layout.markdown(tool.args.plan or ""),
+    })
+  end,
+})
+```
+
+Use `smelt.transcript.extend_renderer` for middleware that wraps multiple tools,
+groups, or ordinary transcript blocks. Recursive group children pass through the
+same middleware chain via `ctx.render`.
 
 For tool-authoring conventions (parameter shape, `summary`, `approval_patterns`,
 `preflight`, `paths_for_workspace`), the implementations under

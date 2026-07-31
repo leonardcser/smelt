@@ -723,6 +723,7 @@ mod tests {
                         metadata: None,
                     },
                     elapsed_ms: None,
+                    called_at_ms: None,
                 }],
             )),
             HistoryItem::assistant(AssistantStep::terminal(
@@ -773,6 +774,7 @@ mod tests {
                         metadata: None,
                     },
                     elapsed_ms: None,
+                    called_at_ms: None,
                 }],
             )),
         ];
@@ -810,6 +812,7 @@ mod tests {
                         metadata: None,
                     },
                     elapsed_ms: None,
+                    called_at_ms: None,
                 }],
             )),
         ];

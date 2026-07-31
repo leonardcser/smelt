@@ -380,7 +380,6 @@ fn turn_meta_for(
         avg_tps,
         display_tps,
         interrupted: outcome.is_interrupted(),
-        tool_elapsed: std::collections::HashMap::new(),
     }
 }
 
@@ -600,7 +599,6 @@ mod tests {
             avg_tps: None,
             display_tps: Some(18.0),
             interrupted: false,
-            tool_elapsed: std::collections::HashMap::new(),
         };
 
         s.restore_from_turn_meta(&meta);
@@ -689,7 +687,6 @@ mod tests {
             avg_tps: Some(42.0),
             display_tps: Some(42.0),
             interrupted: false,
-            tool_elapsed: std::collections::HashMap::new(),
         };
         s.restore_from_turn_meta(&meta);
         assert!(!s.is_animating());
@@ -708,7 +705,6 @@ mod tests {
             avg_tps: None,
             display_tps: None,
             interrupted: true,
-            tool_elapsed: std::collections::HashMap::new(),
         };
         s.restore_from_turn_meta(&meta);
         let round = s.turn_meta().unwrap();
@@ -724,7 +720,6 @@ mod tests {
             avg_tps: None,
             display_tps: None,
             interrupted: false,
-            tool_elapsed: std::collections::HashMap::new(),
         };
         s.restore_from_turn_meta(&meta);
         assert!(!s.is_animating());

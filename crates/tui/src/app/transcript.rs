@@ -1733,6 +1733,10 @@ impl TranscriptDocument {
         Self::from_transcript(Transcript::new())
     }
 
+    pub(crate) fn next_refresh_at(&self) -> Option<std::time::Instant> {
+        self.content.projection.next_refresh_at()
+    }
+
     pub(crate) fn from_transcript(transcript: Transcript) -> Self {
         Self::from_loaded_transcript(LoadedTranscript::full(transcript))
     }
@@ -2413,13 +2417,11 @@ impl TranscriptDocument {
             }
             let temporarily_pinned = self.hydration.is_pinned(id)
                 || history.status(id) == Some(Status::Streaming)
-                || history.tool_call_id(id).is_some_and(|call_id| {
-                    history.tool_status(call_id).is_some_and(|status| {
-                        !matches!(
-                            status,
-                            ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
-                        )
-                    })
+                || history.tool_status(id).is_some_and(|status| {
+                    !matches!(
+                        status,
+                        ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
+                    )
                 });
             if temporarily_pinned {
                 break;
@@ -6885,6 +6887,8 @@ mod document_tests {
             ToolState {
                 status: ToolStatus::Pending,
                 elapsed: None,
+                called_at_ms: None,
+                elapsed_active: true,
                 output: None,
                 user_message: None,
                 preview_output: None,
@@ -6919,7 +6923,7 @@ mod document_tests {
 
         assert!(document
             .history_mut()
-            .update_tool_state("pending-call", |state| state.status = ToolStatus::Ok));
+            .update_tool_state(ids[1], |state| state.status = ToolStatus::Ok));
         let persisted_bounds = document.record_save_bounds(None);
         document.history_mut().clear_record_dirty();
         document.schedule_durable_compaction(2, persisted_bounds);
@@ -8111,6 +8115,8 @@ mod document_tests {
                     smelt_core::transcript_model::ToolState {
                         status: smelt_core::transcript_model::ToolStatus::Ok,
                         elapsed: Some(std::time::Duration::from_millis(25)),
+                        called_at_ms: None,
+                        elapsed_active: false,
                         output: Some(Box::new(smelt_core::transcript_model::ToolOutput {
                             content: format!(
                                 "{marker} output\n{}",
@@ -9979,16 +9985,27 @@ impl TuiApp {
         self.conversation.clear_compaction_preview();
     }
 
-    pub(crate) fn start_tool(
+    pub(crate) fn start_tool_at(
         &mut self,
+        invocation_id: protocol::InvocationId,
         call_id: String,
         name: String,
         summary: ::protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
+        called_at_ms: u64,
     ) {
-        let now = self.core.clock.instant_now();
-        self.conversation
-            .start_tool(call_id, name, summary, args, now);
+        self.conversation.start_tool(
+            smelt_core::content::stream_parser::ToolStart {
+                invocation_id,
+                call_id,
+                name,
+                summary,
+                args,
+                preview_output: None,
+                called_at_ms,
+            },
+            self.core.clock.instant_now(),
+        );
     }
 
     pub(crate) fn start_exec(&mut self, command: String) {
@@ -10011,32 +10028,43 @@ impl TuiApp {
         self.conversation.has_active_exec()
     }
 
-    pub(crate) fn append_active_output(&mut self, call_id: &str, chunk: &str) {
+    pub(crate) fn append_active_output(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        chunk: &str,
+    ) {
         self.conversation
-            .append_tool_output(call_id.to_string(), chunk.to_string());
+            .append_tool_output(invocation_id, chunk.to_string());
     }
 
-    pub(crate) fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
+    pub(crate) fn set_active_status(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        status: ToolStatus,
+    ) {
         let now = self.core.clock.instant_now();
         self.conversation
-            .set_tool_status(call_id.to_string(), status, now);
+            .set_tool_status(invocation_id, status, now);
     }
 
-    pub(crate) fn set_active_user_message(&mut self, call_id: &str, msg: String) {
-        self.conversation
-            .set_tool_user_message(call_id.to_string(), msg);
+    pub(crate) fn set_active_user_message(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        msg: String,
+    ) {
+        self.conversation.set_tool_user_message(invocation_id, msg);
     }
 
     pub(crate) fn finish_tool(
         &mut self,
-        call_id: &str,
+        invocation_id: protocol::InvocationId,
         status: ToolStatus,
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
     ) {
         let now = self.core.clock.instant_now();
         self.conversation
-            .finish_tool(call_id.to_string(), status, output, engine_elapsed, now);
+            .finish_tool(invocation_id, status, output, engine_elapsed, now);
     }
 
     pub(crate) fn has_transcript_content(&mut self) -> bool {

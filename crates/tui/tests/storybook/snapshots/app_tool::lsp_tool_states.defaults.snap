@@ -1,12 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 595
-expression: frame.text()
+expression: text
 ---
-* outline crates/core/src/lsp.rs, function containing "request", depth 2
+* outline crates/core/src/lsp.rs, function containing "request", depth 2               14:37:03
   2 symbols
 
-* language_server_status crates/core/src/lsp.rs
+* language_server_status crates/core/src/lsp.rs                                        14:37:03
   {
     "servers": [
       {
@@ -17,16 +16,16 @@ expression: frame.text()
     ]
   }
 
-* lsp ×3
+* lsp ×3                                                                               14:37:03
   find_definition crates/core/src/lsp.rs:111:12
   find_references crates/core/src/lsp.rs:111:12
   diagnostics crates/core/src/lsp.rs
 
-* preview_rename crates/core/src/lsp.rs:111:12 to "manager"
+* preview_rename crates/core/src/lsp.rs:111:12 to "manager"                            14:37:03
   preview across 1 file
   - crates/core/src/lsp.rs (1 edit)
 
-* rename_symbol crates/core/src/lsp.rs:111:12 to "manager"
+* rename_symbol crates/core/src/lsp.rs:111:12 to "manager"                             14:37:03
   applied across 1 file
   - crates/core/src/lsp.rs (1 edit)
 

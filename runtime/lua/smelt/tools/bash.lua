@@ -107,16 +107,15 @@ function M.execute(args, ctx)
   }
 end
 
-transcript_defaults.__tool_body_renderers.bash = function(block, ctx)
-  local output = block.output or { content = "", is_error = false }
-  local content = (output.content or ""):gsub("%s+$", "")
-  if not content:match("%S") then return nil end
-  return transcript_defaults.render_tool_output({ content = content, is_error = output.is_error }, ctx)
-end
-
-transcript_defaults.__tool_header_rest_prefixes.bash = {
-  { text = "  ", selectable = false, dim = true },
-}
+smelt.transcript.register_tool("bash", {
+  cache_key = "smelt.tool-presentation.bash:v1",
+  body = function(block, ctx)
+    local output = block.output or { content = "", is_error = false }
+    local content = (output.content or ""):gsub("%s+$", "")
+    if not content:match("%S") then return nil end
+    return transcript_defaults.render_tool_output({ content = content, is_error = output.is_error }, ctx)
+  end,
+})
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "bash",

@@ -806,8 +806,6 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Syntax-highlighted code layout leaf.
 - `smelt.layout.diff` :: `fun(opts: table): smelt.layout.Node`
   Inline-diff render directive.
-- `smelt.layout.elapsed` :: `fun(elapsed: any, opts: table?): smelt.layout.Node`
-  Dynamic elapsed-time text leaf.
 - `smelt.layout.empty` :: `fun(): smelt.layout.Node`
   Explicit zero-row layout node.
 - `smelt.layout.file_view` :: `fun(opts: table): smelt.layout.Node`
@@ -822,6 +820,8 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Markdown layout leaf.
 - `smelt.layout.panel` :: `fun(child: any, opts: table?): smelt.layout.Node`
   Render `child` inside a full-width background panel.
+- `smelt.layout.refresh` :: `fun(child: any, opts: table): smelt.layout.Node`
+  Return `child` unchanged while requesting that its containing top-level transcript node be rendered again after `opts.after_ms`.
 - `smelt.layout.row_prefix` :: `fun(child: any, opts: table): smelt.layout.Node`
   Apply row chrome to `child` after the child has produced rows.
 - `smelt.layout.runs` :: `fun(lines: any, opts: table?): smelt.layout.Node`
@@ -1187,7 +1187,7 @@ Bundled default transcript renderers.
 - `smelt.transcript.defaults.render_group_child_list` :: `fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node`
   Render a compact ordered child list for collapsed group nodes.
 - `smelt.transcript.defaults.render_group_children` :: `fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node`
-  Render all group children through the bundled default block renderer.
+  Render all group children through the configured root renderer and middleware.
 - `smelt.transcript.defaults.render_llm_markdown` :: `fun(content: string?, opts: table?): smelt.layout.Node`
   Render LLM-authored Markdown with the shared transcript Markdown path.
 - `smelt.transcript.defaults.render_llm_markdown_tail` :: `fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
@@ -1206,17 +1206,17 @@ Bundled default transcript renderers.
   Render a compact thinking summary.
 - `smelt.transcript.defaults.render_tool` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render a tool block for the current transcript view state.
-- `smelt.transcript.defaults.render_tool_body` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?`
+- `smelt.transcript.defaults.render_tool_body` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil`
   Render a tool body.
-- `smelt.transcript.defaults.render_tool_full` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
+- `smelt.transcript.defaults.render_tool_full` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node`
   Render a full tool block using the current generic primitives and explicit item construction.
-- `smelt.transcript.defaults.render_tool_header` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node`
+- `smelt.transcript.defaults.render_tool_header` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolHeaderOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node`
   Render the default one-line tool header.
 - `smelt.transcript.defaults.render_tool_output` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
   Render raw tool output using generic layout primitives: text, gutter, and a rendered-row cap.
 - `smelt.transcript.defaults.render_tool_output_tail` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
   Render raw tool output without gutter using generic layout primitives: text/runs and a rendered-row cap.
-- `smelt.transcript.defaults.render_tool_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
+- `smelt.transcript.defaults.render_tool_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node`
   Render a compact tool summary: header plus an optional detail line.
 - `smelt.transcript.defaults.render_unknown` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render unknown block kinds without failing the transcript.
@@ -1224,7 +1224,7 @@ Bundled default transcript renderers.
   Render a user block.
 - `smelt.transcript.defaults.render_user_text` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render user text.
-- `smelt.transcript.defaults.tool_collapsed_detail` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?`
+- `smelt.transcript.defaults.tool_collapsed_detail` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): string|smelt.layout.Node|nil`
   Return a compact tool detail for collapsed tool blocks.
 
 #### `smelt.transcript.groups`
@@ -1864,6 +1864,8 @@ Transcript display policy and rendered transcript inspection.
   Jump the transcript to its semantic tail and enable tail-follow mode.
 - `smelt.transcript.get_renderer` (Host) :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
   Return the current composed root transcript renderer, or nil before the default renderer has been installed.
+- `smelt.transcript.get_tool_presentation` (Host) :: `fun(name: string): smelt.transcript.ToolPresentation?`
+  Return a copy of the current presentation policy for `name`, or nil.
 - `smelt.transcript.invalidate_renderer` (Host) :: `fun(): integer`
   Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
 - `smelt.transcript.is_empty` (UiHost) :: `fun(): boolean`
@@ -1876,6 +1878,8 @@ Transcript display policy and rendered transcript inspection.
   Return the currently loaded transcript display text as a single newline-joined string.
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
   Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
+- `smelt.transcript.register_tool` (Host) :: `fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg`
+  Register or replace presentation policy for a tool.
 - `smelt.transcript.reveal` (UiHost) :: `fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean`
   Reveal a semantic transcript `target` returned by a committed view.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`

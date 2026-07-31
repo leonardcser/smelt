@@ -462,7 +462,7 @@ impl TestApp {
         // a synthetic tool call or already-submitted model request is in flight.
         let in_flight = drained_request
             || logged_request
-            || (self.agent_running() && !self.pending_tool_call_ids().is_empty());
+            || (self.agent_running() && !self.pending_tool_invocation_ids().is_empty());
         if in_flight {
             return;
         }

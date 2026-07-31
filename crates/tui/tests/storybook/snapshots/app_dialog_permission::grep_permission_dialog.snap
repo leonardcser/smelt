@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* grep confirm_dialog in crates/tui/src
+* grep confirm_dialog in crates/tui/src                      14:37:03
   0 matches
 
 

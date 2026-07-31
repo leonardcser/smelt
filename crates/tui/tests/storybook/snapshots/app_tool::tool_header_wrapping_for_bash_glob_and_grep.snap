@@ -1,14 +1,13 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 607
-expression: frame.text()
+expression: text
 ---
-* bash cargo test -p smelt-tui content::display_renderers::la
-  yout_ir::tests::runs_continuation_indent_aligns_soft_wrappe
-  d_rows
+* bash cargo test -p smelt-tui content::display_ren  14:37:03
+       derers::layout_ir::tests::runs_continuation_
+       indent_aligns_soft_wrapped_rows
   test result: ok
 
-* explore ×2
+* explore ×2                                         14:37:03
   glob crates/tui/tests/storybook/snapshots/app_tool::*.snap
   in /Users/leo/dev/rust/smelt/.worktrees/transcript-layout-r
   ewrite

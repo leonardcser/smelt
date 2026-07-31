@@ -1,21 +1,20 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 595
-expression: frame.text()
+expression: text
 ---
-* read_file src/lib.rs
+* read_file src/lib.rs                                                           14:37:03
   2 lines
 
-* grep render_group in crates/tui/src
+* grep render_group in crates/tui/src                                            14:37:03
   2 files
 
-* glob **/*.rs in crates/tui/src
+* glob **/*.rs in crates/tui/src                                                 14:37:03
   3 files
 
-* outline crates/tui/src/app.rs, function containing "render", depth 2
+* outline crates/tui/src/app.rs, function containing "render", depth 2           14:37:03
   2 symbols
 
-* find_symbol RenderNode, enum, crates/tui/**/*.rs
+* find_symbol RenderNode, enum, crates/tui/**/*.rs                               14:37:03
   1 symbol
 
 

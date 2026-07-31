@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* edit_notebook analysis.ipynb
+* edit_notebook analysis.ipynb                                         14:37:03
 
 
 

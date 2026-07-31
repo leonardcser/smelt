@@ -115,26 +115,37 @@ local function draft_preview(args, block)
   return nil
 end
 
-transcript_defaults.__tool_body_renderers.edit_file = function(block)
-  local args = block.args or {}
-
-  local meta = (block.output and block.output.metadata) or (block.preview_output and block.preview_output.metadata)
-  if meta then
+smelt.transcript.register_tool("edit_file", {
+  cache_key = "smelt.tool-presentation.edit_file:v1",
+  body = function(block, ctx, opts)
+    if block.output and block.output.is_error then
+      return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
+    end
+    local args = block.args or {}
+    local meta = (block.output and block.output.metadata) or (block.preview_output and block.preview_output.metadata)
+    if not meta then return nil end
     return diff_from_content(
       meta.path or args.file_path or "",
       meta.old_content or args.old_string or "",
       meta.new_content or args.new_string or "",
       args.old_string or ""
     )
-  end
-
-  return nil
-end
-
-transcript_defaults.__tool_collapsed_details.edit_file = function(block)
-  local args = block.args or {}
-  return replacement_line_detail(args.old_string or "", args.new_string or "")
-end
+  end,
+  draft = function(block)
+    return draft_preview(block.args or {}, block)
+  end,
+  compact = function(block, ctx)
+    if block.output and block.output.is_error then
+      return transcript_defaults.render_tool_output_tail(block.output, ctx, {
+        rows = (ctx and ctx.limits and ctx.limits.collapsed_error_rows) or 4,
+        keep = "head",
+        marker = "below",
+      })
+    end
+    local args = block.args or {}
+    return replacement_line_detail(args.old_string or "", args.new_string or "")
+  end,
+})
 
 smelt.tools.register({
   name = "edit_file",
@@ -185,11 +196,6 @@ smelt.tools.register({
   preview_output = function(args)
     return planned_output(args or {})
   end,
-  draft_preview = function(args, ctx, block)
-    local _ = ctx
-    return draft_preview(args or {}, block)
-  end,
-
   execute = function(args)
     local path, old_string, new_string, do_all = edit_fields(args)
 

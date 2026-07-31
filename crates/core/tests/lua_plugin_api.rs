@@ -11,7 +11,7 @@
 //! plain `#[test]` form.
 
 use smelt_core::lua::{
-    LuaRuntime, LuaShared, TaskDriveOutput, ToolEnv, ToolExecResult, ToolVisibility,
+    LuaRuntime, LuaShared, TaskDriveOutput, ToolCallIds, ToolEnv, ToolExecResult, ToolVisibility,
 };
 use smelt_core::permissions::ToolEffectKind;
 use std::collections::HashMap;
@@ -38,6 +38,29 @@ fn fresh() -> LuaRuntime {
         .exec()
         .expect("bootstrap");
     rt
+}
+
+fn execute_tool(
+    rt: &LuaRuntime,
+    tool_name: &str,
+    args: &HashMap<String, serde_json::Value>,
+    request_id: u64,
+    call_id: &str,
+    env: ToolEnv<'_>,
+    now: Instant,
+) -> ToolExecResult {
+    LuaRuntime::execute_tool(
+        rt,
+        tool_name,
+        args,
+        ToolCallIds {
+            invocation_id: protocol::InvocationId::new(request_id),
+            request_id,
+            call_id,
+        },
+        env,
+        now,
+    )
 }
 
 /// Pump task events + drive the runtime in a tight loop until `done`
@@ -271,7 +294,8 @@ fn tool_invocation_context_spans_synchronous_middleware_and_handler() {
         .exec()
         .expect("register invocation probe");
 
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "invocation_probe",
         &HashMap::new(),
         83,
@@ -341,7 +365,8 @@ fn tool_invocation_context_survives_a_yield() {
         .exec()
         .expect("register yielding invocation probe");
 
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "yielding_invocation_probe",
         &HashMap::new(),
         84,
@@ -403,7 +428,8 @@ fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
             .exec()
             .expect("register task_all_tool");
 
-        let result = rt.execute_tool(
+        let result = execute_tool(
+            &rt,
             "task_all_tool",
             &HashMap::new(),
             42,
@@ -486,7 +512,8 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
     let now = Instant::now();
     let mut first_args = HashMap::new();
     first_args.insert("value".into(), serde_json::json!("first"));
-    let first = rt.execute_tool(
+    let first = execute_tool(
+        &rt,
         "yield_once",
         &first_args,
         1,
@@ -502,7 +529,8 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
 
     let mut second_args = HashMap::new();
     second_args.insert("value".into(), serde_json::json!("second"));
-    let second = rt.execute_tool(
+    let second = execute_tool(
+        &rt,
         "yield_once",
         &second_args,
         2,
@@ -560,7 +588,8 @@ fn tool_execute_preserves_result_metadata() {
         .exec()
         .expect("register metadata_tool");
 
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "metadata_tool",
         &HashMap::new(),
         3,
@@ -626,7 +655,8 @@ fn lsp_plugin_formats_semantic_results_as_text() {
 
     let mut args = HashMap::new();
     args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "outline",
         &args,
         4,
@@ -704,7 +734,8 @@ fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
 
     let mut args = HashMap::new();
     args.insert("file_path".into(), serde_json::json!("/tmp/empty.rs"));
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "outline",
         &args,
         7,
@@ -881,7 +912,8 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
     args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
     args.insert("line".into(), serde_json::json!(10));
     args.insert("column".into(), serde_json::json!(4));
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "find_references",
         &args,
         6,
@@ -972,7 +1004,8 @@ fn lsp_plugin_truncates_large_structured_results() {
     args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
     args.insert("line".into(), serde_json::json!(1));
     args.insert("column".into(), serde_json::json!(1));
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "find_references",
         &args,
         5,
@@ -1039,7 +1072,8 @@ fn tool_timeout_completes_a_parked_tool_with_error() {
     let now = Instant::now();
     let mut args = HashMap::new();
     args.insert("timeout_ms".into(), serde_json::json!(5));
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "slow_tool",
         &args,
         9,
@@ -1093,7 +1127,8 @@ fn tool_watchdog_uses_explicit_timeout_arg_metadata() {
     let now = Instant::now();
     let mut args = HashMap::new();
     args.insert("deadline".into(), serde_json::json!(1));
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "seconds_timeout_tool",
         &args,
         10,
@@ -1480,7 +1515,8 @@ fn turn_cancellation_preserves_top_level_spawned_app_tasks() {
 
     let now = Instant::now();
     assert!(rt.drive_tasks(now).is_empty());
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "slow_turn_tool",
         &HashMap::new(),
         77,
@@ -1538,7 +1574,8 @@ fn turn_cancellation_cancels_spawned_child_tasks() {
         .expect("setup child task tool");
 
     let now = Instant::now();
-    let result = rt.execute_tool(
+    let result = execute_tool(
+        &rt,
         "spawns_child_turn_task",
         &HashMap::new(),
         78,

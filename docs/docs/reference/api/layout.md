@@ -38,16 +38,6 @@ Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax; `opts.full_file` treats `opts.old` as the complete pre-edit file for stable previews after writes.
 
-## `smelt.layout.elapsed`
-
-```lua
-fun(elapsed: any, opts: table?): smelt.layout.Node
-```
-
-Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
-
-Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.
-
 ## `smelt.layout.empty`
 
 ```lua
@@ -117,6 +107,16 @@ fun(child: any, opts: table?): smelt.layout.Node
 Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.
+
+## `smelt.layout.refresh`
+
+```lua
+fun(child: any, opts: table): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Return `child` unchanged while requesting that its containing top-level transcript node be rendered again after `opts.after_ms`. The positive delay is declarative cache metadata and does not affect measurement, rendering, or selection.
 
 ## `smelt.layout.row_prefix`
 

@@ -7,6 +7,7 @@ dim: 84 22
   0   1  14 attrs=dim
   2   0   1 fg=AnsiValue(77)
   2   1  14 attrs=dim
+  2  73  10 attrs=dim
   3   0   2 bg=Rgb { r: 60, g: 20, b: 20 }
   3   2   3 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
   3   5   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
@@ -40,6 +41,7 @@ dim: 84 22
   6  35  48 bg=Rgb { r: 20, g: 50, b: 20 }
   8   0   1 fg=AnsiValue(77)
   8   1  14 attrs=dim
+  8  73  10 attrs=dim
   9   2   3 fg=AnsiValue(244)
   9   7   5 fg=Rgb { r: 102, g: 217, b: 239 }
   9  12   1 fg=Rgb { r: 248, g: 248, b: 242 }

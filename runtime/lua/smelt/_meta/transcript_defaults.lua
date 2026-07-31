@@ -48,7 +48,7 @@ transcript_defaults.render_exec = nil
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
 transcript_defaults.render_group_child_list = nil
 
---- Render all group children through the bundled default block renderer.
+--- Render all group children through the configured root renderer and middleware.
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_group_children = nil
 
@@ -90,16 +90,16 @@ transcript_defaults.render_tool = nil
 
 --- Render a tool body. Drafts can provide an explicit best-effort preview;
 --- completed tools fall back to raw output or their structured body renderer.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil
 transcript_defaults.render_tool_body = nil
 
 --- Render a full tool block using the current generic primitives and explicit item
 --- construction.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 transcript_defaults.render_tool_full = nil
 
 --- Render the default one-line tool header.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolHeaderOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 transcript_defaults.render_tool_header = nil
 
 --- Render raw tool output using generic layout primitives: text, gutter, and a
@@ -114,7 +114,7 @@ transcript_defaults.render_tool_output = nil
 transcript_defaults.render_tool_output_tail = nil
 
 --- Render a compact tool summary: header plus an optional detail line.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 transcript_defaults.render_tool_summary = nil
 
 --- Render unknown block kinds without failing the transcript.
@@ -132,7 +132,7 @@ transcript_defaults.render_user = nil
 transcript_defaults.render_user_text = nil
 
 --- Return a compact tool detail for collapsed tool blocks.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): string|smelt.layout.Node|nil
 transcript_defaults.tool_collapsed_detail = nil
 
 return transcript_defaults

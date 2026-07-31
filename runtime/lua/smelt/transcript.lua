@@ -15,12 +15,14 @@ smelt.transcript = smelt.transcript or {}
 ---@field renderer_generation integer Current renderer generation used for cache invalidation.
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
+---@field now_ms integer Unix epoch milliseconds shared by the complete top-level render pass.
+---@field render fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node Re-enter the composed root renderer for a semantic child.
 
 --- Semantic transcript block snapshot passed to the root renderer.
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
----@field kind "user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted" Block kind.
+---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field content? string Assistant/thinking/code content.
@@ -37,10 +39,9 @@ smelt.transcript = smelt.transcript or {}
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
----@field status_hl? string Tool status highlight group.
----@field elapsed? table Dynamic elapsed descriptor for `smelt.layout.elapsed`.
----@field elapsed_secs? integer Terminal/static tool elapsed seconds.
----@field elapsed_text? string Terminal/static tool elapsed label.
+---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
+---@field elapsed_ms? integer Best-known execution duration in milliseconds.
+---@field elapsed_active? boolean True only while elapsed time can continue advancing.
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
 ---@field preview_output? smelt.transcript.ToolOutput Immutable pending output snapshot for a promoted finished draft.
@@ -52,6 +53,12 @@ smelt.transcript = smelt.transcript or {}
 ---@field exit_code? integer Background process exit code when known.
 ---@field command? string Exec command.
 ---@field command_spans? table Exec command as one styled span line, including the `!` accent.
+---@field group_kind? string Registered semantic group name.
+---@field bucket? string Stable planner bucket for a group.
+---@field view_state? "collapsed"|"peek"|"expanded" Effective group or child view state.
+---@field children? smelt.transcript.Block[] Ordered semantic child snapshots for a group.
+---@field child_ids? integer[] Ordered stable block ids for a group.
+---@field child_count? integer Number of semantic children in a group.
 
 --- Group selector declared through `smelt.transcript.groups.register`.
 ---@class smelt.transcript.GroupSelector
@@ -65,8 +72,8 @@ smelt.transcript = smelt.transcript or {}
 ---@field exit_code? integer|string Match typed background process exit code.
 ---@field fields? table<string,string|integer> Exact block-field matches such as `{ event = "background_process_completed" }`.
 
---- Declarative transcript group registration. The host owns planning; Lua owns
---- the selector metadata and the virtual-node renderer.
+--- Declarative transcript group registration. The host owns planning; the root
+--- transcript renderer owns presentation for the resulting semantic group node.
 ---@class smelt.transcript.GroupSpec
 ---@field name string Unique group name. Registering the same name replaces it.
 ---@field cache_key? string Persisted layout cache key; omit to opt out while active.
@@ -75,7 +82,48 @@ smelt.transcript = smelt.transcript or {}
 ---@field default_view? "collapsed"|"peek"|"expanded" Initial presentation when the group first appears.
 ---@field selector smelt.transcript.GroupSelector Declarative block matcher.
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
----@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
+
+--- Style attributes accepted on one styled title span.
+---@class smelt.transcript.StyledSpanStyle
+---@field hl? string Theme highlight group.
+---@field fg? string Foreground color.
+---@field bg? string Background color.
+---@field dim? boolean Whether to dim the text.
+---@field bold? boolean Whether to render bold text.
+---@field italic? boolean Whether to render italic text.
+
+--- One span in a styled tool title. Style attributes may be supplied directly or through `style`.
+---@class smelt.transcript.StyledSpan
+---@field text? string Span text. The positional field `[1]` is also accepted.
+---@field style? smelt.transcript.StyledSpanStyle Nested style attributes.
+---@field syntax? string Syntax language used to highlight the span text.
+---@field hl? string Theme highlight group.
+---@field fg? string Foreground color.
+---@field bg? string Background color.
+---@field dim? boolean Whether to dim the text.
+---@field bold? boolean Whether to render bold text.
+---@field italic? boolean Whether to render italic text.
+---@field selectable? boolean Whether copied transcript text includes this span.
+---@field title_suffix? boolean Whether this span is transient pending-state title metadata.
+
+--- Options passed to focused tool body and draft callbacks.
+---@class smelt.transcript.ToolBodyOptions
+---@field gutter? string Prefix rendered before each body line.
+
+--- Options accepted by the default tool header renderer.
+---@class smelt.transcript.ToolHeaderOptions
+---@field hl? string Status marker highlight group.
+
+--- Public presentation policy for one tool name. A complete `render` callback
+--- takes precedence; otherwise the default renderer composes the focused pieces.
+--- Registrations are immutable snapshots.
+---@class smelt.transcript.ToolPresentation
+---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
+---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
+---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
+---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.
+---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
+---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
 local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v2"
 local transcript = smelt.transcript
@@ -83,7 +131,18 @@ local base_renderer = transcript.__get_renderer and transcript.__get_renderer() 
 local base_renderer_cache_key = nil
 local extensions = {}
 local order = {}
+local tool_presentations = {}
+local tool_order = {}
 local next_token = 0
+local tool_presentation_fields = { "cache_key", "render", "title", "body", "draft", "compact" }
+
+local function copy_tool_presentation(presentation)
+  local copy = {}
+  for _, field in ipairs(tool_presentation_fields) do
+    copy[field] = presentation[field]
+  end
+  return copy
+end
 
 local function require_function(name, value)
   if type(value) ~= "function" then
@@ -114,6 +173,15 @@ local function effective_cache_key()
       if not entry.cache_key then return nil end
       parts[#parts + 1] = name
       parts[#parts + 1] = entry.cache_key
+    end
+  end
+  for i = 1, #tool_order do
+    local name = tool_order[i]
+    local entry = tool_presentations[name]
+    if entry then
+      if not entry.presentation.cache_key then return nil end
+      parts[#parts + 1] = "tool:" .. name
+      parts[#parts + 1] = entry.presentation.cache_key
     end
   end
   return table.concat(parts, "\n")
@@ -200,6 +268,59 @@ function smelt.transcript.invalidate_renderer()
   return transcript.__invalidate_renderer()
 end
 
+--- Register or replace presentation policy for a tool. The supported fields are
+--- snapshotted, so later table mutation has no effect; re-register to change behavior
+--- or cache keys. The returned registration removes only this exact replacement.
+--- Registering presentation changes rebuilds the composed root renderer so all
+--- cached standalone and grouped nodes invalidate.
+---@type fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg
+function smelt.transcript.register_tool(name, presentation)
+  if type(name) ~= "string" or name == "" then
+    error("smelt.transcript.register_tool: name must be a non-empty string", 2)
+  end
+  if type(presentation) ~= "table" then
+    error("smelt.transcript.register_tool: presentation must be a table", 2)
+  end
+  for _, field in ipairs({ "render", "title", "body", "draft", "compact" }) do
+    if presentation[field] ~= nil and type(presentation[field]) ~= "function" then
+      error("smelt.transcript.register_tool: presentation." .. field .. " must be a function", 2)
+    end
+  end
+  if presentation.cache_key ~= nil
+    and (type(presentation.cache_key) ~= "string" or presentation.cache_key == "")
+  then
+    error("smelt.transcript.register_tool: presentation.cache_key must be a non-empty string", 2)
+  end
+
+  local snapshot = copy_tool_presentation(presentation)
+  next_token = next_token + 1
+  local token = next_token
+  if not tool_presentations[name] then tool_order[#tool_order + 1] = name end
+  tool_presentations[name] = { presentation = snapshot, token = token }
+  rebuild_renderer()
+
+  return smelt.reg.new(function()
+    local entry = tool_presentations[name]
+    if not entry or entry.token ~= token then return end
+    tool_presentations[name] = nil
+    for i = #tool_order, 1, -1 do
+      if tool_order[i] == name then
+        table.remove(tool_order, i)
+        break
+      end
+    end
+    rebuild_renderer()
+  end)
+end
+
+--- Return a copy of the current presentation policy for `name`, or nil. Mutating
+--- the returned table has no effect; re-register the tool to change its presentation.
+---@type fun(name: string): smelt.transcript.ToolPresentation?
+function smelt.transcript.get_tool_presentation(name)
+  local entry = tool_presentations[name]
+  return entry and copy_tool_presentation(entry.presentation) or nil
+end
+
 smelt.transcript.groups = smelt.transcript.groups or {}
 
 local function require_table(name, value)
@@ -209,8 +330,8 @@ local function require_table(name, value)
 end
 
 --- Register or replace a declarative transcript group type. This only declares
---- planning metadata and a renderer for future virtual group nodes; Rust owns
---- deterministic adjacent-run planning.
+--- planning metadata; Rust owns deterministic adjacent-run planning and the
+--- composed root transcript renderer presents resulting group nodes.
 ---@type fun(spec: smelt.transcript.GroupSpec): smelt.Reg
 function smelt.transcript.groups.register(spec)
   require_table("groups.register", spec)
@@ -220,7 +341,6 @@ function smelt.transcript.groups.register(spec)
   if type(spec.selector) ~= "table" then
     error("smelt.transcript.groups.register: spec.selector must be a table", 2)
   end
-  require_function("groups.register", spec.render)
 
   local token = transcript.__register_group(spec)
   local name = spec.name

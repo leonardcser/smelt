@@ -1,9 +1,7 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    HistoryAppend, HistoryAppendResult, HistoryItem, ReasoningEffort, StyledLines, TokenUsage,
-    TurnMeta,
+    HistoryAppend, HistoryAppendResult, HistoryItem, ReasoningEffort, TokenUsage, TurnMeta,
 };
 use smelt_core::content::stream_parser::{StreamParser, ToolDraftUpdate, ToolStart};
 use smelt_core::session::{
@@ -690,27 +688,24 @@ pub(crate) enum StreamMutation {
         now: Instant,
     },
     StartTool {
-        call_id: String,
-        name: String,
-        summary: StyledLines,
-        args: HashMap<String, serde_json::Value>,
+        start: ToolStart,
         now: Instant,
     },
     AppendToolOutput {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         chunk: String,
     },
     SetToolStatus {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         status: ToolStatus,
         now: Instant,
     },
     SetToolUserMessage {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         message: String,
     },
     FinishTool {
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         status: ToolStatus,
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
@@ -1329,30 +1324,30 @@ impl SessionDocument {
             StreamMutation::SyncActiveToolElapsed { now } => {
                 parser.sync_active_tool_elapsed_at(transcript.history_mut(), now);
             }
-            StreamMutation::StartTool {
-                call_id,
-                name,
-                summary,
-                args,
-                now,
-            } => {
-                parser.start_tool(transcript.history_mut(), call_id, name, summary, args, now);
+            StreamMutation::StartTool { start, now } => {
+                parser.start_tool(transcript.history_mut(), start, now);
             }
-            StreamMutation::AppendToolOutput { call_id, chunk } => {
-                parser.append_active_output(transcript.history_mut(), &call_id, &chunk);
+            StreamMutation::AppendToolOutput {
+                invocation_id,
+                chunk,
+            } => {
+                parser.append_active_output(transcript.history_mut(), invocation_id, &chunk);
             }
             StreamMutation::SetToolStatus {
-                call_id,
+                invocation_id,
                 status,
                 now,
             } => {
-                parser.set_active_status(transcript.history_mut(), &call_id, status, now);
+                parser.set_active_status(transcript.history_mut(), invocation_id, status, now);
             }
-            StreamMutation::SetToolUserMessage { call_id, message } => {
-                parser.set_active_user_message(transcript.history_mut(), &call_id, message);
+            StreamMutation::SetToolUserMessage {
+                invocation_id,
+                message,
+            } => {
+                parser.set_active_user_message(transcript.history_mut(), invocation_id, message);
             }
             StreamMutation::FinishTool {
-                call_id,
+                invocation_id,
                 status,
                 output,
                 engine_elapsed,
@@ -1360,7 +1355,7 @@ impl SessionDocument {
             } => {
                 parser.finish_tool(
                     transcript.history_mut(),
-                    &call_id,
+                    invocation_id,
                     status,
                     output,
                     engine_elapsed,
@@ -1579,10 +1574,13 @@ fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Se
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Content, ReasoningEffort};
+    use protocol::{Content, ReasoningEffort, StyledLines};
     use smelt_core::session::{
         AuthoritativeContextTokens, ContextTokenIdentity, DisplayContextTokens,
     };
+    use std::collections::HashMap;
+
+    const INVOCATION_ID: protocol::InvocationId = protocol::InvocationId::new(1);
 
     fn token_identity() -> ContextTokenIdentity {
         ContextTokenIdentity {
@@ -1908,7 +1906,6 @@ mod tests {
                 avg_tps: None,
                 display_tps: None,
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
 
@@ -2006,7 +2003,6 @@ mod tests {
             avg_tps: Some(2.0),
             display_tps: Some(2.0),
             interrupted: false,
-            tool_elapsed: std::collections::HashMap::new(),
         };
 
         let result = apply_turn_state(
@@ -2035,7 +2031,6 @@ mod tests {
             avg_tps: None,
             display_tps: None,
             interrupted: false,
-            tool_elapsed: std::collections::HashMap::new(),
         };
         session.turn_metas.push((2, meta.clone()));
         session.turn_metas.push((4, meta));
@@ -2573,10 +2568,15 @@ mod tests {
             &mut parser,
             &mut transcript,
             StreamMutation::StartTool {
-                call_id: "tool-1".into(),
-                name: "bash".into(),
-                summary: StyledLines::from_plain("bash"),
-                args: HashMap::new(),
+                start: ToolStart {
+                    invocation_id: INVOCATION_ID,
+                    call_id: "tool-1".into(),
+                    name: "bash".into(),
+                    summary: StyledLines::from_plain("bash"),
+                    args: HashMap::new(),
+                    preview_output: None,
+                    called_at_ms: 0,
+                },
                 now,
             },
         );
@@ -2604,10 +2604,15 @@ mod tests {
             &mut parser,
             &mut transcript,
             StreamMutation::StartTool {
-                call_id: "tool-1".into(),
-                name: "bash".into(),
-                summary: StyledLines::from_plain("bash"),
-                args: HashMap::new(),
+                start: ToolStart {
+                    invocation_id: INVOCATION_ID,
+                    call_id: "tool-1".into(),
+                    name: "bash".into(),
+                    summary: StyledLines::from_plain("bash"),
+                    args: HashMap::new(),
+                    preview_output: None,
+                    called_at_ms: 0,
+                },
                 now,
             },
         );
@@ -2615,7 +2620,7 @@ mod tests {
             &mut parser,
             &mut transcript,
             StreamMutation::AppendToolOutput {
-                call_id: "tool-1".into(),
+                invocation_id: INVOCATION_ID,
                 chunk: "done".into(),
             },
         );
@@ -2623,7 +2628,7 @@ mod tests {
             &mut parser,
             &mut transcript,
             StreamMutation::FinishTool {
-                call_id: "tool-1".into(),
+                invocation_id: INVOCATION_ID,
                 status: ToolStatus::Ok,
                 output: None,
                 engine_elapsed: None,
@@ -2666,11 +2671,13 @@ mod tests {
             StreamMutation::PromoteToolDraft {
                 stream_id: Some("stream-1".into()),
                 start: ToolStart {
+                    invocation_id: INVOCATION_ID,
                     call_id: "tool-1".into(),
                     name: "bash".into(),
                     summary: StyledLines::from_plain("bash"),
                     args: HashMap::new(),
                     preview_output: None,
+                    called_at_ms: 0,
                 },
                 now,
             },

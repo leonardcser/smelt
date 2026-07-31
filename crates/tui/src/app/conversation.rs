@@ -82,6 +82,14 @@ impl ConversationRuntime {
         &self.document.transcript
     }
 
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn active_tool_block_id(
+        &self,
+        invocation_id: protocol::InvocationId,
+    ) -> Option<smelt_core::transcript_model::BlockId> {
+        self.parser.active_tool_block_id(invocation_id)
+    }
+
     pub(crate) fn promote_last_reasoning_summary(
         &mut self,
     ) -> Option<super::transcript::ReasoningSummarySnapshot> {
@@ -1018,57 +1026,62 @@ impl ConversationRuntime {
 
     pub(crate) fn start_tool(
         &mut self,
-        call_id: String,
-        name: String,
-        summary: protocol::StyledLines,
-        args: std::collections::HashMap<String, serde_json::Value>,
+        start: smelt_core::content::stream_parser::ToolStart,
         now: std::time::Instant,
     ) {
         self.apply_stream_mutation(super::session_document::StreamMutation::StartTool {
-            call_id,
-            name,
-            summary,
-            args,
+            start,
             now,
         });
     }
 
-    pub(crate) fn append_tool_output(&mut self, call_id: String, chunk: String) {
+    pub(crate) fn append_tool_output(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        chunk: String,
+    ) {
         self.apply_stream_mutation(super::session_document::StreamMutation::AppendToolOutput {
-            call_id,
+            invocation_id,
             chunk,
         });
     }
 
     pub(crate) fn set_tool_status(
         &mut self,
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         status: smelt_core::transcript_model::ToolStatus,
         now: std::time::Instant,
     ) {
         self.apply_stream_mutation(super::session_document::StreamMutation::SetToolStatus {
-            call_id,
+            invocation_id,
             status,
             now,
         });
     }
 
-    pub(crate) fn set_tool_user_message(&mut self, call_id: String, message: String) {
+    pub(crate) fn set_tool_user_message(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        message: String,
+    ) {
         self.apply_stream_mutation(
-            super::session_document::StreamMutation::SetToolUserMessage { call_id, message },
+            super::session_document::StreamMutation::SetToolUserMessage {
+                invocation_id,
+                message,
+            },
         );
     }
 
     pub(crate) fn finish_tool(
         &mut self,
-        call_id: String,
+        invocation_id: protocol::InvocationId,
         status: smelt_core::transcript_model::ToolStatus,
         output: Option<smelt_core::transcript_model::ToolOutputRef>,
         engine_elapsed: Option<std::time::Duration>,
         now: std::time::Instant,
     ) {
         self.apply_stream_mutation(super::session_document::StreamMutation::FinishTool {
-            call_id,
+            invocation_id,
             status,
             output,
             engine_elapsed,
@@ -1294,9 +1307,10 @@ impl ConversationRuntime {
         self.turn.cancel_generation()
     }
 
-    pub(crate) fn remove_pending_tool(&mut self, call_id: &str) {
+    pub(crate) fn remove_pending_tool(&mut self, invocation_id: protocol::InvocationId) {
         if let Some(turn) = self.turn.active_mut() {
-            turn.pending.retain(|pending| pending.call_id != call_id);
+            turn.pending
+                .retain(|pending| pending.invocation_id != invocation_id);
         }
     }
 
@@ -1400,7 +1414,7 @@ impl ConversationRuntime {
 
     pub(crate) fn set_active_tools_paused(&mut self, paused: bool, now: std::time::Instant) {
         self.parser
-            .set_active_tools_paused(self.document.transcript.history(), paused, now);
+            .set_active_tools_paused(self.document.transcript.history_mut(), paused, now);
     }
 
     pub(crate) fn clear_stream_parser(&mut self) {
@@ -1464,6 +1478,10 @@ impl ConversationRuntime {
         now: std::time::Instant,
     ) -> Option<std::time::Duration> {
         self.draft_tools.next_render_delay(now)
+    }
+
+    pub(crate) fn next_transcript_refresh_at(&self) -> Option<std::time::Instant> {
+        self.document.transcript.next_refresh_at()
     }
 
     pub(crate) fn take_resume_preview(

@@ -1,9 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 607
-expression: frame.text()
+expression: text
 ---
-* explore ×3 (1 error)
+* explore ×3 (1 error)                                             14:37:03
   grep "fn render" in crates/tui/src
   grep "definitely_not_present" in crates/tui/src
   grep "(?P<bad" in crates/tui/src

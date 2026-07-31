@@ -1,10 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* bash set -euo pipefail
-  rm -rf /tmp/smelt-fuzzy-check
-  mkdir -p /tmp/smelt-fuzzy-check/src
+* bash set -euo pipefail                                                     14:37:03
+       rm -rf /tmp/smelt-fuzzy-check
+       mkdir -p /tmp/smelt-fuzzy-check/src
   done
 
 

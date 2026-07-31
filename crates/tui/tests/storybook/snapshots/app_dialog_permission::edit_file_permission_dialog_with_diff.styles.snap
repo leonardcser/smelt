@@ -5,6 +5,7 @@ expression: frame.styles_text()
 dim: 80 24
   0   0   1 fg=AnsiValue(208)
   0   1  10 attrs=dim
+  0  69  10 attrs=dim
  10   0  80 fg=AnsiValue(208)
  11   1   9 fg=AnsiValue(208)
  12   0  80 fg=AnsiValue(244)

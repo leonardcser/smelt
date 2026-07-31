@@ -27,6 +27,16 @@ pub trait WallClock: Send + Sync {
 pub trait Clock: MonoClock + WallClock {}
 impl<T: MonoClock + WallClock + ?Sized> Clock for T {}
 
+/// Read wall time as Unix epoch milliseconds, clamped to the protocol's `u64` range.
+pub fn unix_time_ms(clock: &dyn WallClock) -> u64 {
+    clock
+        .system_now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 /// Production clock: delegates to `Instant::now` / `SystemTime::now`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealClock;

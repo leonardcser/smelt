@@ -34,7 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     );
     record_module_doc(
         "smelt.transcript.groups",
-        "Declarative transcript display grouping. Register adjacent-run group rules and group-node renderers while the host owns deterministic planning and cache invalidation.",
+        "Declarative transcript display grouping. Register adjacent-run group rules while the host owns deterministic planning and the composed root renderer presents resulting group nodes.",
     );
 
     let shared_set = Arc::clone(shared);
@@ -104,14 +104,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     m.private_fn(
         "__register_group",
         &["spec"],
-        move |lua, spec: mlua::Table| -> LuaResult<u64> {
+        move |_, spec: mlua::Table| -> LuaResult<u64> {
             let mut registry = shared_register_group
                 .transcript_groups
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let order = registry.next_order;
             registry.next_order = registry.next_order.wrapping_add(1).max(1);
-            let group = super::transcript_groups::parse_registration(lua, spec, order)?;
+            let group = super::transcript_groups::parse_registration(spec, order)?;
             let token = group.token;
             registry.entries.insert(group.spec.name.clone(), group);
             let cache_key = super::transcript_groups::cache_key_hash(&registry);

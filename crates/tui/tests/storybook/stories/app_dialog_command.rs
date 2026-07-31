@@ -19,6 +19,7 @@ use crate::storybook::args;
 
 fn open_ask_user_question_dialog(ctx: &mut AppStoryCtx) {
     ctx.engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(1),
         request_id: 1,
         call_id: "aq-1".into(),
         tool_name: "ask_user_question".into(),

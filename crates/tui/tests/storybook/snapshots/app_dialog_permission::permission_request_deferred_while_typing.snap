@@ -1,9 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 633
-expression: frame.text()
+expression: text
 ---
-* bash ls -la /tmp/foo
+* bash ls -la /tmp/foo                                                 14:37:03
 
 
 

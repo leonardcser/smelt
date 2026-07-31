@@ -1,15 +1,17 @@
-local transcript_defaults = require("smelt.transcript.defaults")
 local worktree = require("smelt.worktree")
 
 local function trim(s)
   return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-transcript_defaults.__tool_body_renderers.enter_worktree = function(block)
-  local info = block.output and block.output.metadata
-  if not info then return nil end
-  return worktree.detail(info)
-end
+smelt.transcript.register_tool("enter_worktree", {
+  cache_key = "smelt.tool-presentation.enter_worktree:v1",
+  body = function(block)
+    local info = block.output and block.output.metadata
+    if not info then return nil end
+    return worktree.detail(info)
+  end,
+})
 
 smelt.tools.register({
   name = "enter_worktree",

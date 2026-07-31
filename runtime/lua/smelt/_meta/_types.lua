@@ -643,7 +643,7 @@
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
----@field kind "user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted" Block kind.
+---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field content? string Assistant/thinking/code content.
@@ -660,10 +660,9 @@
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
----@field status_hl? string Tool status highlight group.
----@field elapsed? table Dynamic elapsed descriptor for `smelt.layout.elapsed`.
----@field elapsed_secs? integer Terminal/static tool elapsed seconds.
----@field elapsed_text? string Terminal/static tool elapsed label.
+---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
+---@field elapsed_ms? integer Best-known execution duration in milliseconds.
+---@field elapsed_active? boolean True only while elapsed time can continue advancing.
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
 ---@field preview_output? smelt.transcript.ToolOutput Immutable pending output snapshot for a promoted finished draft.
@@ -675,6 +674,12 @@
 ---@field exit_code? integer Background process exit code when known.
 ---@field command? string Exec command.
 ---@field command_spans? table Exec command as one styled span line, including the `!` accent.
+---@field group_kind? string Registered semantic group name.
+---@field bucket? string Stable planner bucket for a group.
+---@field view_state? "collapsed"|"peek"|"expanded" Effective group or child view state.
+---@field children? smelt.transcript.Block[] Ordered semantic child snapshots for a group.
+---@field child_ids? integer[] Ordered stable block ids for a group.
+---@field child_count? integer Number of semantic children in a group.
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
 ---@class smelt.transcript.Context
@@ -682,6 +687,8 @@
 ---@field renderer_generation integer Current renderer generation used for cache invalidation.
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
+---@field now_ms integer Unix epoch milliseconds shared by the complete top-level render pass.
+---@field render fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node Re-enter the composed root renderer for a semantic child.
 
 --- Visible transcript cursor position relative to the committed viewport.
 ---@class smelt.transcript.Cursor
@@ -706,8 +713,8 @@
 ---@field exit_code? integer|string Match typed background process exit code.
 ---@field fields? table<string,string|integer> Exact block-field matches such as `{ event = "background_process_completed" }`.
 
---- Declarative transcript group registration. The host owns planning; Lua owns
---- the selector metadata and the virtual-node renderer.
+--- Declarative transcript group registration. The host owns planning; the root
+--- transcript renderer owns presentation for the resulting semantic group node.
 ---@class smelt.transcript.GroupSpec
 ---@field name string Unique group name. Registering the same name replaces it.
 ---@field cache_key? string Persisted layout cache key; omit to opt out while active.
@@ -716,7 +723,6 @@
 ---@field default_view? "collapsed"|"peek"|"expanded" Initial presentation when the group first appears.
 ---@field selector smelt.transcript.GroupSelector Declarative block matcher.
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
----@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
 
 ---@class smelt.transcript.NavigationOpts
 ---@field role? smelt.transcript.Role Match only blocks with this semantic role. Defaults to `user`.
@@ -736,17 +742,59 @@
 ---@class smelt.transcript.StreamOpts
 ---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
+--- One span in a styled tool title. Style attributes may be supplied directly or through `style`.
+---@class smelt.transcript.StyledSpan
+---@field text? string Span text. The positional field `[1]` is also accepted.
+---@field style? smelt.transcript.StyledSpanStyle Nested style attributes.
+---@field syntax? string Syntax language used to highlight the span text.
+---@field hl? string Theme highlight group.
+---@field fg? string Foreground color.
+---@field bg? string Background color.
+---@field dim? boolean Whether to dim the text.
+---@field bold? boolean Whether to render bold text.
+---@field italic? boolean Whether to render italic text.
+---@field selectable? boolean Whether copied transcript text includes this span.
+---@field title_suffix? boolean Whether this span is transient pending-state title metadata.
+
+--- Style attributes accepted on one styled title span.
+---@class smelt.transcript.StyledSpanStyle
+---@field hl? string Theme highlight group.
+---@field fg? string Foreground color.
+---@field bg? string Background color.
+---@field dim? boolean Whether to dim the text.
+---@field bold? boolean Whether to render bold text.
+---@field italic? boolean Whether to render italic text.
+
 --- Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.
 ---@class smelt.transcript.Target
 ---@field block_id integer Stable transcript block identity.
 ---@field role smelt.transcript.Role Semantic block role.
 ---@field first_line string First source line, suitable for navigation labels.
 
+--- Options passed to focused tool body and draft callbacks.
+---@class smelt.transcript.ToolBodyOptions
+---@field gutter? string Prefix rendered before each body line.
+
+--- Options accepted by the default tool header renderer.
+---@class smelt.transcript.ToolHeaderOptions
+---@field hl? string Status marker highlight group.
+
 --- Tool output snapshot passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput
 ---@field content string Captured output text.
 ---@field is_error boolean True when the tool result is an error.
 ---@field metadata? table Tool-specific structured metadata.
+
+--- Public presentation policy for one tool name. A complete `render` callback
+--- takes precedence; otherwise the default renderer composes the focused pieces.
+--- Registrations are immutable snapshots.
+---@class smelt.transcript.ToolPresentation
+---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
+---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
+---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
+---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.
+---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
+---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
 --- Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.
 ---@class smelt.transcript.View

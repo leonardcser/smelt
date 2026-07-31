@@ -9,7 +9,9 @@ use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::highlight::InlineOptions;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
+#[cfg(test)]
+use smelt_core::transcript_model::BlockId;
+use smelt_core::transcript_model::{Block, BlockHistory, ViewState};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -84,6 +86,8 @@ pub(crate) struct TranscriptRenderEnv<'a> {
     pub(crate) lua: &'a LuaRuntime,
     pub(crate) renderer_generation: u64,
     pub(crate) renderer_cache_key: Option<u64>,
+    pub(crate) now_ms: u64,
+    pub(crate) refresh_now: std::time::Instant,
 }
 
 impl<'a> TranscriptRenderEnv<'a> {
@@ -97,6 +101,8 @@ impl<'a> TranscriptRenderEnv<'a> {
             lua,
             renderer_generation: lua.transcript_renderer_generation(),
             renderer_cache_key: transcript_renderer_cache_key(lua, &inline_options),
+            now_ms: lua.transcript_now_ms(),
+            refresh_now: lua.transcript_instant_now(),
         }
     }
 
@@ -109,28 +115,23 @@ impl<'a> TranscriptRenderEnv<'a> {
             lua,
             renderer_generation,
             renderer_cache_key,
+            now_ms: lua.transcript_now_ms(),
+            refresh_now: lua.transcript_instant_now(),
         }
     }
 }
 
-pub(crate) enum CompileJob {
-    Block {
-        id: RenderNodeId,
-        block_id: BlockId,
-        index: usize,
-        key: DisplayCacheKey,
-        view_state: ViewState,
-        block: Block,
-        state: Option<Box<ToolState>>,
-        cache_source_views: bool,
-    },
-    Group {
-        id: RenderNodeId,
-        name: String,
-        key: DisplayCacheKey,
-        view_state: ViewState,
-        snapshot: serde_json::Value,
-    },
+pub(crate) struct CompileJob {
+    id: RenderNodeId,
+    key: DisplayCacheKey,
+    view_state: ViewState,
+    snapshot: serde_json::Value,
+    cache_source_views: bool,
+}
+
+struct CompiledLayout {
+    layout: LayoutIr,
+    refresh_after_ms: Option<u64>,
 }
 
 impl CompileJob {
@@ -138,48 +139,28 @@ impl CompileJob {
         self,
         env: TranscriptRenderEnv<'_>,
         source_views: &mut SourceViewCache,
-    ) -> (RenderNodeId, DisplayCacheKey, LayoutIr) {
-        match self {
-            Self::Block {
-                id,
-                block_id,
-                index,
-                key,
-                view_state,
-                block,
-                state,
-                cache_source_views,
-            } => {
-                let mut cache = CompileLayoutCache {
-                    source_views,
-                    source_views_enabled: cache_source_views,
-                };
-                (
-                    id,
-                    key,
-                    compile_block_with_lua(
-                        env,
-                        block_id,
-                        index,
-                        &block,
-                        state.as_deref(),
-                        view_state,
-                        &mut cache,
-                    ),
-                )
-            }
-            Self::Group {
-                id,
-                name,
-                key,
-                view_state,
-                snapshot,
-            } => (
-                id,
-                key,
-                compile_group_with_lua(env, &name, &snapshot, view_state),
-            ),
-        }
+    ) -> (
+        RenderNodeId,
+        DisplayCacheKey,
+        LayoutIr,
+        Option<std::time::Instant>,
+    ) {
+        let mut cache = CompileLayoutCache {
+            source_views,
+            source_views_enabled: self.cache_source_views,
+            refresh_after_ms: None,
+        };
+        let compiled =
+            compile_node_with_lua(env.clone(), &self.snapshot, self.view_state, &mut cache);
+        (
+            self.id,
+            self.key,
+            compiled.layout,
+            compiled.refresh_after_ms.and_then(|after_ms| {
+                env.refresh_now
+                    .checked_add(std::time::Duration::from_millis(after_ms))
+            }),
+        )
     }
 }
 
@@ -203,6 +184,7 @@ struct CachedLayout {
     key: DisplayCacheKey,
     layout: LayoutIr,
     weight: usize,
+    refresh_at: Option<std::time::Instant>,
 }
 
 struct CachedSourceView {
@@ -251,6 +233,7 @@ impl SourceViewCache {
 struct CompileLayoutCache<'a> {
     source_views: &'a mut SourceViewCache,
     source_views_enabled: bool,
+    refresh_after_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -268,6 +251,7 @@ pub(crate) struct DisplayModel {
     pinned: HashSet<RenderNodeId>,
     retained_bytes: usize,
     budget: usize,
+    earliest_refresh_at: Option<std::time::Instant>,
 }
 
 impl Default for DisplayModel {
@@ -279,6 +263,7 @@ impl Default for DisplayModel {
             pinned: HashSet::new(),
             retained_bytes: 0,
             budget: 16 * 1024 * 1024,
+            earliest_refresh_at: None,
         }
     }
 }
@@ -329,6 +314,14 @@ impl DisplayModel {
         lru.push_back(id);
     }
 
+    fn recompute_earliest_refresh_at(&mut self) {
+        self.earliest_refresh_at = self
+            .blocks
+            .values()
+            .filter_map(|entry| entry.refresh_at)
+            .min();
+    }
+
     fn enforce_budget(&mut self) {
         let mut attempts = self.lru.borrow().len();
         while self.retained_bytes() > self.budget && attempts > 0 {
@@ -346,6 +339,7 @@ impl DisplayModel {
             }
         }
         while self.retained_bytes() > self.budget && self.source_views.evict_oldest() {}
+        self.recompute_earliest_refresh_at();
         smelt_perf::perf::record_value(
             "transcript:render_cache:retained_bytes",
             self.retained_bytes() as u64,
@@ -425,6 +419,7 @@ impl DisplayModel {
 
         let mut jobs = Vec::new();
         let mut requested = 0;
+        let mut removed_cached_layout = false;
         for (index, node, key) in nodes {
             requested += 1;
             let id = node.id();
@@ -438,46 +433,42 @@ impl DisplayModel {
                 self.touch(id);
                 continue;
             }
-            match node {
-                RenderNode::Block { id: block_id, .. } => {
-                    let Some(block) = history.block(block_id).cloned() else {
+            let (snapshot, cache_source_views) = match node {
+                RenderNode::Block {
+                    id: block_id,
+                    block_index,
+                } => {
+                    let Some(block) = history.block(block_id) else {
                         if let Some(removed) = self.blocks.remove(&id) {
                             self.retained_bytes =
                                 self.retained_bytes.saturating_sub(removed.weight);
+                            removed_cached_layout = true;
                         }
                         self.lru.borrow_mut().retain(|candidate| *candidate != id);
                         continue;
                     };
-                    let state = match &block {
-                        Block::ToolCall { call_id, .. } => {
-                            history.tool_state(call_id).cloned().map(Box::new)
-                        }
-                        _ => None,
+                    let Some(snapshot) =
+                        block_snapshot_json(history, block_id, block_index, Some(key.view_state))
+                    else {
+                        continue;
                     };
-                    let cache_source_views = cache_source_views_for_block(&block);
-                    jobs.push(CompileJob::Block {
-                        id,
-                        block_id,
-                        index,
-                        key: display_key,
-                        view_state: key.view_state,
-                        block,
-                        state,
-                        cache_source_views,
-                    });
+                    (snapshot, cache_source_views_for_block(block))
                 }
-                RenderNode::Group(ref group) => {
-                    let snapshot =
-                        group_snapshot_json(history, policy, index, &node, key.view_state);
-                    jobs.push(CompileJob::Group {
-                        id,
-                        name: group.name.clone(),
-                        key: display_key,
-                        view_state: key.view_state,
-                        snapshot,
-                    });
-                }
-            }
+                RenderNode::Group(_) => (
+                    group_snapshot_json(history, policy, index, &node, key.view_state),
+                    true,
+                ),
+            };
+            jobs.push(CompileJob {
+                id,
+                key: display_key,
+                view_state: key.view_state,
+                snapshot,
+                cache_source_views,
+            });
+        }
+        if removed_cached_layout {
+            self.recompute_earliest_refresh_at();
         }
         smelt_perf::perf::record_value("transcript:display_model:requested", requested);
         smelt_perf::perf::record_value("transcript:display_model:compiled", jobs.len() as u64);
@@ -502,10 +493,15 @@ impl DisplayModel {
 
     pub(crate) fn insert_compiled_blocks(
         &mut self,
-        layouts: Vec<(RenderNodeId, DisplayCacheKey, LayoutIr)>,
+        layouts: Vec<(
+            RenderNodeId,
+            DisplayCacheKey,
+            LayoutIr,
+            Option<std::time::Instant>,
+        )>,
     ) {
         let _perf = smelt_perf::perf::begin("transcript:display_model:insert_cache");
-        for (id, key, layout) in layouts {
+        for (id, key, layout, refresh_at) in layouts {
             let weight = retained_serialized_bytes(&layout);
             if let Some(previous) = self.blocks.remove(&id) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(previous.weight);
@@ -517,6 +513,7 @@ impl DisplayModel {
                     key,
                     layout,
                     weight,
+                    refresh_at,
                 },
             );
             self.touch(id);
@@ -537,6 +534,34 @@ impl DisplayModel {
         self.lru.borrow_mut().retain(|id| live.contains(id));
         self.pinned.retain(|id| live.contains(id));
         self.enforce_budget();
+    }
+
+    pub(crate) fn next_refresh_at(&self) -> Option<std::time::Instant> {
+        self.earliest_refresh_at
+    }
+
+    pub(crate) fn expire_due_refreshes(&mut self, now: std::time::Instant) -> Vec<RenderNodeId> {
+        let due = self
+            .blocks
+            .iter()
+            .filter_map(|(id, entry)| {
+                entry
+                    .refresh_at
+                    .filter(|deadline| *deadline <= now)
+                    .map(|_| *id)
+            })
+            .collect::<Vec<_>>();
+        for id in &due {
+            if let Some(entry) = self.blocks.remove(id) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
+            }
+        }
+        if !due.is_empty() {
+            let due_set = due.iter().copied().collect::<HashSet<_>>();
+            self.lru.borrow_mut().retain(|id| !due_set.contains(id));
+            self.recompute_earliest_refresh_at();
+        }
+        due
     }
 
     pub(crate) fn get(
@@ -575,40 +600,18 @@ pub(crate) fn compile_block(block: &Block) -> LayoutIr {
     let mut cache = CompileLayoutCache {
         source_views: &mut source_views,
         source_views_enabled: true,
+        refresh_after_ms: None,
     };
-    compile_block_with_lua(
+    let snapshot =
+        smelt_core::lua::runtime::transcript_block_snapshot_json(BlockId::new(0), 0, block, None)
+            .expect("block snapshot");
+    compile_node_with_lua(
         TranscriptRenderEnv::new(&lua),
-        BlockId::new(0),
-        0,
-        block,
-        None,
+        &snapshot,
         ViewState::Expanded,
         &mut cache,
     )
-}
-
-fn compile_group_with_lua(
-    env: TranscriptRenderEnv<'_>,
-    name: &str,
-    snapshot: &serde_json::Value,
-    view_state: ViewState,
-) -> LayoutIr {
-    let layout = env
-        .lua
-        .render_transcript_group_layout(name, snapshot, view_state);
-    match compile_layout_ir(&layout) {
-        Ok(layout) => layout,
-        Err(e) => {
-            env.lua.record_error(format!(
-                "transcript group render `{name}`: compile layout IR: {e}"
-            ));
-            BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-                content: format!("{name} group render error"),
-                hl_group: Some("ErrorMsg".into()),
-                ansi: false,
-            }))
-        }
-    }
+    .layout
 }
 
 fn group_snapshot_json(
@@ -628,7 +631,7 @@ fn group_snapshot_json(
             let id = *history.order.get(block_index)?;
             let child_view_state =
                 policy.node_default_view_state(history, &RenderNode::Block { id, block_index });
-            block_snapshot_json(history, block_index, Some(child_view_state))
+            block_snapshot_json(history, id, block_index, Some(child_view_state))
         })
         .collect();
     serde_json::json!({
@@ -647,13 +650,13 @@ fn group_snapshot_json(
 
 fn block_snapshot_json(
     history: &BlockHistory,
+    id: smelt_core::transcript_model::BlockId,
     block_index: usize,
     view_state: Option<ViewState>,
 ) -> Option<serde_json::Value> {
-    let id = *history.order.get(block_index)?;
     let block = history.block(id)?;
     let state = match block {
-        Block::ToolCall { call_id, .. } => history.tool_state(call_id),
+        Block::ToolCall { .. } => history.tool_state(id),
         _ => None,
     };
     let serde_json::Value::Object(mut value) =
@@ -681,36 +684,42 @@ fn view_state_label(view_state: ViewState) -> &'static str {
     }
 }
 
-fn compile_block_with_lua(
+fn compile_node_with_lua(
     env: TranscriptRenderEnv<'_>,
-    id: BlockId,
-    index: usize,
-    block: &Block,
-    state: Option<&ToolState>,
+    snapshot: &serde_json::Value,
     view_state: ViewState,
     cache: &mut CompileLayoutCache<'_>,
-) -> LayoutIr {
-    let kind = block_kind(block);
+) -> CompiledLayout {
+    let kind = snapshot
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let index = snapshot
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let layout = env
         .lua
-        .render_transcript_layout(id, index, block, state, view_state);
+        .render_transcript_layout(snapshot, view_state, env.now_ms);
     match compile_layout_ir_with_cache(&layout, cache) {
-        Ok(layout) => layout,
-        Err(e) => {
+        Ok(layout) => CompiledLayout {
+            layout,
+            refresh_after_ms: cache.refresh_after_ms,
+        },
+        Err(error) => {
             env.lua.record_error(format!(
-                "transcript render `{kind}` #{index}: compile layout IR: {e}"
+                "transcript render `{kind}` #{index}: compile layout IR: {error}"
             ));
-            BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-                content: format!("{kind} render error"),
-                hl_group: Some("ErrorMsg".into()),
-                ansi: false,
-            }))
+            CompiledLayout {
+                layout: BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                    content: format!("{kind} render error"),
+                    hl_group: Some("ErrorMsg".into()),
+                    ansi: false,
+                })),
+                refresh_after_ms: None,
+            }
         }
     }
-}
-
-fn block_kind(block: &Block) -> &'static str {
-    block.kind()
 }
 
 pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
@@ -718,6 +727,7 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
     let mut cache = CompileLayoutCache {
         source_views: &mut source_views,
         source_views_enabled: true,
+        refresh_after_ms: None,
     };
     compile_layout_ir_with_cache(layout, &mut cache)
 }
@@ -739,9 +749,6 @@ fn compile_layout_ir_with_cache(
             Ok(BlockLayout::Leaf(IrLeaf::Markdown(spec.clone())))
         }
         BlockLayout::Leaf(LuaLeaf::Code(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Code(spec.clone()))),
-        BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) => {
-            Ok(BlockLayout::Leaf(IrLeaf::Elapsed(spec.clone())))
-        }
         BlockLayout::Leaf(LuaLeaf::Separator(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Separator(spec.clone())))
         }
@@ -819,7 +826,7 @@ fn compile_layout_ir_with_cache(
             spec: spec.clone(),
         }),
         BlockLayout::RowPrefix { child, spec } => Ok(BlockLayout::RowPrefix {
-            child: Box::new(compile_layout_ir(child)?),
+            child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
         BlockLayout::Panel { child, spec } => Ok(BlockLayout::Panel {
@@ -834,6 +841,14 @@ fn compile_layout_ir_with_cache(
             child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
+        BlockLayout::Refresh { child, spec } => {
+            cache.refresh_after_ms = Some(
+                cache
+                    .refresh_after_ms
+                    .map_or(spec.after_ms, |current| current.min(spec.after_ms)),
+            );
+            compile_layout_ir_with_cache(child, cache)
+        }
     }
 }
 
@@ -1171,7 +1186,8 @@ mod tests {
             )),
         });
 
-        let snapshot = block_snapshot_json(&transcript.history, 0, None).expect("snapshot");
+        let id = transcript.history.order[0];
+        let snapshot = block_snapshot_json(&transcript.history, id, 0, None).expect("snapshot");
 
         assert_eq!(snapshot["kind"], "process_status");
         assert_eq!(snapshot["event"], "background_process_completed");
@@ -1266,8 +1282,8 @@ mod tests {
         let weight = retained_serialized_bytes(&small);
 
         model.insert_compiled_blocks(vec![
-            (first, key, small.clone()),
-            (second, key, small.clone()),
+            (first, key, small.clone(), None),
+            (second, key, small.clone(), None),
         ]);
         assert_eq!(model.retained_bytes, weight * 2);
         model.touch(first);
@@ -1281,7 +1297,7 @@ mod tests {
         });
         let replacement_weight = retained_serialized_bytes(&replacement);
         model.set_budget(usize::MAX);
-        model.insert_compiled_blocks(vec![(first, key, replacement)]);
+        model.insert_compiled_blocks(vec![(first, key, replacement, None)]);
         assert_eq!(model.blocks.len(), 1);
         assert_eq!(model.retained_bytes, replacement_weight);
 
@@ -1328,5 +1344,188 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn refresh_compilation_is_visually_transparent_and_uses_earliest_delay() {
+        let child = BlockLayout::Leaf(LuaLeaf::Runs(RunsSpec {
+            lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                text: "select me".into(),
+                selectable: true,
+                ..Default::default()
+            }]]),
+            hl_group: Some("SmeltAccent".into()),
+            continuation_indent: 2,
+        }));
+        let layout = BlockLayout::Refresh {
+            child: Box::new(BlockLayout::Vbox(vec![
+                BlockLayout::Refresh {
+                    child: Box::new(child),
+                    spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 400 },
+                },
+                BlockLayout::Refresh {
+                    child: Box::new(BlockLayout::Empty),
+                    spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 75 },
+                },
+            ])),
+            spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 250 },
+        };
+        let mut source_views = SourceViewCache::default();
+        let mut cache = CompileLayoutCache {
+            source_views: &mut source_views,
+            source_views_enabled: true,
+            refresh_after_ms: None,
+        };
+
+        let compiled = compile_layout_ir_with_cache(&layout, &mut cache).unwrap();
+
+        assert_eq!(cache.refresh_after_ms, Some(75));
+        assert_eq!(measured_rows(&compiled, 10), rendered_rows(&compiled, 10));
+        let BlockLayout::Vbox(items) = compiled else {
+            panic!("refresh wrappers must be stripped from display IR");
+        };
+        let BlockLayout::Leaf(IrLeaf::Runs(spec)) = &items[0] else {
+            panic!("refresh child layout changed during compilation");
+        };
+        assert_eq!(spec.lines.0[0][0].text, "select me");
+        assert!(spec.lines.0[0][0].selectable);
+        assert_eq!(spec.continuation_indent, 2);
+    }
+
+    #[test]
+    fn refresh_deadlines_are_replaced_removed_retained_and_evicted_with_nodes() {
+        let start = std::time::Instant::now();
+        let key = DisplayCacheKey::new(1, 0, 0, None, 0);
+        let layout = compile_block(&Block::Text {
+            content: "cached".into(),
+        });
+        let first = RenderNodeId::Block(BlockId::new(1));
+        let second = RenderNodeId::Block(BlockId::new(2));
+        let static_node = RenderNodeId::Block(BlockId::new(3));
+        let mut model = DisplayModel::new();
+        model.set_budget(usize::MAX);
+        model.insert_compiled_blocks(vec![
+            (
+                first,
+                key,
+                layout.clone(),
+                Some(start + std::time::Duration::from_millis(100)),
+            ),
+            (
+                second,
+                key,
+                layout.clone(),
+                Some(start + std::time::Duration::from_millis(200)),
+            ),
+            (static_node, key, layout.clone(), None),
+        ]);
+
+        assert_eq!(
+            model.next_refresh_at(),
+            Some(start + std::time::Duration::from_millis(100))
+        );
+        assert!(model
+            .expire_due_refreshes(start + std::time::Duration::from_millis(99))
+            .is_empty());
+        assert_eq!(
+            model.expire_due_refreshes(start + std::time::Duration::from_millis(100)),
+            vec![first]
+        );
+        assert!(model.blocks.contains_key(&second));
+        assert!(model.blocks.contains_key(&static_node));
+
+        model.insert_compiled_blocks(vec![(second, key, layout.clone(), None)]);
+        assert_eq!(model.next_refresh_at(), None);
+
+        model.insert_compiled_blocks(vec![(
+            first,
+            key,
+            layout.clone(),
+            Some(start + std::time::Duration::from_secs(1)),
+        )]);
+        model.retain_nodes([static_node]);
+        assert_eq!(model.next_refresh_at(), None);
+
+        model.insert_compiled_blocks(vec![(
+            first,
+            key,
+            layout,
+            Some(start + std::time::Duration::from_secs(1)),
+        )]);
+        model.set_budget(0);
+        assert!(model.blocks.is_empty());
+        assert_eq!(model.next_refresh_at(), None);
+    }
+
+    #[test]
+    fn due_refresh_recompiles_only_its_top_level_node() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::User {
+            text: "dynamic".into(),
+            image_labels: Vec::new(),
+            command: false,
+        });
+        transcript.push(Block::User {
+            text: "static".into(),
+            image_labels: Vec::new(),
+            command: false,
+        });
+        let ids = transcript.history.order.clone();
+        let keys = ids
+            .iter()
+            .map(|id| base_key(&transcript.history, *id))
+            .collect::<Vec<_>>();
+        let lua = smelt_core::lua::runtime::LuaRuntime::new();
+        lua.lua
+            .load(
+                r#"
+                smelt.transcript.set_renderer(function(node)
+                  local view = smelt.layout.text(node.text)
+                  if node.text == "dynamic" then
+                    return smelt.layout.refresh(view, { after_ms = 100 })
+                  end
+                  return view
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let renderer_generation = lua.transcript_renderer_generation();
+        let renderer_cache_key = lua.transcript_renderer_cache_key();
+        let start = std::time::Instant::now();
+        let env = TranscriptRenderEnv {
+            lua: &lua,
+            renderer_generation,
+            renderer_cache_key,
+            now_ms: 1_700_000_000_000,
+            refresh_now: start,
+        };
+        let mut model = DisplayModel::new();
+
+        assert_eq!(
+            model.ensure_many(env.clone(), &transcript.history, &ids, &keys),
+            2
+        );
+        assert_eq!(
+            model.next_refresh_at(),
+            Some(start + std::time::Duration::from_millis(100))
+        );
+        assert_eq!(
+            model.expire_due_refreshes(start + std::time::Duration::from_millis(100)),
+            vec![RenderNodeId::Block(ids[0])]
+        );
+        assert_eq!(
+            model.ensure_many(
+                TranscriptRenderEnv {
+                    refresh_now: start + std::time::Duration::from_millis(100),
+                    ..env
+                },
+                &transcript.history,
+                &ids,
+                &keys,
+            ),
+            1
+        );
+        assert_eq!(model.blocks.len(), 2);
     }
 }

@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* bash ls -ld /Users/leo/.dotfiles; realpath /Users/leo/.dotfiles
-  2>/dev/null || true; cd
-  /Users/leo/dev/rust/smelt/.worktrees/fix-path-parsing && cargo
-  test -p smelt-core permissions::tests
+* bash ls -ld /Users/leo/.dotfiles; realpath                 14:37:03
+       /Users/leo/.dotfiles 2>/dev/null || true; cd /Users/
+       leo/dev/rust/smelt/.worktrees/fix-path-parsing &&
+       cargo test -p smelt-core permissions::tests
 
 
 

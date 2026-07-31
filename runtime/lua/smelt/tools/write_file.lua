@@ -9,13 +9,28 @@ local function file_view(args)
   })
 end
 
-transcript_defaults.__tool_body_renderers.write_file = function(block)
-  return file_view(block.args or {})
-end
-
-transcript_defaults.__tool_collapsed_details.write_file = function(block)
-  return "wrote " .. smelt.text.line_count((block.args and block.args.content) or "") .. " lines"
-end
+smelt.transcript.register_tool("write_file", {
+  cache_key = "smelt.tool-presentation.write_file:v1",
+  body = function(block, ctx, opts)
+    if block.output and block.output.is_error then
+      return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
+    end
+    return file_view(block.args or {})
+  end,
+  draft = function(block)
+    return file_view(block.args or {})
+  end,
+  compact = function(block, ctx)
+    if block.output and block.output.is_error then
+      return transcript_defaults.render_tool_output_tail(block.output, ctx, {
+        rows = (ctx and ctx.limits and ctx.limits.collapsed_error_rows) or 4,
+        keep = "head",
+        marker = "below",
+      })
+    end
+    return "wrote " .. smelt.text.line_count((block.args and block.args.content) or "") .. " lines"
+  end,
+})
 
 smelt.tools.register({
   name = "write_file",
@@ -46,9 +61,6 @@ smelt.tools.register({
   end,
   preview = function(args)
     return file_view(args)
-  end,
-  draft_preview = function(args)
-    return file_view(args or {})
   end,
   execute = function(args)
     local path = args.file_path or ""

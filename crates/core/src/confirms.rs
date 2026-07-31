@@ -78,6 +78,7 @@ mod tests {
 
     fn req(id: u64) -> ConfirmRequest {
         ConfirmRequest {
+            invocation_id: protocol::InvocationId::new(id),
             call_id: format!("call-{id}"),
             tool_name: "test".into(),
             args: Default::default(),

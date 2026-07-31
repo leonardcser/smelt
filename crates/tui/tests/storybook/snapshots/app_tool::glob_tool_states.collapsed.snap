@@ -1,9 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 607
-expression: frame.text()
+expression: text
 ---
-* explore ×3 (1 error)
+* explore ×3 (1 error)                                         14:37:03
   glob **/*.rs in crates/term
   glob missing/**/*.rs
   glob [invalid

@@ -8,17 +8,21 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Handle to an in-flight tool call; full mutable state lives in `tool_states[call_id]`.
+/// Handle to an in-flight tool call; full mutable state lives on its transcript block.
 pub struct ActiveTool {
-    pub call_id: String,
+    pub invocation_id: protocol::InvocationId,
     pub(crate) block_id: BlockId,
     timer: PausedTimer,
 }
 
 impl ActiveTool {
-    pub fn new(call_id: String, block_id: BlockId, start_time: Instant) -> Self {
+    pub fn new(
+        invocation_id: protocol::InvocationId,
+        block_id: BlockId,
+        start_time: Instant,
+    ) -> Self {
         Self {
-            call_id,
+            invocation_id,
             block_id,
             timer: PausedTimer::new(start_time),
         }
@@ -39,6 +43,7 @@ impl ActiveTool {
 
 #[derive(Clone)]
 pub struct ConfirmRequest {
+    pub invocation_id: protocol::InvocationId,
     pub call_id: String,
     pub tool_name: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
@@ -70,15 +75,6 @@ impl ToolStatus {
             ToolStatus::Denied => "denied",
         }
     }
-
-    pub fn hl_group(self) -> &'static str {
-        match self {
-            ToolStatus::Pending => "SmeltToolPending",
-            ToolStatus::Ok => "SmeltSuccess",
-            ToolStatus::Err | ToolStatus::Denied => "ErrorMsg",
-            ToolStatus::Confirm => "SmeltAccent",
-        }
-    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -90,13 +86,17 @@ pub struct ToolOutput {
 
 pub type ToolOutputRef = Box<ToolOutput>;
 
-/// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id`.
+/// Mutable sidecar for a committed `Block::ToolCall`, keyed by its `BlockId`.
 /// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
 /// layout can be cached permanently.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolState {
     pub status: ToolStatus,
     pub elapsed: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub called_at_ms: Option<u64>,
+    #[serde(default)]
+    pub elapsed_active: bool,
     pub output: Option<ToolOutputRef>,
     pub user_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +122,9 @@ impl ToolState {
         #[derive(serde::Serialize)]
         struct DisplayState<'a> {
             status: ToolStatus,
+            elapsed_ms: Option<u64>,
+            called_at_ms: Option<u64>,
+            elapsed_active: bool,
             output: Option<DisplayOutput<'a>>,
             preview_output: Option<DisplayOutput<'a>>,
             user_message: &'a Option<String>,
@@ -140,6 +143,9 @@ impl ToolState {
 
         crate::utils::hash_serializable(&DisplayState {
             status: self.status,
+            elapsed_ms: self.elapsed.map(|elapsed| elapsed.as_millis() as u64),
+            called_at_ms: self.called_at_ms,
+            elapsed_active: self.elapsed_active,
             output: self.output.as_deref().map(display_output),
             preview_output: self.preview_output.as_deref().map(display_output),
             user_message: &self.user_message,
@@ -572,7 +578,7 @@ pub struct TranscriptBlockRecord {
     #[serde(default)]
     pub content_hash: u64,
     pub origin: Option<BlockOrigin>,
-    pub tool_state: Option<(String, ToolState)>,
+    pub tool_state: Option<ToolState>,
 }
 
 #[derive(Clone)]
@@ -1029,10 +1035,7 @@ pub fn transcript_block_row_with_block_idx(
     block_idx: u64,
     record: &TranscriptBlockRecord,
 ) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
-    let indexed_text = transcript_indexed_text(
-        &record.block,
-        record.tool_state.as_ref().map(|(_, state)| state),
-    );
+    let indexed_text = transcript_indexed_text(&record.block, record.tool_state.as_ref());
     let block_json = serde_json::to_string(&record.block)?;
     let origin_json = record
         .origin
@@ -1151,7 +1154,7 @@ impl StoredBlockRef {
         preview: String,
     ) -> (BlockId, Arc<Self>) {
         let block = &record.block;
-        let tool_state = record.tool_state.as_ref().map(|(_, state)| state);
+        let tool_state = record.tool_state.as_ref();
         let kind = StoredBlockKind::from_kind(block.kind())
             .expect("transcript blocks use a known block kind");
         let tool_call_id = block.tool_call_id().map(str::to_string);
@@ -1477,7 +1480,7 @@ pub struct BlockHistory {
     pub order: Vec<BlockId>,
     entries: HashMap<BlockId, BlockEntry>,
     pub(crate) next_id: u64,
-    tool_states: HashMap<String, ToolStateEntry>,
+    tool_states: HashMap<BlockId, ToolStateEntry>,
     /// Blocks that transitioned `Streaming` → `Done` since last drain;
     /// drained by the app loop to emit `block_done` autocmds.
     pub finished_blocks: Vec<BlockId>,
@@ -1723,20 +1726,18 @@ impl BlockHistory {
         }
     }
 
-    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
-        self.tool_states
-            .get(call_id)
-            .and_then(ToolStateEntry::state)
+    pub fn tool_state(&self, id: BlockId) -> Option<&ToolState> {
+        self.tool_states.get(&id).and_then(ToolStateEntry::state)
     }
 
-    pub fn tool_status(&self, call_id: &str) -> Option<ToolStatus> {
-        self.tool_states.get(call_id).map(ToolStateEntry::status)
+    pub fn tool_status(&self, id: BlockId) -> Option<ToolStatus> {
+        self.tool_states.get(&id).map(ToolStateEntry::status)
     }
 
-    pub fn tool_states(&self) -> impl Iterator<Item = (&str, &ToolState)> {
+    pub fn tool_states(&self) -> impl Iterator<Item = (BlockId, &ToolState)> {
         self.tool_states
             .iter()
-            .filter_map(|(call_id, state)| state.state().map(|state| (call_id.as_str(), state)))
+            .filter_map(|(id, state)| state.state().map(|state| (*id, state)))
     }
 
     pub fn len(&self) -> usize {
@@ -1915,11 +1916,7 @@ impl BlockHistory {
             return None;
         }
         let block = entry.cloned_block()?;
-        let tool_state = block.tool_call_id().and_then(|call_id| {
-            self.tool_state(call_id)
-                .cloned()
-                .map(|state| (call_id.to_string(), state))
-        });
+        let tool_state = self.tool_state(id).cloned();
         Some(TranscriptBlockRecordWithId {
             block_id: id,
             record: TranscriptBlockRecord {
@@ -1942,10 +1939,8 @@ impl BlockHistory {
             }
         }
         let record = self.block_record_with_id(id)?;
-        let indexed = transcript_indexed_text(
-            &record.record.block,
-            record.record.tool_state.as_ref().map(|(_, state)| state),
-        );
+        let indexed =
+            transcript_indexed_text(&record.record.block, record.record.tool_state.as_ref());
         let (_, stored) = StoredBlockRef::from_record(
             record_index,
             id,
@@ -1976,7 +1971,7 @@ impl BlockHistory {
             .map(|(record_index, record)| {
                 let indexed = transcript_indexed_text(
                     &record.record.block,
-                    record.record.tool_state.as_ref().map(|(_, state)| state),
+                    record.record.tool_state.as_ref(),
                 );
                 StoredBlockRef::from_record(
                     record_index,
@@ -2014,15 +2009,13 @@ impl BlockHistory {
         for (id, stored) in records {
             self.next_id = self.next_id.max(id.0.saturating_add(1));
             next_order.push(id);
-            if let Some(call_id) = stored.tool_call_id.as_ref() {
-                let entry = self.tool_states.entry(call_id.clone());
-                if let std::collections::hash_map::Entry::Vacant(entry) = entry {
-                    if let Some(status) = stored.tool_status {
-                        entry.insert(ToolStateEntry::Stored {
-                            status,
-                            display_hash: stored.tool_display_hash,
-                        });
-                    }
+            let state_entry = self.tool_states.entry(id);
+            if let std::collections::hash_map::Entry::Vacant(state_entry) = state_entry {
+                if let Some(status) = stored.tool_status {
+                    state_entry.insert(ToolStateEntry::Stored {
+                        status,
+                        display_hash: stored.tool_display_hash,
+                    });
                 }
             }
             match self.entries.remove(&id) {
@@ -2086,18 +2079,14 @@ impl BlockHistory {
         let tool_state_weight = record
             .tool_state
             .as_ref()
-            .map_or(0, |(_, state)| tool_state_retained_bytes(state));
+            .map_or(0, tool_state_retained_bytes);
         let block_weight = block_retained_bytes(&block);
         let weight = block_weight.saturating_add(tool_state_weight);
         let had_entry = self.entries.contains_key(&id);
         debug_assert_eq!(had_entry, self.order.contains(&id));
-        if let Some((call_id, state)) = record.tool_state {
-            if !matches!(
-                self.tool_states.get(&call_id),
-                Some(ToolStateEntry::Live(_))
-            ) {
-                self.tool_states
-                    .insert(call_id, ToolStateEntry::Hydrated(state));
+        if let Some(state) = record.tool_state {
+            if !matches!(self.tool_states.get(&id), Some(ToolStateEntry::Live(_))) {
+                self.tool_states.insert(id, ToolStateEntry::Hydrated(state));
             }
         }
         if !had_entry {
@@ -2133,11 +2122,8 @@ impl BlockHistory {
             origin: stored.origin,
             ..BlockMetadata::default()
         };
-        if let Some(call_id) = stored.tool_call_id.as_ref() {
-            if let Some(ToolStateEntry::Hydrated(state)) = self.tool_states.remove(call_id) {
-                self.tool_states
-                    .insert(call_id.clone(), ToolStateEntry::Live(state));
-            }
+        if let Some(ToolStateEntry::Hydrated(state)) = self.tool_states.remove(&id) {
+            self.tool_states.insert(id, ToolStateEntry::Live(state));
         }
         self.insert_entry(
             id,
@@ -2163,22 +2149,17 @@ impl BlockHistory {
             unreachable!("entry was checked as hydrated");
         };
         let weight = block_weight.saturating_add(tool_state_weight);
-        if let Some(call_id) = stored.tool_call_id.as_ref() {
-            if matches!(
-                self.tool_states.get(call_id),
-                Some(ToolStateEntry::Hydrated(_))
-            ) {
-                if let Some(status) = stored.tool_status {
-                    self.tool_states.insert(
-                        call_id.clone(),
-                        ToolStateEntry::Stored {
-                            status,
-                            display_hash: stored.tool_display_hash,
-                        },
-                    );
-                } else {
-                    self.tool_states.remove(call_id);
-                }
+        if matches!(self.tool_states.get(&id), Some(ToolStateEntry::Hydrated(_))) {
+            if let Some(status) = stored.tool_status {
+                self.tool_states.insert(
+                    id,
+                    ToolStateEntry::Stored {
+                        status,
+                        display_hash: stored.tool_display_hash,
+                    },
+                );
+            } else {
+                self.tool_states.remove(&id);
             }
         }
         self.insert_entry(id, BlockEntry::Stored(stored));
@@ -2194,19 +2175,17 @@ impl BlockHistory {
             unreachable!("entry was checked as live");
         };
         let mut weight = block_retained_bytes(&live.block);
-        if let Some(call_id) = stored.tool_call_id.as_ref() {
-            if let Some(ToolStateEntry::Live(state)) = self.tool_states.remove(call_id) {
-                weight = weight.saturating_add(tool_state_retained_bytes(&state));
-            }
-            if let Some(status) = stored.tool_status {
-                self.tool_states.insert(
-                    call_id.clone(),
-                    ToolStateEntry::Stored {
-                        status,
-                        display_hash: stored.tool_display_hash,
-                    },
-                );
-            }
+        if let Some(ToolStateEntry::Live(state)) = self.tool_states.remove(&id) {
+            weight = weight.saturating_add(tool_state_retained_bytes(&state));
+        }
+        if let Some(status) = stored.tool_status {
+            self.tool_states.insert(
+                id,
+                ToolStateEntry::Stored {
+                    status,
+                    display_hash: stored.tool_display_hash,
+                },
+            );
         }
         self.insert_entry(id, BlockEntry::Stored(stored));
         weight
@@ -2223,8 +2202,8 @@ impl BlockHistory {
     pub fn materialized_retained_bytes(&self, id: BlockId) -> usize {
         match self.entries.get(&id) {
             Some(BlockEntry::Live(live)) => block_retained_bytes(&live.block).saturating_add(
-                self.tool_call_id(id)
-                    .and_then(|call_id| self.tool_states.get(call_id))
+                self.tool_states
+                    .get(&id)
                     .and_then(|entry| match entry {
                         ToolStateEntry::Live(state) => Some(tool_state_retained_bytes(state)),
                         _ => None,
@@ -2267,8 +2246,7 @@ impl BlockHistory {
     pub fn tool_state_metadata_retained_bytes(&self) -> usize {
         self.tool_states
             .capacity()
-            .saturating_mul(std::mem::size_of::<(String, ToolStateEntry)>())
-            .saturating_add(self.tool_states.keys().map(String::capacity).sum::<usize>())
+            .saturating_mul(std::mem::size_of::<(BlockId, ToolStateEntry)>())
     }
 
     pub fn block_metadata_retained_bytes(&self) -> usize {
@@ -2429,21 +2407,14 @@ impl BlockHistory {
         let block = normalized;
         self.next_id = self.next_id.max(id.0.saturating_add(1));
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
-        let tool_state = block.tool_call_id().and_then(|call_id| {
-            self.tool_state(call_id)
-                .cloned()
-                .map(|state| (call_id.to_string(), state))
-        });
+        let tool_state = self.tool_state(id).cloned();
         let record = TranscriptBlockRecord {
             block,
             content_hash: hash,
             origin,
             tool_state,
         };
-        let indexed = transcript_indexed_text(
-            &record.block,
-            record.tool_state.as_ref().map(|(_, state)| state),
-        );
+        let indexed = transcript_indexed_text(&record.block, record.tool_state.as_ref());
         let (_, stored) = StoredBlockRef::from_record(
             order_index,
             id,
@@ -2456,7 +2427,7 @@ impl BlockHistory {
         let tool_state_weight = record
             .tool_state
             .as_ref()
-            .map_or(0, |(_, state)| tool_state_retained_bytes(state));
+            .map_or(0, tool_state_retained_bytes);
         let entry = BlockEntry::Hydrated {
             stored,
             block: Box::new(block),
@@ -2529,9 +2500,7 @@ impl BlockHistory {
             return None;
         }
         self.order.remove(idx);
-        if let Some(call_id) = self.tool_call_id(id).map(str::to_string) {
-            self.tool_states.remove(&call_id);
-        }
+        self.tool_states.remove(&id);
         let block = self
             .remove_entry(id)
             .and_then(BlockEntry::into_materialized);
@@ -2540,54 +2509,40 @@ impl BlockHistory {
         block
     }
 
-    pub(crate) fn push_with_state(
-        &mut self,
-        block: Block,
-        call_id: String,
-        state: ToolState,
-    ) -> BlockId {
-        self.tool_states
-            .insert(call_id, ToolStateEntry::Live(state));
-        self.push(block)
+    pub(crate) fn push_with_state(&mut self, block: Block, state: ToolState) -> BlockId {
+        let id = self.push(block);
+        self.tool_states.insert(id, ToolStateEntry::Live(state));
+        id
     }
 
     pub(crate) fn push_with_state_and_origin(
         &mut self,
         block: Block,
-        call_id: String,
         state: ToolState,
         origin: BlockOrigin,
     ) -> BlockId {
-        self.tool_states
-            .insert(call_id, ToolStateEntry::Live(state));
-        self.push_with_origin(block, origin)
+        let id = self.push_with_origin(block, origin);
+        self.tool_states.insert(id, ToolStateEntry::Live(state));
+        id
     }
 
     pub fn push_hydrated_block_with_state_and_origin(
         &mut self,
         block: Block,
-        call_id: String,
         state: ToolState,
         origin: BlockOrigin,
     ) -> BlockId {
-        self.tool_states
-            .insert(call_id, ToolStateEntry::Hydrated(state));
-        self.add_hydrated_block(None, block, Some(origin), None)
+        let id = BlockId(self.next_id);
+        self.tool_states.insert(id, ToolStateEntry::Hydrated(state));
+        self.add_hydrated_block_with_id(id, None, block, Some(origin), None)
     }
 
-    pub fn update_tool_state(
-        &mut self,
-        call_id: &str,
-        mutator: impl FnOnce(&mut ToolState),
-    ) -> bool {
-        let dirty_idx = self
-            .order
-            .iter()
-            .position(|id| self.tool_call_id(*id) == Some(call_id));
-        if let Some(id) = dirty_idx.and_then(|idx| self.order.get(idx).copied()) {
+    pub fn update_tool_state(&mut self, id: BlockId, mutator: impl FnOnce(&mut ToolState)) -> bool {
+        let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
+        if dirty_idx.is_some() {
             self.promote_hydrated(id);
         }
-        let Some(ToolStateEntry::Live(state)) = self.tool_states.get_mut(call_id) else {
+        let Some(ToolStateEntry::Live(state)) = self.tool_states.get_mut(&id) else {
             return false;
         };
         mutator(state);
@@ -2640,16 +2595,9 @@ impl BlockHistory {
         self.mark_record_dirty_for_id(id);
     }
 
-    pub(crate) fn rewrite_with_tool_state(
-        &mut self,
-        id: BlockId,
-        block: Block,
-        call_id: String,
-        state: ToolState,
-    ) {
+    pub(crate) fn rewrite_with_tool_state(&mut self, id: BlockId, block: Block, state: ToolState) {
         self.rewrite(id, block);
-        self.tool_states
-            .insert(call_id, ToolStateEntry::Live(state));
+        self.tool_states.insert(id, ToolStateEntry::Live(state));
         self.bump_generation();
         self.mark_record_dirty_for_id(id);
     }
@@ -2661,6 +2609,7 @@ impl BlockHistory {
         let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
         self.order.retain(|candidate| *candidate != id);
         self.remove_entry(id);
+        self.tool_states.remove(&id);
         self.bump_order_generation();
         if let Some(idx) = dirty_idx {
             self.mark_record_dirty_from(idx);
@@ -2713,8 +2662,8 @@ impl BlockHistory {
     }
 
     pub fn sidecar_hash(&self, id: BlockId) -> u64 {
-        self.tool_call_id(id)
-            .and_then(|call_id| self.tool_states.get(call_id))
+        self.tool_states
+            .get(&id)
             .map_or(0, ToolStateEntry::display_hash)
     }
 
@@ -2742,12 +2691,13 @@ impl BlockHistory {
     }
 
     pub(crate) fn gc_tool_states(&mut self) {
-        let live: HashSet<String> = self
+        let live: HashSet<BlockId> = self
             .order
             .iter()
-            .filter_map(|id| self.tool_call_id(*id).map(str::to_string))
+            .copied()
+            .filter(|id| self.tool_call_id(*id).is_some())
             .collect();
-        self.tool_states.retain(|cid, _| live.contains(cid));
+        self.tool_states.retain(|id, _| live.contains(id));
     }
 }
 
@@ -2858,6 +2808,8 @@ mod tests {
         ToolState {
             status: ToolStatus::Ok,
             elapsed: None,
+            called_at_ms: None,
+            elapsed_active: false,
             output: Some(Box::new(ToolOutput {
                 content: content.to_string(),
                 is_error: false,
@@ -2952,9 +2904,9 @@ mod tests {
             },
             content_hash: 42,
             origin: None,
-            tool_state: Some((
-                "call-1".to_string(),
-                indexed_tool_state_with_content("alpha λ", serde_json::json!({})),
+            tool_state: Some(indexed_tool_state_with_content(
+                "alpha λ",
+                serde_json::json!({}),
             )),
         };
 
@@ -3281,6 +3233,8 @@ mod tests {
         let state = ToolState {
             status: ToolStatus::Ok,
             elapsed: None,
+            called_at_ms: Some(1_742_573_823_000),
+            elapsed_active: false,
             output: Some(Box::new(ToolOutput {
                 content: "hi".into(),
                 is_error: false,
@@ -3298,7 +3252,7 @@ mod tests {
             },
             content_hash: 0,
             origin: Some(BlockOrigin::History(1)),
-            tool_state: Some(("call-1".into(), state.clone())),
+            tool_state: Some(state.clone()),
         };
         let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         assert_eq!(history.block_metadata_retained_bytes(), 0);
@@ -3321,10 +3275,14 @@ mod tests {
         );
         assert!(matches!(history.block(id), Some(Block::ToolCall { name, .. }) if name == "bash"));
         let output = history
-            .tool_state("call-1")
+            .tool_state(id)
             .and_then(|tool_state| tool_state.output.as_ref())
             .expect("hydrated tool output");
         assert_eq!(output.content, "hi");
+        assert_eq!(
+            history.tool_state(id).and_then(|state| state.called_at_ms),
+            Some(1_742_573_823_000)
+        );
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(1)));
 
         assert_eq!(history.evict_hydrated(id), expected_weight);
@@ -3333,8 +3291,8 @@ mod tests {
         assert_eq!(history.hydrated_block_count(), 0);
         assert_eq!(history.hydrated_blocks().count(), 0);
         assert_eq!(history.hydrated_retained_bytes(), 0);
-        assert_eq!(history.tool_status("call-1"), Some(ToolStatus::Ok));
-        assert!(history.tool_state("call-1").is_none());
+        assert_eq!(history.tool_status(id), Some(ToolStatus::Ok));
+        assert!(history.tool_state(id).is_none());
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(1)));
     }
 
@@ -3414,6 +3372,8 @@ mod tests {
         let state = ToolState {
             status: ToolStatus::Ok,
             elapsed: None,
+            called_at_ms: None,
+            elapsed_active: false,
             output: Some(Box::new(ToolOutput {
                 content: "before".into(),
                 is_error: false,
@@ -3431,14 +3391,14 @@ mod tests {
             },
             content_hash: 0,
             origin: Some(BlockOrigin::History(0)),
-            tool_state: Some(("call-1".into(), state)),
+            tool_state: Some(state),
         };
         let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         let id = history.order[0];
         let stored = history.stored_ref(id).cloned().expect("stored ref");
         assert!(history.install_hydrated_record(id, stored, record));
 
-        assert!(history.update_tool_state("call-1", |tool_state| {
+        assert!(history.update_tool_state(id, |tool_state| {
             tool_state.output.as_mut().unwrap().content = "after".into();
         }));
 
@@ -3449,7 +3409,7 @@ mod tests {
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(0)));
         assert_eq!(
             history
-                .tool_state("call-1")
+                .tool_state(id)
                 .and_then(|tool_state| tool_state.output.as_ref())
                 .map(|output| output.content.as_str()),
             Some("after")
@@ -3649,6 +3609,8 @@ mod tests {
         ToolState {
             status: ToolStatus::Pending,
             elapsed: None,
+            called_at_ms: None,
+            elapsed_active: false,
             output: None,
             user_message: None,
             preview_output: None,
@@ -3668,12 +3630,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_hash_ignores_elapsed_ticks() {
+    fn tool_display_hash_includes_raw_timing_facts() {
         let mut a = pending_state();
-        a.elapsed = Some(std::time::Duration::from_secs(1));
-        let mut b = pending_state();
-        b.elapsed = Some(std::time::Duration::from_secs(2));
-        assert_eq!(a.display_hash(), b.display_hash());
+        a.elapsed = Some(std::time::Duration::from_millis(1_000));
+        let mut b = a.clone();
+        b.elapsed = Some(std::time::Duration::from_millis(1_100));
+        assert_ne!(a.display_hash(), b.display_hash());
+
+        b = a.clone();
+        b.called_at_ms = Some(1_700_000_000_000);
+        assert_ne!(a.display_hash(), b.display_hash());
+
+        b = a.clone();
+        b.elapsed_active = true;
+        assert_ne!(a.display_hash(), b.display_hash());
 
         b.status = ToolStatus::Ok;
         assert_ne!(a.display_hash(), b.display_hash());
@@ -3966,25 +3936,24 @@ mod tests {
         history.push(Block::Text {
             content: "a".into(),
         });
-        history.push_with_state(
+        let tool_id = history.push_with_state(
             Block::ToolCall {
                 call_id: "tc1".into(),
                 name: "x".into(),
                 summary: "s".into(),
                 args: HashMap::new(),
             },
-            "tc1".into(),
             pending_state(),
         );
         history.push(Block::Text {
             content: "c".into(),
         });
         assert_eq!(history.len(), 3);
-        assert!(history.tool_states.contains_key("tc1"));
+        assert!(history.tool_states.contains_key(&tool_id));
         // Truncate to before the ToolCall - the tool_state entry should be GC'd.
         history.truncate(1);
         assert_eq!(history.len(), 1);
-        assert!(!history.tool_states.contains_key("tc1"));
+        assert!(!history.tool_states.contains_key(&tool_id));
     }
 
     #[test]
@@ -4063,24 +4032,23 @@ mod tests {
     #[test]
     fn remove_unoriginated_at_gcs_tool_state() {
         let mut history = BlockHistory::new();
-        history.push_with_state(
+        let tool_id = history.push_with_state(
             Block::ToolCall {
                 call_id: "tc1".into(),
                 name: "x".into(),
                 summary: "s".into(),
                 args: HashMap::new(),
             },
-            "tc1".into(),
             pending_state(),
         );
-        assert!(history.tool_states.contains_key("tc1"));
+        assert!(history.tool_states.contains_key(&tool_id));
 
         assert!(matches!(
             history.remove_unoriginated_at(0),
             Some(Block::ToolCall { call_id, .. }) if call_id == "tc1"
         ));
         assert!(history.is_empty());
-        assert!(!history.tool_states.contains_key("tc1"));
+        assert!(!history.tool_states.contains_key(&tool_id));
     }
 
     #[test]

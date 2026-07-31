@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* smelt_reload schedule end-of-turn reload
+* smelt_reload schedule end-of-turn reload                   14:37:03
 
 
 

@@ -142,14 +142,16 @@ function smelt.tools.read_file_summary(args, content, ctx)
   return smelt.tools.path_summary(args.file_path or "", ctx, { suffix = range_display(args, content) })
 end
 
-transcript_defaults.__tool_body_renderers.read_file = function(block, ctx)
-  if not block.output then return nil end
-  return transcript_defaults.render_tool_output_tail(block.output, ctx)
-end
-
-transcript_defaults.__tool_collapsed_details.read_file = function(block)
-  return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
-end
+smelt.transcript.register_tool("read_file", {
+  cache_key = "smelt.tool-presentation.read_file:v1",
+  body = function(block, ctx)
+    if not block.output then return nil end
+    return transcript_defaults.render_tool_output_tail(block.output, ctx)
+  end,
+  compact = function(block)
+    return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
+  end,
+})
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "read_file",

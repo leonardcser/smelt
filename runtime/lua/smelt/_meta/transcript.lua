@@ -45,6 +45,11 @@ transcript.follow_tail = nil
 ---@type fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?
 transcript.get_renderer = nil
 
+--- Return a copy of the current presentation policy for `name`, or nil. Mutating
+--- the returned table has no effect; re-register the tool to change its presentation.
+---@type fun(name: string): smelt.transcript.ToolPresentation?
+transcript.get_tool_presentation = nil
+
 --- Bump the renderer generation after changing closed-over state that affects
 --- renderer output without calling `set_renderer`, `extend_renderer`, or a
 --- registration's `:remove()`. This also opts out of persisted DisplayIR until
@@ -76,6 +81,14 @@ transcript.loaded_text_expensive = nil
 --- Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 ---@type fun(row: integer): table?
 transcript.node_at_row = nil
+
+--- Register or replace presentation policy for a tool. The supported fields are
+--- snapshotted, so later table mutation has no effect; re-register to change behavior
+--- or cache keys. The returned registration removes only this exact replacement.
+--- Registering presentation changes rebuilds the composed root renderer so all
+--- cached standalone and grouped nodes invalidate.
+---@type fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg
+transcript.register_tool = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.

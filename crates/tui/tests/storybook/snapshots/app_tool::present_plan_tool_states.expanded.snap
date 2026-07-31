@@ -1,11 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 464
-expression: frame.text()
+expression: text
 ---
-* present_plan Parser refactor
+* present_plan Parser refactor                                             14:37:03
 
-* present_plan Parser refactor
+* present_plan Parser refactor                                             14:37:03
     1   # Goal
     2   Refactor parser state.
     3

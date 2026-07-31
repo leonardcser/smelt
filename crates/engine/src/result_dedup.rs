@@ -90,6 +90,7 @@ mod tests {
                 metadata: None,
             },
             elapsed_ms: None,
+            called_at_ms: None,
         }
     }
 

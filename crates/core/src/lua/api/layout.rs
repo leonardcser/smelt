@@ -1,13 +1,12 @@
 //! `smelt.layout` - declarative, width-independent content layout returned from Lua display callbacks.
 
 use crate::content::block_layout::{
-    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, ElapsedSpec,
-    FileViewSpec, GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RowPrefixSpec,
+    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, FileViewSpec,
+    GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RefreshSpec, RowPrefixSpec,
     RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
-use crate::transcript_model::ToolStatus;
 use mlua::prelude::*;
 
 pub struct LuaBlockLayout(pub BlockLayout);
@@ -89,88 +88,6 @@ fn style_spec_from_opts(opts: Option<&mlua::Table>) -> LuaResult<StyleSpec> {
     })
 }
 
-fn tool_status_from_label(label: &str) -> LuaResult<ToolStatus> {
-    match label {
-        "pending" => Ok(ToolStatus::Pending),
-        "confirm" => Ok(ToolStatus::Confirm),
-        "ok" => Ok(ToolStatus::Ok),
-        "err" => Ok(ToolStatus::Err),
-        "denied" => Ok(ToolStatus::Denied),
-        other => Err(mlua::Error::external(format!(
-            "smelt.layout.elapsed: invalid status `{other}`"
-        ))),
-    }
-}
-
-fn elapsed_spec_from_value(
-    value: mlua::Value,
-    opts: Option<&mlua::Table>,
-) -> LuaResult<ElapsedSpec> {
-    let source = match value {
-        mlua::Value::Table(t) => t,
-        mlua::Value::String(call_id) => {
-            let lua = call_id.to_str().map_err(mlua::Error::external)?.to_string();
-            let table =
-                opts.and_then(|opts| opts.get::<Option<mlua::Table>>("state").ok().flatten());
-            if let Some(table) = table {
-                table.set("call_id", lua)?;
-                table
-            } else {
-                return Ok(ElapsedSpec {
-                    call_id: lua,
-                    status: opts
-                        .and_then(|opts| opts.get::<Option<String>>("status").ok().flatten())
-                        .as_deref()
-                        .map(tool_status_from_label)
-                        .transpose()?
-                        .unwrap_or(ToolStatus::Pending),
-                    fallback_secs: opts
-                        .and_then(|opts| opts.get::<Option<u64>>("secs").ok().flatten()),
-                    hl_group: opts
-                        .and_then(|opts| opts.get::<Option<String>>("hl_group").ok().flatten())
-                        .or_else(|| {
-                            opts.and_then(|opts| opts.get::<Option<String>>("hl").ok().flatten())
-                        }),
-                    dim: opts
-                        .and_then(|opts| opts.get::<Option<bool>>("dim").ok().flatten())
-                        .unwrap_or(true),
-                    selectable: opts
-                        .and_then(|opts| opts.get::<Option<bool>>("selectable").ok().flatten())
-                        .unwrap_or(false),
-                });
-            }
-        }
-        other => {
-            return Err(mlua::Error::external(format!(
-                "smelt.layout.elapsed: expected elapsed table or call_id string, got {}",
-                other.type_name()
-            )))
-        }
-    };
-    let status = source
-        .get::<Option<String>>("status")?
-        .as_deref()
-        .map(tool_status_from_label)
-        .transpose()?
-        .unwrap_or(ToolStatus::Pending);
-    Ok(ElapsedSpec {
-        call_id: source.get::<Option<String>>("call_id")?.unwrap_or_default(),
-        status,
-        fallback_secs: source
-            .get::<Option<u64>>("secs")?
-            .or(source.get::<Option<u64>>("elapsed_secs")?),
-        hl_group: opts
-            .and_then(|opts| opts.get::<Option<String>>("hl_group").ok().flatten())
-            .or_else(|| opts.and_then(|opts| opts.get::<Option<String>>("hl").ok().flatten())),
-        dim: opts
-            .and_then(|opts| opts.get::<Option<bool>>("dim").ok().flatten())
-            .unwrap_or(true),
-        selectable: opts
-            .and_then(|opts| opts.get::<Option<bool>>("selectable").ok().flatten())
-            .unwrap_or(false),
-    })
-}
-
 fn cap_edge_marker(value: Option<&str>) -> LuaResult<Option<CapMarker>> {
     match value {
         None => Ok(None),
@@ -203,6 +120,13 @@ pub(super) fn register(
         "layout",
         "Declarative, width-independent content layout primitives for transcript/tool display.",
         Tier::Host,
+    )?;
+    m.private_fn(
+        "__is_node",
+        &["value"],
+        |_, value: mlua::Value| -> LuaResult<bool> {
+            Ok(matches!(value, mlua::Value::UserData(ud) if ud.is::<LuaBlockLayout>()))
+        },
     )?;
     m.fn_(
         "text",
@@ -300,13 +224,23 @@ pub(super) fn register(
         },
     )?;
     m.fn_(
-        "elapsed",
-        "Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.",
-        &["elapsed", "opts"],
-        |_, (elapsed, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
-            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Elapsed(
-                elapsed_spec_from_value(elapsed, opts.as_ref())?,
-            ))))
+        "refresh",
+        "Return `child` unchanged while requesting that its containing top-level transcript node be rendered again after `opts.after_ms`. The positive delay is declarative cache metadata and does not affect measurement, rendering, or selection.",
+        &["child", "opts"],
+        |_, (child, opts): (mlua::Value, mlua::Table)| -> LuaResult<LuaBlockLayout> {
+            let child = layout_from_value(child, "refresh")?;
+            let after_ms = opts.get::<Option<u64>>("after_ms")?.ok_or_else(|| {
+                mlua::Error::external("smelt.layout.refresh: opts.after_ms is required")
+            })?;
+            if after_ms == 0 {
+                return Err(mlua::Error::external(
+                    "smelt.layout.refresh: opts.after_ms must be positive",
+                ));
+            }
+            Ok(LuaBlockLayout(BlockLayout::Refresh {
+                child: Box::new(child),
+                spec: RefreshSpec { after_ms },
+            }))
         },
     )?;
     m.fn_(

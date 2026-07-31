@@ -87,8 +87,7 @@ expression: out.events
       "meta": {
         "avg_tps": "[avg_tps]",
         "elapsed_ms": "[elapsed_ms]",
-        "interrupted": false,
-        "tool_elapsed": {}
+        "interrupted": false
       },
       "turn_id": 1
     }

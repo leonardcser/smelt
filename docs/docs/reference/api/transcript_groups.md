@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Declarative transcript display grouping. Register adjacent-run group rules and group-node renderers while the host owns deterministic planning and cache invalidation.
+Declarative transcript display grouping. Register adjacent-run group rules while the host owns deterministic planning and the composed root renderer presents resulting group nodes.
 
 ## `smelt.transcript.groups.cache_key`
 
@@ -45,6 +45,6 @@ fun(spec: smelt.transcript.GroupSpec): smelt.Reg
 Types: [`smelt.transcript.GroupSpec`](types.md#smelttranscriptgroupspec), [`smelt.Reg`](types.md#smeltreg)
 
 Register or replace a declarative transcript group type. This only declares
-planning metadata and a renderer for future virtual group nodes; Rust owns
-deterministic adjacent-run planning.
+planning metadata; Rust owns deterministic adjacent-run planning and the
+composed root transcript renderer presents resulting group nodes.
 

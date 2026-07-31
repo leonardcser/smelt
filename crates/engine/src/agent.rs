@@ -24,9 +24,14 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_invocation_id() -> protocol::InvocationId {
+    protocol::InvocationId::new(NEXT_INVOCATION_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 fn dispatch_request_audit(
@@ -194,7 +199,6 @@ pub(crate) async fn engine_task(
                             persistence,
                             started_at,
                             tps_samples: Vec::new(),
-                            tool_elapsed: HashMap::new(),
                         };
                         turn.run(input, loaded_history.items).await;
                     }
@@ -667,27 +671,34 @@ fn build_provider(
 
 // ── Turn ────────────────────────────────────────────────────────────────────
 
-struct ToolSlot<'a> {
+struct ClassifiedToolCall<'a> {
+    invocation_id: protocol::InvocationId,
     tc: &'a protocol::ToolCall,
     args: HashMap<String, Value>,
-    confirm_msg: Option<String>,
     start: Instant,
+    called_at_ms: u64,
+}
+
+struct ToolSlot {
+    call_index: usize,
+    confirm_msg: Option<String>,
 }
 
 struct ToolExecutionPlan<'a> {
-    slots: Vec<ToolSlot<'a>>,
+    calls: Vec<ClassifiedToolCall<'a>>,
+    slots: Vec<ToolSlot>,
     ready: Vec<usize>,
     pending_perms: Vec<(usize, u64)>,
-    pending_tools: Vec<(u64, String, Instant)>,
-    sequential_tools: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
-    pending_tool_hooks: Vec<(u64, PendingToolCall<'a>)>,
-    pending_tool_perms: Vec<(u64, PendingToolCall<'a>)>,
+    pending_tools: Vec<(u64, usize)>,
+    sequential_tools: Vec<usize>,
+    pending_tool_hooks: Vec<(u64, PendingToolCall)>,
+    pending_tool_perms: Vec<(u64, PendingToolCall)>,
     /// Synthetic outcomes produced inside `classify_tools` itself - unknown
     /// tools, denied dispatch decisions. Folded into the assistant step's
     /// `invocations` at commit time so the invariant ("every dispatched
     /// tool_call has a paired outcome") holds even when no execution
-    /// happens for that slot.
-    inline_outcomes: Vec<(String, ToolOutcome)>,
+    /// happens for that call.
+    inline_outcomes: Vec<(usize, ToolOutcome)>,
 }
 
 /// Fold every produced outcome into a `Vec<ToolInvocation>` in the order
@@ -697,30 +708,37 @@ struct ToolExecutionPlan<'a> {
 /// makes the on-disk + on-wire invariant true *by construction*, not by
 /// careful code review.
 ///
-/// Precedence on `call_id` collision: `slot` > `plugin` > `inline`. The
-/// classify-then-execute pipeline routes each call to exactly one path,
+/// Precedence on classified-call collision: `slot` > `plugin` > `inline`.
+/// The classify-then-execute pipeline routes each call to exactly one path,
 /// so collisions shouldn't happen in practice - but if a path bug starts
 /// double-writing, the explicit precedence keeps the result deterministic.
 fn pair_invocations_in_order(
-    calls: &[protocol::ToolCall],
-    slot_outcomes: Vec<(String, ToolOutcome, Option<u64>)>,
-    plugin_outcomes: Vec<(String, ToolOutcome, Option<u64>)>,
-    inline_outcomes: Vec<(String, ToolOutcome)>,
+    calls: &[ClassifiedToolCall<'_>],
+    slot_outcomes: Vec<(usize, ToolOutcome, Option<u64>)>,
+    plugin_outcomes: Vec<(usize, ToolOutcome, Option<u64>)>,
+    inline_outcomes: Vec<(usize, ToolOutcome)>,
 ) -> Vec<ToolInvocation> {
-    let mut by_id: HashMap<String, (ToolOutcome, Option<u64>)> = HashMap::new();
-    for (id, o, e) in slot_outcomes {
-        by_id.insert(id, (o, e));
+    let mut by_index: Vec<Option<(ToolOutcome, Option<u64>)>> =
+        (0..calls.len()).map(|_| None).collect();
+    for (index, outcome, elapsed_ms) in slot_outcomes {
+        by_index[index] = Some((outcome, elapsed_ms));
     }
-    for (id, o, e) in plugin_outcomes {
-        by_id.entry(id).or_insert((o, e));
+    for (index, outcome, elapsed_ms) in plugin_outcomes {
+        if by_index[index].is_none() {
+            by_index[index] = Some((outcome, elapsed_ms));
+        }
     }
-    for (id, o) in inline_outcomes {
-        by_id.entry(id).or_insert((o, None));
+    for (index, outcome) in inline_outcomes {
+        if by_index[index].is_none() {
+            by_index[index] = Some((outcome, None));
+        }
     }
     calls
         .iter()
-        .map(|tc| {
-            let (result, elapsed_ms) = by_id.remove(&tc.id).unwrap_or_else(|| {
+        .zip(by_index)
+        .map(|(call, outcome)| {
+            let tc = call.tc;
+            let (result, elapsed_ms) = outcome.unwrap_or_else(|| {
                 // Safety net: should be unreachable because every execution
                 // path (slot, plugin, sequential, inline-classify) writes
                 // an outcome before pair_invocations_in_order runs. If it
@@ -748,6 +766,7 @@ fn pair_invocations_in_order(
                 arguments: tc.function.arguments.clone(),
                 result,
                 elapsed_ms,
+                called_at_ms: Some(call.called_at_ms),
             }
         })
         .collect()
@@ -812,10 +831,8 @@ fn estimate_prompt_tokens(
     tokens.min(u32::MAX as usize) as u32
 }
 
-struct PendingToolCall<'a> {
-    tc: &'a protocol::ToolCall,
-    args: HashMap<String, Value>,
-    tool_start: Instant,
+struct PendingToolCall {
+    call_index: usize,
     is_sequential: bool,
 }
 
@@ -859,7 +876,6 @@ struct Turn<'a> {
     persistence: protocol::PersistenceScope,
     started_at: Instant,
     tps_samples: Vec<f64>,
-    tool_elapsed: HashMap<String, u64>,
 }
 
 enum HostCallResult<T> {
@@ -1262,7 +1278,6 @@ impl<'a> Turn<'a> {
             avg_tps,
             display_tps: None,
             interrupted,
-            tool_elapsed: self.tool_elapsed.clone(),
         }
     }
 
@@ -1792,12 +1807,12 @@ impl<'a> Turn<'a> {
             let slot_outcomes = self.gather_slot_results(&plan, completed);
             let inline_outcomes = std::mem::take(&mut plan.inline_outcomes);
             // All execution paths have written their outcome into one of
-            // these three vecs. Pair-and-order folds them onto the
-            // dispatched_calls list so the resulting `Vec<ToolInvocation>`
-            // has the same length and order as the LLM's emitted tool_uses.
-            // The history can never observe an unpaired tool_use.
+            // these three vecs. Pair-and-order folds them onto the classified
+            // calls so the resulting `Vec<ToolInvocation>` has the same length
+            // and order as the LLM's emitted tool_uses. The history can never
+            // observe an unpaired tool_use or an invocation without its timestamp.
             let mut invocations = pair_invocations_in_order(
-                &dispatched_calls,
+                &plan.calls,
                 slot_outcomes,
                 plugin_outcomes,
                 inline_outcomes,
@@ -1820,62 +1835,63 @@ impl<'a> Turn<'a> {
 
     fn send_tool_started_for_call(
         event_tx: &crate::EngineEventSender,
-        tc: &protocol::ToolCall,
-        args: &HashMap<String, Value>,
+        call: &ClassifiedToolCall<'_>,
     ) {
         let _ = event_tx.send(EngineEvent::ToolStarted {
-            call_id: tc.id.clone(),
-            tool_name: tc.function.name.clone(),
-            args: args.clone(),
+            invocation_id: call.invocation_id,
+            call_id: call.tc.id.clone(),
+            tool_name: call.tc.function.name.clone(),
+            args: call.args.clone(),
+            called_at_ms: call.called_at_ms,
         });
     }
 
-    fn emit_tool_started_for_call(&self, tc: &protocol::ToolCall, args: &HashMap<String, Value>) {
-        Self::send_tool_started_for_call(self.event_tx, tc, args);
+    fn emit_tool_started_for_call(&self, call: &ClassifiedToolCall<'_>) {
+        Self::send_tool_started_for_call(self.event_tx, call);
     }
 
     fn send_tool_dispatch_for_call(
         event_tx: &crate::EngineEventSender,
         request_id: u64,
-        tc: &protocol::ToolCall,
-        args: &HashMap<String, Value>,
+        call: &ClassifiedToolCall<'_>,
     ) {
-        Self::send_tool_started_for_call(event_tx, tc, args);
+        Self::send_tool_started_for_call(event_tx, call);
         let _ = event_tx.send(EngineEvent::ToolDispatch {
             request_id,
-            call_id: tc.id.clone(),
-            tool_name: tc.function.name.clone(),
-            args: args.clone(),
+            invocation_id: call.invocation_id,
+            call_id: call.tc.id.clone(),
+            tool_name: call.tc.function.name.clone(),
+            args: call.args.clone(),
         });
     }
 
     fn send_tool_rejected_for_call(
         event_tx: &crate::EngineEventSender,
-        tc: &protocol::ToolCall,
-        args: &HashMap<String, Value>,
+        call: &ClassifiedToolCall<'_>,
         summary: protocol::StyledLines,
         result: ToolOutcome,
         elapsed_ms: Option<u64>,
     ) {
         let _ = event_tx.send(EngineEvent::ToolRejected {
-            call_id: tc.id.clone(),
-            tool_name: tc.function.name.clone(),
-            args: args.clone(),
+            invocation_id: call.invocation_id,
+            call_id: call.tc.id.clone(),
+            tool_name: call.tc.function.name.clone(),
+            args: call.args.clone(),
             summary,
             result,
             elapsed_ms,
+            called_at_ms: call.called_at_ms,
         });
     }
 
     fn emit_tool_rejected_for_call(
         &self,
-        tc: &protocol::ToolCall,
-        args: &HashMap<String, Value>,
+        call: &ClassifiedToolCall<'_>,
         summary: protocol::StyledLines,
         result: ToolOutcome,
         elapsed_ms: Option<u64>,
     ) {
-        Self::send_tool_rejected_for_call(self.event_tx, tc, args, summary, result, elapsed_ms);
+        Self::send_tool_rejected_for_call(self.event_tx, call, summary, result, elapsed_ms);
     }
 
     fn blocked_tool_outcome() -> ToolOutcome {
@@ -1893,6 +1909,7 @@ impl<'a> Turn<'a> {
         'a: 'b,
     {
         let mut plan = ToolExecutionPlan {
+            calls: Vec::with_capacity(tool_calls.len()),
             slots: Vec::new(),
             ready: Vec::new(),
             pending_perms: Vec::new(),
@@ -1913,14 +1930,20 @@ impl<'a> Turn<'a> {
         // Tool evaluation replies for plugin calls share `cmd_rx` with user commands.
         // Leave them queued until `execute_concurrent` has the full request-id plan.
         for tc in tool_calls {
-            let args: HashMap<String, Value> =
-                serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-
-            let tool_start = self.config.clock.instant_now();
+            let args = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+            let call_index = plan.calls.len();
+            plan.calls.push(ClassifiedToolCall {
+                invocation_id: next_invocation_id(),
+                tc,
+                args,
+                start: self.config.clock.instant_now(),
+                called_at_ms: crate::clock::unix_time_ms(self.config.clock.as_ref()),
+            });
+            let call = &plan.calls[call_index];
 
             let tool = self.tools.iter().find(|pt| {
-                pt.name == tc.function.name
-                    && (pt.override_core || !self.dispatcher.contains(&tc.function.name))
+                pt.name == call.tc.function.name
+                    && (pt.override_core || !self.dispatcher.contains(&call.tc.function.name))
             });
             if let Some(pt) = tool {
                 let is_sequential =
@@ -1928,17 +1951,16 @@ impl<'a> Turn<'a> {
                 let request_id = next_request_id();
                 self.emit(EngineEvent::ToolEvaluationRequest {
                     request_id,
-                    call_id: tc.id.clone(),
-                    tool_name: tc.function.name.clone(),
-                    args: args.clone(),
+                    invocation_id: call.invocation_id,
+                    call_id: call.tc.id.clone(),
+                    tool_name: call.tc.function.name.clone(),
+                    args: call.args.clone(),
                     mode: self.mode.clone(),
                 });
                 plan.pending_tool_hooks.push((
                     request_id,
                     PendingToolCall {
-                        tc,
-                        args: args.clone(),
-                        tool_start,
+                        call_index,
                         is_sequential,
                     },
                 ));
@@ -1947,48 +1969,45 @@ impl<'a> Turn<'a> {
 
             let evaluation = match self.dispatcher.evaluate_tool_call(
                 self.turn_id,
-                &tc.function.name,
-                &args,
+                &call.tc.function.name,
+                &call.args,
                 self.mode.clone(),
                 self.permission_overrides.as_ref(),
             ) {
-                Some(h) => h,
+                Some(evaluation) => evaluation,
                 None => {
                     let outcome = ToolOutcome {
-                        content: format!("unknown tool: {}", tc.function.name),
+                        content: format!("unknown tool: {}", call.tc.function.name),
                         is_error: true,
                         metadata: None,
                     };
                     self.emit_tool_rejected_for_call(
-                        tc,
-                        &args,
+                        call,
                         protocol::StyledLines::empty(),
                         outcome.clone(),
-                        Some(self.elapsed_ms_since(tool_start)),
+                        Some(self.elapsed_ms_since(call.start)),
                     );
-                    plan.inline_outcomes.push((tc.id.clone(), outcome));
+                    plan.inline_outcomes.push((call_index, outcome));
                     continue;
                 }
             };
 
             let protocol::ToolEvaluation { decision, metadata } = evaluation;
             let summary = metadata.summary.clone();
-            let idx = plan.slots.len();
+            let slot_index = plan.slots.len();
             match decision {
                 Decision::Allow => {
-                    self.emit_tool_started_for_call(tc, &args);
+                    self.emit_tool_started_for_call(call);
                     plan.slots.push(ToolSlot {
-                        tc,
-                        args,
+                        call_index,
                         confirm_msg: None,
-                        start: tool_start,
                     });
-                    plan.ready.push(idx);
+                    plan.ready.push(slot_index);
                 }
                 Decision::Deny => {
                     let outcome = Self::blocked_tool_outcome();
-                    self.emit_tool_rejected_for_call(tc, &args, summary, outcome.clone(), None);
-                    plan.inline_outcomes.push((tc.id.clone(), outcome));
+                    self.emit_tool_rejected_for_call(call, summary, outcome.clone(), None);
+                    plan.inline_outcomes.push((call_index, outcome));
                 }
                 Decision::Error(ref err) => {
                     let outcome = ToolOutcome {
@@ -1996,26 +2015,26 @@ impl<'a> Turn<'a> {
                         is_error: true,
                         metadata: None,
                     };
-                    self.emit_tool_rejected_for_call(tc, &args, summary, outcome.clone(), None);
-                    plan.inline_outcomes.push((tc.id.clone(), outcome));
+                    self.emit_tool_rejected_for_call(call, summary, outcome.clone(), None);
+                    plan.inline_outcomes.push((call_index, outcome));
                 }
                 Decision::Ask => {
                     let request_id = next_request_id();
                     self.emit(EngineEvent::RequestPermission {
                         request_id,
-                        call_id: tc.id.clone(),
-                        tool_name: tc.function.name.clone(),
-                        args: args.clone(),
+                        invocation_id: call.invocation_id,
+                        call_id: call.tc.id.clone(),
+                        tool_name: call.tc.function.name.clone(),
+                        args: call.args.clone(),
                         approval_patterns: metadata.approval_patterns,
+                        called_at_ms: call.called_at_ms,
                         summary,
                     });
                     plan.slots.push(ToolSlot {
-                        tc,
-                        args,
+                        call_index,
                         confirm_msg: None,
-                        start: tool_start,
                     });
-                    plan.pending_perms.push((idx, request_id));
+                    plan.pending_perms.push((slot_index, request_id));
                 }
             }
         }
@@ -2029,11 +2048,7 @@ impl<'a> Turn<'a> {
         &mut self,
         plan: &mut ToolExecutionPlan<'b>,
         completed: &mut [Option<ToolResult>],
-    ) -> (
-        bool,
-        Vec<UiCommand>,
-        Vec<(String, ToolOutcome, Option<u64>)>,
-    ) {
+    ) -> (bool, Vec<UiCommand>, Vec<(usize, ToolOutcome, Option<u64>)>) {
         use futures_util::stream::StreamExt;
 
         type TaggedFut<'x> =
@@ -2056,15 +2071,16 @@ impl<'a> Turn<'a> {
             futures_util::stream::FuturesUnordered::new();
 
         let dispatcher = self.dispatcher;
-        for &i in &plan.ready {
+        for &slot_index in &plan.ready {
+            let call = &plan.calls[plan.slots[slot_index].call_index];
             let fut = dispatcher
                 .dispatch(
-                    &plan.slots[i].tc.function.name,
-                    plan.slots[i].args.clone(),
-                    &contexts[i],
+                    &call.tc.function.name,
+                    call.args.clone(),
+                    &contexts[slot_index],
                 )
                 .expect("dispatcher resolved tool at slot-build time");
-            futs.push(Box::pin(async move { (i, fut.await) }));
+            futs.push(Box::pin(async move { (slot_index, fut.await) }));
         }
 
         let mut outstanding = plan.ready.len()
@@ -2091,7 +2107,7 @@ impl<'a> Turn<'a> {
         };
         let mut deferred: Vec<UiCommand> = Vec::new();
         let mut speculative: Vec<UiCommand> = Vec::new();
-        let mut tool_results: Vec<(String, ToolOutcome, Option<u64>)> = Vec::new();
+        let mut tool_results: Vec<(usize, ToolOutcome, Option<u64>)> = Vec::new();
 
         let cancelled = loop {
             if outstanding == 0 {
@@ -2107,22 +2123,19 @@ impl<'a> Turn<'a> {
                             .iter()
                             .position(|(_, rid)| *rid == request_id)
                         {
-                            let (idx, _) = plan.pending_perms.swap_remove(pos);
+                            let (slot_index, _) = plan.pending_perms.swap_remove(pos);
                             if approved {
-                                plan.slots[idx].confirm_msg = message;
-                                Self::send_tool_started_for_call(
-                                    self.event_tx,
-                                    plan.slots[idx].tc,
-                                    &plan.slots[idx].args,
-                                );
+                                plan.slots[slot_index].confirm_msg = message;
+                                let call = &plan.calls[plan.slots[slot_index].call_index];
+                                Self::send_tool_started_for_call(self.event_tx, call);
                                 let fut = dispatcher
                                     .dispatch(
-                                        &plan.slots[idx].tc.function.name,
-                                        plan.slots[idx].args.clone(),
-                                        &contexts[idx],
+                                        &call.tc.function.name,
+                                        call.args.clone(),
+                                        &contexts[slot_index],
                                     )
                                     .expect("dispatcher resolved tool at slot-build time");
-                                futs.push(Box::pin(async move { (idx, fut.await) }));
+                                futs.push(Box::pin(async move { (slot_index, fut.await) }));
                             } else {
                                 let denial = match message {
                                     Some(msg) => format!(
@@ -2132,7 +2145,7 @@ impl<'a> Turn<'a> {
                                              approach or ask the user for guidance."
                                         .to_string(),
                                 };
-                                completed[idx] = Some(ToolResult {
+                                completed[slot_index] = Some(ToolResult {
                                     content: denial,
                                     is_error: false,
                                     metadata: None,
@@ -2145,27 +2158,19 @@ impl<'a> Turn<'a> {
                             .position(|(rid, _)| *rid == request_id)
                         {
                             let (_, pending) = plan.pending_tool_perms.swap_remove(pos);
+                            let call = &plan.calls[pending.call_index];
                             if approved {
                                 if pending.is_sequential {
-                                    plan.sequential_tools.push((
-                                        pending.tc,
-                                        pending.args,
-                                        pending.tool_start,
-                                    ));
+                                    plan.sequential_tools.push(pending.call_index);
                                     outstanding -= 1;
                                 } else {
-                                    let rid = next_request_id();
+                                    let request_id = next_request_id();
                                     Self::send_tool_dispatch_for_call(
                                         self.event_tx,
-                                        rid,
-                                        pending.tc,
-                                        &pending.args,
+                                        request_id,
+                                        call,
                                     );
-                                    plan.pending_tools.push((
-                                        rid,
-                                        pending.tc.id.clone(),
-                                        pending.tool_start,
-                                    ));
+                                    plan.pending_tools.push((request_id, pending.call_index));
                                 }
                             } else {
                                 let denial = match message {
@@ -2176,19 +2181,19 @@ impl<'a> Turn<'a> {
                                              approach or ask the user for guidance."
                                         .to_string(),
                                 };
-                                let tool_start = pending.tool_start;
-                                let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                let elapsed_ms = Some(elapsed_ms_since(call.start));
                                 let outcome = ToolOutcome {
                                     content: denial,
                                     is_error: false,
                                     metadata: None,
                                 };
                                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                                    call_id: pending.tc.id.clone(),
+                                    invocation_id: call.invocation_id,
+                                    call_id: call.tc.id.clone(),
                                     result: outcome.clone(),
                                     elapsed_ms,
                                 });
-                                tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
+                                tool_results.push((pending.call_index, outcome, elapsed_ms));
                                 outstanding -= 1;
                             }
                         }
@@ -2203,47 +2208,38 @@ impl<'a> Turn<'a> {
                             let protocol::ToolEvaluation { decision, metadata } = evaluation;
                             match decision {
                                 Decision::Allow => {
+                                    let call = &plan.calls[pending.call_index];
                                     if pending.is_sequential {
-                                        plan.sequential_tools.push((
-                                            pending.tc,
-                                            pending.args,
-                                            pending.tool_start,
-                                        ));
+                                        plan.sequential_tools.push(pending.call_index);
                                         outstanding -= 1;
                                     } else {
-                                        let rid = next_request_id();
+                                        let request_id = next_request_id();
                                         Self::send_tool_dispatch_for_call(
                                             self.event_tx,
-                                            rid,
-                                            pending.tc,
-                                            &pending.args,
+                                            request_id,
+                                            call,
                                         );
-                                        plan.pending_tools.push((
-                                            rid,
-                                            pending.tc.id.clone(),
-                                            pending.tool_start,
-                                        ));
+                                        plan.pending_tools.push((request_id, pending.call_index));
                                     }
                                 }
                                 Decision::Deny => {
-                                    let tool_start = pending.tool_start;
-                                    let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                    let call = &plan.calls[pending.call_index];
+                                    let elapsed_ms = Some(elapsed_ms_since(call.start));
                                     let outcome = Self::blocked_tool_outcome();
                                     let summary = metadata.summary.clone();
                                     Self::send_tool_rejected_for_call(
                                         self.event_tx,
-                                        pending.tc,
-                                        &pending.args,
+                                        call,
                                         summary,
                                         outcome.clone(),
                                         elapsed_ms,
                                     );
-                                    tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
+                                    tool_results.push((pending.call_index, outcome, elapsed_ms));
                                     outstanding -= 1;
                                 }
                                 Decision::Error(ref err) => {
-                                    let tool_start = pending.tool_start;
-                                    let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                    let call = &plan.calls[pending.call_index];
+                                    let elapsed_ms = Some(elapsed_ms_since(call.start));
                                     let outcome = ToolOutcome {
                                         content: err.clone(),
                                         is_error: true,
@@ -2252,58 +2248,75 @@ impl<'a> Turn<'a> {
                                     let summary = metadata.summary.clone();
                                     Self::send_tool_rejected_for_call(
                                         self.event_tx,
-                                        pending.tc,
-                                        &pending.args,
+                                        call,
                                         summary,
                                         outcome.clone(),
                                         elapsed_ms,
                                     );
-                                    tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
+                                    tool_results.push((pending.call_index, outcome, elapsed_ms));
                                     outstanding -= 1;
                                 }
                                 Decision::Ask => {
+                                    let call = &plan.calls[pending.call_index];
                                     let summary = metadata.summary.clone();
-                                    let rid = next_request_id();
+                                    let request_id = next_request_id();
                                     let _ = self
                                         .event_tx
                                         .send(EngineEvent::RequestPermission {
-                                            request_id: rid,
-                                            call_id: pending.tc.id.clone(),
-                                            tool_name: pending.tc.function.name.clone(),
-                                            args: pending.args.clone(),
+                                            request_id,
+                                            invocation_id: call.invocation_id,
+                                            call_id: call.tc.id.clone(),
+                                            tool_name: call.tc.function.name.clone(),
+                                            args: call.args.clone(),
                                             approval_patterns: metadata.approval_patterns,
+                                            called_at_ms: call.called_at_ms,
                                             summary,
                                         });
-                                    plan.pending_tool_perms.push((rid, pending));
+                                    plan.pending_tool_perms.push((request_id, pending));
                                 }
                             }
                         }
                     }
-                    UiCommand::ToolResult { request_id, call_id, content, is_error, metadata } => {
+                    UiCommand::ToolResult {
+                        request_id,
+                        invocation_id: _,
+                        call_id: _,
+                        content,
+                        is_error,
+                        metadata,
+                    } => {
                         if let Some(pos) = plan
                             .pending_tools
                             .iter()
-                            .position(|(rid, _, _)| *rid == request_id)
+                            .position(|(pending_id, _)| *pending_id == request_id)
                         {
-                            let (_, _, start) = plan.pending_tools.swap_remove(pos);
-                            let elapsed_ms = Some(elapsed_ms_since(start));
+                            let (_, call_index) = plan.pending_tools.swap_remove(pos);
+                            let call = &plan.calls[call_index];
+                            let elapsed_ms = Some(elapsed_ms_since(call.start));
                             let outcome = ToolOutcome {
                                 content,
                                 is_error,
                                 metadata,
                             };
                             let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                                call_id: call_id.clone(),
+                                invocation_id: call.invocation_id,
+                                call_id: call.tc.id.clone(),
                                 result: outcome.clone(),
                                 elapsed_ms,
                             });
-                            tool_results.push((call_id, outcome, elapsed_ms));
+                            tool_results.push((call_index, outcome, elapsed_ms));
                             outstanding -= 1;
                         }
                     }
-                    UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
+                    UiCommand::CallCoreTool {
+                        request_id,
+                        parent_invocation_id,
+                        parent_call_id,
+                        tool_name,
+                        args,
+                    } => {
                         if dispatcher.contains(&tool_name) {
-                            let _ = parent_call_id;
+                            let _ = (parent_invocation_id, parent_call_id);
                             let ctx = ToolContext;
                             side_futs.push(Box::pin(async move {
                                 let r = dispatcher
@@ -2357,34 +2370,42 @@ impl<'a> Turn<'a> {
                 is_error: true,
                 metadata: None,
             };
-            for (_, call_id, start) in plan.pending_tools.drain(..) {
-                let elapsed_ms = Some(elapsed_ms_since(start));
+            let calls = &plan.calls;
+            for (_, call_index) in plan.pending_tools.drain(..) {
+                let call = &calls[call_index];
+                let elapsed_ms = Some(elapsed_ms_since(call.start));
                 let outcome = cancelled_outcome();
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                    call_id: call_id.clone(),
+                    invocation_id: call.invocation_id,
+                    call_id: call.tc.id.clone(),
                     result: outcome.clone(),
                     elapsed_ms,
                 });
-                tool_results.push((call_id, outcome, elapsed_ms));
+                tool_results.push((call_index, outcome, elapsed_ms));
             }
             for (_, pending) in plan.pending_tool_hooks.drain(..) {
-                let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
+                let call = &calls[pending.call_index];
+                let elapsed_ms = Some(elapsed_ms_since(call.start));
                 let outcome = cancelled_outcome();
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                    call_id: pending.tc.id.clone(),
+                    invocation_id: call.invocation_id,
+                    call_id: call.tc.id.clone(),
                     result: outcome.clone(),
                     elapsed_ms,
                 });
-                tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
+                tool_results.push((pending.call_index, outcome, elapsed_ms));
             }
             for (_, pending) in plan.pending_tool_perms.drain(..) {
-                let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
+                let call = &calls[pending.call_index];
+                let elapsed_ms = Some(elapsed_ms_since(call.start));
+                let outcome = cancelled_outcome();
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                    call_id: pending.tc.id.clone(),
-                    result: cancelled_outcome(),
+                    invocation_id: call.invocation_id,
+                    call_id: call.tc.id.clone(),
+                    result: outcome.clone(),
                     elapsed_ms,
                 });
-                tool_results.push((pending.tc.id.clone(), cancelled_outcome(), elapsed_ms));
+                tool_results.push((pending.call_index, outcome, elapsed_ms));
             }
         }
 
@@ -2403,25 +2424,27 @@ impl<'a> Turn<'a> {
         plan: &ToolExecutionPlan<'_>,
         completed: &mut [Option<ToolResult>],
     ) {
-        for (i, slot) in plan.slots.iter().enumerate() {
-            if completed[i].is_some() {
+        for (slot_index, slot) in plan.slots.iter().enumerate() {
+            if completed[slot_index].is_some() {
                 continue;
             }
+            let call = &plan.calls[slot.call_index];
             let outcome = ToolResult {
                 content: "cancelled".to_string(),
                 is_error: true,
                 metadata: None,
             };
             self.emit(EngineEvent::ToolFinished {
-                call_id: slot.tc.id.clone(),
+                invocation_id: call.invocation_id,
+                call_id: call.tc.id.clone(),
                 result: ToolOutcome {
                     content: outcome.content.clone(),
                     is_error: outcome.is_error,
                     metadata: outcome.metadata.clone(),
                 },
-                elapsed_ms: Some(self.elapsed_ms_since(slot.start)),
+                elapsed_ms: Some(self.elapsed_ms_since(call.start)),
             });
-            completed[i] = Some(outcome);
+            completed[slot_index] = Some(outcome);
         }
     }
 
@@ -2430,45 +2453,47 @@ impl<'a> Turn<'a> {
         &mut self,
         plan: &ToolExecutionPlan<'_>,
         deferred_turn_cmds: &mut Vec<UiCommand>,
-    ) -> (bool, Vec<(String, ToolOutcome, Option<u64>)>) {
+    ) -> (bool, Vec<(usize, ToolOutcome, Option<u64>)>) {
         let mut tool_results = Vec::new();
         let mut cancelled = self.cancel.is_cancelled();
-        for (tc, args, start) in &plan.sequential_tools {
+        for &call_index in &plan.sequential_tools {
+            let call = &plan.calls[call_index];
             let (content, is_error, metadata) = if cancelled {
                 ("cancelled".to_string(), true, None)
             } else {
                 let request_id = next_request_id();
-                Self::send_tool_dispatch_for_call(self.event_tx, request_id, tc, args);
+                Self::send_tool_dispatch_for_call(self.event_tx, request_id, call);
                 match self
                     .wait_for_tool_result(request_id, deferred_turn_cmds)
                     .await
                 {
-                    Some((c, e, m)) => (c, e, m),
+                    Some((content, is_error, metadata)) => (content, is_error, metadata),
                     None => {
                         cancelled = true;
                         ("cancelled".to_string(), true, None)
                     }
                 }
             };
-            let elapsed_ms = Some(self.elapsed_ms_since(*start));
+            let elapsed_ms = Some(self.elapsed_ms_since(call.start));
             let outcome = ToolOutcome {
                 content,
                 is_error,
                 metadata,
             };
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                call_id: tc.id.clone(),
+                invocation_id: call.invocation_id,
+                call_id: call.tc.id.clone(),
                 result: outcome.clone(),
                 elapsed_ms,
             });
-            tool_results.push((tc.id.clone(), outcome, elapsed_ms));
+            tool_results.push((call_index, outcome, elapsed_ms));
         }
         (cancelled, tool_results)
     }
 
-    /// Fold built-in (dispatched-by-slot) tool results into `(call_id,
-    /// outcome, elapsed)` triples ready to be paired into the assistant
-    /// turn. Emits `ToolFinished` and records `tool_elapsed` along the way.
+    /// Fold built-in (dispatched-by-slot) tool results into classified-call
+    /// indexes, outcomes, and elapsed times ready to be paired into the
+    /// assistant turn. Emits `ToolFinished` along the way.
     ///
     /// Pure accumulator: never touches `self.history`. The atomic commit
     /// in `run()` is the only place that writes to history.
@@ -2476,12 +2501,13 @@ impl<'a> Turn<'a> {
         &mut self,
         plan: &ToolExecutionPlan<'_>,
         mut completed: Vec<Option<ToolResult>>,
-    ) -> Vec<(String, ToolOutcome, Option<u64>)> {
+    ) -> Vec<(usize, ToolOutcome, Option<u64>)> {
         let mut out = Vec::with_capacity(plan.slots.len());
-        for (i, slot) in plan.slots.iter().enumerate() {
-            let Some(result) = completed[i].take() else {
+        for (slot_index, slot) in plan.slots.iter().enumerate() {
+            let Some(result) = completed[slot_index].take() else {
                 continue;
             };
+            let call = &plan.calls[slot.call_index];
             let ToolResult {
                 content,
                 is_error,
@@ -2497,8 +2523,8 @@ impl<'a> Turn<'a> {
                     log::Level::Debug,
                     "tool_result",
                     &serde_json::json!({
-                        "tool": slot.tc.function.name,
-                        "id": slot.tc.id,
+                        "tool": call.tc.function.name,
+                        "id": call.tc.id,
                         "is_error": is_error,
                         "content_len": content.len(),
                         "content_preview": preview,
@@ -2506,14 +2532,14 @@ impl<'a> Turn<'a> {
                 );
             }
 
-            let elapsed_ms = self.elapsed_ms_since(slot.start);
-            self.tool_elapsed.insert(slot.tc.id.clone(), elapsed_ms);
+            let elapsed_ms = self.elapsed_ms_since(call.start);
             let mut full_content = content.clone();
             if let Some(ref msg) = slot.confirm_msg {
                 full_content.push_str(&format!("\n\nUser message: {msg}"));
             }
             self.emit(EngineEvent::ToolFinished {
-                call_id: slot.tc.id.clone(),
+                invocation_id: call.invocation_id,
+                call_id: call.tc.id.clone(),
                 result: ToolOutcome {
                     content: content.clone(),
                     is_error,
@@ -2522,7 +2548,7 @@ impl<'a> Turn<'a> {
                 elapsed_ms: Some(elapsed_ms),
             });
             out.push((
-                slot.tc.id.clone(),
+                slot.call_index,
                 ToolOutcome {
                     content: full_content,
                     is_error,
@@ -2690,6 +2716,7 @@ impl<'a> Turn<'a> {
             match self.cmd_rx.recv().await {
                 Some(UiCommand::ToolResult {
                     request_id: id,
+                    invocation_id: _,
                     call_id: _,
                     content,
                     is_error,
@@ -3368,6 +3395,16 @@ mod tests {
         )
     }
 
+    fn classified_call(tc: &protocol::ToolCall, called_at_ms: u64) -> ClassifiedToolCall<'_> {
+        ClassifiedToolCall {
+            invocation_id: protocol::InvocationId::new(1),
+            tc,
+            args: HashMap::new(),
+            start: Instant::now(),
+            called_at_ms,
+        }
+    }
+
     fn outcome(content: &str) -> ToolOutcome {
         ToolOutcome {
             content: content.into(),
@@ -3377,21 +3414,68 @@ mod tests {
     }
 
     #[test]
+    fn virtual_clock_captures_one_wall_timestamp_per_invocation() {
+        let clock = crate::clock::VirtualClock::new(
+            std::time::Instant::now(),
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123),
+        );
+
+        let captured = crate::clock::unix_time_ms(&clock);
+        clock.advance(std::time::Duration::from_secs(5));
+
+        assert_eq!(captured, 1_700_000_000_123);
+        assert_eq!(crate::clock::unix_time_ms(&clock), 1_700_000_005_123);
+    }
+
+    #[test]
+    fn tool_started_event_and_committed_invocation_share_called_at_timestamp() {
+        let tc = tc("c1");
+        let called_at_ms = 1_700_000_000_123;
+        let call = classified_call(&tc, called_at_ms);
+        let (event_tx, _host_tx, mut output_rx) =
+            crate::output_channel(crate::HostCallbacks::Enabled);
+
+        Turn::send_tool_started_for_call(&event_tx, &call);
+        let event_called_at_ms = match output_rx.try_recv().unwrap() {
+            crate::EngineOutput::Event(EngineEvent::ToolStarted { called_at_ms, .. }) => {
+                called_at_ms
+            }
+            _ => panic!("unexpected engine output"),
+        };
+        let invocation = pair_invocations_in_order(
+            std::slice::from_ref(&call),
+            vec![(0, outcome("ok"), Some(42))],
+            Vec::new(),
+            Vec::new(),
+        )
+        .pop()
+        .unwrap();
+
+        assert_eq!(event_called_at_ms, called_at_ms);
+        assert_eq!(invocation.called_at_ms, Some(event_called_at_ms));
+    }
+
+    #[test]
     fn pair_invocations_in_order_precedence_is_slot_then_plugin_then_inline() {
-        // Same call_id appears in all three inputs. The classifier guarantees
-        // this can't happen in practice - this test pins the tiebreaker so a
-        // future refactor that *does* introduce a collision behaves
-        // predictably instead of silently flipping which outcome wins.
-        let calls = vec![tc("c1"), tc("c2"), tc("c3")];
-        let slot = vec![("c1".into(), outcome("slot-c1"), Some(11))];
+        // The same classified call appears in all three inputs. The classifier
+        // guarantees this can't happen in practice - this test pins the
+        // tiebreaker so a future refactor that does introduce a collision
+        // behaves predictably instead of silently flipping which outcome wins.
+        let tool_calls = [tc("c1"), tc("c2"), tc("c3")];
+        let calls = vec![
+            classified_call(&tool_calls[0], 101),
+            classified_call(&tool_calls[1], 102),
+            classified_call(&tool_calls[2], 103),
+        ];
+        let slot = vec![(0, outcome("slot-c1"), Some(11))];
         let plugin = vec![
-            ("c1".into(), outcome("plugin-c1"), Some(99)),
-            ("c2".into(), outcome("plugin-c2"), Some(22)),
+            (0, outcome("plugin-c1"), Some(99)),
+            (1, outcome("plugin-c2"), Some(22)),
         ];
         let inline = vec![
-            ("c1".into(), outcome("inline-c1")),
-            ("c2".into(), outcome("inline-c2")),
-            ("c3".into(), outcome("inline-c3")),
+            (0, outcome("inline-c1")),
+            (1, outcome("inline-c2")),
+            (2, outcome("inline-c3")),
         ];
         let out = pair_invocations_in_order(&calls, slot, plugin, inline);
         assert_eq!(out[0].result.content, "slot-c1");
@@ -3400,6 +3484,30 @@ mod tests {
         assert_eq!(out[1].elapsed_ms, Some(22));
         assert_eq!(out[2].result.content, "inline-c3");
         assert_eq!(out[2].elapsed_ms, None);
+        assert_eq!(out[0].called_at_ms, Some(101));
+        assert_eq!(out[1].called_at_ms, Some(102));
+        assert_eq!(out[2].called_at_ms, Some(103));
+    }
+
+    #[test]
+    fn pair_invocations_uses_classified_index_when_call_ids_repeat() {
+        let tool_calls = [tc("duplicate"), tc("duplicate")];
+        let calls = vec![
+            classified_call(&tool_calls[0], 101),
+            classified_call(&tool_calls[1], 102),
+        ];
+
+        let out = pair_invocations_in_order(
+            &calls,
+            Vec::new(),
+            Vec::new(),
+            vec![(0, outcome("first")), (1, outcome("second"))],
+        );
+
+        assert_eq!(out[0].result.content, "first");
+        assert_eq!(out[0].called_at_ms, Some(101));
+        assert_eq!(out[1].result.content, "second");
+        assert_eq!(out[1].called_at_ms, Some(102));
     }
 
     fn model_target() -> ModelTarget {
@@ -3465,7 +3573,6 @@ mod tests {
             persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
-            tool_elapsed: HashMap::new(),
         };
 
         turn.push_turn_content(
@@ -3626,7 +3733,6 @@ mod tests {
             persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
-            tool_elapsed: HashMap::new(),
         };
 
         cmd_tx
@@ -3664,6 +3770,7 @@ mod tests {
         cmd_tx
             .send(UiCommand::ToolResult {
                 request_id: 7,
+                invocation_id: protocol::InvocationId::new(1),
                 call_id: "switch".into(),
                 content: "cwd: /target".into(),
                 is_error: false,

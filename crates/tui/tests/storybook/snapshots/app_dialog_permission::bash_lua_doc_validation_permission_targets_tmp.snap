@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* bash set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; status=${PIPESTATUS[0]}; if [ "$status" -ne 0 ];
-  then exit "$status"; fi; git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta docs/zensical.toml
-  runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff || { cat /tmp/smelt-doc-diff; exit 1; }
-
+* bash set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; status=${PIPESTATUS[0]}; if [ "$status"     14:37:03
+       -ne 0 ]; then exit "$status"; fi; git diff --exit-code -- docs/docs/reference/api
+       runtime/lua/smelt/_meta docs/zensical.toml runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff ||
+       { cat /tmp/smelt-doc-diff; exit 1; }
 
 
 

@@ -171,19 +171,24 @@ fn tool_output_paints_before_a_coalesced_tool_completion() {
     app.start_turn(42);
     app.render_to_frame();
 
+    let invocation_id = protocol::InvocationId::new(1);
     let call_id = "streaming-tool".to_string();
     app.inject_engine(EngineEvent::ToolStarted {
+        invocation_id,
         call_id: call_id.clone(),
         tool_name: "bash".into(),
         args: std::collections::HashMap::from([("command".into(), serde_json::json!("sleep 1"))]),
+        called_at_ms: 0,
     })
     .expect("queue tool start");
     app.inject_engine(EngineEvent::ToolOutput {
+        invocation_id,
         call_id: call_id.clone(),
         chunk: "coalesced live tool marker\n".into(),
     })
     .expect("queue tool output");
     app.inject_engine(EngineEvent::ToolFinished {
+        invocation_id,
         call_id,
         result: protocol::ToolOutcome {
             content: "done".into(),
@@ -208,6 +213,102 @@ fn tool_output_paints_before_a_coalesced_tool_completion() {
         streamed_frame.contains("coalesced live tool marker"),
         "no frame painted the tool output: {streamed_frame}"
     );
+}
+
+#[test]
+fn repeated_provider_call_ids_keep_distinct_live_tool_blocks() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    app.start_turn(42);
+
+    let invocations = [
+        (
+            protocol::InvocationId::new(1),
+            "printf first",
+            1_700_000_000_111,
+            "first output",
+        ),
+        (
+            protocol::InvocationId::new(2),
+            "printf second",
+            1_700_000_000_222,
+            "second output",
+        ),
+    ];
+    let mut block_ids = Vec::new();
+
+    for (invocation_id, command, called_at_ms, _) in invocations {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+            invocation_id,
+            call_id: "duplicate".into(),
+            tool_name: "bash".into(),
+            args: std::collections::HashMap::from([("command".into(), serde_json::json!(command))]),
+            called_at_ms,
+        }));
+        block_ids.push(
+            app.conversation_probe()
+                .transcript()
+                .history()
+                .last_block_id()
+                .expect("tool block"),
+        );
+    }
+
+    assert_ne!(
+        block_ids[0], block_ids[1],
+        "each invocation needs its own block"
+    );
+
+    for ((invocation_id, _, _, output), block_id) in invocations.into_iter().zip(&block_ids) {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+            invocation_id,
+            call_id: "duplicate".into(),
+            result: protocol::ToolOutcome {
+                content: output.into(),
+                is_error: false,
+                metadata: None,
+            },
+            elapsed_ms: Some(10),
+        }));
+        assert_eq!(
+            app.conversation_probe()
+                .transcript()
+                .history()
+                .tool_state(*block_id)
+                .and_then(|state| state.output.as_ref())
+                .map(|output| output.content.as_str()),
+            Some(output)
+        );
+    }
+
+    let records = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .block_records_with_ids();
+    let mut restored =
+        smelt_core::transcript_model::BlockHistory::from_block_records_with_ids(records.clone());
+    for record in records {
+        let stored = restored
+            .stored_ref(record.block_id)
+            .cloned()
+            .expect("stored tool block");
+        assert!(restored.install_hydrated_record(record.block_id, stored, record.record));
+    }
+    let restored_records = restored.block_records_with_ids();
+
+    for ((_, _, called_at_ms, output), block_id) in invocations.into_iter().zip(block_ids) {
+        let state = restored_records
+            .iter()
+            .find(|record| record.block_id == block_id)
+            .and_then(|record| record.record.tool_state.as_ref())
+            .expect("persisted tool state");
+        assert_eq!(state.called_at_ms, Some(called_at_ms));
+        assert_eq!(
+            state.output.as_ref().map(|output| output.content.as_str()),
+            Some(output)
+        );
+    }
 }
 
 #[test]
@@ -352,14 +453,14 @@ fn resume_overlay_materializes_tail_after_collapsed_estimates_move_viewport() {
         });
         for index in 0..80 {
             let call_id = format!("resume-preview-tool-{index}");
-            app.start_tool(
-                call_id.clone(),
+            let invocation_id = app.start_tool(
+                call_id,
                 "bash".into(),
                 protocol::StyledLines::from_plain(format!("printf tool-{index}")),
                 std::collections::HashMap::new(),
             );
             app.finish_tool(
-                &call_id,
+                invocation_id,
                 smelt_core::transcript_model::ToolStatus::Ok,
                 Some(Box::new(smelt_core::transcript_model::ToolOutput {
                     content: format!("tool-{index} output ").repeat(180),
@@ -587,7 +688,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         .unwrap());
     assert!(app
         .eval_lua::<bool>(
-            "return type(require('smelt.transcript.defaults').__tool_draft_preview_renderers.edit_file) == 'function'",
+            "local p = smelt.transcript.get_tool_presentation('edit_file'); return p ~= nil and type(p.draft) == 'function'",
         )
         .unwrap());
 
@@ -619,16 +720,25 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
     let draft_frame = app.render_to_frame().text();
     assert_edit_file_diff_visible(&draft_frame, "draft-finished");
 
+    let invocation_id = protocol::InvocationId::new(1);
     app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
         call_id: call_id.clone(),
         tool_name: "edit_file".into(),
         args,
+        called_at_ms: 0,
     }));
+    let block_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("tool block");
     assert!(
         app.conversation_probe()
             .transcript()
             .history()
-            .tool_state(&call_id)
+            .tool_state(block_id)
             .is_some_and(|state| state.preview_output.is_some()),
         "promoted finished draft should keep immutable preview output"
     );
@@ -644,6 +754,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
     assert_edit_file_diff_visible(&after_write_frame, "pending-after-file-state-write");
 
     app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+        invocation_id,
         call_id: call_id.clone(),
         result: protocol::ToolOutcome {
             content: format!("edited {path}"),
@@ -660,7 +771,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         app.conversation_probe()
             .transcript()
             .history()
-            .tool_state(&call_id)
+            .tool_state(block_id)
             .is_some_and(|state| state.preview_output.is_none()),
         "finished tool should rely on output metadata instead of preview output"
     );
@@ -680,11 +791,13 @@ fn parallel_pending_tool_timers_refresh_live() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 20);
     app.start_turn(7);
-    for (call_id, path) in [("read-a", "a.rs"), ("read-b", "b.rs")] {
+    for (id, call_id, path) in [(1, "read-a", "a.rs"), (2, "read-b", "b.rs")] {
         app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+            invocation_id: protocol::InvocationId::new(id),
             call_id: call_id.into(),
             tool_name: "read_file".into(),
             args: std::collections::HashMap::from([("file_path".into(), serde_json::json!(path))]),
+            called_at_ms: 0,
         }));
     }
 
@@ -698,7 +811,7 @@ fn parallel_pending_tool_timers_refresh_live() {
 
     let live_tool_timers = live
         .lines()
-        .filter(|line| line.contains("read_file") && line.ends_with("2s"))
+        .filter(|line| line.contains("read_file") && line.contains("  2s"))
         .count();
     assert_eq!(
         live_tool_timers, 2,

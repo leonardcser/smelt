@@ -168,12 +168,14 @@ local function grep_collapsed_detail(block)
   return smelt.text.line_count((output and output.content) or "") .. " matches"
 end
 
-transcript_defaults.__tool_body_renderers.grep = function(block, ctx)
-  if not block.output then return nil end
-  return transcript_defaults.render_tool_output_tail(block.output, ctx)
-end
-
-transcript_defaults.__tool_collapsed_details.grep = grep_collapsed_detail
+smelt.transcript.register_tool("grep", {
+  cache_key = "smelt.tool-presentation.grep:v1",
+  body = function(block, ctx)
+    if not block.output then return nil end
+    return transcript_defaults.render_tool_output_tail(block.output, ctx)
+  end,
+  compact = grep_collapsed_detail,
+})
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "grep",

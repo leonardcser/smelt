@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* nvim_lsp_read_lints {"files":["/Users/leo/dev/rust/smelt/.worktrees/transcript-
-                      layout-rewrite/PLAN-transcript-layout-rewrite.md"],"workspa
-                      ce":"/Users/leo/dev/rust/smelt/.worktrees/transcript-layout
-                      -rewrite"}
+* nvim_lsp_read_lints {"files":["/Users/leo/dev/rust/smelt/.worktrees/t  14:37:03
+                      ranscript-layout-rewrite/PLAN-transcript-layout-r
+                      ewrite.md"],"workspace":"/Users/leo/dev/rust/smel
+                      t/.worktrees/transcript-layout-rewrite"}
   []
 
 ─ ✿ working… ─────────────────────────────────────────────────────────────────────

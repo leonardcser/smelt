@@ -508,9 +508,6 @@ smelt.tools.register = function(def)
     if def.summary == nil then
       def.summary = smelt.tools.default_summary
     end
-    if def.draft_preview ~= nil then
-      require("smelt.transcript.defaults").__tool_draft_preview_renderers[def.name or ""] = def.draft_preview
-    end
   end
   return __smelt_raw_tools_register__(def)
 end

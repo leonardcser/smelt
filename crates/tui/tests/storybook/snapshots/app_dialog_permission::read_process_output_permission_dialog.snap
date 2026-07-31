@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* read_process_output 4242
+* read_process_output 4242                                   14:37:03
 
 
 

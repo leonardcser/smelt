@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* bash cargo test --workspace
+* bash cargo test --workspace                                                14:37:03
   error: test failed
   failures:
   … 2 lines below

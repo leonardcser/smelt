@@ -49,8 +49,8 @@ app_story!(usage_codex_reset_action_available, |ctx| {
     ctx.set_viewport(76, 28);
     ctx.run_lua(
         r#"
-        local primary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
-        local secondary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 })
+        local primary_reset = 1893456000 -- 2030-01-01 00:00:00 UTC
+        local secondary_reset = 1893459600 -- 2030-01-01 01:00:00 UTC
         smelt.model.current = function() return "gpt-5-codex" end
         smelt.model.pricing = function()
           return { input = 0, output = 0, cache_read = 0, cache_write = 0, source = "none" }
@@ -120,7 +120,7 @@ app_story!(usage_codex_reset_expiry_groups, |ctx| {
     ctx.set_viewport(76, 30);
     ctx.run_lua(
         r#"
-        local primary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
+        local primary_reset = 1893456000 -- 2030-01-01 00:00:00 UTC
         smelt.model.current = function() return "gpt-5-codex" end
         smelt.model.pricing = function()
           return { input = 0, output = 0, cache_read = 0, cache_write = 0, source = "none" }
@@ -171,8 +171,8 @@ app_story!(usage_codex_reset_action_unavailable, |ctx| {
     ctx.set_viewport(76, 28);
     ctx.run_lua(
         r#"
-        local primary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
-        local secondary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 })
+        local primary_reset = 1893456000 -- 2030-01-01 00:00:00 UTC
+        local secondary_reset = 1893459600 -- 2030-01-01 01:00:00 UTC
         smelt.model.current = function() return "gpt-5-codex" end
         smelt.model.pricing = function()
           return { input = 0, output = 0, cache_read = 0, cache_write = 0, source = "none" }

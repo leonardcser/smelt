@@ -11,6 +11,7 @@ use crate::storybook::args;
 
 fn open_present_plan_dialog(ctx: &mut AppStoryCtx) {
     ctx.engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(1),
         request_id: 1,
         call_id: "plan-dialog".into(),
         tool_name: "present_plan".into(),

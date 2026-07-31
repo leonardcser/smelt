@@ -169,11 +169,7 @@ impl Transcript {
 
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
         debug_assert!(matches!(block, Block::ToolCall { .. }));
-        let call_id = match &block {
-            Block::ToolCall { call_id, .. } => call_id.clone(),
-            _ => return,
-        };
-        self.history.push_with_state(block, call_id, state);
+        self.history.push_with_state(block, state);
     }
 
     pub fn push_tool_call_with_origin(
@@ -183,12 +179,8 @@ impl Transcript {
         origin: BlockOrigin,
     ) {
         debug_assert!(matches!(block, Block::ToolCall { .. }));
-        let call_id = match &block {
-            Block::ToolCall { call_id, .. } => call_id.clone(),
-            _ => return,
-        };
         self.history
-            .push_with_state_and_origin(block, call_id, state, origin);
+            .push_with_state_and_origin(block, state, origin);
     }
 
     pub fn push_hydrated_tool_block_with_origin(
@@ -200,11 +192,11 @@ impl Transcript {
         let Some(block) = Self::normalize_block(block) else {
             return;
         };
-        let Some(call_id) = block.tool_call_id().map(str::to_string) else {
+        if block.tool_call_id().is_none() {
             return;
-        };
+        }
         self.history
-            .push_hydrated_block_with_state_and_origin(block, call_id, state, origin);
+            .push_hydrated_block_with_state_and_origin(block, state, origin);
     }
 
     pub fn truncate_to(&mut self, block_idx: usize) {
@@ -270,6 +262,8 @@ mod tests {
         ToolState {
             status: ToolStatus::Pending,
             elapsed: None,
+            called_at_ms: None,
+            elapsed_active: false,
             output: None,
             user_message: None,
             preview_output: None,
@@ -401,7 +395,7 @@ mod tests {
             tool_state(),
         );
         assert_eq!(t.history.len(), 1);
-        assert!(t.history.tool_state("id-1").is_some());
+        assert!(t.history.tool_state(t.history.order[0]).is_some());
     }
 
     #[test]

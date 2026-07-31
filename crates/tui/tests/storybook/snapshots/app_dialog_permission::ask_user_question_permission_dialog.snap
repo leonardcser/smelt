@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* ask_user_question 1 question
+* ask_user_question 1 question                               14:37:03
 
 
 

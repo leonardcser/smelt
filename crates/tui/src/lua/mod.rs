@@ -18,7 +18,9 @@ pub(crate) use app_ref::{
     with_conversation_host, with_platform_host, with_runtime_host, with_session_host, with_ui_host,
 };
 
-pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
+pub(crate) use smelt_core::lua::{
+    LuaHandle, TaskDriveOutput, ToolCallIds, ToolEnv, ToolExecResult,
+};
 
 use mlua::prelude::*;
 
@@ -1098,9 +1100,7 @@ impl Default for LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::block_layout::{
-        BlockLayout, CapKeep, CapMarker, Constraint, LuaLeaf, TextSpec,
-    };
+    use smelt_core::content::block_layout::{BlockLayout, CapKeep, CapMarker, LuaLeaf, TextSpec};
     use smelt_core::lua::api::lua_table_to_json;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
 
@@ -1354,6 +1354,26 @@ mod tests {
     }
 
     #[test]
+    fn fresh_candidate_inherits_transcript_clock() {
+        let runtime = LuaRuntime::new();
+        let wall_time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        let clock = Arc::new(engine::clock::VirtualClock::new(
+            std::time::Instant::now(),
+            wall_time,
+        ));
+        let shared_clock: Arc<dyn engine::clock::Clock> = clock.clone();
+        runtime.core_shared().set_clock(shared_clock);
+
+        let candidate = runtime.fresh_candidate(None);
+        assert_eq!(runtime.transcript_now_ms(), 1_700_000_000_123);
+        assert_eq!(candidate.transcript_now_ms(), 1_700_000_000_123);
+
+        clock.advance(std::time::Duration::from_millis(250));
+        assert_eq!(runtime.transcript_now_ms(), 1_700_000_000_373);
+        assert_eq!(candidate.transcript_now_ms(), 1_700_000_000_373);
+    }
+
+    #[test]
     fn layout_style_api_wraps_child() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
@@ -1387,31 +1407,26 @@ mod tests {
     }
 
     #[test]
-    fn layout_elapsed_api_builds_dynamic_leaf() {
+    fn layout_refresh_api_wraps_visible_child() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let layout = rt
             .lua
             .load(
                 r#"
-                return smelt.layout.elapsed({ call_id = "c1", status = "ok", secs = 65 }, {
-                  hl = "SmeltToolPending",
-                  selectable = false,
-                })
+                return smelt.layout.refresh(smelt.layout.text("visible"), { after_ms = 250 })
                 "#,
             )
             .eval::<mlua::AnyUserData>()
-            .expect("eval elapsed layout");
+            .expect("eval refresh layout");
         let layout = layout
             .borrow::<smelt_core::lua::api::layout::LuaBlockLayout>()
             .unwrap();
-        let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &layout.0 else {
-            panic!("expected elapsed layout, got {:?}", layout.0);
+        let BlockLayout::Refresh { child, spec } = &layout.0 else {
+            panic!("expected refresh layout, got {:?}", layout.0);
         };
-        assert_eq!(spec.call_id, "c1");
-        assert_eq!(spec.fallback_secs, Some(65));
-        assert_eq!(spec.hl_group.as_deref(), Some("SmeltToolPending"));
-        assert!(!spec.selectable);
+        assert_eq!(spec.after_ms, 250);
+        assert_text_layout(child, "visible");
     }
 
     fn render_transcript_block(
@@ -1419,13 +1434,28 @@ mod tests {
         block: &Block,
         state: Option<&ToolState>,
     ) -> BlockLayout {
-        rt.render_transcript_layout(
+        let snapshot = smelt_core::lua::runtime::transcript_block_snapshot_json(
             BlockId::new(7),
             0,
             block,
             state,
-            smelt_core::transcript_model::ViewState::Expanded,
         )
+        .expect("transcript snapshot");
+        render_transcript_snapshot(
+            rt,
+            &snapshot,
+            smelt_core::transcript_model::ViewState::Expanded,
+            1_742_573_823_000,
+        )
+    }
+
+    fn render_transcript_snapshot(
+        rt: &LuaRuntime,
+        snapshot: &serde_json::Value,
+        view_state: smelt_core::transcript_model::ViewState,
+        now_ms: u64,
+    ) -> BlockLayout {
+        rt.render_transcript_layout(snapshot, view_state, now_ms)
     }
 
     fn assert_text_layout(layout: &BlockLayout, expected: &str) {
@@ -1461,6 +1491,8 @@ mod tests {
             ToolState {
                 status: ToolStatus::Ok,
                 elapsed: Some(std::time::Duration::from_secs(65)),
+                called_at_ms: None,
+                elapsed_active: false,
                 output: Some(Box::new(ToolOutput {
                     content: output.into(),
                     is_error: false,
@@ -1492,42 +1524,84 @@ mod tests {
         assert_text_layout(child, expected);
     }
 
-    fn assert_tool_header_has_dynamic_elapsed(layout: &BlockLayout, call_id: &str) {
+    fn assert_tool_header_has_lua_duration(layout: &BlockLayout) {
         let BlockLayout::Vbox(items) = layout else {
             panic!("expected tool vbox, got {layout:?}");
         };
-        let (header, prefixed) = match &items[0] {
-            BlockLayout::Cap { child, .. } => (child.as_ref(), false),
-            BlockLayout::RowPrefix { child, spec } => {
-                assert!(
-                    spec.rest.iter().any(|span| !span.text.is_empty()),
-                    "expected continued header rows to keep prefix indentation"
-                );
-                let BlockLayout::Cap { child, .. } = child.as_ref() else {
-                    panic!("expected capped prefixed header, got {:?}", items[0]);
-                };
-                (child.as_ref(), true)
-            }
-            other => panic!("expected capped header, got {other:?}"),
+        let BlockLayout::RowPrefix { child, spec } = &items[0] else {
+            panic!("expected prefixed header, got {:?}", items[0]);
         };
-        let BlockLayout::Hbox(items) = header else {
-            panic!("expected dynamic elapsed hbox header, got {header:?}");
+        assert!(
+            spec.rest.iter().any(|span| !span.text.is_empty()),
+            "expected continued header rows to keep prefix indentation"
+        );
+        let BlockLayout::Cap { child, .. } = child.as_ref() else {
+            panic!("expected capped header, got {child:?}");
         };
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].constraint, Constraint::Fit);
-        assert_eq!(items[1].constraint, Constraint::Length(2));
-        assert_eq!(items[2].constraint, Constraint::Length(8));
-        let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = &items[0].layout else {
-            panic!("expected runs header leaf, got {:?}", items[0].layout);
+        let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = child.as_ref() else {
+            panic!("expected Lua-owned runs header, got {child:?}");
         };
-        if !prefixed {
-            assert!(spec.continuation_indent > 0);
-        }
-        let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &items[2].layout else {
-            panic!("expected elapsed header leaf, got {:?}", items[2].layout);
-        };
-        assert_eq!(spec.call_id, call_id);
-        assert!(!spec.selectable);
+        let text = spec
+            .lines
+            .0
+            .first()
+            .into_iter()
+            .flatten()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert!(text.ends_with("  1m5s"), "unexpected header text: {text:?}");
+    }
+
+    #[test]
+    fn tool_call_timestamp_format_and_boundary_refresh_are_adaptive() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        let values: (String, u64, String, u64, String, bool, String, u64, String, String, u64, String) = rt
+            .lua
+            .load(
+                r#"
+                local defaults = require("smelt.transcript.defaults")
+                local function ms(t) return assert(os.time(t)) * 1000 end
+
+                local now = ms({ year = 2025, month = 3, day = 21, hour = 12, min = 0, sec = 0 })
+                local same_day, same_day_refresh = defaults.tool_called_at(
+                  ms({ year = 2025, month = 3, day = 21, hour = 11, min = 37, sec = 3 }), now)
+                local prior_day, prior_day_refresh = defaults.tool_called_at(
+                  ms({ year = 2025, month = 3, day = 20, hour = 18, min = 42, sec = 3 }), now)
+                local prior_year, prior_year_refresh = defaults.tool_called_at(
+                  ms({ year = 2024, month = 3, day = 20, hour = 18, min = 42, sec = 3 }), now)
+
+                local midnight = ms({ year = 2025, month = 3, day = 22, hour = 0, min = 0, sec = 0 })
+                local called_today = ms({ year = 2025, month = 3, day = 21, hour = 20, min = 0, sec = 0 })
+                local before_midnight, midnight_refresh = defaults.tool_called_at(called_today, midnight - 500)
+                local after_midnight = defaults.tool_called_at(called_today, midnight + 1)
+
+                local new_year = ms({ year = 2026, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
+                local called_this_year = ms({ year = 2025, month = 12, day = 31, hour = 20, min = 0, sec = 0 })
+                local before_new_year, new_year_refresh = defaults.tool_called_at(called_this_year, new_year - 500)
+                local after_new_year = defaults.tool_called_at(called_this_year, new_year + 1)
+
+                return same_day, same_day_refresh, prior_day, prior_day_refresh,
+                  prior_year, prior_year_refresh == nil, before_midnight, midnight_refresh,
+                  after_midnight, before_new_year, new_year_refresh, after_new_year
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(values.0, "11:37:03");
+        assert!(values.1 > 0);
+        assert_eq!(values.2, "mar 20 18:42:03");
+        assert!(values.3 > values.1);
+        assert_eq!(values.4, "2024 mar 20 18:42:03");
+        assert!(values.5);
+        assert_eq!(values.6, "20:00:00");
+        assert_eq!(values.7, 500);
+        assert_eq!(values.8, "mar 21 20:00:00");
+        assert_eq!(values.9, "20:00:00");
+        assert_eq!(values.10, 500);
+        assert_eq!(values.11, "2025 dec 31 20:00:00");
     }
 
     #[test]
@@ -1539,8 +1613,42 @@ mod tests {
             let (block, state) = tool_block(name, "one\ntwo\nthree");
             let layout = render_transcript_block(&rt, &block, Some(&state));
             assert_tool_body_is_raw_tail(&layout, "one\ntwo\nthree");
-            assert_tool_header_has_dynamic_elapsed(&layout, &format!("{name}-call"));
+            assert_tool_header_has_lua_duration(&layout);
         }
+    }
+
+    #[test]
+    fn default_tool_header_refreshes_only_while_elapsed_is_active() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let (block, mut state) = tool_block("bash", "done");
+        state.status = ToolStatus::Pending;
+        state.elapsed = Some(std::time::Duration::from_millis(1_250));
+        state.elapsed_active = true;
+
+        let active = render_transcript_block(&rt, &block, Some(&state));
+        let BlockLayout::Vbox(items) = active else {
+            panic!("expected active tool vbox");
+        };
+        let BlockLayout::Refresh { child, spec } = &items[0] else {
+            panic!("active elapsed header must request refresh");
+        };
+        assert_eq!(spec.after_ms, 250);
+        assert!(matches!(child.as_ref(), BlockLayout::RowPrefix { .. }));
+
+        state.elapsed_active = false;
+        let paused = render_transcript_block(&rt, &block, Some(&state));
+        let BlockLayout::Vbox(items) = paused else {
+            panic!("expected paused tool vbox");
+        };
+        assert!(matches!(&items[0], BlockLayout::RowPrefix { .. }));
+
+        state.status = ToolStatus::Ok;
+        let terminal = render_transcript_block(&rt, &block, Some(&state));
+        let BlockLayout::Vbox(items) = terminal else {
+            panic!("expected terminal tool vbox");
+        };
+        assert!(matches!(&items[0], BlockLayout::RowPrefix { .. }));
     }
 
     #[test]
@@ -1550,10 +1658,10 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                local defaults = require("smelt.transcript.defaults")
-                defaults.__tool_body_renderers.no_cap_probe = function()
-                  return smelt.layout.text("structured body")
-                end
+                smelt.transcript.register_tool("no_cap_probe", {
+                  cache_key = "test.no-cap-probe:v1",
+                  body = function() return smelt.layout.text("structured body") end,
+                })
                 "#,
             )
             .exec()
@@ -1568,6 +1676,464 @@ mod tests {
             panic!("expected body gutter, got {:?}", items[1]);
         };
         assert_text_layout(child, "structured body");
+    }
+
+    #[test]
+    fn public_tool_renderer_can_replace_complete_header_body_and_timing() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.register_tool("presentation_probe", {
+                  cache_key = "test.presentation-probe:v1",
+                  render = function(tool, ctx)
+                    return smelt.layout.vbox({
+                      smelt.layout.text("CUSTOM HEADER " .. tool.name),
+                      smelt.layout.text(
+                        "timing moved: elapsed=" .. tostring(tool.elapsed_ms)
+                          .. " called=" .. tostring(tool.called_at_ms)
+                          .. " now=" .. tostring(ctx.now_ms)
+                      ),
+                    })
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let (block, mut state) = tool_block("presentation_probe", "default body must not render");
+        state.called_at_ms = Some(1_700_000_000_123);
+
+        let layout = render_transcript_block(&rt, &block, Some(&state));
+
+        let BlockLayout::Vbox(items) = layout else {
+            panic!("expected complete replacement layout");
+        };
+        assert_eq!(items.len(), 2);
+        assert_text_layout(&items[0], "CUSTOM HEADER presentation_probe");
+        assert_text_layout(
+            &items[1],
+            "timing moved: elapsed=65000 called=1700000000123 now=1742573823000",
+        );
+    }
+
+    #[test]
+    fn tool_presentation_registration_and_getter_are_immutable_snapshots() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                presentation_probe = {
+                  cache_key = "test.immutable-presentation:v1",
+                  render = function() return smelt.layout.text("original") end,
+                }
+                smelt.transcript.register_tool("immutable_probe", presentation_probe)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let generation = rt.transcript_renderer_generation();
+        let cache_key = rt.transcript_renderer_cache_key();
+        assert!(cache_key.is_some());
+
+        rt.lua
+            .load(
+                r#"
+                presentation_probe.cache_key = "mutated-original"
+                presentation_probe.render = function() return smelt.layout.text("mutated original") end
+                local exposed = assert(smelt.transcript.get_tool_presentation("immutable_probe"))
+                exposed.cache_key = "mutated-getter"
+                exposed.render = function() return smelt.layout.text("mutated getter") end
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        assert_eq!(rt.transcript_renderer_generation(), generation);
+        assert_eq!(rt.transcript_renderer_cache_key(), cache_key);
+        let exposed_cache_key: String = rt
+            .lua
+            .load(
+                r#"
+                return assert(smelt.transcript.get_tool_presentation("immutable_probe")).cache_key
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(exposed_cache_key, "test.immutable-presentation:v1");
+
+        let (block, state) = tool_block("immutable_probe", "ignored");
+        let layout = render_transcript_block(&rt, &block, Some(&state));
+        assert_text_layout(&layout, "original");
+    }
+
+    #[test]
+    fn focused_tool_presentation_callbacks_override_terminal_defaults() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.register_tool("custom_error_compact", {
+                  compact = function() return smelt.layout.text("custom error compact") end,
+                })
+                smelt.transcript.register_tool("custom_error_body", {
+                  body = function() return smelt.layout.text("custom error body") end,
+                })
+                smelt.transcript.register_tool("custom_denied_body", {
+                  body = function() return smelt.layout.text("custom denied body") end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let render = |name: &str, status: &str, view_state, is_error: bool| {
+            render_transcript_snapshot(
+                &rt,
+                &serde_json::json!({
+                    "id": 7,
+                    "index": 0,
+                    "kind": "tool",
+                    "name": name,
+                    "summary": name,
+                    "status": status,
+                    "output": {
+                        "content": "default output must not render",
+                        "is_error": is_error,
+                    },
+                }),
+                view_state,
+                1_742_573_823_000,
+            )
+        };
+
+        let compact = render(
+            "custom_error_compact",
+            "err",
+            smelt_core::transcript_model::ViewState::Collapsed,
+            true,
+        );
+        let BlockLayout::Vbox(items) = compact else {
+            panic!("expected compact tool vbox");
+        };
+        let BlockLayout::Gutter { child, .. } = &items[1] else {
+            panic!("expected compact detail gutter, got {:?}", items[1]);
+        };
+        assert_text_layout(child, "custom error compact");
+
+        for (name, status, is_error, expected) in [
+            ("custom_error_body", "err", true, "custom error body"),
+            ("custom_denied_body", "denied", false, "custom denied body"),
+        ] {
+            let expanded = render(
+                name,
+                status,
+                smelt_core::transcript_model::ViewState::Expanded,
+                is_error,
+            );
+            let BlockLayout::Vbox(items) = expanded else {
+                panic!("expected expanded tool vbox");
+            };
+            let BlockLayout::Gutter { child, .. } = &items[1] else {
+                panic!("expected custom body gutter, got {:?}", items[1]);
+            };
+            assert_text_layout(child, expected);
+        }
+    }
+
+    #[test]
+    fn tool_render_uses_one_presentation_snapshot_across_callbacks() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.register_tool("render_snapshot_probe", {
+                  title = function()
+                    smelt.transcript.register_tool("render_snapshot_probe", {
+                      title = function() return "replacement title" end,
+                      body = function() return smelt.layout.text("replacement body") end,
+                    })
+                    return "original title"
+                  end,
+                  body = function() return smelt.layout.text("original body") end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let snapshot = serde_json::json!({
+            "id": 7,
+            "index": 0,
+            "kind": "tool",
+            "name": "render_snapshot_probe",
+            "summary": "fallback title",
+            "status": "ok",
+            "output": { "content": "fallback body", "is_error": false },
+        });
+
+        let first = render_transcript_snapshot(
+            &rt,
+            &snapshot,
+            smelt_core::transcript_model::ViewState::Expanded,
+            1_742_573_823_000,
+        );
+        let BlockLayout::Vbox(first_items) = first else {
+            panic!("expected first tool vbox");
+        };
+        let BlockLayout::Gutter { child, .. } = &first_items[1] else {
+            panic!("expected original body gutter, got {:?}", first_items[1]);
+        };
+        assert_text_layout(child, "original body");
+
+        let second = render_transcript_snapshot(
+            &rt,
+            &snapshot,
+            smelt_core::transcript_model::ViewState::Expanded,
+            1_742_573_823_000,
+        );
+        let BlockLayout::Vbox(second_items) = second else {
+            panic!("expected second tool vbox");
+        };
+        let BlockLayout::Gutter { child, .. } = &second_items[1] else {
+            panic!(
+                "expected replacement body gutter, got {:?}",
+                second_items[1]
+            );
+        };
+        assert_text_layout(child, "replacement body");
+    }
+
+    #[test]
+    fn tool_presentation_callbacks_reject_unsupported_results() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.register_tool("invalid_render", {
+                  render = function() return 42 end,
+                })
+                smelt.transcript.register_tool("invalid_title", {
+                  title = function() return 42 end,
+                })
+                smelt.transcript.register_tool("invalid_body", {
+                  body = function() return "not a layout" end,
+                })
+                smelt.transcript.register_tool("invalid_draft", {
+                  draft = function() return false end,
+                })
+                smelt.transcript.register_tool("invalid_compact", {
+                  compact = function() return {} end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        for name in ["invalid_render", "invalid_title", "invalid_body"] {
+            let (block, state) = tool_block(name, "output");
+            let _ = render_transcript_block(&rt, &block, Some(&state));
+        }
+        let draft = serde_json::json!({
+            "id": 7,
+            "index": 0,
+            "kind": "tool",
+            "name": "invalid_draft",
+            "draft": true,
+            "summary": "draft",
+            "status": "pending",
+        });
+        let _ = render_transcript_snapshot(
+            &rt,
+            &draft,
+            smelt_core::transcript_model::ViewState::Expanded,
+            1_742_573_823_000,
+        );
+        let compact = serde_json::json!({
+            "id": 8,
+            "index": 0,
+            "kind": "tool",
+            "name": "invalid_compact",
+            "summary": "compact",
+            "status": "ok",
+        });
+        let _ = render_transcript_snapshot(
+            &rt,
+            &compact,
+            smelt_core::transcript_model::ViewState::Collapsed,
+            1_742_573_823_000,
+        );
+
+        let errors = drain_errors(&rt);
+        for expected in [
+            "`invalid_render`.render returned number; expected smelt.layout.Node",
+            "`invalid_title`.title returned number; expected string, styled-lines table, or nil",
+            "`invalid_body`.body returned string; expected smelt.layout.Node or nil",
+            "`invalid_draft`.draft returned boolean; expected smelt.layout.Node or nil",
+            "`invalid_compact`.compact returned table; expected string, smelt.layout.Node, or nil",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "missing {expected:?} in {errors:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_middleware_wraps_standalone_collapsed_group_and_recursive_child() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.set_renderer(function(node, ctx)
+                  if node.kind == "group" then
+                    local items = {
+                      smelt.layout.text("group:" .. ctx.view_state .. ":" .. tostring(ctx.now_ms)),
+                    }
+                    if ctx.view_state == "expanded" then
+                      items[#items + 1] = ctx.render(node.children[1], { view_state = "peek" })
+                    end
+                    return smelt.layout.vbox(items)
+                  end
+                  return smelt.layout.text(
+                    node.kind .. ":" .. ctx.view_state .. ":" .. tostring(ctx.now_ms)
+                  )
+                end)
+                smelt.transcript.extend_renderer("composition_probe", function(next, node, ctx)
+                  return smelt.layout.gutter(next(node, ctx), { text = "> " })
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let tool = serde_json::json!({
+            "id": 1,
+            "index": 0,
+            "kind": "tool",
+            "name": "probe",
+        });
+        let group = serde_json::json!({
+            "id": 2,
+            "index": 0,
+            "kind": "group",
+            "name": "probe-group",
+            "children": [{
+                "id": 1,
+                "index": 0,
+                "kind": "tool",
+                "name": "probe",
+                "view_state": "expanded",
+            }],
+        });
+
+        let standalone = render_transcript_snapshot(
+            &rt,
+            &tool,
+            smelt_core::transcript_model::ViewState::Expanded,
+            4_242,
+        );
+        let BlockLayout::Gutter { child, spec } = standalone else {
+            panic!("standalone tool did not pass through middleware");
+        };
+        assert_eq!(spec.text, "> ");
+        assert_text_layout(&child, "tool:expanded:4242");
+
+        let collapsed = render_transcript_snapshot(
+            &rt,
+            &group,
+            smelt_core::transcript_model::ViewState::Collapsed,
+            4_242,
+        );
+        let BlockLayout::Gutter { child, .. } = collapsed else {
+            panic!("collapsed group did not pass through middleware");
+        };
+        let BlockLayout::Vbox(items) = child.as_ref() else {
+            panic!("expected collapsed group body");
+        };
+        assert_eq!(items.len(), 1);
+        assert_text_layout(&items[0], "group:collapsed:4242");
+
+        let expanded = render_transcript_snapshot(
+            &rt,
+            &group,
+            smelt_core::transcript_model::ViewState::Expanded,
+            4_242,
+        );
+        let BlockLayout::Gutter { child, .. } = expanded else {
+            panic!("expanded group did not pass through middleware");
+        };
+        let BlockLayout::Vbox(items) = child.as_ref() else {
+            panic!("expected expanded group body");
+        };
+        assert_text_layout(&items[0], "group:expanded:4242");
+        let BlockLayout::Gutter {
+            child: recursive_child,
+            spec,
+        } = &items[1]
+        else {
+            panic!("recursive child did not re-enter middleware");
+        };
+        assert_eq!(spec.text, "> ");
+        assert_text_layout(recursive_child, "tool:peek:4242");
+    }
+
+    #[test]
+    fn recursive_renderer_rejects_unsupported_overrides_and_unbounded_recursion() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.set_renderer(function(node, ctx)
+                  if node.trigger == "override" then
+                    return ctx.render(node, { now_ms = 1 })
+                  end
+                  return ctx.render(node)
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let override_node = serde_json::json!({
+            "id": 1,
+            "index": 0,
+            "kind": "assistant",
+            "content": "fallback",
+            "trigger": "override",
+        });
+        let _ = render_transcript_snapshot(
+            &rt,
+            &override_node,
+            smelt_core::transcript_model::ViewState::Expanded,
+            10,
+        );
+        assert!(drain_errors(&rt)
+            .iter()
+            .any(|error| error.contains("unsupported override now_ms")));
+
+        let recursive_node = serde_json::json!({
+            "id": 2,
+            "index": 0,
+            "kind": "assistant",
+            "content": "fallback",
+        });
+        let _ = render_transcript_snapshot(
+            &rt,
+            &recursive_node,
+            smelt_core::transcript_model::ViewState::Expanded,
+            10,
+        );
+        assert!(drain_errors(&rt)
+            .iter()
+            .any(|error| error.contains("maximum recursion depth exceeded")));
     }
 
     #[test]
@@ -1598,6 +2164,8 @@ mod tests {
         let state = ToolState {
             status: ToolStatus::Ok,
             elapsed: Some(std::time::Duration::from_secs(65)),
+            called_at_ms: None,
+            elapsed_active: false,
             output: Some(Box::new(ToolOutput {
                 content: "hi".into(),
                 is_error: false,
@@ -1951,8 +2519,11 @@ mod tests {
         match rt.execute_tool(
             "echo",
             &args,
-            1,
-            "c1",
+            ToolCallIds {
+                invocation_id: protocol::InvocationId::new(1),
+                request_id: 1,
+                call_id: "c1",
+            },
             test_env(),
             std::time::Instant::now(),
         ) {
@@ -1992,8 +2563,11 @@ mod tests {
         match rt.execute_tool(
             "wait_then_yes",
             &args,
-            7,
-            "c9",
+            ToolCallIds {
+                invocation_id: protocol::InvocationId::new(7),
+                request_id: 7,
+                call_id: "c9",
+            },
             test_env(),
             std::time::Instant::now(),
         ) {
@@ -2040,8 +2614,11 @@ mod tests {
         let result = rt.execute_tool(
             "read_file",
             &args,
-            11,
-            "call-read-file-utf8-boundary",
+            ToolCallIds {
+                invocation_id: protocol::InvocationId::new(11),
+                request_id: 11,
+                call_id: "call-read-file-utf8-boundary",
+            },
             ToolEnv {
                 mode: protocol::AgentMode::normal(),
                 session_id: "sess",

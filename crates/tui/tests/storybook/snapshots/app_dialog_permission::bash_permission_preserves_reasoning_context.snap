@@ -1,13 +1,13 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
 │ I need to inspect the generated fixtures before choosing an implementation.
 │
 │ The temporary directory should reveal whether reusable outputs already
 │ exist.
 
-* bash ls -la /tmp/foo
+* bash ls -la /tmp/foo                                                 14:37:03
 
 
 

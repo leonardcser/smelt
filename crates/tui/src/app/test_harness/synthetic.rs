@@ -1,5 +1,10 @@
 use super::*;
 
+fn next_synthetic_invocation_id() -> protocol::InvocationId {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    protocol::InvocationId::new(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 impl TestApp {
     pub(crate) fn push_transcript_block(&mut self, block: smelt_core::transcript_model::Block) {
         self.app.push_block(block);
@@ -11,19 +16,23 @@ impl TestApp {
         name: String,
         summary: protocol::StyledLines,
         args: std::collections::HashMap<String, serde_json::Value>,
-    ) {
-        self.app.start_tool(call_id, name, summary, args);
+    ) -> protocol::InvocationId {
+        let invocation_id = next_synthetic_invocation_id();
+        let called_at_ms = self.tool_called_at_ms();
+        self.app
+            .start_tool_at(invocation_id, call_id, name, summary, args, called_at_ms);
+        invocation_id
     }
 
     pub(crate) fn finish_tool(
         &mut self,
-        call_id: &str,
+        invocation_id: protocol::InvocationId,
         status: smelt_core::transcript_model::ToolStatus,
         output: Option<smelt_core::transcript_model::ToolOutputRef>,
         engine_elapsed: Option<std::time::Duration>,
     ) {
         self.app
-            .finish_tool(call_id, status, output, engine_elapsed);
+            .finish_tool(invocation_id, status, output, engine_elapsed);
     }
 
     pub(crate) fn dispatch_host_call(&mut self, call: engine::HostCall) {
@@ -416,26 +425,37 @@ impl TestApp {
         self.feed_one(SourceEvent::engine(event));
     }
 
+    fn tool_called_at_ms(&self) -> u64 {
+        engine::clock::unix_time_ms(self.clock.as_ref())
+    }
+
     pub fn tool_started(
         &mut self,
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
         args: std::collections::HashMap<String, serde_json::Value>,
-    ) {
+    ) -> protocol::InvocationId {
+        let invocation_id = next_synthetic_invocation_id();
+        let called_at_ms = self.tool_called_at_ms();
         self.engine_event(EngineEvent::ToolStarted {
+            invocation_id,
             call_id: call_id.into(),
             tool_name: tool_name.into(),
             args,
+            called_at_ms,
         });
+        invocation_id
     }
 
     pub fn tool_finished(
         &mut self,
+        invocation_id: protocol::InvocationId,
         call_id: impl Into<String>,
         result: protocol::ToolOutcome,
         elapsed_ms: Option<u64>,
     ) {
         self.engine_event(EngineEvent::ToolFinished {
+            invocation_id,
             call_id: call_id.into(),
             result,
             elapsed_ms,
@@ -451,13 +471,16 @@ impl TestApp {
         result: protocol::ToolOutcome,
         elapsed_ms: Option<u64>,
     ) {
+        let called_at_ms = self.tool_called_at_ms();
         self.engine_event(EngineEvent::ToolRejected {
+            invocation_id: next_synthetic_invocation_id(),
             call_id: call_id.into(),
             tool_name: tool_name.into(),
             args,
             summary,
             result,
             elapsed_ms,
+            called_at_ms,
         });
     }
 
@@ -470,12 +493,15 @@ impl TestApp {
         approval_patterns: Vec<String>,
         summary: protocol::StyledLines,
     ) {
+        let called_at_ms = self.tool_called_at_ms();
         self.engine_event(EngineEvent::RequestPermission {
             request_id,
+            invocation_id: next_synthetic_invocation_id(),
             call_id: call_id.into(),
             tool_name: tool_name.into(),
             args,
             approval_patterns,
+            called_at_ms,
             summary,
         });
     }
@@ -515,6 +541,7 @@ impl TestApp {
             .engine
             .send(protocol::UiCommand::CallCoreTool {
                 request_id: 1,
+                parent_invocation_id: next_synthetic_invocation_id(),
                 parent_call_id: String::new(),
                 tool_name: tool_name.to_string(),
                 args,

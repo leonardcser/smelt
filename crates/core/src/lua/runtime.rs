@@ -8,13 +8,11 @@ use std::time::Instant;
 use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
-use crate::content::block_layout::{
-    tool_elapsed_text, BlockLayout, LuaLeaf, SeparatorSpec, TextSpec,
-};
+use crate::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
 use crate::content::display_safe_text;
 use crate::lua::{
-    json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
-    TranscriptGroupSpec,
+    json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds, ToolEnv,
+    ToolExecResult, TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
 use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus};
@@ -2450,79 +2448,16 @@ impl LuaRuntime {
             .specs()
     }
 
-    pub fn render_transcript_group_layout(
-        &self,
-        name: &str,
-        group: &serde_json::Value,
-        view_state: crate::transcript_model::ViewState,
-    ) -> BlockLayout {
-        let render_fn = {
-            let registry = self
-                .shared
-                .transcript_groups
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let Some(entry) = registry.entries.get(name) else {
-                return fallback_transcript_group_layout(name);
-            };
-            match self.lua.registry_value::<mlua::Function>(&entry.render.key) {
-                Ok(f) => f,
-                Err(e) => {
-                    self.record_error(format!(
-                        "transcript group render `{name}`: renderer handle: {e}"
-                    ));
-                    return fallback_transcript_group_layout(name);
-                }
-            }
-        };
-
-        let group_table = match transcript_group_to_lua_table(&self.lua, name, group) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!(
-                    "transcript group render `{name}`: build group: {e}"
-                ));
-                return fallback_transcript_group_layout(name);
-            }
-        };
-        let ctx_table = match transcript_render_ctx_to_lua_table(
-            &self.lua,
-            view_state,
-            self.transcript_renderer_generation(),
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("transcript group render `{name}`: build ctx: {e}"));
-                return fallback_transcript_group_layout(name);
-            }
-        };
-
-        let result: mlua::Value = match render_fn.call((group_table, ctx_table)) {
-            Ok(v) => v,
-            Err(e) => {
-                self.record_error(format!("transcript group render `{name}`: {e}"));
-                return fallback_transcript_group_layout(name);
-            }
-        };
-        transcript_layout_from_lua_value(
-            self,
-            result,
-            &format!("transcript group render `{name}`"),
-            || fallback_transcript_group_layout(name),
-        )
-    }
-
-    /// Call the root transcript renderer and return its layout tree. Renderer
-    /// errors, nil returns, invalid return types, or missing renderers use a
-    /// small Rust fallback layout so transcript projection stays usable.
+    /// Call the composed root transcript renderer for any semantic node. Blocks,
+    /// groups, and recursive children all enter through this method and therefore
+    /// observe the same middleware chain. Every recursive call shares `now_ms`.
     pub fn render_transcript_layout(
         &self,
-        id: BlockId,
-        index: usize,
-        block: &Block,
-        state: Option<&ToolState>,
+        snapshot: &serde_json::Value,
         view_state: crate::transcript_model::ViewState,
+        now_ms: u64,
     ) -> BlockLayout {
+        let fallback = || fallback_transcript_snapshot_layout(snapshot);
         let render_fn = {
             let slot = self
                 .shared
@@ -2530,54 +2465,77 @@ impl LuaRuntime {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let Some(handle) = slot.as_ref() else {
-                return fallback_transcript_layout(block, state, view_state);
+                return fallback();
             };
             match self.lua.registry_value::<mlua::Function>(&handle.key) {
-                Ok(f) => f,
-                Err(e) => {
-                    self.record_error(format!("transcript render: renderer handle: {e}"));
-                    return fallback_transcript_layout(block, state, view_state);
+                Ok(function) => function,
+                Err(error) => {
+                    self.record_error(format!("transcript render: renderer handle: {error}"));
+                    return fallback();
                 }
             }
         };
 
-        let block_table = match transcript_block_to_lua_table(&self.lua, id, index, block, state) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("transcript render: build block: {e}"));
-                return fallback_transcript_layout(block, state, view_state);
+        let node = match transcript_snapshot_to_lua_table(&self.lua, snapshot) {
+            Ok(table) => table,
+            Err(error) => {
+                self.record_error(format!("transcript render: build node: {error}"));
+                return fallback();
             }
         };
-        let ctx_table = match transcript_render_ctx_to_lua_table(
+        let ctx = match transcript_render_ctx_to_lua_table(
             &self.lua,
             view_state,
             self.transcript_renderer_generation(),
+            now_ms,
         ) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("transcript render: build ctx: {e}"));
-                return fallback_transcript_layout(block, state, view_state);
+            Ok(table) => table,
+            Err(error) => {
+                self.record_error(format!("transcript render: build ctx: {error}"));
+                return fallback();
             }
         };
-
-        let result: mlua::Value = match render_fn.call((block_table, ctx_table)) {
-            Ok(v) => v,
-            Err(e) => {
+        let render = match transcript_recursive_renderer(&self.lua, render_fn, ctx) {
+            Ok(function) => function,
+            Err(error) => {
                 self.record_error(format!(
-                    "transcript render `{}` #{index}: {e}",
-                    transcript_block_kind(block)
+                    "transcript render: build recursive renderer: {error}"
                 ));
-                return fallback_transcript_layout(block, state, view_state);
+                return fallback();
             }
         };
 
-        let label = format!(
-            "transcript render `{}` #{index}",
-            transcript_block_kind(block)
-        );
-        transcript_layout_from_lua_value(self, result, &label, || {
-            fallback_transcript_layout(block, state, view_state)
-        })
+        let result: mlua::Value = match render.call(node) {
+            Ok(value) => value,
+            Err(error) => {
+                self.record_error(format!("transcript render: {error}"));
+                return fallback();
+            }
+        };
+        let kind = snapshot
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let index = snapshot
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        transcript_layout_from_lua_value(
+            self,
+            result,
+            &format!("transcript render `{kind}` #{index}"),
+            fallback,
+        )
+    }
+
+    /// Current monotonic time used to schedule transcript refreshes.
+    pub fn transcript_instant_now(&self) -> std::time::Instant {
+        self.shared.clock().instant_now()
+    }
+
+    /// Current wall-clock time for one top-level transcript render pass.
+    pub fn transcript_now_ms(&self) -> u64 {
+        engine::clock::unix_time_ms(self.shared.clock().as_ref())
     }
 
     fn args_to_lua_table(
@@ -2733,6 +2691,7 @@ impl LuaRuntime {
     fn tool_invocation_context(
         &self,
         tool_name: &str,
+        invocation_id: protocol::InvocationId,
         request_id: u64,
     ) -> super::task::ToolInvocationContext {
         let execution_mode = self
@@ -2744,6 +2703,7 @@ impl LuaRuntime {
             .map(|tool| tool.execution_mode)
             .unwrap_or_default();
         super::task::ToolInvocationContext {
+            invocation_id,
             request_id,
             execution_mode,
         }
@@ -2753,12 +2713,11 @@ impl LuaRuntime {
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-        request_id: u64,
-        call_id: &str,
+        call: ToolCallIds<'_>,
         env: ToolEnv<'_>,
         now: Instant,
     ) -> ToolExecResult {
-        self.execute_tool_with_context(tool_name, args, request_id, call_id, env, now)
+        self.execute_tool_with_context(tool_name, args, call, env, now)
             .1
     }
 
@@ -2766,14 +2725,14 @@ impl LuaRuntime {
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-        request_id: u64,
-        call_id: &str,
+        call: ToolCallIds<'_>,
         env: ToolEnv<'_>,
         now: Instant,
     ) -> (super::task::ToolInvocationContext, ToolExecResult) {
-        let invocation = self.tool_invocation_context(tool_name, request_id);
+        let invocation =
+            self.tool_invocation_context(tool_name, call.invocation_id, call.request_id);
         let result = super::task::with_tool_invocation_context(invocation, || {
-            self.execute_tool_inner(tool_name, args, invocation, call_id, env, now)
+            self.execute_tool_inner(tool_name, args, invocation, call.call_id, env, now)
         });
         (invocation, result)
     }
@@ -2827,7 +2786,14 @@ impl LuaRuntime {
             }
         };
 
-        let ctx_table = match build_tool_ctx(&self.lua, call_id, mode, session_id, session_dir) {
+        let ctx_table = match build_tool_ctx(
+            &self.lua,
+            invocation.invocation_id,
+            call_id,
+            mode,
+            session_id,
+            session_dir,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 return ToolExecResult::Immediate {
@@ -2967,10 +2933,6 @@ impl LuaRuntime {
     }
 }
 
-fn transcript_block_kind(block: &Block) -> &'static str {
-    block.kind()
-}
-
 fn view_state_label(view_state: crate::transcript_model::ViewState) -> &'static str {
     match view_state {
         crate::transcript_model::ViewState::Expanded => "expanded",
@@ -2985,11 +2947,13 @@ fn transcript_render_ctx_to_lua_table(
     lua: &Lua,
     view_state: crate::transcript_model::ViewState,
     renderer_generation: u64,
+    now_ms: u64,
 ) -> LuaResult<mlua::Table> {
     let ctx = lua.create_table()?;
     ctx.set("view_state", view_state_label(view_state))?;
     ctx.set("renderer_generation", renderer_generation)?;
     ctx.set("surface", "transcript")?;
+    ctx.set("now_ms", now_ms)?;
 
     let configured_limits = transcript_limits_table(lua)?;
     let default_rows = crate::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS;
@@ -3058,28 +3022,73 @@ fn transcript_limit(limits: Option<&mlua::Table>, key: &str) -> LuaResult<Option
     }
 }
 
-fn transcript_group_to_lua_table(
+fn transcript_snapshot_to_lua_table(
     lua: &Lua,
-    name: &str,
-    group: &serde_json::Value,
+    snapshot: &serde_json::Value,
 ) -> LuaResult<mlua::Table> {
-    let value = json_to_lua(lua, group)?;
+    let value = json_to_lua(lua, snapshot)?;
     let mlua::Value::Table(table) = value else {
-        return Err(mlua::Error::external("group must encode to a Lua table"));
+        return Err(mlua::Error::external(
+            "transcript node must encode to a Lua table",
+        ));
     };
-    table.set(
-        "kind",
-        table
-            .get::<Option<String>>("kind")?
-            .unwrap_or_else(|| "group".into()),
-    )?;
-    table.set(
-        "name",
-        table
-            .get::<Option<String>>("name")?
-            .unwrap_or_else(|| name.to_string()),
-    )?;
     Ok(table)
+}
+
+const TRANSCRIPT_RENDER_FACTORY_KEY: &str = "__smelt_transcript_render_factory";
+const TRANSCRIPT_RENDER_FACTORY: &str = r#"
+return function(root, base_ctx)
+  local depth = 0
+  local render
+  render = function(node, overrides)
+    if type(node) ~= "table" then
+      error("ctx.render: node must be a table", 2)
+    end
+    if overrides ~= nil and type(overrides) ~= "table" then
+      error("ctx.render: overrides must be a table", 2)
+    end
+    depth = depth + 1
+    if depth > 64 then
+      depth = depth - 1
+      error("ctx.render: maximum recursion depth exceeded", 2)
+    end
+    local ctx = {}
+    for key, value in pairs(base_ctx) do ctx[key] = value end
+    if overrides then
+      for key, value in pairs(overrides) do
+        if key ~= "view_state" then
+          depth = depth - 1
+          error("ctx.render: unsupported override " .. tostring(key), 2)
+        end
+        ctx[key] = value
+      end
+    end
+    ctx.render = render
+    local ok, result = pcall(root, node, ctx)
+    depth = depth - 1
+    if not ok then error(result, 0) end
+    return result
+  end
+  return render
+end
+"#;
+
+fn transcript_recursive_renderer(
+    lua: &Lua,
+    root: mlua::Function,
+    base_ctx: mlua::Table,
+) -> LuaResult<mlua::Function> {
+    let factory = match lua.named_registry_value::<mlua::Function>(TRANSCRIPT_RENDER_FACTORY_KEY) {
+        Ok(factory) => factory,
+        Err(_) => {
+            let factory = lua
+                .load(TRANSCRIPT_RENDER_FACTORY)
+                .eval::<mlua::Function>()?;
+            lua.set_named_registry_value(TRANSCRIPT_RENDER_FACTORY_KEY, factory.clone())?;
+            factory
+        }
+    };
+    factory.call((root, base_ctx))
 }
 
 fn transcript_layout_from_lua_value(
@@ -3164,7 +3173,6 @@ enum TranscriptBlockSnapshotFields<'a> {
         args: &'a HashMap<String, serde_json::Value>,
         raw_arguments: &'a str,
         status: &'static str,
-        status_hl: &'static str,
         draft: bool,
         draft_finished: bool,
     },
@@ -3175,12 +3183,11 @@ enum TranscriptBlockSnapshotFields<'a> {
         summary_text: String,
         args: &'a HashMap<String, serde_json::Value>,
         status: &'static str,
-        status_hl: &'static str,
-        elapsed: ToolElapsedSnapshot<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        elapsed_secs: Option<u64>,
+        called_at_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        elapsed_text: Option<String>,
+        elapsed_ms: Option<u64>,
+        elapsed_active: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         user_message: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -3196,14 +3203,6 @@ enum TranscriptBlockSnapshotFields<'a> {
     Summary {
         summary: &'a str,
     },
-}
-
-#[derive(serde::Serialize)]
-struct ToolElapsedSnapshot<'a> {
-    call_id: &'a str,
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    secs: Option<u64>,
 }
 
 /// Build the canonical renderer-facing snapshot for one transcript block.
@@ -3270,7 +3269,6 @@ pub fn transcript_block_snapshot_json(
             args,
             raw_arguments,
             status: "drafting",
-            status_hl: "SmeltToolPending",
             draft: true,
             draft_finished: *finished,
         },
@@ -3283,9 +3281,9 @@ pub fn transcript_block_snapshot_json(
             let status = state
                 .map(|state| state.status)
                 .unwrap_or(ToolStatus::Pending);
-            let elapsed_secs = state
+            let elapsed_ms = state
                 .and_then(|state| state.elapsed)
-                .map(|elapsed| elapsed.as_secs());
+                .map(|elapsed| elapsed.as_millis() as u64);
             TranscriptBlockSnapshotFields::ToolCall {
                 call_id,
                 name,
@@ -3293,14 +3291,9 @@ pub fn transcript_block_snapshot_json(
                 summary_text: summary.as_plain_text(),
                 args,
                 status: status.label(),
-                status_hl: status.hl_group(),
-                elapsed: ToolElapsedSnapshot {
-                    call_id,
-                    status: status.label(),
-                    secs: elapsed_secs,
-                },
-                elapsed_secs,
-                elapsed_text: elapsed_secs.and_then(|secs| tool_elapsed_text(status, secs)),
+                called_at_ms: state.and_then(|state| state.called_at_ms),
+                elapsed_ms,
+                elapsed_active: state.is_some_and(|state| state.elapsed_active),
                 user_message: state.and_then(|state| state.user_message.as_deref()),
                 preview_output: state.and_then(|state| state.preview_output.as_deref()),
                 output: state.and_then(|state| state.output.as_deref()),
@@ -3321,21 +3314,6 @@ pub fn transcript_block_snapshot_json(
         kind: block.kind(),
         fields,
     })
-}
-
-fn transcript_block_to_lua_table(
-    lua: &Lua,
-    id: BlockId,
-    index: usize,
-    block: &Block,
-    state: Option<&ToolState>,
-) -> LuaResult<mlua::Table> {
-    let snapshot =
-        transcript_block_snapshot_json(id, index, block, state).map_err(mlua::Error::external)?;
-    match json_to_lua(lua, &snapshot)? {
-        mlua::Value::Table(table) => Ok(table),
-        _ => unreachable!("transcript block snapshots serialize as objects"),
-    }
 }
 
 fn args_to_lua_table(
@@ -3483,158 +3461,17 @@ fn layout_text(content: impl Into<String>, hl_group: Option<&str>, ansi: bool) -
     }))
 }
 
-fn layout_separator(label: impl Into<String>) -> BlockLayout {
-    BlockLayout::Leaf(LuaLeaf::Separator(SeparatorSpec {
-        label: vec![protocol::StyledSpan {
-            text: label.into(),
-            ..Default::default()
-        }],
-        dim: true,
-        selectable: false,
-    }))
-}
-
-fn fallback_transcript_group_layout(name: &str) -> BlockLayout {
-    layout_text(
-        format!("{name} group render error"),
-        Some("ErrorMsg"),
-        false,
-    )
-}
-
-fn fallback_transcript_layout(
-    block: &Block,
-    state: Option<&ToolState>,
-    view_state: crate::transcript_model::ViewState,
-) -> BlockLayout {
-    match block {
-        Block::User { text, .. } => layout_text(text.clone(), None, false),
-        Block::Mode {
-            text,
-            icon,
-            hl_group,
-        } => layout_text(format!("{icon}{text}"), Some(hl_group), false),
-        Block::ProcessStatus { text, .. } => layout_text(text.clone(), Some("SmeltProcess"), false),
-        Block::Thinking {
-            title,
-            summary_titles,
-            content,
-            ..
-        } => {
-            if matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
-                layout_text(
-                    thinking_fallback_summary(title.as_deref(), content),
-                    None,
-                    false,
-                )
-            } else {
-                let visible_titles =
-                    if matches!(view_state, crate::transcript_model::ViewState::Expanded) {
-                        summary_titles.as_slice()
-                    } else {
-                        &[]
-                    };
-                let content = crate::transcript_model::thinking_markdown_source(
-                    title.as_deref(),
-                    visible_titles,
-                    content,
-                );
-                BlockLayout::Gutter {
-                    child: Box::new(layout_text(content, None, false)),
-                    spec: crate::content::block_layout::GutterSpec {
-                        text: "│ ".to_string(),
-                        styled: true,
-                    },
-                }
-            }
-        }
-        Block::Text { content } | Block::CodeLine { content, .. } => {
-            layout_text(content.clone(), None, false)
-        }
-        Block::ToolDraft { name, summary, .. } => {
-            let mut header = format!("* {name}");
-            let summary_text = summary.as_plain_text();
-            if !summary_text.is_empty() {
-                header.push(' ');
-                header.push_str(&summary_text);
-            }
-            header.push_str(" (drafting)");
-            layout_text(header, Some("SmeltToolPending"), false)
-        }
-        Block::ToolCall {
-            name,
-            summary,
-            call_id: _,
-            args: _,
-        } => {
-            let status = state.map(|s| s.status).unwrap_or(ToolStatus::Pending);
-            let mut items = Vec::new();
-            let mut header = format!("* {name}");
-            let summary_text = summary.as_plain_text();
-            if !summary_text.is_empty() {
-                header.push(' ');
-                header.push_str(&summary_text);
-            }
-            if let Some(elapsed) = state.and_then(|s| s.elapsed) {
-                if let Some(text) = tool_elapsed_text(status, elapsed.as_secs()) {
-                    header.push_str(&format!(" ({text})"));
-                }
-            }
-            items.push(layout_text(header, Some(tool_status_hl(status)), false));
-            if let Some(message) = state.and_then(|s| s.user_message.as_deref()) {
-                items.push(BlockLayout::Gutter {
-                    child: Box::new(layout_text(message.to_string(), None, false)),
-                    spec: crate::content::block_layout::GutterSpec {
-                        text: "  ".to_string(),
-                        styled: false,
-                    },
-                });
-            }
-            if !matches!(status, ToolStatus::Denied) {
-                if let Some(output) = state.and_then(|s| s.output.as_deref()) {
-                    if !output.content.is_empty() {
-                        items.push(BlockLayout::Gutter {
-                            child: Box::new(layout_text(
-                                output.content.clone(),
-                                output.is_error.then_some("ErrorMsg"),
-                                true,
-                            )),
-                            spec: crate::content::block_layout::GutterSpec {
-                                text: "  ".to_string(),
-                                styled: false,
-                            },
-                        });
-                    }
-                }
-            }
-            BlockLayout::Vbox(items)
-        }
-        Block::Exec { command, output } => {
-            let mut items = vec![layout_text(format!("!{command}"), None, false)];
-            if !output.is_empty() {
-                items.push(layout_text(output.clone(), None, true));
-            }
-            BlockLayout::Vbox(items)
-        }
-        Block::Compacted { summary } => {
-            let mut items = vec![layout_separator(" compacted ")];
-            if !matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
-                items.push(layout_text(summary.clone(), None, false));
-            }
-            BlockLayout::Vbox(items)
-        }
-        Block::CompactionPreview { summary } => {
-            let mut items = vec![layout_separator(" compacting ")];
-            if !matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
-                items.push(layout_text(summary.clone(), None, false));
-            }
-            BlockLayout::Vbox(items)
-        }
-    }
-}
-
-fn tool_status_hl(status: ToolStatus) -> &'static str {
-    status.hl_group()
+fn fallback_transcript_snapshot_layout(snapshot: &serde_json::Value) -> BlockLayout {
+    let kind = snapshot
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("transcript");
+    let text = ["content", "text", "summary", "summary_text", "name"]
+        .into_iter()
+        .find_map(|field| snapshot.get(field).and_then(serde_json::Value::as_str))
+        .filter(|text| !text.is_empty())
+        .unwrap_or(kind);
+    layout_text(text, Some("ErrorMsg"), false)
 }
 
 fn thinking_fallback_summary(title: Option<&str>, content: &str) -> String {
@@ -4015,12 +3852,14 @@ pub fn init_lua_path() -> Option<PathBuf> {
 
 fn build_tool_ctx(
     lua: &Lua,
+    invocation_id: protocol::InvocationId,
     call_id: &str,
     mode: protocol::AgentMode,
     session_id: &str,
     session_dir: &std::path::Path,
 ) -> mlua::Result<mlua::Table> {
     let t = lua.create_table()?;
+    t.set("invocation_id", invocation_id.get())?;
     t.set("call_id", call_id.to_string())?;
     t.set("mode", mode.as_str())?;
     t.set("session_id", session_id.to_string())?;
@@ -4239,7 +4078,8 @@ mod tests {
             )),
         };
 
-        let table = transcript_block_to_lua_table(&lua, BlockId::new(9), 3, &block, None).unwrap();
+        let snapshot = transcript_block_snapshot_json(BlockId::new(9), 3, &block, None).unwrap();
+        let table = transcript_snapshot_to_lua_table(&lua, &snapshot).unwrap();
 
         assert_eq!(table.get::<String>("kind").unwrap(), "process_status");
         assert_eq!(
@@ -4258,6 +4098,44 @@ mod tests {
             "background_process_completed"
         );
     }
+    #[test]
+    fn tool_snapshot_exposes_raw_active_and_terminal_timing_facts() {
+        let block = Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("echo hi"),
+            args: HashMap::new(),
+        };
+        let mut state = ToolState {
+            status: ToolStatus::Pending,
+            elapsed: Some(std::time::Duration::from_millis(1_250)),
+            called_at_ms: Some(1_700_000_000_123),
+            elapsed_active: true,
+            output: None,
+            user_message: None,
+            preview_output: None,
+        };
+
+        let active = transcript_block_snapshot_json(BlockId::new(1), 0, &block, Some(&state))
+            .expect("active snapshot");
+        assert_eq!(active["called_at_ms"], 1_700_000_000_123u64);
+        assert_eq!(active["elapsed_ms"], 1_250);
+        assert_eq!(active["elapsed_active"], true);
+        assert_eq!(active["status"], "pending");
+        assert!(active.get("elapsed_text").is_none());
+        assert!(active.get("elapsed_secs").is_none());
+
+        state.status = ToolStatus::Ok;
+        state.elapsed = Some(std::time::Duration::from_millis(2_500));
+        state.elapsed_active = false;
+        let terminal = transcript_block_snapshot_json(BlockId::new(1), 0, &block, Some(&state))
+            .expect("terminal snapshot");
+        assert_eq!(terminal["called_at_ms"], 1_700_000_000_123u64);
+        assert_eq!(terminal["elapsed_ms"], 2_500);
+        assert_eq!(terminal["elapsed_active"], false);
+        assert_eq!(terminal["status"], "ok");
+    }
+
     #[test]
     fn host_runtime_installs_transcript_renderer_api() {
         let rt = LuaRuntime::new();
@@ -4356,20 +4234,17 @@ mod tests {
                   default_view = "collapsed",
                   selector = { kind = "tool", name = "read_file", terminal = true },
                   bucket = { "name" },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 smelt.transcript.groups.register({
                   name = "low",
                   cache_key = "v1",
                   selector = { kind = "tool" },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 smelt.transcript.groups.register({
                   name = "tool_batch",
                   cache_key = "v2",
                   priority = 10,
                   selector = { kind = "tool", names = { "read_file", "grep", "glob" }, terminal = true },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 "#,
             )
@@ -4412,7 +4287,6 @@ mod tests {
                     event = "background_process_completed",
                     fields = { event_type = "other_event" },
                   },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 "#,
             )
@@ -4432,13 +4306,11 @@ mod tests {
                   name = "batch",
                   cache_key = "v1",
                   selector = { kind = "tool" },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 smelt.transcript.groups.register({
                   name = "batch",
                   cache_key = "v2",
                   selector = { kind = "tool" },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 first:remove()
                 "#,
@@ -4459,7 +4331,6 @@ mod tests {
                 smelt.transcript.groups.register({
                   name = "uncached",
                   selector = { kind = "tool" },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 "#,
             )
@@ -4469,28 +4340,28 @@ mod tests {
     }
 
     #[test]
-    fn transcript_group_renderer_can_be_invoked_by_rust() {
+    fn semantic_group_uses_root_transcript_renderer() {
         let rt = LuaRuntime::new();
         rt.lua
             .load(
                 r#"
-                smelt.transcript.groups.register({
-                  name = "batch",
-                  cache_key = "v1",
-                  selector = { kind = "tool" },
-                  render = function(group, ctx)
-                    return smelt.layout.text(group.name .. ":" .. tostring(group.count) .. ":" .. tostring(ctx.view_state))
-                  end,
-                })
+                smelt.transcript.set_renderer(function(node, ctx)
+                  return smelt.layout.text(node.name .. ":" .. tostring(node.child_count) .. ":" .. tostring(ctx.view_state))
+                end, { cache_key = "group-root:v1" })
                 "#,
             )
             .exec()
             .unwrap();
 
-        let layout = rt.render_transcript_group_layout(
-            "batch",
-            &serde_json::json!({ "count": 3 }),
+        let layout = rt.render_transcript_layout(
+            &serde_json::json!({
+                "kind": "group",
+                "name": "batch",
+                "child_count": 3,
+                "children": [],
+            }),
             crate::transcript_model::ViewState::Expanded,
+            1_742_573_823_000,
         );
         match layout {
             BlockLayout::Leaf(LuaLeaf::Text(spec)) => assert_eq!(spec.content, "batch:3:expanded"),
@@ -4553,7 +4424,6 @@ mod tests {
                 smelt.transcript.groups.register({
                   name = "batch",
                   selector = { kind = "tool" },
-                  render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 "#,
             )

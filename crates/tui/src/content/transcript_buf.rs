@@ -703,6 +703,21 @@ impl MeasurementIndexStore {
         self.entries.clear();
     }
 
+    fn invalidate_nodes(&mut self, ids: &HashSet<RenderNodeId>) {
+        let mut first_dirty = None;
+        for (index, node) in self.active.nodes.iter_mut().enumerate() {
+            if ids.contains(&node.id) {
+                node.exact_height = None;
+                first_dirty = Some(first_dirty.map_or(index, |current: usize| current.min(index)));
+            }
+        }
+        if let Some(index) = first_dirty {
+            self.active.mark_prefix_dirty_from(index);
+        }
+        self.entries
+            .retain(|entry| !entry.nodes.iter().any(|node| ids.contains(&node.id)));
+    }
+
     fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.enforce_budget();
@@ -1054,8 +1069,7 @@ fn estimate_text_rows_with_prefix(prefix: &str, text: &str, width: u16) -> RowIn
 
 fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> RowIndex {
     let tool_output = history
-        .tool_call_id(id)
-        .and_then(|call_id| history.tool_state(call_id))
+        .tool_state(id)
         .and_then(|state| state.output.as_ref())
         .map(|output| output.content.as_str());
     if let Some(text) = tool_output {
@@ -1505,6 +1519,22 @@ impl TranscriptProjection {
             .map(|e| (e.id, e.start, e.rows))
     }
 
+    pub(crate) fn next_refresh_at(&self) -> Option<std::time::Instant> {
+        self.display_layouts.next_refresh_at()
+    }
+
+    fn expire_due_refreshes(&mut self, now: std::time::Instant) {
+        let due = self.display_layouts.expire_due_refreshes(now);
+        if due.is_empty() {
+            return;
+        }
+        let due = due.into_iter().collect::<HashSet<_>>();
+        self.measurements.invalidate_nodes(&due);
+        self.clear_visible_state();
+        self.visible.full_rows = None;
+        self.projection_generation = self.projection_generation.wrapping_add(1);
+    }
+
     #[cfg(test)]
     pub(crate) fn display_layouts_len(&self) -> usize {
         self.display_layouts.len()
@@ -1727,6 +1757,7 @@ impl TranscriptProjection {
         );
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
+        self.expire_due_refreshes(env.refresh_now);
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
         self.gc_if_stale(env.lua, history, width);
         let plan = &self.render_plan;
@@ -3458,6 +3489,7 @@ impl TranscriptProjection {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
+        self.expire_due_refreshes(env.refresh_now);
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
         self.gc_if_stale(env.lua, history, width);
         let gen = self.render_plan.fingerprint;
@@ -3883,11 +3915,19 @@ impl smelt_core::buffer::BufferCopy for TranscriptCopier {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use smelt_core::content::stream_parser::StreamParser;
+    use smelt_core::content::stream_parser::{StreamParser, ToolStart};
     use smelt_core::content::transcript::Transcript;
     use smelt_core::transcript_model::{
         Block, BlockHistory, BlockId, ToolOutput, ToolState, ToolStatus,
     };
+
+    static NEXT_INVOCATION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    fn next_invocation_id() -> protocol::InvocationId {
+        protocol::InvocationId::new(
+            NEXT_INVOCATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    }
 
     fn test_lua() -> smelt_core::lua::runtime::LuaRuntime {
         smelt_core::lua::runtime::LuaRuntime::new()
@@ -3895,20 +3935,25 @@ pub(crate) mod tests {
 
     fn register_terminal_tool_group(lua: &smelt_core::lua::runtime::LuaRuntime, min: usize) {
         let chunk = r#"
-            local defaults = require("smelt.transcript.defaults")
             smelt.transcript.groups.register({
               name = "terminal-tools",
               selector = { kind = "tool", terminal = true },
               min = __MIN__,
               default_view = "expanded",
               cache_key = "test.terminal-tools:v1",
-              render = function(group, ctx)
-                return smelt.layout.vbox({
-                  smelt.layout.text("group:" .. group.name .. ":" .. tostring(group.child_count) .. ":" .. group.view_state),
-                  defaults.render_group_child_list(group, ctx, { field = "call_id" }),
-                })
-              end,
             })
+            smelt.transcript.extend_renderer("test.terminal-tools", function(next, node, ctx)
+              if node.kind ~= "group" or node.name ~= "terminal-tools" then
+                return next(node, ctx)
+              end
+              local items = {
+                smelt.layout.text("group:" .. node.name .. ":" .. tostring(node.child_count) .. ":" .. node.view_state),
+              }
+              for _, child in ipairs(node.children or {}) do
+                items[#items + 1] = ctx.render(child, { view_state = child.view_state or ctx.view_state })
+              end
+              return smelt.layout.vbox(items)
+            end, { cache_key = "test.terminal-tools-renderer:v1" })
         "#
         .replace("__MIN__", &min.to_string());
         lua.lua.load(chunk.as_str()).exec().expect("register group");
@@ -3921,15 +3966,21 @@ pub(crate) mod tests {
         summary: &str,
         status: ToolStatus,
     ) {
+        let invocation_id = next_invocation_id();
         parser.start_tool(
             history,
-            call_id.into(),
-            "bash".into(),
-            protocol::StyledLines::from_plain(summary),
-            std::collections::HashMap::new(),
+            ToolStart {
+                invocation_id,
+                call_id: call_id.into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain(summary),
+                args: std::collections::HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
             std::time::Instant::now(),
         );
-        parser.set_active_status(history, call_id, status, std::time::Instant::now());
+        parser.set_active_status(history, invocation_id, status, std::time::Instant::now());
     }
 
     fn push_named_tool(
@@ -3951,6 +4002,8 @@ pub(crate) mod tests {
             ToolState {
                 status,
                 elapsed: Some(std::time::Duration::from_millis(25)),
+                called_at_ms: None,
+                elapsed_active: false,
                 output: Some(Box::new(ToolOutput {
                     content: format!("{summary} output"),
                     is_error,
@@ -3981,8 +4034,8 @@ pub(crate) mod tests {
                 end
                 require('smelt.transcript')
                 require('smelt.tools.read_file')
-                assert(smelt.transcript.defaults.__tool_collapsed_details.read_file ~= nil)
-                assert(smelt.transcript.defaults.__tool_collapsed_details.read_file({ output = { content = "x" } }) == "1 lines")
+                local presentation = assert(smelt.transcript.get_tool_presentation("read_file"))
+                assert(presentation.compact({ output = { content = "x" } }) == "1 lines")
                 "#,
             )
             .exec()
@@ -3990,7 +4043,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn row_index_survives_generation_only_tool_elapsed_update() {
+    fn elapsed_update_recompiles_and_remeasures_tool_layout() {
         let lua = test_lua();
         let theme = Theme::default();
         let mut transcript = Transcript::new();
@@ -4009,11 +4062,17 @@ pub(crate) mod tests {
             ToolState {
                 status: ToolStatus::Pending,
                 elapsed: Some(std::time::Duration::from_millis(1)),
+                called_at_ms: None,
+                elapsed_active: true,
                 output: None,
                 user_message: None,
                 preview_output: None,
             },
         );
+        let tool_block_id = transcript
+            .history
+            .last_block_id()
+            .expect("tool block should exist");
         let mut projection = TranscriptProjection::new();
         let mut buf = Buffer::new(crate::smelt_edit::BufId(101), Default::default());
         let first = project_with_lua(
@@ -4030,9 +4089,11 @@ pub(crate) mod tests {
         projection.reset_counters();
 
         let generation = transcript.history.generation();
-        assert!(transcript.history.update_tool_state("call-1", |state| {
-            state.elapsed = Some(std::time::Duration::from_secs(2));
-        }));
+        assert!(transcript
+            .history
+            .update_tool_state(tool_block_id, |state| {
+                state.elapsed = Some(std::time::Duration::from_secs(2));
+            }));
         assert!(transcript.history.generation() > generation);
 
         let second = project_with_lua(
@@ -4047,8 +4108,9 @@ pub(crate) mod tests {
         );
         let counters = projection.counters();
         assert_eq!(second.total_rows, first.total_rows);
-        assert_eq!(counters.display_layouts, 0);
-        assert_eq!(counters.exact_height_measured_blocks, 0);
+        assert_eq!(counters.display_layouts, 1);
+        assert_eq!(counters.exact_height_measured_blocks, 1);
+        assert!(snapshot(&buf).iter().any(|row| row.line.contains("2s")));
     }
 
     #[test]
@@ -4342,13 +4404,16 @@ pub(crate) mod tests {
                   min = 2,
                   default_view = "collapsed",
                   cache_key = "test.custom-read-group:v1",
-                  render = function(group, ctx)
-                    return smelt.layout.vbox({
-                      smelt.layout.text("custom summary " .. group.view_state),
-                      smelt.layout.text("custom detail")
-                    })
-                  end,
                 })
+                smelt.transcript.extend_renderer("test.custom-read-group", function(next, node, ctx)
+                  if node.kind ~= "group" or node.name ~= "custom-read-group" then
+                    return next(node, ctx)
+                  end
+                  return smelt.layout.vbox({
+                    smelt.layout.text("custom summary " .. node.view_state),
+                    smelt.layout.text("custom detail")
+                  })
+                end, { cache_key = "test.custom-read-group-renderer:v1" })
                 "#,
             )
             .exec()
@@ -4716,12 +4781,18 @@ pub(crate) mod tests {
             command: false,
         });
         let mut parser = StreamParser::new();
+        let invocation_id = next_invocation_id();
         parser.start_tool(
             &mut transcript.history,
-            "call-1".into(),
-            "bash".into(),
-            protocol::StyledLines::from_plain("ls"),
-            std::collections::HashMap::new(),
+            ToolStart {
+                invocation_id,
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain("ls"),
+                args: std::collections::HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
             std::time::Instant::now(),
         );
 
@@ -4738,10 +4809,10 @@ pub(crate) mod tests {
         );
         let before = snapshot(&buf);
 
-        parser.append_active_output(&mut transcript.history, "call-1", "done");
+        parser.append_active_output(&mut transcript.history, invocation_id, "done");
         parser.set_active_status(
             &mut transcript.history,
-            "call-1",
+            invocation_id,
             ToolStatus::Ok,
             std::time::Instant::now(),
         );
@@ -4799,13 +4870,16 @@ pub(crate) mod tests {
         assert!(grouped
             .iter()
             .any(|line| line == "group:terminal-tools:2:expanded"));
-        assert!(
-            grouped.iter().any(|line| line == "  call-1"),
-            "grouped rows: {grouped:?}"
-        );
-        assert!(grouped.iter().any(|line| line == "  call-2"));
+        for child_header in ["* bash first", "* bash second failed"] {
+            assert!(
+                grouped.iter().any(|line| {
+                    line.strip_prefix(child_header)
+                        .is_some_and(|invoked_at| !invoked_at.trim().is_empty())
+                }),
+                "missing invocation time after {child_header:?} in grouped rows: {grouped:?}"
+            );
+        }
         assert!(grouped.iter().any(|line| line == "after"));
-        assert!(!grouped.iter().any(|line| line.contains("bash")));
     }
 
     #[test]
@@ -4893,12 +4967,13 @@ pub(crate) mod tests {
                   min = 2,
                   default_view = "expanded",
                   cache_key = "test.assistant-pair:v1",
-                  render = function(group, ctx)
-                    local _ = group
-                    local _ = ctx
-                    return smelt.layout.text("assistant group")
-                  end,
                 })
+                smelt.transcript.extend_renderer("test.assistant-pair", function(next, node, ctx)
+                  if node.kind == "group" and node.name == "assistant-pair" then
+                    return smelt.layout.text("assistant group")
+                  end
+                  return next(node, ctx)
+                end, { cache_key = "test.assistant-pair-renderer:v1" })
                 "#,
             )
             .exec()
@@ -4963,10 +5038,18 @@ pub(crate) mod tests {
         ));
         let child_rows: Vec<_> = rows
             .iter()
-            .filter(|line| line.starts_with("  "))
+            .filter(|line| line.starts_with("* bash "))
             .map(String::as_str)
             .collect();
-        assert_eq!(child_rows, vec!["  call-1", "  call-2", "  call-3"]);
+        let expected_headers = ["* bash ok child", "* bash failed child", "* bash later ok"];
+        assert_eq!(child_rows.len(), expected_headers.len());
+        for (row, expected_header) in child_rows.iter().zip(expected_headers) {
+            assert!(
+                row.strip_prefix(expected_header)
+                    .is_some_and(|invoked_at| !invoked_at.trim().is_empty()),
+                "expected {expected_header:?} with an invocation time, got {row:?}"
+            );
+        }
     }
 
     #[test]
@@ -5472,6 +5555,8 @@ pub(crate) mod tests {
             ToolState {
                 status: ToolStatus::Ok,
                 elapsed: None,
+                called_at_ms: None,
+                elapsed_active: false,
                 output: Some(Box::new(ToolOutput {
                     content: prefix_output,
                     is_error: false,
@@ -5495,6 +5580,8 @@ pub(crate) mod tests {
             ToolState {
                 status: ToolStatus::Ok,
                 elapsed: None,
+                called_at_ms: None,
+                elapsed_active: false,
                 output: Some(Box::new(ToolOutput {
                     content: target_output,
                     is_error: false,
@@ -5569,6 +5656,8 @@ pub(crate) mod tests {
                 ToolState {
                     status: ToolStatus::Ok,
                     elapsed: None,
+                    called_at_ms: None,
+                    elapsed_active: false,
                     output: Some(Box::new(ToolOutput {
                         content: estimated_large_output.clone(),
                         is_error: false,
@@ -5711,21 +5800,31 @@ pub(crate) mod tests {
     fn tool_state_changes_invalidate_measured_rows() {
         let mut transcript = Transcript::new();
         let mut parser = StreamParser::new();
+        let invocation_id = next_invocation_id();
         parser.start_tool(
             &mut transcript.history,
-            "call-1".into(),
-            "bash".into(),
-            protocol::StyledLines::from_plain("echo hi"),
-            std::collections::HashMap::new(),
+            ToolStart {
+                invocation_id,
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain("echo hi"),
+                args: std::collections::HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
             std::time::Instant::now(),
         );
         let mut projection = TranscriptProjection::new();
         let pending_total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
-        parser.append_active_output(&mut transcript.history, "call-1", "first\nsecond\nthird");
+        parser.append_active_output(
+            &mut transcript.history,
+            invocation_id,
+            "first\nsecond\nthird",
+        );
         parser.set_active_status(
             &mut transcript.history,
-            "call-1",
+            invocation_id,
             ToolStatus::Ok,
             std::time::Instant::now(),
         );
@@ -7030,6 +7129,7 @@ pub(crate) mod tests {
                     ToolState {
                         status: ToolStatus::Ok,
                         elapsed: Some(std::time::Duration::from_millis(1_250)),
+                        called_at_ms: None,
                         output: Some(Box::new(ToolOutput {
                             content: output,
                             is_error: false,
@@ -7065,8 +7165,8 @@ pub(crate) mod tests {
         for id in &history.order {
             if let Some(block) = history.block(*id) {
                 bytes += block.raw_text().map_or(0, |text| text.len());
-                if let Block::ToolCall { call_id, .. } = block {
-                    if let Some(state) = history.tool_state(call_id) {
+                if let Block::ToolCall { .. } = block {
+                    if let Some(state) = history.tool_state(*id) {
                         bytes += state
                             .output
                             .as_ref()
@@ -7133,6 +7233,8 @@ pub(crate) mod tests {
                 ToolState {
                     status: ToolStatus::Ok,
                     elapsed: Some(std::time::Duration::from_millis(2_000 + i as u64)),
+                    called_at_ms: None,
+                    elapsed_active: false,
                     output: Some(Box::new(ToolOutput {
                         content: output,
                         is_error: false,
@@ -8186,10 +8288,15 @@ pub(crate) mod tests {
         let mut parser = StreamParser::new();
         parser.start_tool(
             &mut transcript.history,
-            "call-1".into(),
-            name.into(),
-            summary,
-            std::collections::HashMap::new(),
+            ToolStart {
+                invocation_id: next_invocation_id(),
+                call_id: "call-1".into(),
+                name: name.into(),
+                summary,
+                args: std::collections::HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
             std::time::Instant::now(),
         );
 
@@ -8247,7 +8354,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn expanded_group_compact_child_detail_is_selectable() {
+    fn expanded_group_root_rendered_child_titles_are_selectable() {
         let lua = test_lua();
         install_read_file_renderer(&lua);
         let mut transcript = Transcript::new();
@@ -8274,7 +8381,8 @@ pub(crate) mod tests {
         assert!(projection.fold_node(&transcript.history, group_id, FoldAction::Open));
         let expanded = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         assert!(
-            expanded.iter().any(|line| line.trim() == "1 lines"),
+            expanded.iter().any(|line| line == "* read_file a.rs")
+                && expanded.iter().any(|line| line == "* read_file b.rs"),
             "expanded rows: {expanded:?}"
         );
         let mut buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
@@ -8288,14 +8396,9 @@ pub(crate) mod tests {
             80,
         );
 
-        assert!(
-            buf.lines().iter().any(|line| line.trim() == "1 lines"),
-            "rows: {:?}",
-            buf.lines()
-        );
         let copied = copy_byte_range(&buf, 0, buf.text().len());
         assert!(copied.contains("* read_file a.rs"), "copied: {copied:?}");
-        assert!(copied.contains("1 lines"), "copied: {copied:?}");
+        assert!(copied.contains("* read_file b.rs"), "copied: {copied:?}");
     }
 
     #[test]

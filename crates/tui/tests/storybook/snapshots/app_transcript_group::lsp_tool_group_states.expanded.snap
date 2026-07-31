@@ -1,19 +1,18 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 595
-expression: frame.text()
+expression: text
 ---
-* inspect_symbol RenderNode, enum, crates/tui/**/*.rs
+* inspect_symbol RenderNode, enum, crates/tui/**/*.rs                            14:37:03
 
-* inspect_symbol_at crates/tui/src/content/render_plan.rs:26:17
+* inspect_symbol_at crates/tui/src/content/render_plan.rs:26:17                  14:37:03
 
-* find_definition crates/tui/src/content/render_plan.rs:44:19
+* find_definition crates/tui/src/content/render_plan.rs:44:19                    14:37:03
   1 definition
   - crates/core/src/transcript_model.rs:118:1
 
-* find_references crates/tui/src/content/render_plan.rs:26:17
+* find_references crates/tui/src/content/render_plan.rs:26:17                    14:37:03
 
-* diagnostics crates/tui/src/content/render_plan.rs
+* diagnostics crates/tui/src/content/render_plan.rs                              14:37:03
   no diagnostics
 
 

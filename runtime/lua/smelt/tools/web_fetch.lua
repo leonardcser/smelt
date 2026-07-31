@@ -203,18 +203,21 @@ local function ask_extract(content, prompt)
   return result.content
 end
 
-transcript_defaults.__tool_body_renderers.web_fetch = function(block, ctx)
-  local items = {}
-  local args = block.args or {}
-  if args.prompt and args.prompt ~= "" then
-    items[#items + 1] = smelt.layout.text(args.prompt)
-  end
-  local output = block.output or {}
-  items[#items + 1] = transcript_defaults.render_llm_markdown_tail(output.content, ctx, {
-    dim = true,
-  })
-  return smelt.layout.vbox(items)
-end
+smelt.transcript.register_tool("web_fetch", {
+  cache_key = "smelt.tool-presentation.web_fetch:v1",
+  body = function(block, ctx)
+    local items = {}
+    local args = block.args or {}
+    if args.prompt and args.prompt ~= "" then
+      items[#items + 1] = smelt.layout.text(args.prompt)
+    end
+    local output = block.output or {}
+    items[#items + 1] = transcript_defaults.render_llm_markdown_tail(output.content, ctx, {
+      dim = true,
+    })
+    return smelt.layout.vbox(items)
+  end,
+})
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "web_fetch",

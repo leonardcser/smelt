@@ -214,11 +214,6 @@ pub(crate) fn build_transcript_from_session(
         return transcript;
     }
 
-    let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
-    for (_, meta) in &session.turn_metas {
-        tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
-    }
-
     let mut checkpoint_markers = checkpoint_markers_by_history_index(session);
     for (idx, item) in session.history.iter().enumerate() {
         insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx);
@@ -236,7 +231,7 @@ pub(crate) fn build_transcript_from_session(
                 *command,
             ),
             HistoryItem::Assistant(turn) => {
-                push_assistant_blocks(&mut transcript, &summary_resolver, idx, turn, &tool_elapsed)
+                push_assistant_blocks(&mut transcript, &summary_resolver, idx, turn)
             }
             HistoryItem::Note(note) => push_note_block(&mut transcript, lua, idx, note),
             HistoryItem::System { .. } => {}
@@ -460,7 +455,6 @@ fn push_assistant_blocks(
     summary_resolver: &ToolSummaryResolver<'_>,
     history_index: usize,
     turn: &AssistantStep,
-    tool_elapsed: &HashMap<String, u64>,
 ) {
     if let Some(ref reasoning) = turn.reasoning {
         if !reasoning.is_empty() {
@@ -500,9 +494,7 @@ fn push_assistant_blocks(
             is_error: inv.result.is_error,
             metadata: inv.result.metadata.clone(),
         };
-        let elapsed_ms = inv
-            .elapsed_ms
-            .or_else(|| tool_elapsed.get(&inv.call_id).copied());
+        let elapsed_ms = inv.elapsed_ms;
         let summary = summary_resolver.resolve(&inv.name, &args);
         transcript.push_hydrated_tool_block_with_origin(
             Block::ToolCall {
@@ -514,6 +506,8 @@ fn push_assistant_blocks(
             ToolState {
                 status,
                 elapsed: elapsed_ms.map(Duration::from_millis),
+                called_at_ms: inv.called_at_ms,
+                elapsed_active: false,
                 output: Some(Box::new(output)),
                 user_message: None,
                 preview_output: None,
@@ -546,6 +540,7 @@ mod tests {
                         metadata: None,
                     },
                     elapsed_ms: None,
+                    called_at_ms: Some(1_742_573_823_000),
                 }],
             ),
         ));
@@ -1402,14 +1397,6 @@ impl TuiApp {
         let history_len = self.conversation.session().history.len();
         let mut checkpoint_markers =
             checkpoint_markers_by_history_index(self.conversation.session());
-        let mut tool_elapsed = HashMap::new();
-        for (_, meta) in &self.conversation.session().turn_metas {
-            tool_elapsed.extend(
-                meta.tool_elapsed
-                    .iter()
-                    .map(|(key, value)| (key.clone(), *value)),
-            );
-        }
 
         let mut transcript = Transcript::new();
         let lua = self.lua.execution();
@@ -1442,7 +1429,6 @@ impl TuiApp {
                     &ToolSummaryResolver::new(&lua),
                     history_index,
                     turn,
-                    &tool_elapsed,
                 ),
                 HistoryItem::Note(note) => {
                     push_note_block(&mut transcript, &lua, history_index, note)
@@ -3883,7 +3869,6 @@ mod checkpoint_tests {
                 avg_tps: None,
                 display_tps: None,
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
         session.context_tokens = Some(100);
@@ -4215,7 +4200,6 @@ mod checkpoint_tests {
                 avg_tps: Some(20.0),
                 display_tps: Some(20.0),
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
         session.history.extend([user("c"), assistant("d")]);
@@ -4226,7 +4210,6 @@ mod checkpoint_tests {
                 avg_tps: Some(50.0),
                 display_tps: Some(50.0),
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
         app.app.conversation.install_session_for_harness(session);
@@ -4253,7 +4236,6 @@ mod checkpoint_tests {
                 avg_tps: Some(20.0),
                 display_tps: Some(20.0),
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
         session.history.extend([user("c"), assistant("d")]);
@@ -4264,7 +4246,6 @@ mod checkpoint_tests {
                 avg_tps: None,
                 display_tps: Some(20.0),
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
         session.history.extend([user("e"), assistant("f")]);
@@ -4275,7 +4256,6 @@ mod checkpoint_tests {
                 avg_tps: Some(50.0),
                 display_tps: Some(50.0),
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             },
         ));
         app.app.conversation.install_session_for_harness(session);

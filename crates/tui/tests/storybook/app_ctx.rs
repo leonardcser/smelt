@@ -35,7 +35,12 @@ pub struct AppStoryCtx {
 
 impl AppStoryCtx {
     pub fn new(name: &str) -> Self {
-        let app = TestApp::builder().without_model().build();
+        let mut app = TestApp::builder()
+            .without_model()
+            .with_wall_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_742_567_823))
+            .build();
+        app.run_lua_result("smelt.time.format = smelt.time.format_utc")
+            .expect("pin storybook timestamp formatting to UTC");
         Self {
             app,
             name: name.to_string(),
@@ -284,7 +289,7 @@ impl AppStoryCtx {
     ) {
         let call_id = self.next_call_id(tool_name);
         self.start_turn();
-        self.app.tool_started(
+        let invocation_id = self.app.tool_started(
             call_id.clone(),
             tool_name,
             args.iter()
@@ -292,6 +297,7 @@ impl AppStoryCtx {
                 .collect(),
         );
         self.app.tool_finished(
+            invocation_id,
             call_id,
             ToolOutcome {
                 content: content.into(),

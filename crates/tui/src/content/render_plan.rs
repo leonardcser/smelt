@@ -957,17 +957,14 @@ fn selector_matches(
         return false;
     }
     if let Some(terminal) = spec.selector.terminal {
-        let terminal_state = history
-            .tool_call_id(id)
-            .and_then(|call_id| history.tool_status(call_id))
-            .is_some_and(|status| {
-                matches!(
-                    status,
-                    smelt_core::ToolStatus::Ok
-                        | smelt_core::ToolStatus::Err
-                        | smelt_core::ToolStatus::Denied
-                )
-            });
+        let terminal_state = history.tool_status(id).is_some_and(|status| {
+            matches!(
+                status,
+                smelt_core::ToolStatus::Ok
+                    | smelt_core::ToolStatus::Err
+                    | smelt_core::ToolStatus::Denied
+            )
+        });
         if terminal_state != terminal {
             return false;
         }
@@ -1002,8 +999,7 @@ fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Optio
         "name" => history.tool_name(id).map(str::to_string),
         "status" if history.is_tool_draft(id) => Some("drafting".to_string()),
         "status" => history
-            .tool_call_id(id)
-            .and_then(|call_id| history.tool_status(call_id))
+            .tool_status(id)
             .map(|status| status.label().to_string()),
         "event" | "event_type" | "process_id" | "exit_code" => history.process_field(id, field),
         field => field

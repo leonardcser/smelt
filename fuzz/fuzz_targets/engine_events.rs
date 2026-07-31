@@ -276,6 +276,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             feed(
                 app,
                 EngineEvent::ToolEvaluationRequest {
+                    invocation_id: protocol::InvocationId::new(model.sequence),
                     request_id: model.sequence,
                     call_id: format!("evaluation-{}", model.sequence),
                     tool_name: small_text(name),
@@ -302,6 +303,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             feed(
                 app,
                 EngineEvent::ToolDispatch {
+                    invocation_id: protocol::InvocationId::new(request_id),
                     request_id,
                     call_id: call_id.clone(),
                     tool_name: "fuzz_engine_dispatch".to_string(),
@@ -430,19 +432,25 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             is_error,
         } => {
             ensure_turn(app, model);
+            let invocation_id = protocol::InvocationId::new(model.sequence);
             let call_id = format!("call-{}", model.sequence);
             feed(
                 app,
                 EngineEvent::ToolStarted {
+                    invocation_id,
                     call_id: call_id.clone(),
                     tool_name: small_text(name),
                     args: HashMap::new(),
+                    called_at_ms: model.sequence,
                 },
             );
-            assert!(app.pending_tool_call_ids().contains(&call_id));
+            assert!(app
+                .pending_tool_invocation_ids()
+                .contains(&invocation_id));
             feed(
                 app,
                 EngineEvent::ToolOutput {
+                    invocation_id,
                     call_id: call_id.clone(),
                     chunk: small_text(output.clone()),
                 },
@@ -450,6 +458,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             feed(
                 app,
                 EngineEvent::ToolFinished {
+                    invocation_id,
                     call_id: call_id.clone(),
                     result: ToolOutcome {
                         content: small_text(output),
@@ -459,7 +468,9 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     elapsed_ms: Some(model.sequence),
                 },
             );
-            assert!(!app.pending_tool_call_ids().contains(&call_id));
+            assert!(!app
+                .pending_tool_invocation_ids()
+                .contains(&invocation_id));
         }
         Op::ToolRejected {
             name,
@@ -472,6 +483,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             feed(
                 app,
                 EngineEvent::ToolRejected {
+                    invocation_id: protocol::InvocationId::new(model.sequence),
                     call_id: format!("rejected-{}", model.sequence),
                     tool_name: name,
                     args: HashMap::new(),
@@ -482,6 +494,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                         metadata: None,
                     },
                     elapsed_ms: Some(model.sequence),
+                    called_at_ms: model.sequence,
                 },
             );
         }
@@ -492,12 +505,14 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             feed(
                 app,
                 EngineEvent::RequestPermission {
+                    invocation_id: protocol::InvocationId::new(request_id),
                     request_id,
                     call_id: format!("permission-{request_id}"),
                     tool_name: small_text(name),
                     args: HashMap::new(),
                     approval_patterns: Vec::new(),
                     summary: protocol::style::StyledLines::from_plain("permission".to_string()),
+                    called_at_ms: model.sequence,
                 },
             );
             assert_eq!(app.pending_confirm_count(), 1);

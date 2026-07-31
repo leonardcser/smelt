@@ -1,8 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* web_fetch https://example.com/page
+* web_fetch https://example.com/page                         14:37:03
 
 
 

@@ -423,16 +423,24 @@ pub struct ToolInvocation {
     pub result: ToolOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub called_at_ms: Option<u64>,
 }
 
 impl ToolInvocation {
-    pub fn from_call(call: &ToolCall, result: ToolOutcome, elapsed_ms: Option<u64>) -> Self {
+    pub fn from_call(
+        call: &ToolCall,
+        result: ToolOutcome,
+        elapsed_ms: Option<u64>,
+        called_at_ms: Option<u64>,
+    ) -> Self {
         Self {
             call_id: call.id.clone(),
             name: call.function.name.clone(),
             arguments: call.function.arguments.clone(),
             result,
             elapsed_ms,
+            called_at_ms,
         }
     }
 
@@ -861,6 +869,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                                 metadata,
                             },
                             elapsed_ms: None,
+                            called_at_ms: None,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1060,6 +1069,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_invocation_json_round_trip_preserves_called_at_ms() {
+        let invocation = ToolInvocation {
+            call_id: "call-1".into(),
+            name: "f".into(),
+            arguments: "{\"x\":1}".into(),
+            result: ToolOutcome {
+                content: "ok".into(),
+                is_error: false,
+                metadata: None,
+            },
+            elapsed_ms: Some(42),
+            called_at_ms: Some(1_700_000_000_123),
+        };
+
+        let json = serde_json::to_value(&invocation).unwrap();
+        assert_eq!(json["called_at_ms"], 1_700_000_000_123u64);
+        assert_eq!(
+            serde_json::from_value::<ToolInvocation>(json).unwrap(),
+            invocation
+        );
+
+        let legacy = serde_json::json!({
+            "call_id": "call-1",
+            "name": "f",
+            "arguments": "{}",
+            "result": { "content": "ok", "is_error": false },
+        });
+        assert_eq!(
+            serde_json::from_value::<ToolInvocation>(legacy)
+                .unwrap()
+                .called_at_ms,
+            None
+        );
+    }
+
+    #[test]
     fn assistant_with_invocations_round_trips_through_provider_messages() {
         let inv = ToolInvocation {
             call_id: "call-1".into(),
@@ -1071,6 +1116,7 @@ mod tests {
                 metadata: None,
             },
             elapsed_ms: None,
+            called_at_ms: None,
         };
         let item = HistoryItem::Assistant(AssistantStep::with_invocations(
             None,

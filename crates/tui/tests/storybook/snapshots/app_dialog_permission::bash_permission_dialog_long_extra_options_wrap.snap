@@ -1,9 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: frame.text()
+expression: text
 ---
-* bash cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/ver
-  y-long-permission-target.log
+* bash cat /var/log/smelt/projects/alpha/beta/gamma/delta/e  14:37:03
+       psilon/very-long-permission-target.log
 
 
 

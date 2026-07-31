@@ -1023,7 +1023,6 @@ impl TuiApp {
                 avg_tps: engine_meta.avg_tps.or(ui_meta.avg_tps),
                 display_tps: engine_meta.display_tps.or(ui_meta.display_tps),
                 interrupted: engine_meta.interrupted,
-                tool_elapsed: engine_meta.tool_elapsed,
             },
             None => ui_meta,
         };
@@ -1278,6 +1277,7 @@ impl TuiApp {
     pub(crate) fn handle_tool_call(
         &mut self,
         request_id: u64,
+        invocation_id: protocol::InvocationId,
         call_id: String,
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
@@ -1292,8 +1292,11 @@ impl TuiApp {
             lua.execute_tool_with_context(
                 &tool_name,
                 &args,
-                request_id,
-                &lua_call_id,
+                crate::lua::ToolCallIds {
+                    invocation_id,
+                    request_id,
+                    call_id: &lua_call_id,
+                },
                 crate::lua::ToolEnv {
                     mode,
                     session_id: &session_id,
@@ -1340,6 +1343,7 @@ impl TuiApp {
         }
         self.core.engine.send(protocol::UiCommand::ToolResult {
             request_id: invocation.request_id,
+            invocation_id: invocation.invocation_id,
             call_id,
             content,
             is_error,
@@ -1505,7 +1509,7 @@ impl TuiApp {
     pub(crate) fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
-        call_id: &str,
+        invocation_id: protocol::InvocationId,
         request_id: u64,
         tool_name: &str,
     ) -> bool {
@@ -1515,11 +1519,11 @@ impl TuiApp {
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
-            self.set_active_user_message(call_id, format!("{label}: {msg}"));
+            self.set_active_user_message(invocation_id, format!("{label}: {msg}"));
         }
         match choice {
             ConfirmChoice::Yes => {
-                self.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(invocation_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
@@ -1543,16 +1547,16 @@ impl TuiApp {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.set_active_status(call_id, ToolStatus::Pending);
+                self.set_active_status(invocation_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 false
             }
             ConfirmChoice::No => {
                 let has_message = message.is_some();
                 self.send_permission_decision(request_id, false, message);
-                self.finish_tool(call_id, ToolStatus::Denied, None, None);
+                self.finish_tool(invocation_id, ToolStatus::Denied, None, None);
                 if has_message {
-                    self.conversation.remove_pending_tool(call_id);
+                    self.conversation.remove_pending_tool(invocation_id);
                     false
                 } else {
                     engine::log::entry(
@@ -1602,15 +1606,15 @@ impl TuiApp {
         }
 
         if approved {
-            self.set_active_status(&req.call_id, ToolStatus::Pending);
+            self.set_active_status(req.invocation_id, ToolStatus::Pending);
             self.send_permission_decision(req.request_id, true, None);
         } else {
             self.send_permission_decision(req.request_id, false, None);
-            self.finish_tool(&req.call_id, ToolStatus::Denied, None, None);
+            self.finish_tool(req.invocation_id, ToolStatus::Denied, None, None);
             if let Some(pending) = pending {
-                pending.retain(|p| p.call_id != req.call_id);
+                pending.retain(|pending| pending.invocation_id != req.invocation_id);
             } else {
-                self.conversation.remove_pending_tool(&req.call_id);
+                self.conversation.remove_pending_tool(req.invocation_id);
             }
         }
     }
@@ -1693,7 +1697,7 @@ impl TuiApp {
                 }
 
                 if should_queue {
-                    self.set_active_status(&req.call_id, ToolStatus::Confirm);
+                    self.set_active_status(req.invocation_id, ToolStatus::Confirm);
                     self.overlays.defer_confirm(req);
                     return SessionControl::Continue;
                 }
@@ -1710,7 +1714,7 @@ impl TuiApp {
                 );
 
                 self.close_focused_non_blocking_overlay();
-                self.set_active_status(&req.call_id, ToolStatus::Confirm);
+                self.set_active_status(req.invocation_id, ToolStatus::Confirm);
 
                 let snapshot = smelt_core::signals::ConfirmRequested {
                     handle_id: 0,

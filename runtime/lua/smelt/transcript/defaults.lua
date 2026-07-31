@@ -2,12 +2,9 @@ smelt.transcript = smelt.transcript or {}
 smelt.transcript.defaults = smelt.transcript.defaults or {}
 
 local M = smelt.transcript.defaults
-M.__tool_body_renderers = M.__tool_body_renderers or {}
-M.__tool_draft_preview_renderers = M.__tool_draft_preview_renderers or {}
-M.__tool_collapsed_details = M.__tool_collapsed_details or {}
-M.__tool_header_rest_prefixes = M.__tool_header_rest_prefixes or {}
 
 local layout = smelt.layout
+local is_layout_node = layout.__is_node
 
 local status_hl = {
   drafting = "SmeltToolPending",
@@ -17,6 +14,60 @@ local status_hl = {
   denied = "ErrorMsg",
   confirm = "SmeltAccent",
 }
+
+local NO_PRESENTATION = {}
+
+local function tool_presentation(block, presentation)
+  if presentation ~= nil then return presentation end
+  return smelt.transcript.get_tool_presentation(block.name or "") or NO_PRESENTATION
+end
+
+local function presentation_result_error(block, field, expected, value)
+  error(
+    "smelt.transcript tool presentation `" .. (block.name or "tool") .. "`." .. field
+      .. " returned " .. type(value) .. "; expected " .. expected,
+    3
+  )
+end
+
+local function require_layout_result(block, field, value, allow_nil)
+  if value == nil and allow_nil then return value end
+  if not is_layout_node(value) then
+    local expected = "smelt.layout.Node"
+    if allow_nil then expected = expected .. " or nil" end
+    presentation_result_error(block, field, expected, value)
+  end
+  return value
+end
+
+local title_result_expected = "string, styled-lines table, or nil"
+
+local function require_title_result(block, value)
+  if value == nil or type(value) == "string" then return value end
+  if type(value) ~= "table" then
+    presentation_result_error(block, "title", title_result_expected, value)
+  end
+  for _, line in ipairs(value) do
+    if type(line) ~= "string" and type(line) ~= "table" then
+      presentation_result_error(block, "title", title_result_expected, value)
+    end
+    if type(line) == "table" then
+      for _, span in ipairs(line) do
+        if type(span) ~= "string" and type(span) ~= "table" then
+          presentation_result_error(block, "title", title_result_expected, value)
+        end
+        if type(span) == "table" then
+          local text = span.text
+          if text == nil then text = span[1] end
+          if text ~= nil and type(text) ~= "string" then
+            presentation_result_error(block, "title", title_result_expected, value)
+          end
+        end
+      end
+    end
+  end
+  return value
+end
 
 function M.display_count_text(block, opts)
   opts = opts or {}
@@ -46,7 +97,9 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render(block, ctx)
   block = block or {}
-  if block.kind == "tool" then
+  if block.kind == "group" then
+    return require("smelt.transcript.builtins").render(block, ctx)
+  elseif block.kind == "tool" then
     return M.render_tool(block, ctx)
   elseif block.kind == "user" then
     return M.render_user(block, ctx)
@@ -73,15 +126,20 @@ end
 --- Render a tool block for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_tool(block, ctx)
-  if ctx and ctx.view_state == "collapsed" then
-    return M.render_tool_summary(block, ctx)
+  local presentation = tool_presentation(block)
+  if presentation.render then
+    local rendered = presentation.render(block, ctx, presentation)
+    return require_layout_result(block, "render", rendered, false)
   end
-  return M.render_tool_full(block, ctx)
+  if ctx and ctx.view_state == "collapsed" then
+    return M.render_tool_summary(block, ctx, presentation)
+  end
+  return M.render_tool_full(block, ctx, presentation)
 end
 
-local function render_tool_error_summary(block, ctx)
+local function render_tool_error_summary(block, ctx, presentation)
   return layout.vbox({
-    M.render_tool_header(block, ctx),
+    M.render_tool_header(block, ctx, nil, presentation),
     layout.gutter(
       M.render_tool_output_tail(block.output, ctx, {
         rows = (ctx and ctx.limits and ctx.limits.collapsed_error_rows) or 4,
@@ -94,29 +152,34 @@ local function render_tool_error_summary(block, ctx)
 end
 
 --- Render a compact tool summary: header plus an optional detail line.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_summary(block, ctx)
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
+function smelt.transcript.defaults.render_tool_summary(block, ctx, presentation)
+  presentation = tool_presentation(block, presentation)
   local output = block.output
-  if output and output.is_error then return render_tool_error_summary(block, ctx) end
+  if not presentation.compact and output and output.is_error then
+    return render_tool_error_summary(block, ctx, presentation)
+  end
 
-  local header = M.render_tool_header(block, ctx)
-  local detail = M.tool_collapsed_detail(block, ctx)
-  if not detail or detail == "" then return header end
+  local header = M.render_tool_header(block, ctx, nil, presentation)
+  local detail = M.tool_collapsed_detail(block, ctx, presentation)
+  if detail == nil or detail == "" then return header end
+  local detail_layout = detail
+  if type(detail) == "string" then
+    detail_layout = layout.runs({ { { text = detail, dim = true } } })
+  end
   return layout.vbox({
     header,
-    layout.gutter(
-      layout.runs({ { { text = tostring(detail), dim = true } } }),
-      { text = "  " }
-    ),
+    layout.gutter(detail_layout, { text = "  " }),
   })
 end
 
 --- Render a full tool block using the current generic primitives and explicit item
 --- construction.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_full(block, ctx)
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
+function smelt.transcript.defaults.render_tool_full(block, ctx, presentation)
+  presentation = tool_presentation(block, presentation)
   local items = {}
-  items[#items + 1] = M.render_tool_header(block, ctx)
+  items[#items + 1] = M.render_tool_header(block, ctx, nil, presentation)
 
   if block.user_message and block.user_message ~= "" then
     items[#items + 1] = layout.gutter(
@@ -125,10 +188,8 @@ function smelt.transcript.defaults.render_tool_full(block, ctx)
     )
   end
 
-  if block.status ~= "denied" then
-    local body = M.render_tool_body(block, ctx)
-    if body then items[#items + 1] = body end
-  end
+  local body = M.render_tool_body(block, ctx, nil, presentation)
+  if body then items[#items + 1] = body end
 
   return layout.vbox(items)
 end
@@ -137,28 +198,90 @@ local tool_header_lines
 local tool_header_rest_prefix
 local tool_header_prefix
 
+local months = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" }
+
+local function boundary_after_ms(now_ms, year_only)
+  local now_seconds = math.floor(now_ms / 1000)
+  local current = os.date("*t", now_seconds)
+  if type(current) ~= "table" then return nil end
+  local boundary
+  if year_only then
+    boundary = os.time({ year = current.year + 1, month = 1, day = 1, hour = 0 })
+  else
+    boundary = os.time({ year = current.year, month = current.month, day = current.day + 1, hour = 0 })
+  end
+  if not boundary or boundary <= now_seconds then return nil end
+  return math.max(1, math.floor(boundary * 1000 - now_ms))
+end
+
+--- Format an invocation timestamp and return the next delay at which its adaptive
+--- date label can change. Both values are derived from the render-pass `now_ms`.
+function M.tool_called_at(called_at_ms, now_ms)
+  local timestamp_ms = tonumber(called_at_ms)
+  local current_ms = tonumber(now_ms)
+  if not timestamp_ms or not current_ms then return nil, nil end
+  local called_at = math.floor(timestamp_ms / 1000)
+  local now = math.floor(current_ms / 1000)
+
+  local called_day = smelt.time.format(called_at, "%Y-%m-%d")
+  local current_day = smelt.time.format(now, "%Y-%m-%d")
+  if called_day == current_day then
+    return smelt.time.format(called_at, "%H:%M:%S"), boundary_after_ms(current_ms, false)
+  end
+
+  local month = tonumber(smelt.time.format(called_at, "%m"))
+  local day_and_time = smelt.time.format(called_at, "%d %H:%M:%S")
+  if not month or not day_and_time then return nil, nil end
+  local date_and_time = months[month] .. " " .. day_and_time
+  if smelt.time.format(called_at, "%Y") == smelt.time.format(now, "%Y") then
+    return date_and_time, boundary_after_ms(current_ms, true)
+  end
+  return smelt.time.format(called_at, "%Y") .. " " .. date_and_time, nil
+end
+
+local function elapsed_text(elapsed_ms)
+  local ms = tonumber(elapsed_ms)
+  if not ms or ms < 1000 then return nil end
+  if ms < 10000 then
+    local text = string.format("%.1fs", ms / 1000)
+    return text:gsub("%.0s$", "s")
+  end
+  local seconds = math.floor(ms / 1000)
+  if seconds < 60 then return tostring(seconds) .. "s" end
+  if seconds < 3600 then return tostring(math.floor(seconds / 60)) .. "m" .. tostring(seconds % 60) .. "s" end
+  return tostring(math.floor(seconds / 3600)) .. "h" .. tostring(math.floor((seconds % 3600) / 60)) .. "m"
+end
+
 --- Render the default one-line tool header.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
-  local _ = ctx
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolHeaderOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
+function smelt.transcript.defaults.render_tool_header(block, ctx, opts, presentation)
+  ctx = ctx or {}
   opts = opts or {}
+  presentation = tool_presentation(block, presentation)
   local status = block.status or "pending"
-  local hl = opts.hl or opts.hl_group or block.status_hl or status_hl[status]
-  local lines, tail, has_summary = tool_header_lines(block, status)
+  local hl = opts.hl or status_hl[status]
+  local lines, tail, has_summary = tool_header_lines(block, status, ctx, presentation)
+  local duration = status ~= "confirm" and elapsed_text(block.elapsed_ms) or nil
+  if duration then
+    local first = lines[1] or {}
+    first[#first + 1] = { text = "  " .. duration, selectable = false, dim = true }
+    lines[1] = first
+  end
+
   local header = layout.runs(lines)
-  local show_elapsed = block.elapsed
-    and status ~= "confirm"
-    and (status == "pending" or (block.elapsed_text and block.elapsed_text ~= ""))
-  if show_elapsed then
+  local called_at, called_at_refresh = M.tool_called_at(block.called_at_ms, ctx.now_ms)
+  if called_at then
     header = layout.hbox({
-      { header, fit = true },
-      { layout.line({ { text = "  ", selectable = false, dim = true } }), cols = 2 },
-      { layout.elapsed(block.elapsed, { dim = true, selectable = false }), cols = 8 },
+      { header, weight = 1 },
+      {
+        layout.line({ { text = "  " .. called_at, selectable = false, dim = true } }),
+        fit = true,
+      },
     })
   end
-  return layout.row_prefix(
+  header = layout.row_prefix(
     layout.cap(header, {
-      rows = (ctx and ctx.limits and ctx.limits.tool_header_rows) or 20,
+      rows = (ctx.limits and ctx.limits.tool_header_rows) or 20,
       keep = "head",
       marker = "below",
     }),
@@ -167,6 +290,13 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
       rest = tool_header_rest_prefix(block),
     }
   )
+
+  local refresh_after = called_at_refresh
+  if block.elapsed_active and status ~= "confirm" then
+    refresh_after = refresh_after and math.min(refresh_after, 250) or 250
+  end
+  if refresh_after then header = layout.refresh(header, { after_ms = refresh_after }) end
+  return header
 end
 
 local function copy_table(t)
@@ -246,14 +376,17 @@ function tool_header_prefix(block, hl, tail, has_summary)
 end
 
 function tool_header_rest_prefix(block)
-  local custom = M.__tool_header_rest_prefixes[block.name or ""]
-  if custom then return copy_table(custom) end
   local _, width = tool_header_prefix(block, nil, true, false)
   return { { text = string.rep(" ", width), selectable = false, dim = true } }
 end
 
-function tool_header_lines(block, status)
-  local lines = summary_lines(block.summary)
+function tool_header_lines(block, status, ctx, presentation)
+  local title = block.summary
+  if presentation.title then
+    title = require_title_result(block, presentation.title(block, ctx))
+    if title == nil then title = block.summary end
+  end
+  local lines = summary_lines(title)
   local suffix = {}
 
   if lines[1] then
@@ -295,39 +428,48 @@ function tool_header_lines(block, status)
 end
 
 --- Return a compact tool detail for collapsed tool blocks.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
-function smelt.transcript.defaults.tool_collapsed_detail(block, ctx)
-  local renderer = M.__tool_collapsed_details[block.name or ""]
-  if not renderer then return nil end
-  return renderer(block, ctx)
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): string|smelt.layout.Node|nil
+function smelt.transcript.defaults.tool_collapsed_detail(block, ctx, presentation)
+  presentation = tool_presentation(block, presentation)
+  if not presentation.compact then return nil end
+  local detail = presentation.compact(block, ctx)
+  if detail ~= nil and type(detail) ~= "string" and not is_layout_node(detail) then
+    presentation_result_error(block, "compact", "string, smelt.layout.Node, or nil", detail)
+  end
+  return detail
 end
 
 --- Render a tool body. Drafts can provide an explicit best-effort preview;
 --- completed tools fall back to raw output or their structured body renderer.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?
-function smelt.transcript.defaults.render_tool_body(block, ctx, opts)
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil
+function smelt.transcript.defaults.render_tool_body(block, ctx, opts, presentation)
   opts = opts or {}
-  local renderer = M.__tool_body_renderers[block.name or ""]
-  local draft_renderer = M.__tool_draft_preview_renderers[block.name or ""]
+  presentation = tool_presentation(block, presentation)
+  local renderer = presentation.body
+  local draft_renderer = presentation.draft
   if block.draft and draft_renderer then
-    local body = draft_renderer(block.args or {}, ctx, block, opts)
-    if not body then return nil end
+    local body = require_layout_result(block, "draft", draft_renderer(block, ctx, opts), true)
+    if body == nil then return nil end
     return layout.gutter(body, { text = opts.gutter or "  " })
   end
-  if not block.output and not renderer then return nil end
 
   local output = block.output or { content = "", is_error = false }
-  if output.is_error then return M.render_tool_output(output, ctx, opts) end
-
   if renderer then
     local render_block = block
     if not block.output then
       render_block = setmetatable({ output = output }, { __index = block })
     end
-    local body = renderer(render_block, ctx, opts)
-    if not body then return nil end
+    local body = require_layout_result(
+      block,
+      "body",
+      renderer(render_block, ctx, opts),
+      true
+    )
+    if body == nil then return nil end
     return layout.gutter(body, { text = opts.gutter or "  " })
   end
+
+  if block.status == "denied" or not block.output then return nil end
   return M.render_tool_output(block.output, ctx, opts)
 end
 
@@ -733,16 +875,16 @@ function smelt.transcript.defaults.group_failure_counts(group)
   return errors, denied
 end
 
---- Render all group children through the bundled default block renderer.
+--- Render all group children through the configured root renderer and middleware.
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_group_children(group, ctx)
+  if not ctx or type(ctx.render) ~= "function" then
+    error("smelt.transcript.defaults.render_group_children: ctx.render is required", 2)
+  end
   local items = {}
   for _, child in ipairs(M.group_children(group)) do
     if #items > 0 then items[#items + 1] = layout.line("") end
-    local child_ctx = {}
-    for k, v in pairs(ctx or {}) do child_ctx[k] = v end
-    child_ctx.view_state = child.view_state or child_ctx.view_state
-    items[#items + 1] = M.render(child, child_ctx)
+    items[#items + 1] = ctx.render(child, { view_state = child.view_state or ctx.view_state })
   end
   if #items == 0 then return layout.empty() end
   return layout.vbox(items)

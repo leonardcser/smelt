@@ -189,9 +189,7 @@ impl TuiApp {
             let Some(record) = history.cloned_block(*id) else {
                 continue;
             };
-            let tool_state = record
-                .tool_call_id()
-                .and_then(|call_id| history.tool_state(call_id));
+            let tool_state = history.tool_state(*id);
             let block_text =
                 smelt_core::transcript_model::transcript_indexed_text(&record, tool_state)
                     .indexed_text;
@@ -245,9 +243,7 @@ impl TuiApp {
                 continue;
             };
             scanned = scanned.saturating_add(1);
-            let tool_state = record
-                .tool_call_id()
-                .and_then(|call_id| history.tool_state(call_id));
+            let tool_state = history.tool_state(*id);
             if smelt_core::transcript_model::transcript_indexed_text(&record, tool_state)
                 .indexed_text
                 .contains(query)

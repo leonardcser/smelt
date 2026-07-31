@@ -1,6 +1,5 @@
 -- Plan-mode plugin: registers the `plan` mode and `present_plan` tool.
 
-local transcript_defaults = require("smelt.transcript.defaults")
 
 local function read_text(path)
   local text = smelt.fs.read(path)
@@ -24,11 +23,14 @@ local function plan_file_view(args, path)
   })
 end
 
-transcript_defaults.__tool_body_renderers.present_plan = function(block)
-  if block.status == "pending" or block.status == "confirm" or not block.output then return nil end
-  local args = block.args or {}
-  return plan_file_view(args, output_plan_path(block.output))
-end
+smelt.transcript.register_tool("present_plan", {
+  cache_key = "smelt.plugin.plan-mode.present-plan:v1",
+  body = function(block)
+    if block.status == "pending" or block.status == "confirm" or not block.output then return nil end
+    local args = block.args or {}
+    return plan_file_view(args, output_plan_path(block.output))
+  end,
+})
 
 smelt.mode.register({
   name = "plan",

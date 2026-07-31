@@ -503,8 +503,13 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
+        local presentations = {}
         smelt = {
-          transcript = { defaults = {} },
+          transcript = {
+            defaults = {},
+            register_tool = function(name, presentation) presentations[name] = presentation end,
+            get_tool_presentation = function(name) return presentations[name] end,
+          },
           layout = {
             markdown = function(content, opts)
               return { kind = "markdown", content = content, opts = opts or {} }
@@ -527,7 +532,7 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
             hbox = function(items) return { kind = "hbox", items = items } end,
             line = function(spans) return { kind = "line", spans = spans } end,
             panel = function(child, opts) return { kind = "panel", child = child, opts = opts or {} } end,
-            elapsed = function(value, opts) return { kind = "elapsed", value = value, opts = opts or {} } end,
+            refresh = function(child, opts) return { kind = "refresh", child = child, opts = opts or {} } end,
             separator = function(opts) return { kind = "separator", opts = opts or {} } end,
             code = function(content, opts) return { kind = "code", content = content, opts = opts or {} } end,
           },
@@ -549,7 +554,7 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     let (body_kind, output_kind, child_kind, dim, rows): (String, String, String, bool, i64) = lua
         .load(
             r###"
-            local renderer = assert(smelt.transcript.defaults.__tool_body_renderers.web_fetch)
+            local renderer = assert(smelt.transcript.get_tool_presentation("web_fetch").body)
             local node = renderer({
               args = { prompt = "Summarise" },
               output = { content = "## Title\n\n| A | B |\n|---|---|\n| 1 | 2 |", is_error = false },

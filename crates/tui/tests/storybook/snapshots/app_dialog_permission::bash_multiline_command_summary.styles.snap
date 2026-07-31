@@ -14,10 +14,11 @@ dim: 80 22
   0  20   1 fg=Rgb { r: 249, g: 38, b: 114 }
   0  21   1 fg=Rgb { r: 255, g: 255, b: 255 }
   0  22   2 fg=Rgb { r: 249, g: 38, b: 114 }
-  1   0   2 attrs=dim
-  1   2  14 fg=Rgb { r: 255, g: 255, b: 255 }
-  2   0   2 attrs=dim
-  2   2   4 fg=Rgb { r: 249, g: 38, b: 114 }
+  0  69  10 attrs=dim
+  1   0   7 attrs=dim
+  1   7  14 fg=Rgb { r: 255, g: 255, b: 255 }
+  2   0   7 attrs=dim
+  2   7   4 fg=Rgb { r: 249, g: 38, b: 114 }
   9   0  80 fg=AnsiValue(208)
  10   1   4 fg=AnsiValue(208)
  14   1   6 attrs=dim

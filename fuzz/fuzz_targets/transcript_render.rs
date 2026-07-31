@@ -91,19 +91,23 @@ fn run_with_app(input: Input) {
             }
             Op::ToolStart { id, name } => {
                 app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+                    invocation_id: protocol::InvocationId::new(u64::from(id)),
                     call_id: call_id(id),
                     tool_name: name,
                     args: std::collections::HashMap::new(),
+                    called_at_ms: u64::from(id),
                 }))
             }
             Op::ToolOutput { id, text } => {
                 app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+                    invocation_id: protocol::InvocationId::new(u64::from(id)),
                     call_id: call_id(id),
                     chunk: text,
                 }))
             }
             Op::ToolFinish { id, is_error, text } => {
                 app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+                    invocation_id: protocol::InvocationId::new(u64::from(id)),
                     call_id: call_id(id),
                     result: protocol::ToolOutcome {
                         content: text,
@@ -154,21 +158,26 @@ fn run_with_app(input: Input) {
 }
 
 fn known_tool_round_trip(app: &mut TestApp, id: u8, kind: u8, is_error: bool) {
+    let invocation_id = protocol::InvocationId::new(u64::from(id));
     let call_id = call_id(id);
     let (tool_name, args, content, metadata) = known_tool_payload(kind);
     if app.current_turn_id().is_none() {
         app.start_turn(u64::from(id));
     }
     app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
         call_id: call_id.clone(),
         tool_name: tool_name.to_string(),
         args,
+        called_at_ms: u64::from(id),
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id,
         call_id: call_id.clone(),
         chunk: content.clone(),
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+        invocation_id,
         call_id,
         result: protocol::ToolOutcome {
             content,
@@ -267,13 +276,16 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
             bucket = { "name" },
             min = 2,
             default_view = "collapsed",
-            render = function(group, ctx)
-              if group.view_state == "expanded" then
-                return smelt.transcript.defaults.render_group_children(group, ctx)
-              end
-              return smelt.layout.text("fuzz tools " .. tostring(group.count))
-            end,
           })
+          smelt.transcript.extend_renderer("fuzz_tool_batch_renderer", function(next, node, ctx)
+            if node.kind ~= "group" or node.name ~= "fuzz_tool_batch" then
+              return next(node, ctx)
+            end
+            if node.view_state == "expanded" then
+              return smelt.transcript.defaults.render_group_children(node, ctx)
+            end
+            return smelt.layout.text("fuzz tools " .. tostring(node.child_count))
+          end, { cache_key = "v1" })
         "#,
         r#"
           smelt.transcript.groups.register({
@@ -283,10 +295,13 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
             bucket = { "process_id", "exit_code" },
             min = 2,
             default_view = "collapsed",
-            render = function(group, _ctx)
-              return smelt.layout.text("fuzz process " .. tostring(group.bucket) .. " x" .. tostring(group.count))
-            end,
           })
+          smelt.transcript.extend_renderer("fuzz_process_batch_renderer", function(next, node, ctx)
+            if node.kind == "group" and node.name == "fuzz_process_batch" then
+              return smelt.layout.text("fuzz process " .. tostring(node.bucket) .. " x" .. tostring(node.child_count))
+            end
+            return next(node, ctx)
+          end, { cache_key = "v1" })
         "#,
         r#"
           smelt.transcript.extend_renderer("fuzz_wrapper", function(next, block, ctx)

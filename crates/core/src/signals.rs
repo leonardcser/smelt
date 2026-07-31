@@ -724,12 +724,6 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
             let _ = t.set("display_tps", tps);
         }
         let _ = t.set("interrupted", m.interrupted);
-        if let Ok(tools) = lua.create_table() {
-            for (k, v) in &m.tool_elapsed {
-                let _ = tools.set(k.as_str(), *v);
-            }
-            let _ = t.set("tool_elapsed", tools);
-        }
         mlua::Value::Table(t)
     });
     signals.register_lua_projector::<TurnError, _>(|e, lua| {
@@ -1368,8 +1362,6 @@ mod tests {
         // on the stored value's TypeId, so the typed projector takes
         // over even though the slot was declared with EventStub.
         let mut signals = signals;
-        let mut tool_elapsed = std::collections::HashMap::new();
-        tool_elapsed.insert("call_42".to_string(), 1500u64);
         signals.set_dyn(
             "turn_complete",
             Rc::new(TurnMeta {
@@ -1377,7 +1369,6 @@ mod tests {
                 avg_tps: Some(33.5),
                 display_tps: Some(33.5),
                 interrupted: false,
-                tool_elapsed,
             }),
         );
         signals.set_dyn(
@@ -1432,8 +1423,6 @@ mod tests {
                 assert!((t.get::<f64>("avg_tps").unwrap() - 33.5).abs() < f64::EPSILON);
                 assert!((t.get::<f64>("display_tps").unwrap() - 33.5).abs() < f64::EPSILON);
                 assert!(!t.get::<bool>("interrupted").unwrap());
-                let tools: mlua::Table = t.get("tool_elapsed").unwrap();
-                assert_eq!(tools.get::<i64>("call_42").unwrap(), 1500);
             }
             other => panic!("expected Table, got {other:?}"),
         }
@@ -1529,7 +1518,6 @@ mod tests {
                 avg_tps: None,
                 display_tps: None,
                 interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
             }),
         );
         signals.set_dyn(

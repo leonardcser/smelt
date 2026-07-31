@@ -2411,7 +2411,6 @@ pub fn backfill_transcript_block_records_from_history_range(
         history_range.start,
         block_start_idx,
         &history,
-        &std::collections::HashMap::new(),
     )?;
     let written = records.len();
     maintenance.replace_transcript_record_suffix(record_start_idx, &records)?;
@@ -2465,11 +2464,10 @@ fn transcript_block_records_from_history_items(
     first_history_idx: usize,
     block_start_idx: u64,
     history: &[HistoryItem],
-    tool_elapsed: &std::collections::HashMap<String, u64>,
 ) -> Result<Vec<smelt_store::StoredTranscriptBlock>, smelt_store::StoreError> {
     let mut records = Vec::new();
     for (offset, item) in history.iter().enumerate() {
-        push_history_item_block_rows(&mut records, first_history_idx + offset, item, tool_elapsed)?;
+        push_history_item_block_rows(&mut records, first_history_idx + offset, item)?;
     }
     for (offset, record) in records.iter_mut().enumerate() {
         record.block_idx = block_start_idx.saturating_add(offset as u64);
@@ -2481,7 +2479,6 @@ fn push_history_item_block_rows(
     records: &mut Vec<smelt_store::StoredTranscriptBlock>,
     history_idx: usize,
     item: &HistoryItem,
-    tool_elapsed: &std::collections::HashMap<String, u64>,
 ) -> Result<(), smelt_store::StoreError> {
     let origin = Some(crate::transcript_model::BlockOrigin::History(history_idx));
     match item {
@@ -2563,12 +2560,12 @@ fn push_history_item_block_rows(
                 } else {
                     crate::transcript_model::ToolStatus::Ok
                 };
-                let elapsed_ms = inv
-                    .elapsed_ms
-                    .or_else(|| tool_elapsed.get(&inv.call_id).copied());
+                let elapsed_ms = inv.elapsed_ms;
                 let tool_state = crate::transcript_model::ToolState {
                     status,
                     elapsed: elapsed_ms.map(std::time::Duration::from_millis),
+                    called_at_ms: inv.called_at_ms,
+                    elapsed_active: false,
                     output: Some(Box::new(crate::transcript_model::ToolOutput {
                         content: inv.result.content.clone(),
                         is_error: inv.result.is_error,
@@ -2586,7 +2583,7 @@ fn push_history_item_block_rows(
                         args,
                     },
                     origin,
-                    Some((inv.call_id.clone(), tool_state)),
+                    Some(tool_state),
                 )?);
             }
         }
@@ -2621,7 +2618,7 @@ fn transcript_block_record(
     record_idx: usize,
     block: crate::transcript_model::Block,
     origin: Option<crate::transcript_model::BlockOrigin>,
-    tool_state: Option<(String, crate::transcript_model::ToolState)>,
+    tool_state: Option<crate::transcript_model::ToolState>,
 ) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
     let content_hash = crate::utils::hash_serializable(&block);
     let record = crate::transcript_model::TranscriptBlockRecord {
@@ -3458,7 +3455,6 @@ mod tests {
             avg_tps: Some(2.0),
             display_tps: Some(2.0),
             interrupted: true,
-            tool_elapsed: std::collections::HashMap::new(),
         };
 
         session.finish_turn_state(7, meta, true, true);
@@ -3478,7 +3474,6 @@ mod tests {
             avg_tps: Some(2.0),
             display_tps: Some(2.0),
             interrupted: false,
-            tool_elapsed: std::collections::HashMap::new(),
         };
         session.finish_turn_state(session.history.len(), meta.clone(), false, false);
 
@@ -4181,6 +4176,7 @@ mod tests {
                     metadata: None,
                 },
                 elapsed_ms: None,
+                called_at_ms: None,
             }],
         ));
         let history = vec![
@@ -4215,6 +4211,7 @@ mod tests {
                     metadata: None,
                 },
                 elapsed_ms: None,
+                called_at_ms: None,
             }],
         ));
         let mut s = fixture_session();
@@ -4703,6 +4700,7 @@ mod tests {
                 metadata: None,
             },
             elapsed_ms: None,
+            called_at_ms: Some(1_742_573_823_000),
         };
         let inv_err = ToolInvocation {
             call_id: "c2".into(),
@@ -4714,6 +4712,7 @@ mod tests {
                 metadata: None,
             },
             elapsed_ms: None,
+            called_at_ms: Some(1_742_573_824_000),
         };
         let mut original = Session::new(123, std::path::PathBuf::from("/w"));
         original.history.push(user_item("hi"));
@@ -4758,10 +4757,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_preserves_inv_elapsed_ms_and_turn_metas() {
-        // Native history carries ToolInvocation telemetry directly, while
-        // turn_metas.tool_elapsed remains available for legacy message-shaped
-        // sessions and render fallbacks. Verify both channels survive save/load.
+    fn round_trip_preserves_invocation_timing() {
         let mut original = Session::new(7, std::path::PathBuf::from("/w"));
         original
             .history
@@ -4779,17 +4775,9 @@ mod tests {
                         metadata: None,
                     },
                     elapsed_ms: Some(42),
+                    called_at_ms: Some(1_742_573_823_000),
                 }],
             )));
-        let meta = protocol::TurnMeta {
-            elapsed_ms: 100,
-            avg_tps: None,
-            display_tps: None,
-            interrupted: false,
-            tool_elapsed: [("c1".to_string(), 42u64)].into_iter().collect(),
-        };
-        original.turn_metas.push((1, meta));
-
         let round: Session =
             serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
         let restored_inv = &round
@@ -4803,12 +4791,7 @@ mod tests {
             Some(42),
             "native history should preserve invocation elapsed telemetry"
         );
-        let restored_meta_elapsed = round.turn_metas[0].1.tool_elapsed.get("c1").copied();
-        assert_eq!(
-            restored_meta_elapsed,
-            Some(42),
-            "turn_metas.tool_elapsed is the canonical on-disk channel - must survive"
-        );
+        assert_eq!(restored_inv.called_at_ms, Some(1_742_573_823_000));
     }
 
     #[test]

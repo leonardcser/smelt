@@ -87,6 +87,19 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 Return the current composed root transcript renderer, or nil before the
 default renderer has been installed.
 
+## `smelt.transcript.get_tool_presentation`
+
+```lua
+fun(name: string): smelt.transcript.ToolPresentation?
+```
+
+Types: [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return a copy of the current presentation policy for `name`, or nil. Mutating
+the returned table has no effect; re-register the tool to change its presentation.
+
 ## `smelt.transcript.invalidate_renderer`
 
 ```lua
@@ -149,6 +162,22 @@ fun(row: integer): table?
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
+
+## `smelt.transcript.register_tool`
+
+```lua
+fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg
+```
+
+Types: [`smelt.transcript.ToolPresentation`](types.md#smelttranscripttoolpresentation), [`smelt.Reg`](types.md#smeltreg)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Register or replace presentation policy for a tool. The supported fields are
+snapshotted, so later table mutation has no effect; re-register to change behavior
+or cache keys. The returned registration removes only this exact replacement.
+Registering presentation changes rebuilds the composed root renderer so all
+cached standalone and grouped nodes invalidate.
 
 ## `smelt.transcript.reveal`
 

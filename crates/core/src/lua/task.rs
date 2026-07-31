@@ -27,6 +27,7 @@ pub enum CommandQueueTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToolInvocationContext {
+    pub invocation_id: protocol::InvocationId,
     pub request_id: u64,
     pub execution_mode: protocol::ToolExecutionMode,
 }
@@ -627,6 +628,7 @@ mod tests {
 
     fn tool_invocation(request_id: u64) -> ToolInvocationContext {
         ToolInvocationContext {
+            invocation_id: protocol::InvocationId::new(request_id),
             request_id,
             execution_mode: protocol::ToolExecutionMode::Concurrent,
         }
