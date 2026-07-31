@@ -458,6 +458,17 @@ fn oversized_io_number_does_not_bypass_shell_permissions() {
 }
 
 #[test]
+fn deeply_nested_arithmetic_command_does_not_hang_permissions() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    let command = format!("(({}x", "(".repeat(32));
+    assert_eq!(
+        permissions.check_subcommand(normal(), "bash", &command),
+        Decision::Ask
+    );
+    assert_eq!(split_shell_commands(&command), vec![command]);
+}
+
+#[test]
 fn split_shell_commands_input_fd_duplication_is_not_background() {
     assert_eq!(
         split_shell_commands("cat <&0 | head"),

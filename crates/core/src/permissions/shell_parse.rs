@@ -9,9 +9,10 @@ use brush_parser::{tokenize_str, Parser, ParserOptions, SourceSpan, Token};
 use smelt_buffer::text::{byte_of_char, slice};
 
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
+const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
-    if has_unrepresentable_io_number(command) {
+    if has_unrepresentable_io_number(command) || has_deep_arithmetic_parentheses(command) {
         return None;
     }
     let mut parser = Parser::new(Cursor::new(command.as_bytes()), &ParserOptions::default());
@@ -34,11 +35,56 @@ fn has_unrepresentable_io_number(command: &str) -> bool {
     })
 }
 
+fn has_deep_arithmetic_parentheses(command: &str) -> bool {
+    command.char_indices().any(|(index, _)| {
+        let tail = &command[index..];
+        if tail.starts_with("$((") {
+            arithmetic_body_parentheses_too_deep(&command[index + 3..])
+        } else if tail.starts_with("((") {
+            arithmetic_body_parentheses_too_deep(&command[index + 2..])
+        } else {
+            false
+        }
+    })
+}
+
+fn arithmetic_body_parentheses_too_deep(body: &str) -> bool {
+    let mut depth = 0usize;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '(' => {
+                depth = depth.saturating_add(1);
+                if depth > MAX_ARITHMETIC_PAREN_DEPTH {
+                    return true;
+                }
+            }
+            ')' => {
+                if depth == 0 {
+                    let next = index + ch.len_utf8();
+                    if body[next..].starts_with(')') {
+                        return false;
+                    }
+                } else {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
+    if has_deep_arithmetic_parentheses(word) {
+        return None;
+    }
     word::parse(word, &ParserOptions::default()).ok()
 }
 
 pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
+    if has_deep_arithmetic_parentheses(word) {
+        return None;
+    }
     word::parse_heredoc(word, &ParserOptions::default()).ok()
 }
 
