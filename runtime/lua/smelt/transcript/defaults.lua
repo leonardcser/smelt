@@ -643,7 +643,7 @@ local function render_compaction_summary(label, block, ctx)
     local summary = layout.markdown(block.summary, { dim = true })
     if ctx and ctx.view_state == "peek" then
       summary = layout.cap(summary, {
-        rows = (ctx and ctx.limits and ctx.limits.compacted_peek_rows) or 5,
+        rows = (ctx and ctx.limits and ctx.limits.compacted_peek_rows) or 4,
         keep = "tail",
         marker = "above",
       })

@@ -33,6 +33,45 @@ pub struct ContextCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCheckpointEvent {
+    #[serde(default = "default_checkpoint_kind")]
+    pub kind: String,
+    pub summary: String,
+    pub first_live_index: usize,
+    pub completed_at_history_len: usize,
+    pub created_at_ms: u64,
+}
+
+impl ContextCheckpointEvent {
+    fn from_checkpoint(checkpoint: &ContextCheckpoint, completed_at_history_len: usize) -> Self {
+        Self {
+            kind: checkpoint.kind.clone(),
+            summary: checkpoint.summary.clone(),
+            first_live_index: checkpoint.first_live_index,
+            completed_at_history_len,
+            created_at_ms: checkpoint.created_at_ms,
+        }
+    }
+
+    fn matches(&self, checkpoint: &ContextCheckpoint) -> bool {
+        self.created_at_ms == checkpoint.created_at_ms
+            && self.first_live_index == checkpoint.first_live_index
+            && self.kind == checkpoint.kind
+            && self.summary == checkpoint.summary
+    }
+
+    fn to_checkpoint(&self) -> ContextCheckpoint {
+        ContextCheckpoint {
+            kind: self.kind.clone(),
+            summary: self.summary.clone(),
+            first_live_index: self.first_live_index,
+            created_at_ms: self.created_at_ms,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSnapshotKey {
     pub kind: String,
     pub first_live_index: usize,
@@ -54,6 +93,19 @@ pub struct ContextTokenIdentity {
     pub model: Option<String>,
     pub api_base: Option<String>,
     pub provider_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeContextTokens {
+    pub tokens: u32,
+    pub history_len: usize,
+    pub identity: ContextTokenIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayContextTokens {
+    pub tokens: u32,
+    pub identity: Option<ContextTokenIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +212,7 @@ pub struct Session {
     pub parent_id: Option<String>,
     pub history: Vec<HistoryItem>,
     pub checkpoint: Option<ContextCheckpoint>,
+    pub checkpoint_events: Vec<ContextCheckpointEvent>,
     pub context_tokens: Option<u32>,
     /// History length at the time `context_tokens` was recorded. Used to
     /// decide whether the provider baseline exactly covers the current
@@ -222,6 +275,8 @@ struct SessionWireV2 {
     pub history: Vec<HistoryItem>,
     #[serde(default)]
     pub checkpoint: Option<ContextCheckpoint>,
+    #[serde(default)]
+    pub checkpoint_events: Vec<ContextCheckpointEvent>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
     #[serde(default)]
@@ -342,6 +397,22 @@ impl From<SessionWireV2> for Session {
         let display_context_tokens = w.display_context_tokens.or(context_tokens);
         let metadata_snapshots = w.metadata_snapshots;
         let context_snapshots = w.context_snapshots;
+        let checkpoint = w.checkpoint;
+        let mut checkpoint_events = w.checkpoint_events;
+        checkpoint_events.retain(|event| {
+            event.first_live_index <= event.completed_at_history_len
+                && event.completed_at_history_len <= w.history.len()
+        });
+        // COMPAT(session-checkpoint-event-backfill): legacy session JSON retained
+        // only the active checkpoint.
+        if checkpoint_events.is_empty() {
+            if let Some(checkpoint) = &checkpoint {
+                checkpoint_events.push(ContextCheckpointEvent::from_checkpoint(
+                    checkpoint,
+                    checkpoint.first_live_index,
+                ));
+            }
+        }
         Self {
             id: w.id,
             title: w.title,
@@ -357,7 +428,8 @@ impl From<SessionWireV2> for Session {
             cwd: w.cwd,
             parent_id: w.parent_id,
             history: w.history,
-            checkpoint: w.checkpoint,
+            checkpoint,
+            checkpoint_events,
             context_tokens,
             context_tokens_history_len: w.context_tokens_history_len,
             context_token_identity: w.context_token_identity,
@@ -390,6 +462,7 @@ impl From<&Session> for SessionWireV2 {
             parent_id: s.parent_id.clone(),
             history: s.history.clone(),
             checkpoint: s.checkpoint.clone(),
+            checkpoint_events: s.checkpoint_events.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
             context_token_identity: s.context_token_identity.clone(),
@@ -448,17 +521,51 @@ pub struct SessionMeta {
     #[serde(default)]
     pub parent_id: Option<String>,
     #[serde(default)]
-    pub context_tokens: Option<u32>,
+    pub authoritative_context_tokens: Option<AuthoritativeContextTokens>,
     #[serde(default)]
-    pub context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
-    pub display_context_token_identity: Option<ContextTokenIdentity>,
+    pub display_context_tokens: Option<DisplayContextTokens>,
     #[serde(default)]
     pub history_len: Option<usize>,
     #[serde(default)]
     pub checkpoint: Option<ContextCheckpoint>,
+    #[serde(default)]
+    pub checkpoint_events: Vec<ContextCheckpointEvent>,
     /// Approximate text byte size (message bodies, reasoning, tool-call args).
     /// Projected into the catalog so list consumers avoid opening session databases.
+    #[serde(default)]
+    pub text_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionListMeta {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub first_user_message: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub fast_mode: Option<bool>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default, rename = "context_tokens")]
+    pub display_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub history_len: Option<usize>,
+    /// Approximate text byte size (message bodies, reasoning, tool-call args).
     #[serde(default)]
     pub text_bytes: Option<u64>,
 }
@@ -471,7 +578,7 @@ pub struct SessionListEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionListStatus {
-    Available(Box<SessionMeta>),
+    Available(Box<SessionListMeta>),
     Upgradeable { reason: String },
     Unavailable(SessionStoreError),
 }
@@ -564,6 +671,7 @@ impl Session {
             parent_id: None,
             history: Vec::new(),
             checkpoint: None,
+            checkpoint_events: Vec::new(),
             context_tokens: None,
             context_tokens_history_len: None,
             context_token_identity: None,
@@ -605,10 +713,15 @@ impl Session {
         self.display_context_token_identity = reading.identity;
     }
 
-    pub fn record_context_tokens(&mut self, tokens: u32, identity: ContextTokenIdentity) {
+    pub fn record_context_tokens(
+        &mut self,
+        tokens: u32,
+        history_len: usize,
+        identity: ContextTokenIdentity,
+    ) {
         let reading = ContextTokenReading {
             tokens,
-            history_len: Some(self.history.len()),
+            history_len: Some(history_len),
             identity: Some(identity),
         };
         self.set_context_token_reading(reading.clone());
@@ -774,6 +887,47 @@ impl Session {
         self.first_user_message = None;
     }
 
+    fn truncate_checkpoint_events(
+        &mut self,
+        history_len: usize,
+        keep_checkpoint_at_boundary: bool,
+    ) -> Option<(Option<u32>, Option<usize>)> {
+        let had_events = !self.checkpoint_events.is_empty();
+        let retained_checkpoint = self.checkpoint.as_ref().filter(|checkpoint| {
+            keep_checkpoint_at_boundary && checkpoint.first_live_index == history_len
+        });
+        self.checkpoint_events.retain(|event| {
+            (event.completed_at_history_len <= history_len && event.first_live_index <= history_len)
+                || retained_checkpoint.is_some_and(|checkpoint| event.matches(checkpoint))
+        });
+        if !had_events
+            || self.checkpoint.as_ref().is_some_and(|checkpoint| {
+                self.checkpoint_events
+                    .iter()
+                    .any(|event| event.matches(checkpoint))
+            })
+        {
+            return None;
+        }
+
+        let fallback = self.checkpoint.take().map(|checkpoint| {
+            (
+                checkpoint.pre_checkpoint_context_tokens,
+                checkpoint.pre_checkpoint_context_history_len,
+            )
+        });
+        self.checkpoint = self
+            .checkpoint_events
+            .last()
+            .map(ContextCheckpointEvent::to_checkpoint);
+        fallback
+    }
+
+    fn remove_checkpoint_event(&mut self, checkpoint: &ContextCheckpoint) {
+        self.checkpoint_events
+            .retain(|event| !event.matches(checkpoint));
+    }
+
     pub fn clear_context_snapshots(&mut self) {
         self.context_snapshots.clear();
     }
@@ -783,14 +937,19 @@ impl Session {
         hist_idx: usize,
         keep_checkpoint_at_boundary: bool,
     ) {
-        let checkpoint_fallback =
-            self.clear_checkpoint_for_rewind(hist_idx, keep_checkpoint_at_boundary);
+        let event_fallback = self.truncate_checkpoint_events(hist_idx, keep_checkpoint_at_boundary);
+        let checkpoint_fallback = self
+            .clear_checkpoint_for_rewind(hist_idx, keep_checkpoint_at_boundary)
+            .or(event_fallback);
         self.context_snapshots.truncate_after(hist_idx);
         self.restore_context_tokens_after_rewind(hist_idx, checkpoint_fallback);
     }
 
     pub fn prune_context_snapshots(&mut self, hist_idx: usize) {
-        let checkpoint_fallback = self.clear_checkpoint_for_rewind(hist_idx, true);
+        let event_fallback = self.truncate_checkpoint_events(hist_idx, true);
+        let checkpoint_fallback = self
+            .clear_checkpoint_for_rewind(hist_idx, true)
+            .or(event_fallback);
         self.context_snapshots.truncate_after(hist_idx);
         if !self.context_snapshots.is_empty() || checkpoint_fallback.is_some() {
             self.restore_context_tokens_after_rewind(hist_idx, checkpoint_fallback);
@@ -861,12 +1020,12 @@ impl Session {
         if !should_clear {
             return None;
         }
-        self.checkpoint.take().map(|cp| {
-            (
-                cp.pre_checkpoint_context_tokens,
-                cp.pre_checkpoint_context_history_len,
-            )
-        })
+        let checkpoint = self.checkpoint.take()?;
+        self.remove_checkpoint_event(&checkpoint);
+        Some((
+            checkpoint.pre_checkpoint_context_tokens,
+            checkpoint.pre_checkpoint_context_history_len,
+        ))
     }
 
     pub fn model_history_range(&self) -> (Vec<HistoryItem>, usize, usize) {
@@ -930,11 +1089,30 @@ impl Session {
         {
             return false;
         }
+        // COMPAT(session-checkpoint-event-backfill): materialized legacy sessions
+        // may carry an active checkpoint without canonical event history.
+        if self.checkpoint_events.is_empty() {
+            if let Some(checkpoint) = &self.checkpoint {
+                self.checkpoint_events
+                    .push(ContextCheckpointEvent::from_checkpoint(
+                        checkpoint,
+                        checkpoint.first_live_index,
+                    ));
+            }
+        }
+        let created_at_ms = now_ms();
+        self.checkpoint_events.push(ContextCheckpointEvent {
+            kind: kind.clone(),
+            summary: summary.clone(),
+            first_live_index,
+            completed_at_history_len: context_snapshot_index,
+            created_at_ms,
+        });
         self.checkpoint = Some(ContextCheckpoint {
             kind,
             summary,
             first_live_index,
-            created_at_ms: now_ms(),
+            created_at_ms,
             tokens_before,
             tokens_after_estimate: None,
             tokens_after_estimate_history_len: None,
@@ -980,24 +1158,40 @@ impl Session {
         (first_live_message_index == message_index).then_some(self.history.len())
     }
 
+    fn restore_checkpoint_fallback(
+        &mut self,
+        hist_idx: usize,
+        fallback: Option<(Option<u32>, Option<usize>)>,
+    ) {
+        match fallback {
+            Some((tokens, Some(history_len))) if history_len <= hist_idx => {
+                self.context_tokens = tokens;
+                self.context_tokens_history_len = Some(history_len);
+                self.context_token_identity = None;
+                self.display_context_tokens = tokens;
+                self.display_context_token_identity = None;
+            }
+            _ => self.clear_context_tokens(),
+        }
+    }
+
     pub fn clear_checkpoint_if_rewound_to(&mut self, hist_idx: usize) {
+        let event_fallback = self.truncate_checkpoint_events(hist_idx, false);
         if self
             .checkpoint
             .as_ref()
             .is_some_and(|cp| cp.first_live_index >= hist_idx)
         {
             if let Some(cp) = self.checkpoint.take() {
-                match cp.pre_checkpoint_context_history_len {
-                    Some(len) if len <= hist_idx => {
-                        self.context_tokens = cp.pre_checkpoint_context_tokens;
-                        self.context_tokens_history_len = Some(len);
-                        self.context_token_identity = None;
-                        self.display_context_tokens = cp.pre_checkpoint_context_tokens;
-                        self.display_context_token_identity = None;
-                    }
-                    _ => self.clear_context_tokens(),
-                }
+                self.remove_checkpoint_event(&cp);
+                let fallback = (
+                    cp.pre_checkpoint_context_tokens,
+                    cp.pre_checkpoint_context_history_len,
+                );
+                self.restore_checkpoint_fallback(hist_idx, Some(fallback).or(event_fallback));
             }
+        } else if event_fallback.is_some() {
+            self.restore_checkpoint_fallback(hist_idx, event_fallback);
         }
     }
 
@@ -1019,6 +1213,7 @@ impl Session {
             parent_id: Some(self.id.clone()),
             history: self.history.clone(),
             checkpoint: self.checkpoint.clone(),
+            checkpoint_events: self.checkpoint_events.clone(),
             context_tokens: self.context_tokens,
             context_tokens_history_len: self.context_tokens_history_len,
             context_token_identity: self.context_token_identity.clone(),
@@ -1403,6 +1598,51 @@ fn checkpoint_json_for_history_len(
     Ok(Some(serde_json::to_value(checkpoint)?))
 }
 
+fn checkpoint_events_from_json(
+    value: Option<Value>,
+    checkpoint: Option<&ContextCheckpoint>,
+    retained_history_len: usize,
+) -> Vec<ContextCheckpointEvent> {
+    let mut events: Vec<ContextCheckpointEvent> = value
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    events.retain(|event: &ContextCheckpointEvent| {
+        event.first_live_index <= event.completed_at_history_len
+            && event.completed_at_history_len <= retained_history_len
+    });
+    if events.is_empty() {
+        // COMPAT(session-checkpoint-event-backfill): checkpoint metadata written
+        // before canonical event history retained only the active checkpoint.
+        if let Some(checkpoint) = checkpoint {
+            events.push(ContextCheckpointEvent::from_checkpoint(
+                checkpoint,
+                checkpoint.first_live_index,
+            ));
+        }
+    }
+    events
+}
+
+fn checkpoint_events_json_for_history_len(
+    events: &[ContextCheckpointEvent],
+    history_len: usize,
+) -> Result<Option<Value>, smelt_store::StoreError> {
+    if let Some(event) = events.iter().find(|event| {
+        event.first_live_index > event.completed_at_history_len
+            || event.completed_at_history_len > history_len
+    }) {
+        return Err(smelt_store::StoreError::Integrity(format!(
+            "checkpoint event boundary {} and completion {} must fit history length {history_len}",
+            event.first_live_index, event.completed_at_history_len
+        )));
+    }
+    if events.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_value(events)?))
+    }
+}
+
 pub fn store_identity_from_session(
     session: &Session,
 ) -> Result<smelt_store::SessionIdentity, smelt_store::StoreError> {
@@ -1434,6 +1674,10 @@ pub fn store_metadata_from_session(
             session,
         ))?),
         checkpoint_json: checkpoint_json_for_history_len(session.checkpoint.as_ref(), history_len)?,
+        checkpoint_events_json: checkpoint_events_json_for_history_len(
+            &session.checkpoint_events,
+            history_len,
+        )?,
         context_tokens: session.context_tokens.map(u64::from),
         context_tokens_history_len: session
             .context_tokens_history_len
@@ -2085,6 +2329,11 @@ fn session_from_full_store(snapshot: smelt_store::FullSession) -> SessionStoreRe
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
     let checkpoint = checkpoint_from_json(metadata.checkpoint_json.clone(), snapshot.history.len());
+    let checkpoint_events = checkpoint_events_from_json(
+        metadata.checkpoint_events_json.clone(),
+        checkpoint.as_ref(),
+        snapshot.history.len(),
+    );
     let context_tokens = metadata
         .context_tokens
         .and_then(|tokens| u32::try_from(tokens).ok());
@@ -2115,6 +2364,7 @@ fn session_from_full_store(snapshot: smelt_store::FullSession) -> SessionStoreRe
         parent_id: identity.parent_id,
         history: snapshot.history,
         checkpoint,
+        checkpoint_events,
         context_tokens,
         context_tokens_history_len: metadata
             .context_tokens_history_len
@@ -2541,7 +2791,7 @@ pub fn delete(id_or_prefix: &str) -> SessionStoreResult<()> {
 }
 
 impl SessionStorage {
-    pub fn list_sessions(&self) -> Vec<SessionMeta> {
+    pub fn list_sessions(&self) -> Vec<SessionListMeta> {
         self.list_session_entries()
             .into_iter()
             .filter_map(|entry| match entry.status {
@@ -2605,7 +2855,7 @@ impl SessionStorage {
     }
 }
 
-pub fn list_sessions() -> Vec<SessionMeta> {
+pub fn list_sessions() -> Vec<SessionListMeta> {
     process_storage().list_sessions()
 }
 
@@ -2754,7 +3004,7 @@ fn session_list_entry_from_catalog(
                 u64::try_from(session.updated_at).map_err(|_| SessionStoreError::Corrupt {
                     context: format!("catalog session {id} has a negative update time"),
                 })?;
-            SessionListStatus::Available(Box::new(SessionMeta {
+            SessionListStatus::Available(Box::new(SessionListMeta {
                 id: id.clone(),
                 title: session.title,
                 slug: session.slug,
@@ -2770,15 +3020,12 @@ fn session_list_entry_from_catalog(
                 fast_mode: session.fast_mode,
                 cwd: session.cwd,
                 parent_id: session.parent_id,
-                context_tokens: session
+                display_context_tokens: session
                     .context_tokens
                     .and_then(|tokens| u32::try_from(tokens).ok()),
-                context_token_identity: None,
-                display_context_token_identity: None,
                 history_len: session
                     .history_len
                     .and_then(|length| usize::try_from(length).ok()),
-                checkpoint: None,
                 text_bytes: session.text_bytes,
             }))
         }
@@ -2873,6 +3120,35 @@ fn session_meta_from_stored_session(
     let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
+    let authoritative_context_tokens = metadata
+        .context_tokens
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .zip(
+            metadata
+                .context_tokens_history_len
+                .and_then(|len| usize::try_from(len).ok()),
+        )
+        .zip(context_token_identity)
+        .map(
+            |((tokens, history_len), identity)| AuthoritativeContextTokens {
+                tokens,
+                history_len,
+                identity,
+            },
+        );
+    let display_context_tokens = metadata
+        .display_context_tokens
+        .or(metadata.context_tokens)
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .map(|tokens| DisplayContextTokens {
+            tokens,
+            identity: display_context_token_identity,
+        });
+    let checkpoint_events = checkpoint_events_from_json(
+        metadata.checkpoint_events_json.clone(),
+        checkpoint.as_ref(),
+        retained_history_len.min(history_len),
+    );
     let created_at_ms =
         u64::try_from(identity.created_at).map_err(|_| SessionStoreError::Corrupt {
             context: "negative session creation time".into(),
@@ -2897,14 +3173,11 @@ fn session_meta_from_stored_session(
         fast_mode: metadata.fast_mode,
         cwd: metadata.cwd,
         parent_id: identity.parent_id,
-        context_tokens: metadata
-            .display_context_tokens
-            .or(metadata.context_tokens)
-            .and_then(|tokens| u32::try_from(tokens).ok()),
-        context_token_identity,
-        display_context_token_identity,
+        authoritative_context_tokens,
+        display_context_tokens,
         history_len: Some(history_len),
         checkpoint,
+        checkpoint_events,
         text_bytes: Some(text_bytes),
     })
 }
@@ -3179,7 +3452,7 @@ mod tests {
     fn finish_turn_state_records_turn_meta_and_rewindable_context() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![user_item("hello")];
-        session.record_context_tokens(123, test_context_identity());
+        session.record_context_tokens(123, 1, test_context_identity());
         let meta = TurnMeta {
             elapsed_ms: 10,
             avg_tps: Some(2.0),
@@ -3384,7 +3657,6 @@ mod tests {
                 .find(|meta| meta.id == *id)
                 .expect("listed catalog metadata");
             assert_eq!(meta.history_len, Some(1));
-            assert!(meta.checkpoint.is_none());
             assert!(meta.text_bytes.is_some_and(|bytes| bytes > 0));
         }
         let read_only_count = snapshot
@@ -3812,7 +4084,7 @@ mod tests {
         s.parent_id = Some("parent-session".into());
         s.session_cost_usd = 1.5;
         s.history.push(user_item("hello sqlite"));
-        s.record_context_tokens(42, test_context_identity());
+        s.record_context_tokens(42, 1, test_context_identity());
         let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.apply_session_commit(&initial_store_commit_from_session(&s).unwrap())
             .unwrap();
@@ -4015,7 +4287,7 @@ mod tests {
             user_item("recent"),
             assistant_text_item("recent reply"),
         ];
-        s.record_context_tokens(500, test_context_identity());
+        s.record_context_tokens(500, s.history.len(), test_context_identity());
 
         let installed =
             s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(500));
@@ -4063,12 +4335,12 @@ mod tests {
     fn restore_context_after_rewind_restores_display_context_snapshot() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
-        s.record_context_tokens(710, test_context_identity());
+        s.record_context_tokens(710, 2, test_context_identity());
         s.clear_context_tokens_baseline();
         s.snapshot_context();
 
         s.history.extend([user_item("c"), assistant_text_item("d")]);
-        s.record_context_tokens(700, test_context_identity());
+        s.record_context_tokens(700, 4, test_context_identity());
         s.snapshot_context();
 
         s.history.truncate(2);
@@ -4094,6 +4366,60 @@ mod tests {
                 .map(|checkpoint| checkpoint.first_live_index),
             Some(2)
         );
+    }
+
+    #[test]
+    fn pruning_between_compactions_restores_the_previous_checkpoint() {
+        let mut s = fixture_session();
+        s.history = vec![
+            user_item("one"),
+            assistant_text_item("one reply"),
+            user_item("two"),
+            assistant_text_item("two reply"),
+            user_item("three"),
+            assistant_text_item("three reply"),
+        ];
+        assert!(s.install_context_checkpoint_at_history_index(
+            "compaction".into(),
+            "first summary".into(),
+            2,
+            Some(100),
+            4,
+        ));
+        assert!(s.install_context_checkpoint_at_history_index(
+            "compaction".into(),
+            "second summary".into(),
+            4,
+            Some(80),
+            6,
+        ));
+
+        let mut boundary_update = s.clone();
+        boundary_update.prune_rewindable_snapshots(4);
+        assert_eq!(boundary_update.checkpoint_events.len(), 2);
+        assert_eq!(
+            boundary_update
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.summary.as_str()),
+            Some("second summary")
+        );
+
+        s.restore_rewindable_snapshots_after_rewind(4, false);
+
+        assert_eq!(s.checkpoint_events.len(), 1);
+        assert_eq!(s.checkpoint_events[0].summary, "first summary");
+        assert_eq!(
+            s.checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.summary.as_str()),
+            Some("first summary")
+        );
+
+        s.restore_rewindable_snapshots_after_rewind(1, false);
+
+        assert!(s.checkpoint_events.is_empty());
+        assert!(s.checkpoint.is_none());
     }
 
     #[test]
@@ -4214,7 +4540,7 @@ mod tests {
     fn current_context_tokens_requires_exact_history_length() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
-        s.record_context_tokens(100, test_context_identity());
+        s.record_context_tokens(100, 2, test_context_identity());
         assert_eq!(s.current_context_tokens(), Some(100));
         assert_eq!(s.display_context_tokens, Some(100));
 
@@ -4227,7 +4553,7 @@ mod tests {
     fn clear_context_tokens_baseline_preserves_visible_reading() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
-        s.record_context_tokens(100, test_context_identity());
+        s.record_context_tokens(100, 2, test_context_identity());
 
         s.clear_context_tokens_baseline();
 
@@ -4254,7 +4580,7 @@ mod tests {
         s.history.push(user_item("q1"));
         s.history.push(assistant_text_item("a1"));
         s.title = Some("kept".into());
-        s.record_context_tokens(500, test_context_identity());
+        s.record_context_tokens(500, s.history.len(), test_context_identity());
         s.session_cost_usd = 1.25;
 
         let forked = s.fork(4242);
@@ -4286,11 +4612,11 @@ mod tests {
             fast_mode: None,
             cwd: None,
             parent_id: None,
-            context_tokens: None,
-            context_token_identity: None,
-            display_context_token_identity: None,
+            authoritative_context_tokens: None,
+            display_context_tokens: None,
             history_len: None,
             checkpoint: None,
+            checkpoint_events: Vec::new(),
             text_bytes: None,
         };
         assert_eq!(session_updated_at(&m), 200);

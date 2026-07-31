@@ -570,6 +570,12 @@ local function auto_compact_due(tokens)
 	return tokens >= window * threshold
 end
 
+local function is_unchanged_checkpoint_estimate(estimate)
+	return estimate
+		and estimate.source == "checkpoint_estimate"
+		and estimate.estimated_delta_tokens == 0
+end
+
 local function compact_live_session(before_tokens, phase, opts, done)
 	local history = smelt.session.model_messages()
 	if not has_compactable_group_prefix(history) then
@@ -629,12 +635,19 @@ end, { desc = "compact conversation history", args = { "<instructions>" }, busy 
 -- to the last provider-reported context size when available.
 
 smelt.engine.on_prepare_request(function(request, reply)
+	local estimate = request and request.context_estimate
+	-- An unchanged checkpoint estimate is the result of this compaction cycle.
+	-- Let its immediate retry reach the provider instead of reconsidering the
+	-- same history when the estimate remains above the configured threshold.
+	if is_unchanged_checkpoint_estimate(estimate) then
+		reply(nil)
+		return
+	end
 	local estimated_tokens = request and (request.estimated_context_tokens or request.estimated_tokens)
 	if not auto_compact_due(estimated_tokens) then
 		reply(nil)
 		return
 	end
-	local estimate = request and request.context_estimate
 	emit_event("trigger-pre-request", estimated_tokens, nil, {
 		estimate_source = estimate and estimate.source or nil,
 		provider_context_tokens = estimate and estimate.provider_context_tokens or nil,

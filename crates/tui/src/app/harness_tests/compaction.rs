@@ -872,10 +872,21 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
     let waiting_frame = waiting_frame.expect("waiting compaction frame");
     assert!(waiting_frame.contains("compacting"));
     let preview_frame = preview_frame.expect("one-shot compaction preview frame");
-    assert!(preview_frame.contains("SUMMARY_TAIL_MUST_BE_VISIBLE"));
+    for expected in [
+        "summary line 09",
+        "summary line 10",
+        "summary line 11",
+        "SUMMARY_TAIL_MUST_BE_VISIBLE",
+    ] {
+        assert!(
+            preview_frame.contains(expected),
+            "one-shot preview omitted tail line {expected:?}:\n{preview_frame}"
+        );
+    }
     assert!(
-        !preview_frame.contains("SUMMARY_HEAD_MUST_BE_CAPPED"),
-        "one-shot preview should retain only the summary tail:\n{preview_frame}"
+        !preview_frame.contains("summary line 08")
+            && !preview_frame.contains("SUMMARY_HEAD_MUST_BE_CAPPED"),
+        "one-shot preview should retain exactly four summary tail lines:\n{preview_frame}"
     );
     assert_eq!(marker_count_after_response, Some(1));
     assert_eq!(marker_count_after_history_update, Some(1));

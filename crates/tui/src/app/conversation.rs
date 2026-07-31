@@ -800,8 +800,10 @@ impl ConversationRuntime {
         usage: protocol::TokenUsage,
         identity: smelt_core::session::ContextTokenIdentity,
     ) -> bool {
+        let history_len = self.history_len();
         self.apply_usage_mutation(super::session_document::UsageMutation::RecordTokens {
             usage,
+            history_len,
             identity,
         })
         .context_tokens_updated
@@ -901,11 +903,13 @@ impl ConversationRuntime {
     pub(crate) fn insert_checkpoint_marker(
         &mut self,
         block_index: usize,
+        history_index: usize,
         block: smelt_core::transcript_model::Block,
     ) {
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::InsertCheckpointMarker {
                 block_index,
+                history_index,
                 block,
             },
         );
@@ -1338,7 +1342,9 @@ impl ConversationRuntime {
         tokens: u32,
         identity: smelt_core::session::ContextTokenIdentity,
     ) {
-        self.session.record_context_tokens(tokens, identity);
+        let history_len = self.history_len();
+        self.session
+            .record_context_tokens(tokens, history_len, identity);
     }
 
     #[cfg(test)]

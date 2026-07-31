@@ -6340,10 +6340,15 @@ impl TranscriptDocument {
         self.content.compaction_preview_id
     }
 
-    pub(crate) fn insert_checkpoint_marker_at(&mut self, block_index: usize, block: Block) {
+    pub(crate) fn insert_checkpoint_marker_at(
+        &mut self,
+        block_index: usize,
+        history_index: usize,
+        block: Block,
+    ) {
         self.content
             .transcript
-            .insert_checkpoint_marker_at(block_index, block);
+            .insert_checkpoint_marker_at(block_index, history_index, block);
         self.clear_transcript_layout_caches();
     }
 

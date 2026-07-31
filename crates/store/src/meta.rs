@@ -66,6 +66,7 @@ pub struct SessionMetadata {
     pub fast_mode: Option<bool>,
     pub accounting_json: Option<serde_json::Value>,
     pub checkpoint_json: Option<serde_json::Value>,
+    pub checkpoint_events_json: Option<serde_json::Value>,
     pub context_tokens: Option<u64>,
     pub context_tokens_history_len: Option<u64>,
     pub display_context_tokens: Option<u64>,
@@ -197,13 +198,14 @@ pub(crate) fn write_session(
     validate_session_checkpoint(metadata, history_len)?;
     let accounting_json = optional_json_string(&metadata.accounting_json)?;
     let checkpoint_json = optional_json_string(&metadata.checkpoint_json)?;
+    let checkpoint_events_json = optional_json_string(&metadata.checkpoint_events_json)?;
     conn.execute(
         "INSERT INTO session_state (
             singleton, id, title, slug, first_user_message, cwd, mode, reasoning_effort,
-            model, fast_mode, parent_id, accounting_json, checkpoint_json, context_tokens,
-            context_tokens_history_len, display_context_tokens, session_cost_usd,
+            model, fast_mode, parent_id, accounting_json, checkpoint_json, checkpoint_events_json,
+            context_tokens, context_tokens_history_len, display_context_tokens, session_cost_usd,
             revision, history_len, transcript_record_count, created_at, updated_at
-         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(singleton) DO UPDATE SET
             title = excluded.title,
             slug = excluded.slug,
@@ -215,6 +217,7 @@ pub(crate) fn write_session(
             fast_mode = excluded.fast_mode,
             accounting_json = excluded.accounting_json,
             checkpoint_json = excluded.checkpoint_json,
+            checkpoint_events_json = excluded.checkpoint_events_json,
             context_tokens = excluded.context_tokens,
             context_tokens_history_len = excluded.context_tokens_history_len,
             display_context_tokens = excluded.display_context_tokens,
@@ -236,6 +239,7 @@ pub(crate) fn write_session(
             &identity.parent_id,
             &accounting_json,
             &checkpoint_json,
+            &checkpoint_events_json,
             metadata
                 .context_tokens
                 .map(|tokens| checked_i64(tokens, "context_tokens"))
@@ -263,9 +267,10 @@ pub(crate) fn stored_session(conn: &Connection) -> Result<Option<PersistedSessio
     let persisted = conn
         .query_row(
             "SELECT id, title, slug, first_user_message, cwd, mode, reasoning_effort,
-                    model, fast_mode, parent_id, accounting_json, checkpoint_json, context_tokens,
-                    context_tokens_history_len, display_context_tokens, session_cost_usd,
-                    revision, history_len, created_at, updated_at
+                    model, fast_mode, parent_id, accounting_json, checkpoint_json,
+                    checkpoint_events_json, context_tokens, context_tokens_history_len,
+                    display_context_tokens, session_cost_usd, revision, history_len, created_at,
+                    updated_at
              FROM session_state
              WHERE singleton = 1",
             [],
@@ -283,14 +288,15 @@ pub(crate) fn stored_session(conn: &Connection) -> Result<Option<PersistedSessio
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<i64>>(13)?,
                     row.get::<_, Option<i64>>(14)?,
-                    row.get::<_, f64>(15)?,
-                    row.get::<_, i64>(16)?,
+                    row.get::<_, Option<i64>>(15)?,
+                    row.get::<_, f64>(16)?,
                     row.get::<_, i64>(17)?,
                     row.get::<_, i64>(18)?,
                     row.get::<_, i64>(19)?,
+                    row.get::<_, i64>(20)?,
                 ))
             },
         )
@@ -308,6 +314,7 @@ pub(crate) fn stored_session(conn: &Connection) -> Result<Option<PersistedSessio
         parent_id,
         accounting_json,
         checkpoint_json,
+        checkpoint_events_json,
         context_tokens,
         context_tokens_history_len,
         display_context_tokens,
@@ -339,6 +346,8 @@ pub(crate) fn stored_session(conn: &Connection) -> Result<Option<PersistedSessio
             fast_mode,
             accounting_json: parse_optional_json(accounting_json).map_err(StoreError::from)?,
             checkpoint_json: parse_optional_json(checkpoint_json).map_err(StoreError::from)?,
+            checkpoint_events_json: parse_optional_json(checkpoint_events_json)
+                .map_err(StoreError::from)?,
             context_tokens: optional_nonnegative_u64(context_tokens, "context_tokens")?,
             context_tokens_history_len: optional_nonnegative_u64(
                 context_tokens_history_len,
@@ -414,17 +423,75 @@ pub(crate) fn validate_session_checkpoint(
     metadata: &SessionMetadata,
     history_len: u64,
 ) -> Result<()> {
-    let Some(first_live_index) = metadata
+    if let Some(first_live_index) = metadata
         .checkpoint_json
         .as_ref()
         .and_then(checkpoint_first_live_index)
-    else {
+    {
+        if first_live_index > history_len {
+            return Err(StoreError::Integrity(format!(
+                "checkpoint first_live_index {first_live_index} exceeds history_len {history_len}"
+            )));
+        }
+    }
+    let Some(events) = metadata.checkpoint_events_json.as_ref() else {
         return Ok(());
     };
-    if first_live_index > history_len {
-        return Err(StoreError::Integrity(format!(
-            "checkpoint first_live_index {first_live_index} exceeds history_len {history_len}"
-        )));
+    let events = events.as_array().ok_or_else(|| {
+        StoreError::Integrity("checkpoint_events_json must be an array".to_string())
+    })?;
+    let mut previous_completion = None;
+    for event in events {
+        if event.get("kind").is_some_and(|kind| !kind.is_string()) {
+            return Err(StoreError::Integrity(
+                "checkpoint event kind must be a string".to_string(),
+            ));
+        }
+        if !event
+            .get("summary")
+            .is_some_and(serde_json::Value::is_string)
+        {
+            return Err(StoreError::Integrity(
+                "checkpoint event summary must be a string".to_string(),
+            ));
+        }
+        let first_live_index = event
+            .get("first_live_index")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                StoreError::Integrity(
+                    "checkpoint event first_live_index must be a nonnegative integer".to_string(),
+                )
+            })?;
+        let completed_at_history_len = event
+            .get("completed_at_history_len")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                StoreError::Integrity(
+                    "checkpoint event completed_at_history_len must be a nonnegative integer"
+                        .to_string(),
+                )
+            })?;
+        if !event
+            .get("created_at_ms")
+            .is_some_and(|created_at| created_at.as_u64().is_some())
+        {
+            return Err(StoreError::Integrity(
+                "checkpoint event created_at_ms must be a nonnegative integer".to_string(),
+            ));
+        }
+        if first_live_index > completed_at_history_len || completed_at_history_len > history_len {
+            return Err(StoreError::Integrity(format!(
+                "checkpoint event boundary {first_live_index} and completion \
+                 {completed_at_history_len} must fit history_len {history_len}"
+            )));
+        }
+        if previous_completion.is_some_and(|previous| previous > completed_at_history_len) {
+            return Err(StoreError::Integrity(
+                "checkpoint events must be ordered by completion boundary".to_string(),
+            ));
+        }
+        previous_completion = Some(completed_at_history_len);
     }
     Ok(())
 }

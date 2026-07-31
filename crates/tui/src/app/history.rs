@@ -5,7 +5,7 @@ use smelt_core::transcript_model::BlockHistory;
 use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -63,11 +63,11 @@ pub(crate) fn live_session_for_test(
             fast_mode: None,
             cwd: None,
             parent_id: None,
-            context_tokens: None,
-            context_token_identity: None,
-            display_context_token_identity: None,
+            authoritative_context_tokens: None,
+            display_context_tokens: None,
             history_len: Some(history_len),
             checkpoint,
+            checkpoint_events: Vec::new(),
             text_bytes: None,
         },
         history_len,
@@ -167,6 +167,38 @@ fn copy_legacy_attachment_blobs(
     Ok(())
 }
 
+fn checkpoint_markers_by_history_index(session: &session::Session) -> BTreeMap<usize, Vec<String>> {
+    let mut markers = BTreeMap::<usize, Vec<String>>::new();
+    for event in &session.checkpoint_events {
+        markers
+            .entry(event.first_live_index)
+            .or_default()
+            .push(event.summary.clone());
+    }
+    if markers.is_empty() {
+        if let Some(checkpoint) = &session.checkpoint {
+            markers
+                .entry(checkpoint.first_live_index)
+                .or_default()
+                .push(checkpoint.summary.clone());
+        }
+    }
+    markers
+}
+
+fn insert_checkpoint_markers(
+    transcript: &mut Transcript,
+    markers: &mut BTreeMap<usize, Vec<String>>,
+    history_index: usize,
+) {
+    let Some(summaries) = markers.remove(&history_index) else {
+        return;
+    };
+    for summary in summaries {
+        transcript.insert_checkpoint_marker(history_index, Block::Compacted { summary });
+    }
+}
+
 pub(crate) fn build_transcript_from_session(
     lua: &smelt_core::lua::LuaRuntime,
     session: &session::Session,
@@ -187,22 +219,9 @@ pub(crate) fn build_transcript_from_session(
         tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
     }
 
-    let compaction = session.checkpoint.clone();
+    let mut checkpoint_markers = checkpoint_markers_by_history_index(session);
     for (idx, item) in session.history.iter().enumerate() {
-        if compaction
-            .as_ref()
-            .is_some_and(|cp| cp.first_live_index == idx)
-        {
-            transcript.insert_checkpoint_marker(
-                idx,
-                Block::Compacted {
-                    summary: compaction
-                        .as_ref()
-                        .map(|cp| cp.summary.clone())
-                        .unwrap_or_default(),
-                },
-            );
-        }
+        insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx);
         match item {
             HistoryItem::User {
                 content,
@@ -223,17 +242,11 @@ pub(crate) fn build_transcript_from_session(
             HistoryItem::System { .. } => {}
         }
     }
-    if compaction
-        .as_ref()
-        .is_some_and(|cp| cp.first_live_index >= session.history.len())
-    {
-        transcript.insert_checkpoint_marker(
-            session.history.len(),
-            Block::Compacted {
-                summary: compaction.map(|cp| cp.summary).unwrap_or_default(),
-            },
-        );
-    }
+    insert_checkpoint_markers(
+        &mut transcript,
+        &mut checkpoint_markers,
+        session.history.len(),
+    );
 
     smelt_perf::perf::record_value(
         "transcript:build_from_session:blocks",
@@ -1387,7 +1400,8 @@ impl TuiApp {
 
     fn build_current_transcript(&mut self) -> Transcript {
         let history_len = self.conversation.session().history.len();
-        let compaction = self.conversation.session().checkpoint.clone();
+        let mut checkpoint_markers =
+            checkpoint_markers_by_history_index(self.conversation.session());
         let mut tool_elapsed = HashMap::new();
         for (_, meta) in &self.conversation.session().turn_metas {
             tool_elapsed.extend(
@@ -1400,20 +1414,7 @@ impl TuiApp {
         let mut transcript = Transcript::new();
         let lua = self.lua.execution();
         for history_index in 0..history_len {
-            if compaction
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.first_live_index == history_index)
-            {
-                transcript.insert_checkpoint_marker(
-                    history_index,
-                    Block::Compacted {
-                        summary: compaction
-                            .as_ref()
-                            .map(|checkpoint| checkpoint.summary.clone())
-                            .unwrap_or_default(),
-                    },
-                );
-            }
+            insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, history_index);
             let Some(item) = self
                 .conversation
                 .session()
@@ -1449,19 +1450,7 @@ impl TuiApp {
                 HistoryItem::System { .. } => {}
             });
         }
-        if compaction
-            .as_ref()
-            .is_some_and(|checkpoint| checkpoint.first_live_index >= history_len)
-        {
-            transcript.insert_checkpoint_marker(
-                history_len,
-                Block::Compacted {
-                    summary: compaction
-                        .map(|checkpoint| checkpoint.summary)
-                        .unwrap_or_default(),
-                },
-            );
-        }
+        insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, history_len);
         transcript
     }
 
@@ -1984,14 +1973,16 @@ impl TuiApp {
             .first_block_index_for_history_origin_at_or_after(first_live_index)
         {
             let index = self.suppress_duplicate_carried_tail_before(index);
-            self.conversation.insert_checkpoint_marker(index, block);
+            self.conversation
+                .insert_checkpoint_marker(index, first_live_index, block);
         } else {
             let index = fallback_transcript_index_for_history_index(
                 &self.conversation.session().history,
                 first_live_index,
             );
             let index = self.suppress_duplicate_carried_tail_before(index);
-            self.conversation.insert_checkpoint_marker(index, block);
+            self.conversation
+                .insert_checkpoint_marker(index, first_live_index, block);
         }
     }
 
@@ -3272,7 +3263,7 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn checkpoint_commit_moves_existing_marker() {
+    fn checkpoint_commit_preserves_existing_marker_at_historical_boundary() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.conversation.replace_history_for_harness(vec![
             user("old"),
@@ -3310,7 +3301,7 @@ mod checkpoint_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(markers, vec![(3, "new summary")]);
+        assert_eq!(markers, vec![(2, "old summary"), (4, "new summary")]);
         assert!(app.app.conversation.has_document_work());
     }
 
@@ -3444,7 +3435,7 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn checkpoint_commit_keeps_history_compacted_blocks() {
+    fn checkpoint_commit_keeps_historical_and_user_compacted_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.conversation.replace_history_for_harness(vec![
             HistoryItem::user(protocol::compaction_summary_content(
@@ -3483,7 +3474,11 @@ mod checkpoint_tests {
             .collect();
         assert_eq!(
             summaries,
-            vec!["user-written summary-looking block", "new summary"]
+            vec![
+                "user-written summary-looking block",
+                "old summary",
+                "new summary",
+            ]
         );
     }
 

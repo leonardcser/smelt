@@ -3,12 +3,12 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 ───────────────────────── compacting ──────────────────────────
-… 5 lines above
-- Added a streaming preview block.
+… 6 lines above
 - Kept the final checkpoint marker separate.
 
 # Next steps
 Update stories and run focused tests.
+
 
 
 

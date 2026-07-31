@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 pub(crate) const CANONICAL_CONTENT_TABLES: &[&str] = &[
     "session_state",
@@ -108,6 +108,9 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if (1..=9).contains(&current) {
         migrate_to_v10(conn)?;
+    }
+    if (1..=10).contains(&current) {
+        migrate_to_v11(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -523,6 +526,16 @@ fn migrate_to_v10(conn: &Connection) -> Result<()> {
     crate::history::backfill_transcript_extent_profiles(conn)
 }
 
+fn migrate_to_v11(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "session_state", "checkpoint_events_json")? {
+        conn.execute_batch(
+            "ALTER TABLE session_state
+             ADD COLUMN checkpoint_events_json TEXT",
+        )?;
+    }
+    Ok(())
+}
+
 fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
     if !column_exists(conn, "session_state", "fast_mode")? {
         conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
@@ -780,9 +793,12 @@ fn legacy_schema_v8() -> String {
         .replace("block_json", "descriptor_json")
 }
 
+fn legacy_schema_v10() -> String {
+    SCHEMA.replace(",\n    checkpoint_events_json TEXT\n", "\n")
+}
+
 fn legacy_schema_v9() -> String {
-    SCHEMA
-        .replace(
+    legacy_schema_v10().replace(
             "    tool_state_json TEXT,\n    extent_profile_version INTEGER NOT NULL DEFAULT 0 CHECK (extent_profile_version >= 0),\n    extent_rows_20 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_20 >= 0),\n    extent_rows_40 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_40 >= 0),\n    extent_rows_80 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_80 >= 0),\n    extent_rows_120 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_120 >= 0),\n    extent_rows_160 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_160 >= 0),\n    extent_rows_240 INTEGER NOT NULL DEFAULT 0 CHECK (extent_rows_240 >= 0)\n",
             "    tool_state_json TEXT\n",
         )
@@ -822,7 +838,8 @@ CREATE TABLE IF NOT EXISTS session_state (
     created_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (updated_at >= 0),
     transcript_record_count INTEGER NOT NULL DEFAULT 0 CHECK (transcript_record_count >= 0),
-    next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)
+    next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0),
+    checkpoint_events_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS history_items (
@@ -1129,7 +1146,34 @@ mod tests {
     }
 
     #[test]
-    fn v9_to_v10_migration_backfills_extent_profiles_and_chunks() {
+    fn v10_to_v11_migration_adds_checkpoint_event_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&legacy_schema_v10()).unwrap();
+        conn.execute(
+            "INSERT INTO session_state (singleton, id) VALUES (1, 'session-a')",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 10).unwrap();
+
+        migrate(&mut conn, "test-v11").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(column_exists(&conn, "session_state", "checkpoint_events_json").unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT id, checkpoint_events_json FROM session_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap(),
+            ("session-a".to_string(), None)
+        );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v9_to_v11_migration_backfills_extent_profiles_and_chunks() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy_schema_v9()).unwrap();
         assert!(!column_exists(&conn, "transcript_blocks", "extent_profile_version").unwrap());
@@ -1156,7 +1200,7 @@ mod tests {
         }
         set_user_version(&conn, 9).unwrap();
 
-        migrate(&mut conn, "test-v10").unwrap();
+        migrate(&mut conn, "test-v11").unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
@@ -1193,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v10_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v11_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -1404,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v10_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v11_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1474,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v10_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v11_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1514,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_to_v10_migration_preserves_canonical_session_state() {
+    fn v5_to_v11_migration_preserves_canonical_session_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "foreign_keys", false).unwrap();
@@ -1529,7 +1573,7 @@ mod tests {
         .unwrap();
         set_user_version(&conn, 5).unwrap();
 
-        migrate(&mut conn, "test-v10").unwrap();
+        migrate(&mut conn, "test-v11").unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
@@ -1552,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_to_v10_migration_caches_transcript_record_count_without_rebuilding() {
+    fn v6_to_v11_migration_caches_transcript_record_count_without_rebuilding() {
         let mut conn = Connection::open_in_memory().unwrap();
         let v6_schema = schema_v7()
             .replace(
@@ -1638,7 +1682,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v7_to_v10_migration_adds_empty_canonical_turn_state() {
+    fn v7_to_v11_migration_adds_empty_canonical_turn_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&schema_v7()).unwrap();
         conn.execute(
@@ -1702,7 +1746,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v8_to_v10_migration_renames_transcript_storage_vocabulary() {
+    fn v8_to_v11_migration_renames_transcript_storage_vocabulary() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy_schema_v8()).unwrap();
         conn.execute(

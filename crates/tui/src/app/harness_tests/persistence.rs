@@ -570,6 +570,7 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
 
     app.insert_transcript_checkpoint_for_harness(
         0,
+        0,
         Block::Text {
             content: "inserted prefix".into(),
         },
@@ -1323,6 +1324,235 @@ fn store_backed_resume_preserves_context_token_identity() {
         .conversation_probe()
         .session()
         .display_context_tokens_stale(&identity));
+}
+
+#[test]
+fn store_backed_resume_uses_provider_snapshot_for_pre_request_compaction() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..3 {
+            app.commit_request_history_item(
+                HistoryItem::user(Content::text(format!("old user {index}"))),
+                None,
+            );
+            app.commit_request_history_item(
+                HistoryItem::assistant(AssistantStep::terminal(
+                    Some(Content::text(format!("old assistant {index}"))),
+                    None,
+                    Vec::new(),
+                )),
+                None,
+            );
+        }
+        app.record_visible_token_usage(TokenUsage {
+            context_tokens: Some(100),
+            ..Default::default()
+        });
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    assert!(resumed.conversation_probe().has_live_session());
+    assert!(resumed.session_snapshot().history.is_empty());
+
+    let mut settings = resumed.core_probe().config.settings.clone();
+    settings.auto_compact = true;
+    settings.compact_threshold = 0.8;
+    settings.compact_keep_recent_groups = 1.0;
+    resumed.set_settings_for_harness(settings);
+    resumed.set_context_window(Some(1_000));
+
+    let messages = protocol::history_to_messages(&resumed.model_history());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    resumed.dispatch_host_call(engine::HostCall::PrepareRequest {
+        messages: engine::PreparedRequestMessages::model_only(messages),
+        estimated_tokens: 2_000,
+        reply: tx,
+    });
+
+    let sends = resumed.drain_engine_sends();
+    assert!(
+        sends
+            .iter()
+            .all(|command| !matches!(command, protocol::UiCommand::EngineAsk { .. })),
+        "provider snapshot below the threshold should prevent compaction: {sends:?}"
+    );
+    assert!(matches!(
+        rx.try_recv().expect("prepare request reply"),
+        engine::HostRequestDecision::Continue
+    ));
+    assert_eq!(resumed.session_snapshot().context_tokens, Some(100));
+    assert_eq!(
+        resumed.session_snapshot().context_tokens_history_len,
+        Some(6)
+    );
+}
+
+#[test]
+fn store_backed_usage_records_canonical_history_coordinate() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.session_append_history(HistoryItem::user(Content::text("stored prompt")));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    resumed.session_append_history(HistoryItem::assistant(AssistantStep::terminal(
+        Some(Content::text("live response")),
+        None,
+        Vec::new(),
+    )));
+    resumed.record_visible_token_usage(TokenUsage {
+        context_tokens: Some(200),
+        ..Default::default()
+    });
+    resumed.save_session_and_flush();
+
+    let reader = smelt_store::SessionReader::open_existing(resumed.session_dir()).unwrap();
+    let stored = reader
+        .stored_session()
+        .unwrap()
+        .expect("stored session metadata");
+    assert_eq!(stored.head.history_len.get(), 2);
+    assert_eq!(stored.metadata.context_tokens, Some(200));
+    assert_eq!(stored.metadata.context_tokens_history_len, Some(2));
+}
+
+#[test]
+fn successful_compactions_remain_after_canonical_transcript_rebuild() {
+    fn append_exchange(app: &mut TestApp, label: &str) {
+        app.commit_request_history_item(
+            HistoryItem::user(Content::text(format!("{label} user"))),
+            Some(Block::User {
+                text: format!("{label} user"),
+                image_labels: Vec::new(),
+                command: false,
+            }),
+        );
+        app.commit_request_history_item(
+            HistoryItem::assistant(AssistantStep::terminal(
+                Some(Content::text(format!("{label} assistant"))),
+                None,
+                Vec::new(),
+            )),
+            Some(Block::Text {
+                content: format!("{label} assistant"),
+            }),
+        );
+    }
+
+    fn compaction_boundaries(app: &mut TestApp) -> Vec<(String, Option<usize>)> {
+        let ids = {
+            let history = app.conversation_probe().transcript().history();
+            (0..history.len())
+                .filter_map(|block_index| {
+                    let id = history.block_id_at(block_index)?;
+                    (history.block_kind(id) == Some("compacted")).then_some(id)
+                })
+                .collect::<Vec<_>>()
+        };
+        app.with_pinned_transcript_blocks(&ids, |history| {
+            ids.iter()
+                .map(|id| {
+                    let Block::Compacted { summary } = history
+                        .block(*id)
+                        .expect("pinned compaction block is hydrated")
+                    else {
+                        panic!("compaction id changed kind after hydration");
+                    };
+                    let history_index = match history.block_origin(*id) {
+                        Some(smelt_core::BlockOrigin::Checkpoint { history_index }) => {
+                            Some(history_index)
+                        }
+                        _ => None,
+                    };
+                    (summary.clone(), history_index)
+                })
+                .collect()
+        })
+        .expect("compaction blocks hydrate from the session store")
+    }
+
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        append_exchange(&mut app, "old");
+        append_exchange(&mut app, "middle");
+        assert!(app.run_lua(
+            r#"assert(smelt.session.checkpoint({
+                summary = "first checkpoint",
+                first_live_message_index = 2,
+                tokens_before = 100,
+            }))"#,
+        ));
+
+        append_exchange(&mut app, "recent");
+        assert!(app.run_lua(
+            r#"assert(smelt.session.checkpoint({
+                summary = "second checkpoint",
+                first_live_message_index = 3,
+                tokens_before = 120,
+            }))"#,
+        ));
+
+        assert_eq!(
+            compaction_boundaries(&mut app),
+            vec![
+                ("first checkpoint".into(), Some(2)),
+                ("second checkpoint".into(), Some(4)),
+            ]
+        );
+        app.save_session_and_flush();
+        let session_id = app.session_snapshot().id.clone();
+        let loaded = loaded_session(&app, &session_id);
+        assert_eq!(
+            loaded
+                .checkpoint_events
+                .iter()
+                .map(|event| (event.summary.as_str(), event.first_live_index))
+                .collect::<Vec<_>>(),
+            vec![("first checkpoint", 2), ("second checkpoint", 4)]
+        );
+        let lua = crate::lua::LuaRuntime::new();
+        let rebuilt = crate::app::history::build_transcript_from_session(&lua, &loaded);
+        let rebuilt_boundaries = rebuilt
+            .history
+            .order
+            .iter()
+            .filter_map(|id| {
+                let Block::Compacted { summary } = rebuilt.history.block(*id)? else {
+                    return None;
+                };
+                let smelt_core::BlockOrigin::Checkpoint { history_index } =
+                    rebuilt.history.block_origin(*id)?
+                else {
+                    return None;
+                };
+                Some((summary.as_str(), history_index))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rebuilt_boundaries,
+            vec![("first checkpoint", 2), ("second checkpoint", 4)]
+        );
+        session_id
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    assert_eq!(
+        compaction_boundaries(&mut resumed),
+        vec![
+            ("first checkpoint".into(), Some(2)),
+            ("second checkpoint".into(), Some(4)),
+        ]
+    );
 }
 
 #[test]

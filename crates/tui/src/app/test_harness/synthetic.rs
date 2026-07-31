@@ -587,11 +587,38 @@ impl TestApp {
                     .map(|effort| effort.label().to_string()),
                 model: meta.model.clone(),
                 fast_mode: meta.fast_mode,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: meta.context_tokens.map(u64::from),
-                context_tokens_history_len: None,
-                display_context_tokens: meta.context_tokens.map(u64::from),
+                accounting_json: Some(serde_json::json!({
+                    "session_usage": {},
+                    "context_token_identity": meta
+                        .authoritative_context_tokens
+                        .as_ref()
+                        .map(|context| &context.identity),
+                    "display_context_token_identity": meta
+                        .display_context_tokens
+                        .as_ref()
+                        .and_then(|context| context.identity.as_ref()),
+                })),
+                checkpoint_json: meta
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| serde_json::to_value(checkpoint).expect("valid checkpoint")),
+                checkpoint_events_json: (!meta.checkpoint_events.is_empty()).then(|| {
+                    serde_json::to_value(&meta.checkpoint_events).expect("valid checkpoint events")
+                }),
+                context_tokens: meta
+                    .authoritative_context_tokens
+                    .as_ref()
+                    .map(|context| u64::from(context.tokens)),
+                context_tokens_history_len: meta.authoritative_context_tokens.as_ref().map(
+                    |context| {
+                        u64::try_from(context.history_len)
+                            .expect("fixture history coordinate fits u64")
+                    },
+                ),
+                display_context_tokens: meta
+                    .display_context_tokens
+                    .as_ref()
+                    .map(|context| u64::from(context.tokens)),
                 session_cost_usd: smelt_store::SessionCostUsd::new(0.0)
                     .expect("valid fixture cost"),
                 updated_at: i64::try_from(meta.updated_at_ms).expect("fixture updated_at fits i64"),

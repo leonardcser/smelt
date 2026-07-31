@@ -482,6 +482,7 @@ impl PrepareContextEstimate {
             } else {
                 return Self::full_request(full_request_estimate, current_history_len);
             };
+        let latest_snapshot_history_len = base_history_len;
         let base_history_len = base_history_len.unwrap_or(current_history_len);
 
         if base_history_len > current_history_len {
@@ -493,7 +494,7 @@ impl PrepareContextEstimate {
                 total_context_tokens: base,
                 provider_context_tokens: current_context_tokens,
                 estimated_delta_tokens: 0,
-                latest_snapshot_history_len: context_tokens_history_len,
+                latest_snapshot_history_len,
                 current_history_len,
                 source: exact_source,
             };
@@ -505,7 +506,7 @@ impl PrepareContextEstimate {
             total_context_tokens: base.saturating_add(estimated_delta_tokens),
             provider_context_tokens: current_context_tokens,
             estimated_delta_tokens,
-            latest_snapshot_history_len: context_tokens_history_len,
+            latest_snapshot_history_len,
             current_history_len,
             source: delta_source,
         }
@@ -644,9 +645,36 @@ mod tests {
         assert!(estimate.total_context_tokens > 80);
         assert!(estimate.total_context_tokens < 10_000);
         assert_eq!(estimate.provider_context_tokens, None);
+        assert_eq!(estimate.latest_snapshot_history_len, Some(2));
         assert_eq!(
             estimate.source,
             PrepareContextEstimateSource::CheckpointEstimatePlusHistoryDelta
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_marks_an_unchanged_checkpoint() {
+        let history = vec![
+            HistoryItem::user(Content::text("checkpoint summary")),
+            HistoryItem::user(Content::text("live suffix")),
+        ];
+        let messages = protocol::history_to_messages(&history);
+        let estimate = PrepareContextEstimate::from_history_delta(
+            None,
+            None,
+            Some((120, Some(history.len()))),
+            history.len(),
+            &[],
+            &messages,
+            10_000,
+        );
+
+        assert_eq!(estimate.total_context_tokens, 120);
+        assert_eq!(estimate.estimated_delta_tokens, 0);
+        assert_eq!(estimate.latest_snapshot_history_len, Some(2));
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::CheckpointEstimate
         );
     }
 

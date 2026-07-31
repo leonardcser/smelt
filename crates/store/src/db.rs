@@ -876,6 +876,7 @@ impl SessionDb {
                     fast_mode: None,
                     accounting_json: None,
                     checkpoint_json: None,
+                    checkpoint_events_json: None,
                     context_tokens: None,
                     context_tokens_history_len: None,
                     display_context_tokens: None,
@@ -2319,6 +2320,7 @@ fn encode_session_metadata(
     }
     encoder.optional_json(metadata.accounting_json.as_ref())?;
     encoder.optional_json(metadata.checkpoint_json.as_ref())?;
+    encoder.optional_json(metadata.checkpoint_events_json.as_ref())?;
     encoder.optional_u64(metadata.context_tokens);
     encoder.optional_u64(metadata.context_tokens_history_len);
     encoder.optional_u64(metadata.display_context_tokens);
@@ -3641,6 +3643,7 @@ mod tests {
         parent_id: Option<String>,
         accounting_json: Option<serde_json::Value>,
         checkpoint_json: Option<serde_json::Value>,
+        checkpoint_events_json: Option<serde_json::Value>,
         context_tokens: Option<u64>,
         context_tokens_history_len: Option<u64>,
         display_context_tokens: Option<u64>,
@@ -3927,6 +3930,7 @@ mod tests {
             fast_mode: state.fast_mode,
             accounting_json: state.accounting_json.clone(),
             checkpoint_json: state.checkpoint_json.clone(),
+            checkpoint_events_json: state.checkpoint_events_json.clone(),
             context_tokens: state.context_tokens,
             context_tokens_history_len: state.context_tokens_history_len,
             display_context_tokens: state.display_context_tokens,
@@ -3949,6 +3953,7 @@ mod tests {
             parent_id: session.identity.parent_id,
             accounting_json: session.metadata.accounting_json,
             checkpoint_json: session.metadata.checkpoint_json,
+            checkpoint_events_json: session.metadata.checkpoint_events_json,
             context_tokens: session.metadata.context_tokens,
             context_tokens_history_len: session.metadata.context_tokens_history_len,
             display_context_tokens: session.metadata.display_context_tokens,
@@ -6539,6 +6544,46 @@ mod tests {
     }
 
     #[test]
+    fn session_state_rejects_malformed_checkpoint_events() {
+        let cases = [
+            (
+                serde_json::json!([{
+                    "kind": "compaction",
+                    "summary": false,
+                    "first_live_index": 0,
+                    "completed_at_history_len": 0,
+                    "created_at_ms": 1,
+                }]),
+                "checkpoint event summary must be a string",
+            ),
+            (
+                serde_json::json!([{
+                    "kind": "compaction",
+                    "summary": "bad boundary",
+                    "first_live_index": 0,
+                    "completed_at_history_len": 1,
+                    "created_at_ms": 1,
+                }]),
+                "must fit history_len 0",
+            ),
+        ];
+
+        for (checkpoint_events_json, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+            let mut state = test_session_state("reject-bad-checkpoint-events", 1);
+            state.checkpoint_events_json = Some(checkpoint_events_json);
+
+            let err = db.apply_test_state(&state).unwrap_err();
+            assert!(
+                matches!(&err, SessionCommitFailure::Integrity { message } if message.contains(expected)),
+                "unexpected checkpoint event error: {err:?}"
+            );
+            assert!(db.test_session_model().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn commit_session_allows_record_links_to_persisted_history_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
@@ -7649,6 +7694,7 @@ mod tests {
                 parent_id: None,
                 accounting_json: Some(serde_json::json!({"prompt_tokens": 1})),
                 checkpoint_json: None,
+                checkpoint_events_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,
@@ -7725,6 +7771,7 @@ mod tests {
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
+                checkpoint_events_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,
@@ -7793,6 +7840,7 @@ mod tests {
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
+                checkpoint_events_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,
@@ -7888,6 +7936,7 @@ mod tests {
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
+                checkpoint_events_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,
@@ -8284,6 +8333,7 @@ mod tests {
             parent_id: None,
             accounting_json: None,
             checkpoint_json: None,
+            checkpoint_events_json: None,
             context_tokens: None,
             context_tokens_history_len: None,
             display_context_tokens: None,
@@ -8354,6 +8404,7 @@ mod tests {
             parent_id: None,
             accounting_json: None,
             checkpoint_json: None,
+            checkpoint_events_json: None,
             context_tokens: None,
             context_tokens_history_len: None,
             display_context_tokens: None,

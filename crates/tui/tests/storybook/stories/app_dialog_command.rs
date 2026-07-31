@@ -322,11 +322,11 @@ app_story!(resume_dialog, |ctx| {
             fast_mode: None,
             cwd: Some(cwd.clone()),
             parent_id: parent_id.map(str::to_string),
-            context_tokens: None,
-            context_token_identity: None,
-            display_context_token_identity: None,
+            authoritative_context_tokens: None,
+            display_context_tokens: None,
             history_len: None,
             checkpoint: None,
+            checkpoint_events: Vec::new(),
             text_bytes: Some(bytes),
         };
         ctx.write_session_meta(&meta);

@@ -3026,6 +3026,7 @@ mod tests {
                 fast_mode: None,
                 accounting_json: None,
                 checkpoint_json: None,
+                checkpoint_events_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,

@@ -5,10 +5,9 @@ expression: frame.styles_text()
 dim: 60 16
   0   0  59 attrs=dim
   1   0  15 attrs=dim
-  2   0  34 attrs=dim
-  3   0  44 attrs=dim
-  5   0  12 fg=AnsiValue(117) attrs=bold|dim
-  6   0  37 attrs=dim
+  2   0  44 attrs=dim
+  4   0  12 fg=AnsiValue(117) attrs=bold|dim
+  5   0  37 attrs=dim
  11   0   6 fg=AnsiValue(208) attrs=bold
  11   6  19 fg=AnsiValue(244)
  11  25   2 fg=AnsiValue(244) attrs=dim

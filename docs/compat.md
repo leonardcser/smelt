@@ -66,6 +66,28 @@ with `COMPAT(<id>)`.
   - `session_state_rejects_checkpoint_first_live_index_past_history`
   - `store_backed_resume_tolerates_bad_checkpoint_without_repairing_database`
 
+## session-checkpoint-event-backfill
+
+- Remove after: sessions written before canonical checkpoint event history no longer
+  need to open in supported versions
+- Why: seed the active checkpoint as one historical event when old session JSON
+  or SQLite metadata has no `checkpoint_events_json`
+- Code:
+  - `crates/core/src/session.rs`: normalizes legacy full-session and metadata loads
+- Tests:
+  - `successful_compactions_remain_after_canonical_transcript_rebuild`
+
+## checkpoint-marker-origin-boundary
+
+- Remove after: transcript records written before checkpoint origins carried an
+  explicit history boundary no longer need to open in supported versions
+- Why: deserialize the old unit `CheckpointMarker` origin while all new markers
+  persist `Checkpoint { history_index }`
+- Code:
+  - `crates/core/src/transcript_model.rs`: retains the legacy origin variant for reads
+- Tests:
+  - `checkpoint_marker_origin_round_trips_with_history_boundary`
+
 ## storage-root-lease
 
 - Remove after: schema versions older than v6 are no longer supported for

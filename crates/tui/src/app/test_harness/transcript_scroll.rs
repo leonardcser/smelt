@@ -292,11 +292,12 @@ impl TestApp {
     pub(crate) fn insert_transcript_checkpoint_for_harness(
         &mut self,
         block_index: usize,
+        history_index: usize,
         block: smelt_core::transcript_model::Block,
     ) {
         self.app
             .conversation
-            .insert_checkpoint_marker(block_index, block);
+            .insert_checkpoint_marker(block_index, history_index, block);
     }
 
     #[cfg(test)]

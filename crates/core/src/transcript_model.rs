@@ -430,7 +430,13 @@ impl BlockId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlockOrigin {
     History(usize),
-    CheckpointMarker,
+    // COMPAT(checkpoint-marker-origin-boundary): read transcript records written
+    // before checkpoint markers stored their canonical history boundary.
+    #[serde(rename = "CheckpointMarker")]
+    LegacyCheckpointMarker,
+    Checkpoint {
+        history_index: usize,
+    },
 }
 
 /// How the block is presented in the transcript. Independent of [`Status`] -
@@ -2485,7 +2491,6 @@ impl BlockHistory {
         before_history_index: usize,
         block: Block,
     ) -> BlockId {
-        self.remove_checkpoint_marker();
         let idx = self
             .order
             .iter()
@@ -2496,25 +2501,25 @@ impl BlockHistory {
                 )
             })
             .unwrap_or(self.order.len());
-        self.add_block(Some(idx), block, Some(BlockOrigin::CheckpointMarker))
+        self.add_block(
+            Some(idx),
+            block,
+            Some(BlockOrigin::Checkpoint {
+                history_index: before_history_index,
+            }),
+        )
     }
 
     pub(crate) fn insert_checkpoint_marker_at(
         &mut self,
         block_index: usize,
+        history_index: usize,
         block: Block,
     ) -> BlockId {
-        let removed_before = self
-            .order
-            .iter()
-            .take(block_index)
-            .filter(|id| matches!(self.block_origin(**id), Some(BlockOrigin::CheckpointMarker)))
-            .count();
-        self.remove_checkpoint_marker();
         self.add_block(
-            Some(block_index.saturating_sub(removed_before)),
+            Some(block_index),
             block,
-            Some(BlockOrigin::CheckpointMarker),
+            Some(BlockOrigin::Checkpoint { history_index }),
         )
     }
 
@@ -2533,29 +2538,6 @@ impl BlockHistory {
         self.bump_order_generation();
         self.mark_record_dirty_from(idx);
         block
-    }
-
-    fn remove_checkpoint_marker(&mut self) {
-        let removed: Vec<BlockId> = self
-            .order
-            .iter()
-            .copied()
-            .filter(|id| matches!(self.block_origin(*id), Some(BlockOrigin::CheckpointMarker)))
-            .collect();
-        if removed.is_empty() {
-            return;
-        }
-        let first_removed = self
-            .order
-            .iter()
-            .position(|id| removed.contains(id))
-            .unwrap_or(self.order.len());
-        self.order.retain(|id| !removed.contains(id));
-        for id in removed {
-            self.remove_entry(id);
-        }
-        self.bump_order_generation();
-        self.mark_record_dirty_from(first_removed);
     }
 
     pub(crate) fn push_with_state(
@@ -2856,6 +2838,21 @@ fn ends_with_heading(block: &Block) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_marker_origin_round_trips_with_history_boundary() {
+        let origin = BlockOrigin::Checkpoint { history_index: 7 };
+        let encoded = serde_json::to_value(origin).unwrap();
+
+        assert_eq!(
+            serde_json::from_value::<BlockOrigin>(encoded).unwrap(),
+            origin
+        );
+        assert_eq!(
+            serde_json::from_value::<BlockOrigin>(serde_json::json!("CheckpointMarker")).unwrap(),
+            BlockOrigin::LegacyCheckpointMarker
+        );
+    }
 
     fn indexed_tool_state_with_content(content: &str, metadata: serde_json::Value) -> ToolState {
         ToolState {

@@ -150,11 +150,17 @@ impl Transcript {
         self.history.insert_checkpoint_marker(history_index, block);
     }
 
-    pub fn insert_checkpoint_marker_at(&mut self, block_index: usize, block: Block) {
+    pub fn insert_checkpoint_marker_at(
+        &mut self,
+        block_index: usize,
+        history_index: usize,
+        block: Block,
+    ) {
         let Some(block) = Self::normalize_block(block) else {
             return;
         };
-        self.history.insert_checkpoint_marker_at(block_index, block);
+        self.history
+            .insert_checkpoint_marker_at(block_index, history_index, block);
     }
 
     pub fn remove_unoriginated_at(&mut self, block_idx: usize) -> Option<Block> {

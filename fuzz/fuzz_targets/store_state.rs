@@ -709,6 +709,15 @@ fn session_metadata(input: &StateInput, history_len: usize, sequence: u64) -> Se
                 "created_at_ms": sequence,
             })
         }),
+        checkpoint_events_json: input.checkpoint.then(|| {
+            serde_json::json!([{
+                "kind": "compaction",
+                "summary": format!("summary-{sequence}"),
+                "first_live_index": first_live_index,
+                "completed_at_history_len": history_len,
+                "created_at_ms": sequence,
+            }])
+        }),
         context_tokens: Some(history_len as u64 * 10),
         context_tokens_history_len: Some(history_len as u64),
         display_context_tokens: Some(history_len as u64 * 8),
@@ -729,6 +738,7 @@ fn empty_session_metadata() -> SessionMetadata {
         fast_mode: None,
         accounting_json: None,
         checkpoint_json: None,
+        checkpoint_events_json: None,
         context_tokens: None,
         context_tokens_history_len: None,
         display_context_tokens: None,

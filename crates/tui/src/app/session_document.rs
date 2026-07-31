@@ -654,6 +654,7 @@ pub(crate) enum TranscriptMutation {
     },
     InsertCheckpointMarker {
         block_index: usize,
+        history_index: usize,
         block: Block,
     },
     RemoveUnoriginatedBlockAt {
@@ -740,6 +741,7 @@ pub(crate) enum StreamMutation {
 pub(crate) enum UsageMutation {
     RecordTokens {
         usage: TokenUsage,
+        history_len: usize,
         identity: ContextTokenIdentity,
     },
     ClearTokenBaselineIfMismatched {
@@ -1070,20 +1072,23 @@ impl SessionDocument {
 
     fn apply_usage(session: &mut Session, mutation: UsageMutation) -> DocumentChange {
         match mutation {
-            UsageMutation::RecordTokens { usage, identity } => {
+            UsageMutation::RecordTokens {
+                usage,
+                history_len,
+                identity,
+            } => {
                 let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) else {
                     return DocumentChange::default();
                 };
                 if tokens == 0 {
                     return DocumentChange::default();
                 }
-                let history_len = session.history.len();
                 let changed = session.context_tokens != Some(tokens)
                     || session.context_tokens_history_len != Some(history_len)
                     || session.context_token_identity.as_ref() != Some(&identity)
                     || session.display_context_tokens != Some(tokens)
                     || session.display_context_token_identity.as_ref() != Some(&identity);
-                session.record_context_tokens(tokens, identity);
+                session.record_context_tokens(tokens, history_len, identity);
                 DocumentChange {
                     session_dirty: changed,
                     context_tokens_updated: changed,
@@ -1421,8 +1426,12 @@ impl SessionDocument {
                 transcript.history().record_dirty_generation() != before_generation
                     || transcript.history().record_dirty_from() != before_dirty_from
             }
-            TranscriptMutation::InsertCheckpointMarker { block_index, block } => {
-                transcript.insert_checkpoint_marker_at(block_index, block);
+            TranscriptMutation::InsertCheckpointMarker {
+                block_index,
+                history_index,
+                block,
+            } => {
+                transcript.insert_checkpoint_marker_at(block_index, history_index, block);
                 transcript.history().record_dirty_generation() != before_generation
                     || transcript.history().record_dirty_from() != before_dirty_from
             }
@@ -1541,7 +1550,6 @@ fn history_suffix_contains_matching_record_origin(
 
 fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Session {
     let mut session = Session::new(pid, cwd);
-    let context_token_identity = meta.context_token_identity.clone();
     session.id = meta.id;
     session.title = meta.title;
     session.slug = meta.slug;
@@ -1555,11 +1563,16 @@ fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Se
     session.cwd = meta.cwd;
     session.parent_id = meta.parent_id;
     session.checkpoint = meta.checkpoint;
-    session.display_context_tokens = meta.context_tokens;
-    session.context_token_identity = context_token_identity.clone();
-    session.display_context_token_identity = meta
-        .display_context_token_identity
-        .or(context_token_identity);
+    session.checkpoint_events = meta.checkpoint_events;
+    if let Some(context) = meta.authoritative_context_tokens {
+        session.context_tokens = Some(context.tokens);
+        session.context_tokens_history_len = Some(context.history_len);
+        session.context_token_identity = Some(context.identity);
+    }
+    if let Some(context) = meta.display_context_tokens {
+        session.display_context_tokens = Some(context.tokens);
+        session.display_context_token_identity = context.identity;
+    }
     session
 }
 
@@ -1567,7 +1580,9 @@ fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Se
 mod tests {
     use super::*;
     use protocol::{Content, ReasoningEffort};
-    use smelt_core::session::ContextTokenIdentity;
+    use smelt_core::session::{
+        AuthoritativeContextTokens, ContextTokenIdentity, DisplayContextTokens,
+    };
 
     fn token_identity() -> ContextTokenIdentity {
         ContextTokenIdentity {
@@ -1592,11 +1607,18 @@ mod tests {
             fast_mode: Some(true),
             cwd: Some("/tmp".into()),
             parent_id: Some("parent".into()),
-            context_tokens: Some(42),
-            context_token_identity: Some(identity),
-            display_context_token_identity: None,
+            authoritative_context_tokens: Some(AuthoritativeContextTokens {
+                tokens: 42,
+                history_len: 3,
+                identity: identity.clone(),
+            }),
+            display_context_tokens: Some(DisplayContextTokens {
+                tokens: 42,
+                identity: Some(identity),
+            }),
             history_len: Some(3),
             checkpoint: None,
+            checkpoint_events: Vec::new(),
             text_bytes: Some(128),
         }
     }
@@ -1654,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn session_from_meta_restores_display_token_identity_from_context_identity() {
+    fn session_from_meta_restores_typed_context_readings() {
         let session = session_from_meta(
             meta_with_token_identity(),
             1,
@@ -1662,6 +1684,8 @@ mod tests {
         );
 
         assert_eq!(session.id, "session-a");
+        assert_eq!(session.context_tokens, Some(42));
+        assert_eq!(session.context_tokens_history_len, Some(3));
         assert_eq!(session.display_context_tokens(), Some(42));
         assert_eq!(
             session.display_context_token_identity,
@@ -1698,6 +1722,7 @@ mod tests {
                     context_tokens: Some(777),
                     ..Default::default()
                 },
+                history_len: 12,
                 identity: identity.clone(),
             },
         );
@@ -1705,6 +1730,7 @@ mod tests {
         assert!(result.session_dirty);
         assert!(result.context_tokens_updated);
         assert_eq!(session.display_context_tokens(), Some(777));
+        assert_eq!(session.context_tokens_history_len, Some(12));
         assert_eq!(session.context_token_identity, Some(identity.clone()));
         assert_eq!(session.display_context_token_identity, Some(identity));
     }
@@ -1721,6 +1747,7 @@ mod tests {
                     context_tokens: Some(0),
                     ..Default::default()
                 },
+                history_len: 0,
                 identity,
             },
         );
@@ -1733,7 +1760,7 @@ mod tests {
     #[test]
     fn clear_context_tokens_baseline_mutation_reports_dirty_on_identity_mismatch() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.record_context_tokens(100, token_identity());
+        session.record_context_tokens(100, 0, token_identity());
         let mut new_identity = token_identity();
         new_identity.model = Some("model-b".into());
 
@@ -1864,7 +1891,7 @@ mod tests {
         session
             .history
             .push(HistoryItem::user(Content::text("prompt")));
-        session.record_context_tokens(500, identity.clone());
+        session.record_context_tokens(500, 1, identity.clone());
         session.snapshot_context_at(1);
         apply_metadata(
             &mut session,
@@ -2380,6 +2407,7 @@ mod tests {
             &mut transcript,
             TranscriptMutation::InsertCheckpointMarker {
                 block_index: 0,
+                history_index: 3,
                 block: Block::Compacted {
                     summary: "summary".into(),
                 },
@@ -2390,7 +2418,7 @@ mod tests {
         assert!(result.transcript_dirty);
         assert_eq!(
             transcript.history().block_origin_at(0),
-            Some(BlockOrigin::CheckpointMarker)
+            Some(BlockOrigin::Checkpoint { history_index: 3 })
         );
         assert_eq!(transcript.history().record_dirty_from(), Some(0));
     }

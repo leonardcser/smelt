@@ -257,7 +257,7 @@ const INSPECT_ASSETS: &[StaticAsset] = &[
 #[derive(Debug, Clone, Serialize)]
 struct SessionListItem {
     #[serde(flatten)]
-    meta: smelt_core::session::SessionMeta,
+    meta: smelt_core::session::SessionListMeta,
     project: Option<String>,
     path_group: Option<String>,
 }
