@@ -362,6 +362,62 @@ fn request_queue_bindings_steer_running_turn() {
 }
 
 #[test]
+fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.tool_started(
+        "tool-a",
+        "read_file",
+        std::collections::HashMap::from([("file_path".to_string(), serde_json::json!("a.rs"))]),
+    );
+    app.tool_started(
+        "tool-b",
+        "read_file",
+        std::collections::HashMap::from([("file_path".to_string(), serde_json::json!("b.rs"))]),
+    );
+
+    app.type_text("queued follow-up");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+
+    assert_eq!(app.queued_message_count(), 1);
+    assert!(app.render_to_frame().text().contains("queued follow-up"));
+    assert!(!app.transcript_buffer_text().contains("queued follow-up"));
+
+    let finished = || protocol::ToolOutcome {
+        content: "done".into(),
+        is_error: false,
+        metadata: None,
+    };
+    app.tool_finished("tool-a", finished(), Some(10));
+
+    assert_eq!(app.pending_tool_call_ids(), ["tool-b"]);
+    assert_eq!(app.queued_message_count(), 1);
+    assert!(app.render_to_frame().text().contains("queued follow-up"));
+    assert!(!app.transcript_buffer_text().contains("queued follow-up"));
+
+    app.tool_finished("tool-b", finished(), Some(20));
+
+    assert!(app.pending_tool_call_ids().is_empty());
+    assert_eq!(app.queued_message_count(), 1);
+    assert!(app.render_to_frame().text().contains("queued follow-up"));
+    assert!(!app.transcript_buffer_text().contains("queued follow-up"));
+
+    let transcript_blocks_before_ack = app.transcript_block_count();
+    app.feed_one(SourceEvent::engine(EngineEvent::Steered {
+        text: "queued follow-up".into(),
+        count: 1,
+    }));
+
+    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.state().prompt_text, "");
+    assert_eq!(
+        app.transcript_block_count(),
+        transcript_blocks_before_ack + 1
+    );
+    assert!(app.render_to_frame().text().contains("queued follow-up"));
+}
+
+#[test]
 fn stale_prompt_prediction_response_after_submit_is_ignored() {
     let mut app = TestApp::builder().build();
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(

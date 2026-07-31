@@ -325,6 +325,38 @@ pub(crate) struct BackgroundCtx<'a> {
     pub bg_cancel: CancellationToken,
 }
 
+enum ActiveTurnCommand {
+    Cancel,
+    HistoryAppend(protocol::HistoryAppend),
+    Injection(UiCommand),
+    ConfigUpdate(UiCommand),
+    Other(UiCommand),
+}
+
+impl ActiveTurnCommand {
+    fn classify(cmd: UiCommand) -> Self {
+        match cmd {
+            UiCommand::Cancel => Self::Cancel,
+            UiCommand::AppendHistoryItem { append } => Self::HistoryAppend(append),
+            cmd @ (UiCommand::Steer { .. } | UiCommand::Unsteer { .. }) => Self::Injection(cmd),
+            cmd @ (UiCommand::SetReasoningEffort { .. }
+            | UiCommand::SetFastMode { .. }
+            | UiCommand::SetMode { .. }
+            | UiCommand::SetTurnModel { .. }
+            | UiCommand::UpdateAgentProjectContext(_)) => Self::ConfigUpdate(cmd),
+            other => Self::Other(other),
+        }
+    }
+
+    fn into_command(self) -> UiCommand {
+        match self {
+            Self::Cancel => UiCommand::Cancel,
+            Self::HistoryAppend(append) => UiCommand::AppendHistoryItem { append },
+            Self::Injection(cmd) | Self::ConfigUpdate(cmd) | Self::Other(cmd) => cmd,
+        }
+    }
+}
+
 /// Dispatch a command that doesn't depend on turn state. Returns `None`
 /// when the command was consumed; `Some(cmd)` when the caller should
 /// handle it (turn-control, per-tool protocol, lifecycle, etc.). Today
@@ -878,24 +910,6 @@ impl<'a> Turn<'a> {
         self.mark_history_changed_from(self.public_history_len());
     }
 
-    /// True for commands that inject or remove user messages from the
-    /// current turn. These are speculative until the operation that
-    /// received them succeeds; callers decide whether to apply them.
-    fn is_turn_injection(cmd: &UiCommand) -> bool {
-        matches!(cmd, UiCommand::Steer { .. } | UiCommand::Unsteer { .. })
-    }
-
-    fn is_turn_config_update(cmd: &UiCommand) -> bool {
-        matches!(
-            cmd,
-            UiCommand::SetReasoningEffort { .. }
-                | UiCommand::SetFastMode { .. }
-                | UiCommand::SetMode { .. }
-                | UiCommand::SetTurnModel { .. }
-                | UiCommand::UpdateAgentProjectContext(_)
-        )
-    }
-
     /// Drain `deferred` back through `handle_turn_cmd`.
     fn apply_deferred_turn_cmds(&mut self, deferred: Vec<UiCommand>) {
         for cmd in deferred {
@@ -936,10 +950,11 @@ impl<'a> Turn<'a> {
                     return result;
                 }
                 Some(cmd) = self.cmd_rx.recv() => {
-                    if Self::is_turn_injection(&cmd) {
-                        deferred.push(cmd);
-                    } else {
-                        self.handle_turn_cmd(cmd);
+                    match ActiveTurnCommand::classify(cmd) {
+                        ActiveTurnCommand::Injection(cmd) => deferred.push(cmd),
+                        other => {
+                            self.handle_turn_cmd(other.into_command());
+                        }
                     }
                     if self.cancel.is_cancelled() {
                         return HostCallResult::Cancelled;
@@ -1765,9 +1780,11 @@ impl<'a> Turn<'a> {
             let mut plan = self.classify_tools(&dispatched_calls);
             let mut completed: Vec<Option<ToolResult>> =
                 (0..plan.slots.len()).map(|_| None).collect();
-            let (cancelled, deferred, mut plugin_outcomes) =
+            let (mut cancelled, mut deferred_turn_cmds, mut plugin_outcomes) =
                 self.execute_concurrent(&mut plan, &mut completed).await;
-            let seq_outcomes = self.run_sequential(&plan).await;
+            let (sequential_cancelled, seq_outcomes) =
+                self.run_sequential(&plan, &mut deferred_turn_cmds).await;
+            cancelled |= sequential_cancelled;
             plugin_outcomes.extend(seq_outcomes);
             if cancelled {
                 self.mark_unfinished_cancelled(&plan, &mut completed);
@@ -1795,8 +1812,8 @@ impl<'a> Turn<'a> {
                 invocations,
             ));
             self.emit_history_appended_from(first_index);
-            for cmd in deferred {
-                self.handle_turn_cmd(cmd);
+            if !cancelled {
+                self.apply_deferred_turn_cmds(deferred_turn_cmds);
             }
         }
     }
@@ -2084,10 +2101,6 @@ impl<'a> Turn<'a> {
                 biased;
                 _ = cancel.cancelled() => break true,
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    UiCommand::Cancel => {
-                        cancel.cancel();
-                        self.bg_cancel.cancel();
-                    }
                     UiCommand::PermissionDecision { request_id, approved, message } => {
                         if let Some(pos) = plan
                             .pending_perms
@@ -2308,14 +2321,20 @@ impl<'a> Turn<'a> {
                             });
                         }
                     }
-                    UiCommand::Steer { .. } | UiCommand::Unsteer { .. } => {
-                        speculative.push(cmd)
+                    cmd => match ActiveTurnCommand::classify(cmd) {
+                        ActiveTurnCommand::Cancel => {
+                            cancel.cancel();
+                            self.bg_cancel.cancel();
+                        }
+                        ActiveTurnCommand::Injection(cmd) => speculative.push(cmd),
+                        ActiveTurnCommand::HistoryAppend(append) => {
+                            deferred.push(UiCommand::AppendHistoryItem { append });
+                        }
+                        ActiveTurnCommand::ConfigUpdate(cmd) => deferred.push(cmd),
+                        ActiveTurnCommand::Other(other) => {
+                            let _ = dispatch_background_cmd(other, &bg_ctx);
+                        }
                     }
-                    UiCommand::AppendHistoryItem { append } => {
-                        deferred.push(UiCommand::AppendHistoryItem { append });
-                    }
-                    cmd if Self::is_turn_config_update(&cmd) => deferred.push(cmd),
-                    other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
                 },
                 Some((idx, result)) = futs.next(), if !futs.is_empty() => {
                     completed[idx] = Some(result);
@@ -2369,16 +2388,10 @@ impl<'a> Turn<'a> {
             }
         }
 
-        if !cancelled {
-            for cmd in speculative {
-                self.handle_turn_cmd(cmd);
-            }
-        }
-        for cmd in deferred {
-            self.handle_turn_cmd(cmd);
-        }
+        self.apply_deferred_turn_cmds(deferred);
 
-        (cancelled, Vec::new(), tool_results)
+        let deferred_turn_cmds = if cancelled { Vec::new() } else { speculative };
+        (cancelled, deferred_turn_cmds, tool_results)
     }
 
     /// Populate `completed[i]` with a synthetic `cancelled` outcome for any
@@ -2416,17 +2429,20 @@ impl<'a> Turn<'a> {
     async fn run_sequential(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
-    ) -> Vec<(String, ToolOutcome, Option<u64>)> {
+        deferred_turn_cmds: &mut Vec<UiCommand>,
+    ) -> (bool, Vec<(String, ToolOutcome, Option<u64>)>) {
         let mut tool_results = Vec::new();
-        let mut cancelled = false;
+        let mut cancelled = self.cancel.is_cancelled();
         for (tc, args, start) in &plan.sequential_tools {
-            let (content, is_error, metadata) = if cancelled || self.cancel.is_cancelled() {
-                cancelled = true;
+            let (content, is_error, metadata) = if cancelled {
                 ("cancelled".to_string(), true, None)
             } else {
                 let request_id = next_request_id();
                 Self::send_tool_dispatch_for_call(self.event_tx, request_id, tc, args);
-                match self.wait_for_tool_result(request_id).await {
+                match self
+                    .wait_for_tool_result(request_id, deferred_turn_cmds)
+                    .await
+                {
                     Some((c, e, m)) => (c, e, m),
                     None => {
                         cancelled = true;
@@ -2447,7 +2463,7 @@ impl<'a> Turn<'a> {
             });
             tool_results.push((tc.id.clone(), outcome, elapsed_ms));
         }
-        tool_results
+        (cancelled, tool_results)
     }
 
     /// Fold built-in (dispatched-by-slot) tool results into `(call_id,
@@ -2629,22 +2645,20 @@ impl<'a> Turn<'a> {
                 tokio::select! {
                     biased;
                     result = &mut chat_future => break result,
-                    Some(cmd) = self.cmd_rx.recv() => match cmd {
-                        UiCommand::Cancel => {
+                    Some(cmd) = self.cmd_rx.recv() => match ActiveTurnCommand::classify(cmd) {
+                        ActiveTurnCommand::Cancel => {
                             self.cancel.cancel();
                             cancel_received = true;
                             self.bg_cancel.cancel();
                         }
-                        UiCommand::AppendHistoryItem { append } => {
+                        ActiveTurnCommand::HistoryAppend(append) => {
                             deferred_appends.push(append);
                         }
-                        UiCommand::Steer { .. } | UiCommand::Unsteer { .. } => {
-                            deferred_turn_cmds.push(cmd)
+                        ActiveTurnCommand::Injection(cmd) => deferred_turn_cmds.push(cmd),
+                        ActiveTurnCommand::ConfigUpdate(cmd) => {
+                            deferred_config_updates.push(cmd);
                         }
-                        cmd if Self::is_turn_config_update(&cmd) => {
-                            deferred_config_updates.push(cmd)
-                        }
-                        other => {
+                        ActiveTurnCommand::Other(other) => {
                             let _ = dispatch_background_cmd(other, &self.bg_ctx());
                         }
                     },
@@ -2662,9 +2676,7 @@ impl<'a> Turn<'a> {
             .iter()
             .any(|c| matches!(c, UiCommand::Steer { .. }));
         if result.is_ok() {
-            for cmd in deferred_turn_cmds {
-                self.handle_turn_cmd(cmd);
-            }
+            self.apply_deferred_turn_cmds(deferred_turn_cmds);
         }
         (result.map(|r| (r, had_injected)), pt, pr)
     }
@@ -2672,6 +2684,7 @@ impl<'a> Turn<'a> {
     async fn wait_for_tool_result(
         &mut self,
         request_id: u64,
+        deferred_turn_cmds: &mut Vec<UiCommand>,
     ) -> Option<(String, bool, Option<serde_json::Value>)> {
         loop {
             match self.cmd_rx.recv().await {
@@ -2682,21 +2695,24 @@ impl<'a> Turn<'a> {
                     is_error,
                     metadata,
                 }) if id == request_id => return Some((content, is_error, metadata)),
-                Some(UiCommand::AppendHistoryItem { append }) => {
-                    self.queue_history_item(append);
-                }
-                Some(cmd) if Self::is_turn_config_update(&cmd) => {
-                    self.handle_turn_cmd(cmd);
-                }
-                Some(UiCommand::Cancel) => {
-                    self.cancel.cancel();
-                    self.bg_cancel.cancel();
-                    return None;
-                }
+                Some(cmd) => match ActiveTurnCommand::classify(cmd) {
+                    ActiveTurnCommand::Cancel => {
+                        self.cancel.cancel();
+                        self.bg_cancel.cancel();
+                        return None;
+                    }
+                    ActiveTurnCommand::HistoryAppend(append) => {
+                        self.queue_history_item(append);
+                    }
+                    ActiveTurnCommand::Injection(cmd) => deferred_turn_cmds.push(cmd),
+                    ActiveTurnCommand::ConfigUpdate(cmd) => {
+                        self.handle_turn_cmd(cmd);
+                    }
+                    ActiveTurnCommand::Other(other) => {
+                        let _ = dispatch_background_cmd(other, &self.bg_ctx());
+                    }
+                },
                 None => return None,
-                Some(other) => {
-                    let _ = dispatch_background_cmd(other, &self.bg_ctx());
-                }
             }
         }
     }
@@ -3500,7 +3516,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_config_classifier_covers_every_active_turn_update() {
+    fn active_turn_command_classifier_covers_every_route() {
         let context = || {
             Box::new(protocol::AgentProjectContext {
                 cwd: std::path::PathBuf::from("/target"),
@@ -3525,9 +3541,33 @@ mod tests {
             },
             UiCommand::UpdateAgentProjectContext(context()),
         ] {
-            assert!(Turn::is_turn_config_update(&command), "{command:?}");
+            assert!(matches!(
+                ActiveTurnCommand::classify(command),
+                ActiveTurnCommand::ConfigUpdate(_)
+            ));
         }
-        assert!(!Turn::is_turn_config_update(&UiCommand::Cancel));
+        assert!(matches!(
+            ActiveTurnCommand::classify(UiCommand::Cancel),
+            ActiveTurnCommand::Cancel
+        ));
+        assert!(matches!(
+            ActiveTurnCommand::classify(UiCommand::Unsteer { count: 1 }),
+            ActiveTurnCommand::Injection(_)
+        ));
+        assert!(matches!(
+            ActiveTurnCommand::classify(UiCommand::AppendHistoryItem {
+                append: protocol::HistoryAppend::append(HistoryItem::user(Content::text("note"))),
+            }),
+            ActiveTurnCommand::HistoryAppend(_)
+        ));
+        assert!(matches!(
+            ActiveTurnCommand::classify(UiCommand::PermissionDecision {
+                request_id: 1,
+                approved: true,
+                message: None,
+            }),
+            ActiveTurnCommand::Other(_)
+        ));
     }
 
     #[tokio::test]
@@ -3631,9 +3671,11 @@ mod tests {
             })
             .unwrap();
 
-        let result = turn.wait_for_tool_result(7).await;
+        let mut deferred_turn_cmds = Vec::new();
+        let result = turn.wait_for_tool_result(7, &mut deferred_turn_cmds).await;
 
         assert_eq!(result, Some(("cwd: /target".into(), false, None)));
+        assert!(deferred_turn_cmds.is_empty());
         assert_eq!(turn.config.cwd, std::path::PathBuf::from("/target"));
         assert_eq!(
             turn.config.instructions.as_deref(),

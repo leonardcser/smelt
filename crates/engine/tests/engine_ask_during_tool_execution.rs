@@ -7,15 +7,21 @@ use protocol::{
     RequestRuntimeConfig, StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags,
     ToolMetadata, UiCommand,
 };
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 
 const TOOL_NAME: &str = "needs_engine_ask";
 const TOOL_CALL_ID: &str = "needs_engine_ask:1";
+const PARALLEL_TOOL_A: &str = "parallel_a";
+const PARALLEL_TOOL_B: &str = "parallel_b";
+const PARALLEL_CALL_A: &str = "parallel_a:1";
+const PARALLEL_CALL_B: &str = "parallel_b:1";
 const TEST_DEADLINE: Duration = Duration::from_secs(30);
 
 fn primary_turn_sse() -> String {
@@ -27,6 +33,27 @@ fn primary_turn_sse() -> String {
         &block_start,
         r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
         r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":12}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+    sse(&events)
+}
+
+fn parallel_tools_sse() -> String {
+    let block_a = format!(
+        r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"tool_use","id":"{PARALLEL_CALL_A}","name":"{PARALLEL_TOOL_A}","input":{{}}}}}}"#
+    );
+    let block_b = format!(
+        r#"{{"type":"content_block_start","index":1,"content_block":{{"type":"tool_use","id":"{PARALLEL_CALL_B}","name":"{PARALLEL_TOOL_B}","input":{{}}}}}}"#
+    );
+    let events: Vec<&str> = vec![
+        r#"{"type":"message_start","message":{"id":"m-parallel","type":"message","role":"assistant","content":[],"model":"x","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}"#,
+        &block_a,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        &block_b,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+        r#"{"type":"content_block_stop","index":1}"#,
         r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":12}}"#,
         r#"{"type":"message_stop"}"#,
     ];
@@ -123,6 +150,48 @@ async fn run_server(
             };
             write_sse_response(&mut sock, &body).await;
         });
+    }
+}
+
+struct BlockingDispatcher {
+    releases: HashMap<String, Arc<Semaphore>>,
+}
+
+impl engine::tools::ToolDispatcher for BlockingDispatcher {
+    fn definitions(&self) -> Vec<smelt_provider::ToolDefinition> {
+        Vec::new()
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.releases.contains_key(name)
+    }
+
+    fn evaluate_tool_call(
+        &self,
+        _turn_id: u64,
+        name: &str,
+        _args: &HashMap<String, serde_json::Value>,
+        _mode: AgentMode,
+        _permission_overrides: Option<&protocol::PermissionOverrides>,
+    ) -> Option<protocol::ToolEvaluation> {
+        self.contains(name).then(|| protocol::ToolEvaluation {
+            decision: protocol::Decision::Allow,
+            metadata: ToolMetadata::default(),
+        })
+    }
+
+    fn dispatch<'a>(
+        &'a self,
+        name: &str,
+        _args: HashMap<String, serde_json::Value>,
+        _ctx: &'a engine::tools::ToolContext,
+    ) -> Option<engine::tools::ToolFuture<'a>> {
+        let release = Arc::clone(self.releases.get(name)?);
+        let name = name.to_string();
+        Some(Box::pin(async move {
+            let _permit = release.acquire().await.expect("tool release semaphore");
+            engine::tools::ToolResult::ok(format!("{name} finished"))
+        }))
     }
 }
 
@@ -327,6 +396,131 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut first).await;
+        write_sse_response(&mut first, &parallel_tools_sse()).await;
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut second).await;
+        write_sse_response(&mut second, &aux_text_sse()).await;
+    });
+
+    let release_a = Arc::new(Semaphore::new(0));
+    let release_b = Arc::new(Semaphore::new(0));
+    let dispatcher = BlockingDispatcher {
+        releases: HashMap::from([
+            (PARALLEL_TOOL_A.to_string(), Arc::clone(&release_a)),
+            (PARALLEL_TOOL_B.to_string(), Arc::clone(&release_b)),
+        ]),
+    };
+    let config = EngineConfig {
+        system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
+        ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
+    };
+    let target = ModelTarget {
+        model: "test-model".into(),
+        api_base: format!("http://{addr}"),
+        api_key: "test-key".into(),
+        provider_type: "anthropic-compatible".into(),
+        config: ModelConfig::default(),
+    };
+    let mut handle = engine::start(config, Box::new(dispatcher));
+    while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
+
+    handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
+        turn_id: 1,
+        input: protocol::StartTurnInput::user(Content::text("run both")),
+        mode: AgentMode::normal(),
+        model_target: target,
+        request_config: RequestRuntimeConfig::default(),
+        reasoning_effort: ReasoningEffort::Off,
+        fast_mode: false,
+        history: protocol::ModelHistorySource::items(Vec::new()),
+        session_id: "sess".into(),
+        session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
+        permission_overrides: None,
+        system_prompt: Some("test system".into()),
+        tools: Vec::new(),
+    })));
+
+    let expected_calls = HashSet::from([PARALLEL_CALL_A, PARALLEL_CALL_B]);
+    let mut started = HashSet::new();
+    tokio::time::timeout(TEST_DEADLINE, async {
+        while started.len() < expected_calls.len() {
+            match handle.recv().await {
+                Some(EngineEvent::ToolStarted { call_id, .. })
+                    if expected_calls.contains(call_id.as_str()) =>
+                {
+                    started.insert(call_id);
+                }
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before tools started"),
+            }
+        }
+    })
+    .await
+    .expect("parallel tools should start");
+
+    handle.send(UiCommand::Steer {
+        input: protocol::StartTurnInput::user(Content::text("queued follow-up")),
+    });
+    release_a.add_permits(1);
+    release_b.add_permits(1);
+
+    let mut lifecycle = Vec::new();
+    let mut finished = HashSet::new();
+    tokio::time::timeout(TEST_DEADLINE, async {
+        while lifecycle.len() < 3 {
+            match handle.recv().await {
+                Some(EngineEvent::ToolFinished { call_id, .. })
+                    if expected_calls.contains(call_id.as_str()) =>
+                {
+                    assert!(finished.insert(call_id), "tool finished more than once");
+                    lifecycle.push("tool_finished");
+                }
+                Some(EngineEvent::Steered { text, count }) => {
+                    assert_eq!(text, "queued follow-up");
+                    assert_eq!(count, 1);
+                    lifecycle.push("steered");
+                }
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before queued message was acknowledged"),
+            }
+        }
+    })
+    .await
+    .expect("tool completion and queued-message acknowledgement");
+
+    assert_eq!(
+        lifecycle,
+        ["tool_finished", "tool_finished", "steered"],
+        "queued input must remain queued until every parallel tool is visibly finished"
+    );
+
+    tokio::time::timeout(TEST_DEADLINE, async {
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::TurnComplete { .. }) => break,
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before turn completion"),
+            }
+        }
+    })
+    .await
+    .expect("turn should complete");
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn model_switch_during_in_flight_request_applies_at_next_request_boundary() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -428,7 +622,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request() {
+async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
@@ -489,6 +683,7 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
         }],
     })));
 
+    let mut lifecycle = Vec::new();
     loop {
         match tokio::time::timeout(TEST_DEADLINE, handle.recv())
             .await
@@ -512,6 +707,9 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
                     target: Box::new(switched_target.clone()),
                     system_prompt: "sequential switched system".into(),
                 });
+                handle.send(UiCommand::Steer {
+                    input: protocol::StartTurnInput::user(Content::text("queued during tool")),
+                });
                 handle.send(UiCommand::ToolResult {
                     request_id,
                     call_id,
@@ -519,6 +717,14 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
                     is_error: false,
                     metadata: None,
                 });
+            }
+            Some(EngineEvent::ToolFinished { call_id, .. }) if call_id == TOOL_CALL_ID => {
+                lifecycle.push("tool_finished");
+            }
+            Some(EngineEvent::Steered { text, count }) => {
+                assert_eq!(text, "queued during tool");
+                assert_eq!(count, 1);
+                lifecycle.push("steered");
             }
             Some(EngineEvent::TurnComplete { .. }) => break,
             Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
@@ -528,6 +734,11 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
     }
     server.abort();
 
+    assert_eq!(
+        lifecycle,
+        ["tool_finished", "steered"],
+        "queued input must remain queued during a sequential tool wait"
+    );
     let requests: Vec<_> = std::iter::from_fn(|| request_rx.try_recv().ok()).collect();
     let next_request = requests
         .iter()
