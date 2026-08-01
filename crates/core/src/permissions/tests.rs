@@ -2718,6 +2718,35 @@ fn dialog_combines_dir_and_pattern_when_both_are_required() {
 }
 
 #[test]
+fn dialog_combines_cd_prefixed_command_pattern_and_path_grant() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", ruleset(&[], &["*"], &[]))]);
+    let p = permissions_from_mode(mode, true, PathBuf::from("/home/user/project"));
+    let command = concat!(
+        "cd /home/user/project && ",
+        "python3 -m demo_tool --input /tmp/shared-data/sample.input --dry-run",
+    );
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    let options = p.approval_options("bash", &["python3 *".to_string()], &outcome);
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![
+            PermissionGrant::Command {
+                tool: "bash".to_string(),
+                pattern: "python3 *".to_string()
+            },
+            PermissionGrant::PathPrefix {
+                dir: canonical_abs("/tmp/shared-data")
+            }
+        ]]
+    );
+}
+
+#[test]
 fn dialog_combines_command_pattern_candidates() {
     let mut tools = HashMap::new();
     tools.insert("bash".to_string(), Decision::Allow);
@@ -4354,6 +4383,23 @@ fn approvals_is_approved_requires_all_patterns_match() {
     );
     // Only `ls` is approved; chained `rm` should fail.
     assert!(!rt.is_approved("bash", "ls && rm -rf /", None));
+}
+
+#[test]
+fn approvals_is_approved_ignores_cd_prefix_for_bash_patterns() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", vec![pat("python3 *")]);
+
+    assert!(rt.is_approved(
+        "bash",
+        "cd /home/user/project && python3 -m demo_tool --dry-run",
+        None
+    ));
+    assert!(!rt.is_approved(
+        "bash",
+        "cd /home/user/project && python3 -m demo_tool --dry-run && rm -rf /",
+        None
+    ));
 }
 
 // ── rules.rs (backfill: merge_mode / build_mode / for_mode) ─────────

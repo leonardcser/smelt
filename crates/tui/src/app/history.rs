@@ -1428,7 +1428,7 @@ impl TuiApp {
         if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
             return;
         }
-        self.reset_session_permissions();
+        self.clear_session_scoped_permissions_for_session_boundary();
         self.prompt.clear_queue();
         self.task_label = None;
         self.working.clear();
@@ -1591,7 +1591,7 @@ impl TuiApp {
         // Drop snapshots beyond the restored history length.
         let hist_len = self.conversation.session().history.len();
         self.prune_rewindable_session_state(hist_len);
-        self.reset_session_permissions();
+        self.clear_session_scoped_permissions_for_session_boundary();
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
@@ -1668,7 +1668,7 @@ impl TuiApp {
             "store-backed TUI sessions must not retain materialized history"
         );
         self.bump_epoch("session_epoch");
-        self.reset_session_permissions();
+        self.clear_session_scoped_permissions_for_session_boundary();
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
@@ -2317,7 +2317,6 @@ impl TuiApp {
         if let Some(mode) = mode_after_rewind {
             self.restore_mode_after_rewind(mode);
         }
-        self.reset_session_permissions();
         self.sync_session_snapshot();
         self.publish_history_delta("rewound");
 
@@ -2329,7 +2328,6 @@ impl TuiApp {
         self.task_label = None;
         self.working.clear();
         self.clear_transcript();
-        self.reset_session_permissions();
         self.sync_session_snapshot();
         self.publish_history_delta("rewound");
     }

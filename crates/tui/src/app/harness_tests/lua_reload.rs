@@ -1005,6 +1005,30 @@ fn relative_lua_session_path_grant_uses_runtime_cwd() {
 }
 
 #[test]
+fn lua_session_path_grant_survives_rewind_to_start() {
+    let trusted_dir = tempfile::TempDir::new().expect("create trusted directory");
+    let trusted =
+        std::fs::canonicalize(trusted_dir.path()).expect("canonicalize trusted directory");
+    let mut app = TestApp::builder().build();
+
+    app.start_submitted_turn("read generated artifacts");
+    app.grant_session_path(
+        None,
+        "read_file".into(),
+        smelt_core::permissions::PathAccess::Read,
+        trusted.clone(),
+    );
+    app.cancel();
+    app.rewind_to_start();
+
+    assert!(app.session_path_grants().iter().any(|grant| {
+        grant.tool == "read_file"
+            && grant.access == smelt_core::permissions::PathAccess::Read
+            && grant.dir == trusted
+    }));
+}
+
+#[test]
 fn setting_write_reads_desired_value_while_preserving_startup_precedence() {
     let mut app = TestApp::builder().build();
     app.set_startup_setting_override_for_harness(

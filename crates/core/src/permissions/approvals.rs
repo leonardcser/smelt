@@ -1,6 +1,5 @@
 //! Session- and workspace-scoped runtime auto-approvals, augmenting static config rules.
 
-use crate::permissions::bash::split_shell_commands;
 use crate::permissions::rules::{check_ruleset, matches_rule, RuleSet};
 use crate::permissions::{
     workspace, PathAccess, PermissionGrant, PermissionRequirement, Permissions,
@@ -204,23 +203,13 @@ impl RuntimeApprovals {
             return true;
         }
 
-        let subcmds = split_shell_commands(desc);
-        if subcmds.is_empty() {
-            return false;
-        }
-
         let all_pats: Vec<&glob::Pattern> = session
             .into_iter()
             .chain(workspace)
             .flat_map(|approval| &approval.patterns)
             .collect();
 
-        subcmds.iter().all(|sc| {
-            all_pats.iter().any(|p| matches_rule(p, sc))
-                // Also check config allow patterns (e.g. bash's default_allow list).
-                || config_subpatterns
-                    .is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
-        })
+        super::command_patterns_satisfy(tool_name, &all_pats, desc, config_subpatterns)
     }
 
     /// Full auto-approval check. Outside the workspace, directory approvals must also match.

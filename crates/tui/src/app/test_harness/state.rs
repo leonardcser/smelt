@@ -363,6 +363,52 @@ impl TestApp {
         true
     }
 
+    pub(crate) fn resolve_first_session_grant_where(
+        &mut self,
+        matches_grants: impl Fn(&[smelt_core::permissions::PermissionGrant]) -> bool,
+    ) -> bool {
+        let Some(handle_id) = self.first_pending_confirm() else {
+            return false;
+        };
+        let Some(req) = self
+            .app
+            .core
+            .confirms
+            .get(handle_id)
+            .map(|entry| entry.req.clone())
+        else {
+            return false;
+        };
+        let Some(option) = req
+            .grant_options
+            .iter()
+            .find(|option| {
+                option.scope == smelt_core::ApprovalScope::Session && matches_grants(&option.grants)
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(entry) = self.app.core.confirms.take(handle_id) else {
+            return false;
+        };
+        let req = entry.req;
+        let cancel = self.app.resolve_confirm(
+            (
+                smelt_core::transcript_model::ConfirmChoice::Grant(option),
+                None,
+            ),
+            req.invocation_id,
+            req.request_id,
+            &req.tool_name,
+        );
+        if cancel {
+            self.app.discard_turn(crate::app::TurnEnd::Complete);
+        }
+        self.drain_cmd();
+        true
+    }
+
     /// Smallest pending `smelt.engine.ask` callback id, if any.
     /// Stories that drive `/btw` or other ask flows use this to
     /// pair their synthesised `EngineAskResponse` to the right id.

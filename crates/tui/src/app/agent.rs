@@ -1497,7 +1497,7 @@ impl TuiApp {
         self.reconcile_permissions();
     }
 
-    pub(crate) fn reset_session_permissions(&mut self) {
+    pub(crate) fn clear_session_scoped_permissions_for_session_boundary(&mut self) {
         self.core
             .permissions
             .approvals()

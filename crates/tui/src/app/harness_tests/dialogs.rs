@@ -820,6 +820,30 @@ fn actions_permission_decisions(actions: &[Action]) -> Vec<(u64, bool)> {
         .collect()
 }
 
+fn bash_permission_args(command: &str) -> std::collections::HashMap<String, serde_json::Value> {
+    std::collections::HashMap::from([("command".into(), serde_json::json!(command))])
+}
+
+fn request_bash_permission(
+    app: &mut TestApp,
+    request_id: u64,
+    command: &str,
+    approval_patterns: Vec<&str>,
+) {
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(request_id),
+            request_id,
+            call_id: format!("call-{request_id}"),
+            tool_name: "bash".into(),
+            args: bash_permission_args(command),
+            approval_patterns: approval_patterns.into_iter().map(str::to_string).collect(),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain(command.to_string()),
+        },
+    ));
+}
+
 #[test]
 fn request_permission_auto_allows_when_applied_turn_mode_allows() {
     let mut app = TestApp::builder().build();
@@ -913,6 +937,116 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
     );
     assert_eq!(app.transcript_block_count(), 0);
     app.assert_invariants();
+}
+
+#[test]
+fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() {
+    let outside = tempfile::TempDir::new().expect("create outside-workspace directory");
+    let outside_dir = outside.path().join("shared-data");
+    std::fs::create_dir_all(&outside_dir).expect("create outside data directory");
+    let outside_dir = std::fs::canonicalize(outside_dir).expect("canonicalize outside dir");
+    let outside_file = outside_dir.join("sample.input");
+    std::fs::write(&outside_file, "fixture\n").expect("write outside-workspace file");
+
+    let mut app = TestApp::builder().build();
+    let approval_pattern = "python3 *";
+    let command = format!(
+        "cd {} && python3 -m demo_tool --input {} --dry-run",
+        app.cwd_str(),
+        outside_file.display()
+    );
+    app.restrict_permissions_to_cwd();
+    app.start_submitted_turn("process outside data");
+    let block_idx = app
+        .app
+        .last_user_block_index()
+        .expect("submitted user block");
+
+    request_bash_permission(&mut app, 21, &command, vec![approval_pattern]);
+    assert_eq!(app.pending_confirm_count(), 1);
+    let before = app.actions().len();
+    assert!(
+        app.resolve_first_session_grant_where(|grants| {
+            let has_command_grant = grants.iter().any(|grant| {
+                matches!(
+                    grant,
+                    smelt_core::permissions::PermissionGrant::Command { tool, pattern }
+                        if tool == "bash" && pattern == approval_pattern
+                )
+            });
+            let has_path_grant = grants.iter().any(|grant| {
+                matches!(
+                    grant,
+                    smelt_core::permissions::PermissionGrant::PathPrefix { dir }
+                        if dir == &outside_dir
+                )
+            });
+            has_command_grant && has_path_grant
+        }),
+        "matching session command and path grant option"
+    );
+    assert_eq!(
+        actions_permission_decisions(app.actions_since(before)),
+        vec![(21, true)]
+    );
+
+    app.cancel();
+    app.rewind_to_block(Some(block_idx), false);
+
+    let before = app.actions().len();
+    app.start_submitted_turn("process outside data");
+    request_bash_permission(&mut app, 22, &command, vec![approval_pattern]);
+
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert_eq!(
+        actions_permission_decisions(app.actions_since(before)),
+        vec![(22, true)]
+    );
+}
+
+#[test]
+fn command_session_grant_survives_cancel_and_rewind() {
+    let approval_pattern = "python3 *";
+    let mut app = TestApp::builder().build();
+    let command = format!("cd {} && python3 --version", app.cwd_str());
+    app.start_submitted_turn("check python");
+    let block_idx = app
+        .app
+        .last_user_block_index()
+        .expect("submitted user block");
+
+    request_bash_permission(&mut app, 31, &command, vec![approval_pattern]);
+    assert_eq!(app.pending_confirm_count(), 1);
+    let before = app.actions().len();
+    assert!(
+        app.resolve_first_session_grant_where(|grants| {
+            grants.iter().any(|grant| {
+                matches!(
+                    grant,
+                    smelt_core::permissions::PermissionGrant::Command { tool, pattern }
+                        if tool == "bash" && pattern == approval_pattern
+                )
+            })
+        }),
+        "matching session command grant option"
+    );
+    assert_eq!(
+        actions_permission_decisions(app.actions_since(before)),
+        vec![(31, true)]
+    );
+
+    app.cancel();
+    app.rewind_to_block(Some(block_idx), false);
+
+    let before = app.actions().len();
+    app.start_submitted_turn("check python");
+    request_bash_permission(&mut app, 32, &command, vec![approval_pattern]);
+
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert_eq!(
+        actions_permission_decisions(app.actions_since(before)),
+        vec![(32, true)]
+    );
 }
 
 #[test]

@@ -230,8 +230,13 @@ impl PermissionGrant {
                 PermissionRequirement::Command { tool, command }
                 | PermissionRequirement::OpaqueCommand { tool, command, .. },
             ) => {
-                grant_tool == tool
-                    && glob::Pattern::new(pattern).is_ok_and(|p| rules::matches_rule(&p, command))
+                if grant_tool != tool {
+                    return false;
+                }
+                let Ok(pattern) = glob::Pattern::new(pattern) else {
+                    return false;
+                };
+                command_patterns_satisfy(tool, &[&pattern], command, None)
             }
             (
                 PermissionGrant::PathPrefix { dir },
@@ -1170,6 +1175,49 @@ fn grants_satisfy_requirements(
     requirements
         .iter()
         .all(|requirement| grants.iter().any(|grant| grant.satisfies(requirement)))
+}
+
+pub(super) fn command_patterns_satisfy(
+    tool_name: &str,
+    patterns: &[&glob::Pattern],
+    command: &str,
+    config_subpatterns: Option<&RuleSet>,
+) -> bool {
+    if patterns.is_empty() && config_subpatterns.is_none() {
+        return false;
+    }
+
+    if tool_name != "bash" {
+        return command_text_satisfied(command, patterns, config_subpatterns);
+    }
+
+    let subcommands = split_shell_commands(command);
+    if subcommands.is_empty() {
+        return false;
+    }
+
+    let mut checked_command = false;
+    for subcommand in subcommands {
+        if is_cd_command(&subcommand) {
+            continue;
+        }
+        checked_command = true;
+        if !command_text_satisfied(&subcommand, patterns, config_subpatterns) {
+            return false;
+        }
+    }
+    checked_command
+}
+
+fn command_text_satisfied(
+    command: &str,
+    patterns: &[&glob::Pattern],
+    config_subpatterns: Option<&RuleSet>,
+) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| rules::matches_rule(pattern, command))
+        || config_subpatterns.is_some_and(|rules| check_ruleset(rules, command) == Decision::Allow)
 }
 
 fn grant_equivalent(a: &PermissionGrant, b: &PermissionGrant) -> bool {
