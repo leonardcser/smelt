@@ -63,6 +63,8 @@ pub fn run(args: Vec<String>) {
     let mut hot_path_fixture: Option<String> = None;
     let mut hot_path_heterogeneous = false;
     let mut save_request_only = false;
+    let mut tall_write_only = false;
+    let mut tall_write_lines: Option<String> = None;
     let mut no_warmup = false;
 
     let mut iter = args.into_iter();
@@ -118,6 +120,10 @@ pub fn run(args: Vec<String>) {
                 active_memory = true;
                 active_memory_bytes =
                     Some(take_positive_usize_arg(&mut iter, "--active-memory-bytes"));
+            }
+            "--tall-write-only" => tall_write_only = true,
+            "--tall-write-lines" => {
+                tall_write_lines = Some(take_positive_usize_arg(&mut iter, "--tall-write-lines"));
             }
             "--scale-500mb" => {
                 resumed_wheel = true;
@@ -181,6 +187,9 @@ pub fn run(args: Vec<String>) {
     if no_warmup {
         env.push(("SMELT_TRANSCRIPT_BENCH_NO_WARMUP", "1".to_string()));
     }
+    if let Some(lines) = tall_write_lines {
+        env.push(("SMELT_TRANSCRIPT_TALL_WRITE_LINES", lines));
+    }
     if hot_path {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH", "1".to_string()));
     }
@@ -209,6 +218,8 @@ pub fn run(args: Vec<String>) {
         "bench-transcript-layout",
         if save_request_only {
             "transcript_layout_hot_path_benchmark_suite"
+        } else if tall_write_only {
+            "transcript_layout_tall_write_file_benchmark_suite"
         } else {
             "transcript_layout_"
         },
@@ -274,13 +285,15 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
     eprintln!();
     eprintln!("workloads: mixed_10mib, mixed_50mib, markdown_4mib, tool_output_4mib, tiny_blocks_1mib, huge_blocks_4mib");
     eprintln!("--skip-nav omits the app-level navigation/search suite for projection-only runs.");
+    eprintln!("--tall-write-only runs only the expanded write_file interaction benchmark.");
+    eprintln!("--tall-write-lines N sets generated source lines; default is 20000.");
     eprintln!("--search enables the large app-level transcript search benchmark.");
     eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
     eprintln!("--resume runs the true session resume benchmark after layout/search.");

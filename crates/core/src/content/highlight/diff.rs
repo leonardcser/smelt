@@ -4,8 +4,12 @@
 
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use syntect::easy::HighlightLines;
+use syntect::highlighting::HighlightState;
+use syntect::parsing::ParseState;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::content::builder::{display_width, LineBuilder};
@@ -37,11 +41,70 @@ struct DiffViewData {
     is_full_file: bool,
 }
 
+const SYNTAX_CHECKPOINT_INTERVAL: usize = 128;
+const MAX_SYNTAX_CHECKPOINTS: usize = u16::MAX as usize / SYNTAX_CHECKPOINT_INTERVAL + 2;
+const MAX_ROW_LAYOUTS: usize = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffIr {
     pub(crate) max_display_lineno: usize,
     pub(crate) syntax_ext: String,
     pub(crate) lines: Vec<DiffLine>,
+    #[serde(skip)]
+    render_cache: Arc<Mutex<DiffRenderCache>>,
+}
+
+#[derive(Debug, Default)]
+struct DiffRenderCache {
+    row_layouts: VecDeque<Arc<DiffRowLayout>>,
+    syntax: Option<DiffSyntaxCache>,
+}
+
+#[derive(Debug)]
+struct DiffRowLayout {
+    max_content: usize,
+    line_starts: Vec<usize>,
+    total_rows: u16,
+}
+
+impl DiffRowLayout {
+    fn line_index_for_row(&self, row: u16) -> Option<usize> {
+        if row >= self.total_rows {
+            return None;
+        }
+        Some(
+            self.line_starts
+                .partition_point(|start| *start <= usize::from(row))
+                .saturating_sub(1),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct DiffSyntaxCache {
+    theme_id: usize,
+    checkpoints: Vec<SyntaxCheckpoint>,
+}
+
+#[derive(Clone, Debug)]
+struct SyntaxCheckpoint {
+    line_index: usize,
+    highlight_state: HighlightState,
+    parse_state: ParseState,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PREFIX_SYNTAX_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn diff_ir(max_display_lineno: usize, syntax_ext: String, lines: Vec<DiffLine>) -> DiffIr {
+    DiffIr {
+        max_display_lineno,
+        syntax_ext,
+        lines,
+        render_cache: Arc::default(),
+    }
 }
 
 /// UTF-8 byte range into a rendered diff line. Diff lines expand tabs before
@@ -147,11 +210,7 @@ pub fn build_file_view_ir(content: &str, ext: Option<&str>) -> DiffIr {
         .map(|(i, line)| context_line(i + 1, line.to_string()))
         .collect();
     let max_display_lineno = lines.len().max(1);
-    DiffIr {
-        max_display_lineno,
-        syntax_ext,
-        lines,
-    }
+    diff_ir(max_display_lineno, syntax_ext, lines)
 }
 
 pub fn build_diff_ir_ext(
@@ -320,11 +379,7 @@ fn build_diff_ir_ext_inner(
 
     annotate_inline_highlights(&mut lines);
 
-    DiffIr {
-        max_display_lineno: dv.max_display_lineno,
-        syntax_ext,
-        lines,
-    }
+    diff_ir(dv.max_display_lineno, syntax_ext, lines)
 }
 
 #[cfg(test)]
@@ -721,6 +776,171 @@ impl DiffPalette {
     }
 }
 
+fn render_cache(cache: &DiffIr) -> std::sync::MutexGuard<'_, DiffRenderCache> {
+    cache
+        .render_cache
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn diff_row_layout(cache: &DiffIr, max_content: usize) -> Arc<DiffRowLayout> {
+    if let Some(layout) = render_cache(cache)
+        .row_layouts
+        .iter()
+        .find(|layout| layout.max_content == max_content)
+        .cloned()
+    {
+        return layout;
+    }
+
+    let mut line_starts = Vec::with_capacity(cache.lines.len());
+    let mut total_rows = 0usize;
+    for line in &cache.lines {
+        line_starts.push(total_rows);
+        total_rows = total_rows.saturating_add(match line {
+            DiffLine::Context { text, .. }
+            | DiffLine::Delete { text, .. }
+            | DiffLine::Insert { text, .. } => diff_line_rows(&diff_line_layout(text), max_content),
+            DiffLine::Ellipsis => 1,
+        });
+    }
+    let layout = Arc::new(DiffRowLayout {
+        max_content,
+        line_starts,
+        total_rows: total_rows.min(u16::MAX as usize) as u16,
+    });
+    let mut render_cache = render_cache(cache);
+    if let Some(existing) = render_cache
+        .row_layouts
+        .iter()
+        .find(|candidate| candidate.max_content == max_content)
+        .cloned()
+    {
+        return existing;
+    }
+    render_cache.row_layouts.push_back(layout.clone());
+    while render_cache.row_layouts.len() > MAX_ROW_LAYOUTS {
+        render_cache.row_layouts.pop_front();
+    }
+    layout
+}
+
+fn cache_syntax_checkpoint(
+    cache: &DiffIr,
+    theme_id: usize,
+    line_index: usize,
+    highlighter: HighlightLines<'static>,
+    theme: &'static syntect::highlighting::Theme,
+) -> HighlightLines<'static> {
+    let (highlight_state, parse_state) = highlighter.state();
+    if line_index <= u16::MAX as usize {
+        let mut render_cache = render_cache(cache);
+        if let Some(syntax_cache) = render_cache
+            .syntax
+            .as_mut()
+            .filter(|syntax_cache| syntax_cache.theme_id == theme_id)
+        {
+            match syntax_cache
+                .checkpoints
+                .binary_search_by_key(&line_index, |checkpoint| checkpoint.line_index)
+            {
+                Ok(_) => {}
+                Err(index) if syntax_cache.checkpoints.len() < MAX_SYNTAX_CHECKPOINTS => {
+                    syntax_cache.checkpoints.insert(
+                        index,
+                        SyntaxCheckpoint {
+                            line_index,
+                            highlight_state: highlight_state.clone(),
+                            parse_state: parse_state.clone(),
+                        },
+                    );
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    HighlightLines::from_state(theme, highlight_state, parse_state)
+}
+
+fn advance_syntax_line(highlighter: &mut HighlightLines<'static>, line: &str) {
+    let mut line_with_nl = String::with_capacity(line.len() + 1);
+    line_with_nl.push_str(line);
+    line_with_nl.push('\n');
+    let _ = highlighter.highlight_line(&line_with_nl, &SYNTAX_SET);
+}
+
+fn highlighter_at_line(
+    cache: &DiffIr,
+    line_index: usize,
+    syntax: &'static syntect::parsing::SyntaxReference,
+    theme: &'static syntect::highlighting::Theme,
+) -> HighlightLines<'static> {
+    let theme_id = std::ptr::from_ref(theme) as usize;
+    let checkpoint = {
+        let mut render_cache = render_cache(cache);
+        let reset = render_cache
+            .syntax
+            .as_ref()
+            .is_none_or(|syntax_cache| syntax_cache.theme_id != theme_id);
+        if reset {
+            let initial = HighlightLines::new(syntax, theme);
+            let (highlight_state, parse_state) = initial.state();
+            render_cache.syntax = Some(DiffSyntaxCache {
+                theme_id,
+                checkpoints: vec![SyntaxCheckpoint {
+                    line_index: 0,
+                    highlight_state,
+                    parse_state,
+                }],
+            });
+        }
+        render_cache
+            .syntax
+            .as_ref()
+            .and_then(|syntax_cache| {
+                syntax_cache
+                    .checkpoints
+                    .iter()
+                    .rev()
+                    .find(|checkpoint| checkpoint.line_index <= line_index)
+            })
+            .cloned()
+            .expect("syntax cache always contains the initial checkpoint")
+    };
+
+    let mut highlighter =
+        HighlightLines::from_state(theme, checkpoint.highlight_state, checkpoint.parse_state);
+    let mut prefix_syntax_lines = 0usize;
+    for index in checkpoint.line_index..line_index {
+        if index > checkpoint.line_index && index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
+            highlighter = cache_syntax_checkpoint(cache, theme_id, index, highlighter, theme);
+        }
+        match &cache.lines[index] {
+            DiffLine::Context { text, .. }
+            | DiffLine::Delete { text, .. }
+            | DiffLine::Insert { text, .. } => {
+                advance_syntax_line(&mut highlighter, text);
+                prefix_syntax_lines = prefix_syntax_lines.saturating_add(1);
+            }
+            DiffLine::Ellipsis => {
+                highlighter = HighlightLines::new(syntax, theme);
+            }
+        }
+    }
+    if line_index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
+        highlighter = cache_syntax_checkpoint(cache, theme_id, line_index, highlighter, theme);
+    }
+    smelt_perf::perf::record_value(
+        "render:inline_diff_cached:prefix_syntax_lines",
+        prefix_syntax_lines as u64,
+    );
+    #[cfg(test)]
+    PREFIX_SYNTAX_LINES.with(|count| {
+        count.set(count.get().saturating_add(prefix_syntax_lines));
+    });
+    highlighter
+}
+
 pub fn measure_diff_ir(cache: &DiffIr, width: u16, gutter: GutterStyle, indent_cells: u16) -> u16 {
     let lineno_digits = format!("{}", cache.max_display_lineno).len();
     let prefix_cells = match gutter {
@@ -738,17 +958,7 @@ pub fn measure_diff_ir(cache: &DiffIr, width: u16, gutter: GutterStyle, indent_c
         .saturating_sub(indent_cells as usize + prefix_cells + sign_prefix)
         .max(1);
 
-    cache
-        .lines
-        .iter()
-        .map(|line| match line {
-            DiffLine::Context { text, .. }
-            | DiffLine::Delete { text, .. }
-            | DiffLine::Insert { text, .. } => diff_line_rows(&diff_line_layout(text), max_content),
-            DiffLine::Ellipsis => 1,
-        })
-        .sum::<usize>()
-        .min(u16::MAX as usize) as u16
+    diff_row_layout(cache, max_content).total_rows
 }
 
 pub fn print_diff_ir(
@@ -816,13 +1026,23 @@ pub fn print_diff_ir_with_width(
         .find_syntax_by_extension(&cache.syntax_ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let syntax_theme = syntax_theme();
-    let mut h = HighlightLines::new(syntax, syntax_theme);
+    let row_layout = diff_row_layout(cache, max_content);
+    let Some(first_line_index) = row_layout.line_index_for_row(skip) else {
+        smelt_perf::perf::record_value("render:inline_diff_cached:source_lines", 0);
+        return 0;
+    };
+    let mut h = highlighter_at_line(cache, first_line_index, syntax, syntax_theme);
+    let theme_id = std::ptr::from_ref(syntax_theme) as usize;
 
-    let mut seen_rows = 0u16;
+    let mut seen_rows = row_layout.line_starts[first_line_index] as u16;
     let mut emitted = 0u16;
-    'lines: for line in &cache.lines {
+    let mut source_lines = 0u64;
+    'lines: for (line_index, line) in cache.lines.iter().enumerate().skip(first_line_index) {
         if emitted >= emit_limit {
             break;
+        }
+        if line_index > first_line_index && line_index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
+            h = cache_syntax_checkpoint(cache, theme_id, line_index, h, syntax_theme);
         }
         match line {
             DiffLine::Ellipsis => {
@@ -888,6 +1108,7 @@ pub fn print_diff_ir_with_width(
                     ),
                     DiffLine::Ellipsis => unreachable!(),
                 };
+                source_lines = source_lines.saturating_add(1);
                 let visual_rows = split_syntax_spans_into_rows_with_highlights(
                     &mut h,
                     text,
@@ -945,6 +1166,7 @@ pub fn print_diff_ir_with_width(
             }
         }
     }
+    smelt_perf::perf::record_value("render:inline_diff_cached:source_lines", source_lines);
     emitted
 }
 
@@ -1824,22 +2046,33 @@ mod tests {
     }
 
     #[test]
-    fn diff_ir_round_trips_through_json() {
+    fn diff_ir_round_trips_through_json_without_runtime_caches() {
         let cache = build_file_view_ir("alpha\nbeta\n", Some("txt"));
+        assert_eq!(measure_diff_ir(&cache, 80, GutterStyle::None, 0), 2);
+        render_test(80, |out| {
+            print_diff_ir(out, &cache, GutterStyle::None, 0, 0, 1);
+        });
+        {
+            let runtime = render_cache(&cache);
+            assert!(!runtime.row_layouts.is_empty());
+            assert!(runtime.syntax.is_some());
+        }
+
         let encoded = serde_json::to_string(&cache).unwrap();
         let decoded: DiffIr = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.syntax_ext, "txt");
         assert_eq!(count_lines(&decoded), (2, 0, 0, 0));
+        {
+            let runtime = render_cache(&decoded);
+            assert!(runtime.row_layouts.is_empty());
+            assert!(runtime.syntax.is_none());
+        }
         assert_eq!(measure_diff_ir(&decoded, 80, GutterStyle::None, 0), 2);
     }
 
     #[test]
     fn print_diff_ir_zero_max_rows_emits_no_limit() {
-        let cache = DiffIr {
-            max_display_lineno: 1,
-            syntax_ext: "txt".to_string(),
-            lines: vec![context_line(1, "x".to_string())],
-        };
+        let cache = diff_ir(1, "txt".to_string(), vec![context_line(1, "x".to_string())]);
         let block = render_test(80, |out| {
             let emitted = print_diff_ir(out, &cache, GutterStyle::Stamped, 0, 0, 0);
             // 0 means "no limit" - should emit the single line.
@@ -1850,13 +2083,13 @@ mod tests {
 
     #[test]
     fn print_diff_ir_respects_max_rows() {
-        let cache = DiffIr {
-            max_display_lineno: 3,
-            syntax_ext: "txt".to_string(),
-            lines: (1..=3)
+        let cache = diff_ir(
+            3,
+            "txt".to_string(),
+            (1..=3)
                 .map(|i| context_line(i, format!("line{i}")))
                 .collect(),
-        };
+        );
         render_test(80, |out| {
             let emitted = print_diff_ir(out, &cache, GutterStyle::Stamped, 0, 0, 2);
             assert_eq!(emitted, 2);
@@ -1865,13 +2098,13 @@ mod tests {
 
     #[test]
     fn print_diff_ir_skips_leading_rows() {
-        let cache = DiffIr {
-            max_display_lineno: 3,
-            syntax_ext: "txt".to_string(),
-            lines: (1..=3)
+        let cache = diff_ir(
+            3,
+            "txt".to_string(),
+            (1..=3)
                 .map(|i| context_line(i, format!("line{i}")))
                 .collect(),
-        };
+        );
         let block = render_test(80, |out| {
             let emitted = print_diff_ir(out, &cache, GutterStyle::Stamped, 0, 2, 0);
             assert_eq!(emitted, 1);
@@ -1889,11 +2122,11 @@ mod tests {
 
     #[test]
     fn print_diff_ir_skips_visual_rows_inside_wrapped_line() {
-        let cache = DiffIr {
-            max_display_lineno: 1,
-            syntax_ext: "txt".to_string(),
-            lines: vec![context_line(1, "abcdefghij".to_string())],
-        };
+        let cache = diff_ir(
+            1,
+            "txt".to_string(),
+            vec![context_line(1, "abcdefghij".to_string())],
+        );
         let block = render_test(6, |out| {
             let emitted = print_diff_ir(out, &cache, GutterStyle::None, 0, 1, 1);
             assert_eq!(emitted, 1);
@@ -1909,17 +2142,125 @@ mod tests {
     }
 
     #[test]
+    fn deep_diff_ranges_reuse_bounded_syntax_checkpoints() {
+        let content = (0..5_000)
+            .map(|i| format!("let value_{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cache = build_file_view_ir(&content, Some("rs"));
+
+        render_test(80, |out| {
+            assert_eq!(
+                print_diff_ir(out, &cache, GutterStyle::None, 0, 4_000, 20),
+                20
+            );
+        });
+        PREFIX_SYNTAX_LINES.with(|count| count.set(0));
+        render_test(80, |out| {
+            assert_eq!(
+                print_diff_ir(out, &cache, GutterStyle::None, 0, 4_010, 20),
+                20
+            );
+        });
+
+        let scanned = PREFIX_SYNTAX_LINES.with(std::cell::Cell::get);
+        assert!(
+            scanned < SYNTAX_CHECKPOINT_INTERVAL,
+            "deep range replayed {scanned} prefix lines"
+        );
+        let runtime = render_cache(&cache);
+        let checkpoints = runtime
+            .syntax
+            .as_ref()
+            .expect("deep render syntax cache")
+            .checkpoints
+            .len();
+        assert!(checkpoints > 1);
+        assert!(checkpoints <= MAX_SYNTAX_CHECKPOINTS);
+    }
+
+    #[test]
+    fn deep_diff_range_matches_full_render_with_multiline_syntax_and_wrapping() {
+        let mut lines = Vec::new();
+        for i in 0..240 {
+            let line = match i {
+                10 => "/* begin multiline comment".to_string(),
+                210 => "end multiline comment */".to_string(),
+                145 => {
+                    "comment unicode é😀 and a wrapped tail abcdefghijklmnopqrstuvwxyz".to_string()
+                }
+                _ => format!("comment row {i:03} abcdefghijklmnopqrstuvwxyz"),
+            };
+            lines.push(line);
+        }
+        let content = lines.join("\n");
+        let full_cache = build_file_view_ir(&content, Some("rs"));
+        let range_cache = build_file_view_ir(&content, Some("rs"));
+        let skip = 170;
+        let count = 18;
+        let full = render_test(32, |out| {
+            print_diff_ir(out, &full_cache, GutterStyle::None, 0, 0, 0);
+        });
+        let range = render_test(32, |out| {
+            assert_eq!(
+                print_diff_ir(out, &range_cache, GutterStyle::None, 0, skip, count),
+                count
+            );
+        });
+        let signature = |line: &crate::content::builder::test_util::TestLine| {
+            (
+                line.text.clone(),
+                line.spans
+                    .iter()
+                    .map(|span| format!("{}|{:?}|{:?}", span.text, span.style, span.meta))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let expected = full
+            .lines
+            .iter()
+            .skip(usize::from(skip))
+            .take(usize::from(count))
+            .map(signature)
+            .collect::<Vec<_>>();
+        let actual = range.lines.iter().map(signature).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn diff_row_layout_cache_is_width_specific_and_bounded() {
+        let cache = build_file_view_ir(
+            "alpha abcdefghijklmnopqrstuvwxyz\nbeta abcdefghijklmnopqrstuvwxyz",
+            Some("txt"),
+        );
+        let shared = cache.clone();
+        let narrow = measure_diff_ir(&cache, 12, GutterStyle::None, 0);
+        let wide = measure_diff_ir(&cache, 80, GutterStyle::None, 0);
+        assert!(narrow > wide);
+        assert_eq!(wide, 2);
+        assert_eq!(measure_diff_ir(&shared, 12, GutterStyle::None, 0), narrow);
+        let _ = measure_diff_ir(&cache, 24, GutterStyle::None, 0);
+
+        let runtime = render_cache(&shared);
+        assert_eq!(runtime.row_layouts.len(), MAX_ROW_LAYOUTS);
+        assert!(runtime
+            .row_layouts
+            .iter()
+            .all(|layout| !layout.line_starts.is_empty()));
+    }
+
+    #[test]
     fn print_diff_ir_renders_delete_insert_and_ellipsis_markers() {
-        let cache = DiffIr {
-            max_display_lineno: 10,
-            syntax_ext: "txt".to_string(),
-            lines: vec![
+        let cache = diff_ir(
+            10,
+            "txt".to_string(),
+            vec![
                 context_line(1, "ctx".to_string()),
                 DiffLine::Ellipsis,
                 delete_line(5, "old".to_string()),
                 insert_line(5, "new".to_string()),
             ],
-        };
+        );
         let block = render_test(80, |out| {
             print_diff_ir(out, &cache, GutterStyle::InlineLineNumbers, 0, 0, 0);
         });

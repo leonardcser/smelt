@@ -14,7 +14,11 @@ release mode and prints:
 - structural counters for layout compilation, exact height measurement, and
   visible materialization;
 - app-level navigation/search timings for `/`, Ctrl-D, Ctrl-U, `gg`, and `G`
-  over a warmed transcript unless `--skip-nav` is passed.
+  over a warmed transcript unless `--skip-nav` is passed;
+- real mouse-click and Lua callback timings for the previous-user and bottom
+  scroll pills;
+- collapsed, expansion, and top/middle/deep wheel-scroll timings for a real
+  expanded `write_file` source view.
 
 Useful variants:
 
@@ -27,6 +31,10 @@ cargo xtask bench-transcript-layout --runs 1 --workloads mixed_50mib --skip-nav
 
 # Run a comma-separated subset.
 cargo xtask bench-transcript-layout --runs 5 --workloads markdown_4mib,tool_output_4mib
+
+# Run only the tall expanded write_file interaction with 20,000 source lines.
+cargo xtask bench-transcript-layout --runs 5 --tall-write-only \
+  --tall-write-lines 20000
 
 # Debug/test profile for instrumentation work; do not use for timing baselines.
 cargo xtask bench-transcript-layout --debug --runs 1 --workloads mixed_10mib
@@ -57,6 +65,7 @@ and reports:
 - 20 Ctrl-U half-page moves plus redraws;
 - `gg` plus redraw;
 - `G` plus redraw;
+- real previous-user and bottom scroll-pill mouse clicks plus redraw;
 - sparse/resumed 80-key burst scroll timings without scroll trace enabled,
   reported with the `prod_burst_*` prefix;
 - sparse/resumed 80-key burst scroll timings with scroll trace enabled, reported
@@ -74,6 +83,71 @@ Use release numbers for decisions. Use the counters to identify algorithmic
 changes: scroll/visible/full-cache paths should not compile layouts or remeasure
 exact block heights, while no-cache cold projection should compile and measure
 every block.
+
+## Scroll pills and tall expanded `write_file`
+
+The navigation fixture contains 4,000 user/assistant turns plus a tall final
+response, producing 28,117 rendered rows. The pill samples locate the named
+`smelt.scroll_pills.top.win` and `smelt.scroll_pills.bottom.win` overlays, send
+real left-button down/up events at their rendered rectangles, run the Lua press
+callbacks, and redraw. This covers the same event path as an interactive click,
+not a direct call to transcript internals.
+
+Five uncontended release samples produced:
+
+| Interaction | Mean | Stddev | p50 | p95 | p99 | Maximum |
+|---|---:|---:|---:|---:|---:|---:|
+| Previous-user pill | 0.549 ms | 0.005 ms | 0.552 ms | 0.552 ms | 0.552 ms | 0.552 ms |
+| Bottom pill | 0.397 ms | 0.014 ms | 0.393 ms | 0.420 ms | 0.420 ms | 0.420 ms |
+
+The previous-user path used to obtain an exact row by compiling and measuring
+all loaded render nodes. It now prepares or reuses the height index, exactifies
+only the target node, and carries that node's stable row anchor into projection.
+The benchmark rejects full-session reads, full block-buffer renders, complete
+height-index rebuilds, more than 128 exactified target/viewport nodes, more than
+1,024 materialized viewport rows, or failure to reuse the existing index. A
+400-node unit fixture more tightly verifies that resolving the target itself
+compiles and measures exactly one node and materializes no row range.
+
+The tall source-view fixture starts with a collapsed completed `write_file`,
+presses real Enter to expand it, and scrolls 12 rendered wheel frames at the top,
+middle, and 90 percent depth of 20,000 Rust source lines. Five release samples on
+the same machine produced:
+
+| Expanded `write_file` phase | Mean | p95 |
+|---|---:|---:|
+| Collapsed 12-frame scroll | 2.529 ms | 2.831 ms |
+| Enter and expansion | 14.177 ms | 14.880 ms |
+| Top 12-frame scroll | 8.865 ms | 8.925 ms |
+| Middle 12-frame scroll | 11.464 ms | 11.524 ms |
+| Deep 12-frame scroll | 11.417 ms | 11.590 ms |
+
+The source was 1,448,889 bytes. Middle and deep latencies remain effectively
+constant instead of increasing with source offset. The older
+`tool_output_4mib` workload is retained as a broad raw-tool-output reference,
+but it renders `bash` output and did not exercise the `write_file` syntax path.
+Its three-run pre-fix release reference was 76.029 ms for 12 scrolls and
+22.352 ms for visible-range materialization. Its five-run post-fix reference was
+74.450 ms and 22.504 ms respectively, confirming that the targeted source-view
+fix does not regress the unrelated workload.
+
+The bottleneck was `print_diff_ir_with_width`: every deep range restarted
+syntect at source line zero, syntax-highlighted and wrapped all preceding lines,
+and discarded them until it reached the requested visual row. `DiffIr` now has
+non-serialized runtime caches for at most two width-specific visual-row indexes
+and syntax-state checkpoints every 128 source lines. A deep render finds the
+source line containing the first requested row, restores the nearest compatible
+syntax state, and processes only the bounded replay suffix and visible rows.
+Changing syntax theme invalidates the syntax checkpoints, while serde round
+trips intentionally discard all runtime cache state.
+
+Every measured 12-frame scroll rejects full-session reads, full block-buffer
+renders, complete height-index rebuilds, failure to reuse the existing index,
+and more than 3,072 materialized rows. Expanded frames additionally require
+fewer than 128 replayed prefix source lines and at most 256 highlighted source
+lines per frame. Tests compare deep range text, wrapping, span styles, and
+metadata with a full render across a multiline syntax scope, verify cache
+serialization behavior, and enforce the two-layout and 513-checkpoint limits.
 
 ## Submit, persistence, and provider history
 

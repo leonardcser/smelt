@@ -308,7 +308,6 @@ impl ConversationRuntime {
         width: u16,
         record_index: usize,
         row_offset: crate::smelt_edit::RowIndex,
-        screen_padding_top: crate::smelt_edit::RowIndex,
         viewport_rows: u16,
     ) -> Option<super::transcript::TranscriptBlockRevealPosition> {
         self.document.transcript.record_block_reveal_position(
@@ -316,7 +315,6 @@ impl ConversationRuntime {
             width,
             record_index,
             row_offset,
-            screen_padding_top,
             viewport_rows,
         )
     }

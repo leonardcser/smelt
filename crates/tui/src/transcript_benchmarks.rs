@@ -44,6 +44,8 @@ struct NavSample {
     ctrl_u20_ms: f64,
     gg_ms: f64,
     g_ms: f64,
+    previous_user_pill_ms: f64,
+    bottom_pill_ms: f64,
     rows: crate::smelt_edit::RowIndex,
 }
 
@@ -130,15 +132,32 @@ fn navigation_bench_runs() -> usize {
 fn transcript_navigation_bench_app() -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
     app.app.handle_resize(100, 32);
-    for i in 0..8_000 {
-        let marker = if i == 7_777 { " needle-target" } else { "" };
+    for i in 0..4_000 {
         app.app
-            .push_block(smelt_core::transcript_model::Block::Text {
-                content: format!(
-                    "navigation bench row {i:04}{marker}: {}",
-                    "alpha beta gamma delta ".repeat(3)
-                ),
+            .push_block(smelt_core::transcript_model::Block::User {
+                text: format!("navigation bench prompt {i:04}"),
+                image_labels: Vec::new(),
+                command: false,
             });
+        let marker = if i == 3_777 { " needle-target" } else { "" };
+        let content = if i == 3_999 {
+            (0..60)
+                .map(|line| {
+                    format!(
+                        "navigation bench final response {line:02}: {}",
+                        "alpha beta gamma delta ".repeat(3)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            format!(
+                "navigation bench response {i:04}{marker}: {}",
+                "alpha beta gamma delta ".repeat(3)
+            )
+        };
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text { content });
     }
     app.render_silent();
     app.app.app_focus = AppFocus::Content;
@@ -183,7 +202,8 @@ fn run_navigation_sample() -> NavSample {
         app.render_silent();
     }
     let ctrl_u20_ms = elapsed_ms(ctrl_u_start.elapsed());
-    assert!(transcript_row_cursor_row(&app) < rows.saturating_sub(1));
+    let rows_after_ctrl_u = transcript_total_rows(&app);
+    assert!(transcript_row_cursor_row(&app) < rows_after_ctrl_u.saturating_sub(1));
 
     let gg_start = std::time::Instant::now();
     app.type_char('g');
@@ -196,7 +216,10 @@ fn run_navigation_sample() -> NavSample {
     app.type_char('G');
     app.render_silent();
     let g_ms = elapsed_ms(g_start.elapsed());
+    let rows = transcript_total_rows(&app);
     assert!(transcript_row_cursor_row(&app) >= rows.saturating_sub(2));
+
+    let (previous_user_pill_ms, bottom_pill_ms) = measure_scroll_pills(&mut app);
 
     NavSample {
         search_ms,
@@ -204,6 +227,8 @@ fn run_navigation_sample() -> NavSample {
         ctrl_u20_ms,
         gg_ms,
         g_ms,
+        previous_user_pill_ms,
+        bottom_pill_ms,
         rows,
     }
 }
@@ -332,6 +357,99 @@ fn perf_value_total(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
         .find(|row| row.label == label)
         .map(|row| row.total)
         .unwrap_or(0)
+}
+
+fn click_named_window(app: &mut TestApp, name: &str) {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let win = app
+        .ui_probe()
+        .named_win(name)
+        .unwrap_or_else(|| panic!("missing benchmark window {name}"));
+    let rect = app
+        .ui_probe()
+        .split_rect(win)
+        .or_else(|| {
+            app.ui_probe()
+                .win(win)
+                .and_then(|win| win.viewport.map(|viewport| viewport.rect))
+        })
+        .unwrap_or_else(|| panic!("missing benchmark window rect {name}"));
+    let row = rect.top.saturating_add(rect.height.saturating_sub(1) / 2);
+    let column = rect.left.saturating_add(rect.width.saturating_sub(1) / 2);
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
+            MouseEvent {
+                kind,
+                row,
+                column,
+                modifiers: KeyModifiers::empty(),
+            },
+        )));
+    }
+}
+
+fn assert_scroll_pill_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_block_renders_for_scroll(snapshot, label);
+    let full_layouts = perf_duration_count(snapshot, "transcript:rebuild_row_index");
+    assert_eq!(
+        full_layouts, 0,
+        "{label} rebuilt the complete transcript height index"
+    );
+    let exactified_nodes = perf_value_total(snapshot, "transcript:row_index:exactify_missing");
+    assert!(
+        exactified_nodes <= 128,
+        "{label} exactified {exactified_nodes} nodes, expected bounded target and viewport work"
+    );
+    let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
+    assert!(
+        materialized_rows <= 1_024,
+        "{label} materialized {materialized_rows} rows, expected bounded viewport work"
+    );
+    let reused = perf_value_max(snapshot, "transcript:prepare_row_index:reused_index");
+    assert_eq!(reused, 1, "{label} did not reuse the transcript row index");
+}
+
+fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
+    app.render_silent();
+    let tail_scroll = app.app.transcript_win().scroll_top();
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.top.win")
+        .is_some());
+
+    smelt_perf::perf::clear();
+    let previous_user_start = std::time::Instant::now();
+    click_named_window(app, "smelt.scroll_pills.top.win");
+    app.render_silent();
+    let previous_user_pill_ms = elapsed_ms(previous_user_start.elapsed());
+    let previous_user_snapshot = smelt_perf::perf::snapshot();
+    assert_scroll_pill_operation_gates(&previous_user_snapshot, "previous_user_pill");
+    assert!(
+        app.app.transcript_win().scroll_top() < tail_scroll,
+        "previous-user pill did not move above the transcript tail"
+    );
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.bottom.win")
+        .is_some());
+    app.render_silent();
+
+    smelt_perf::perf::clear();
+    let bottom_start = std::time::Instant::now();
+    click_named_window(app, "smelt.scroll_pills.bottom.win");
+    app.render_silent();
+    let bottom_pill_ms = elapsed_ms(bottom_start.elapsed());
+    let bottom_snapshot = smelt_perf::perf::snapshot();
+    assert_scroll_pill_operation_gates(&bottom_snapshot, "bottom_pill");
+    assert!(app.app.transcript_win().is_following_tail());
+    assert!(app.app.transcript_win().scroll_top() >= tail_scroll);
+
+    (previous_user_pill_ms, bottom_pill_ms)
 }
 
 fn assert_no_full_search_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
@@ -1662,6 +1780,299 @@ fn transcript_layout_search_benchmark_suite() {
     );
 }
 
+const TALL_WRITE_SCROLL_FRAMES: usize = 12;
+
+#[derive(Clone, Copy, Debug)]
+struct TallWriteSample {
+    bytes: usize,
+    lines: usize,
+    collapsed_scroll_ms: f64,
+    expand_ms: f64,
+    top_scroll_ms: f64,
+    middle_scroll_ms: f64,
+    deep_scroll_ms: f64,
+}
+
+fn tall_write_line_count() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_TALL_WRITE_LINES", 20_000)
+}
+
+fn feed_transcript_wheel(app: &mut TestApp, kind: crossterm::event::MouseEventKind) {
+    let rect = app
+        .ui_probe()
+        .split_rect(crate::app::TRANSCRIPT_WIN)
+        .expect("transcript rect for tall write benchmark");
+    app.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind,
+            row: rect.top.saturating_add(rect.height / 2),
+            column: rect.left.saturating_add(rect.width / 2),
+            modifiers: KeyModifiers::empty(),
+        },
+    )));
+}
+
+fn assert_tall_write_scroll_gates(
+    snapshot: &smelt_perf::perf::Snapshot,
+    label: &str,
+    expanded: bool,
+) {
+    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_block_renders_for_scroll(snapshot, label);
+    assert_eq!(
+        perf_duration_count(snapshot, "transcript:rebuild_row_index"),
+        0,
+        "{label} rebuilt the complete transcript height index"
+    );
+    assert_eq!(
+        perf_value_max(snapshot, "transcript:prepare_row_index:reused_index"),
+        1,
+        "{label} did not reuse the transcript row index"
+    );
+    let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
+    assert!(
+        materialized_rows <= (TALL_WRITE_SCROLL_FRAMES as u64) * 256,
+        "{label} materialized {materialized_rows} rows"
+    );
+    let prefix_lines = perf_value_max(snapshot, "render:inline_diff_cached:prefix_syntax_lines");
+    let source_lines = perf_value_max(snapshot, "render:inline_diff_cached:source_lines");
+    if expanded {
+        assert!(
+            prefix_lines < 128,
+            "{label} replayed {prefix_lines} source lines before a visible range"
+        );
+        assert!(
+            source_lines <= 256,
+            "{label} highlighted {source_lines} source lines for one viewport frame"
+        );
+    } else {
+        assert_eq!(prefix_lines, 0, "{label} touched hidden source syntax");
+        assert_eq!(source_lines, 0, "{label} rendered hidden source lines");
+    }
+}
+
+fn measure_tall_write_scroll(
+    app: &mut TestApp,
+    label: &'static str,
+    kind: crossterm::event::MouseEventKind,
+    expanded: bool,
+) -> f64 {
+    let before = app.app.transcript_win().scroll_top();
+    smelt_perf::perf::clear();
+    let start = std::time::Instant::now();
+    for _ in 0..TALL_WRITE_SCROLL_FRAMES {
+        feed_transcript_wheel(app, kind);
+        app.render_silent();
+    }
+    let ms = elapsed_ms(start.elapsed());
+    let after = app.app.transcript_win().scroll_top();
+    match kind {
+        crossterm::event::MouseEventKind::ScrollDown => assert!(after > before),
+        crossterm::event::MouseEventKind::ScrollUp => assert!(after < before),
+        _ => unreachable!("tall write benchmark only sends wheel events"),
+    }
+    let snapshot = smelt_perf::perf::snapshot();
+    assert_tall_write_scroll_gates(&snapshot, label, expanded);
+    ms
+}
+
+fn jump_to_transcript_row(app: &mut TestApp, row: crate::smelt_edit::RowIndex) {
+    app.type_text(&row.saturating_add(1).to_string());
+    app.type_char('G');
+    app.render_silent();
+}
+
+fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
+    let mut app = TestApp::builder()
+        .with_ephemeral(true)
+        .with_vim(true)
+        .build();
+    app.app.handle_resize(120, 40);
+    for i in 0..80 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("collapsed transcript row before tool {i:03}"),
+            });
+    }
+    let content = (0..line_count)
+        .map(|i| {
+            format!("pub fn generated_{i:05}() -> usize {{ {i} }} // tall write file benchmark")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bytes = content.len();
+    let tool_record = 80;
+    app.start_tool(
+        "tall-write-file".into(),
+        "write_file".into(),
+        protocol::StyledLines::from_plain("write generated/large.rs"),
+        std::collections::HashMap::from([
+            ("file_path".into(), serde_json::json!("generated/large.rs")),
+            ("content".into(), serde_json::json!(content)),
+        ]),
+    );
+    app.finish_tool(
+        "tall-write-file",
+        smelt_core::transcript_model::ToolStatus::Ok,
+        None,
+        Some(std::time::Duration::from_millis(250)),
+    );
+    for i in 0..80 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("collapsed transcript row after tool {i:03}"),
+            });
+    }
+    app.render_silent();
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+    assert!(app.run_lua("smelt.transcript.fold_all('close')"));
+    app.type_char('G');
+    app.render_silent();
+
+    let collapsed_scroll_ms = measure_tall_write_scroll(
+        &mut app,
+        "tall_write_collapsed_scroll12",
+        crossterm::event::MouseEventKind::ScrollUp,
+        false,
+    );
+
+    assert!(app.reveal_transcript_record_block(tool_record, 0, true));
+    app.render_silent();
+    let collapsed_rows = transcript_total_rows(&app);
+    smelt_perf::perf::clear();
+    let expand_start = std::time::Instant::now();
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let expand_ms = elapsed_ms(expand_start.elapsed());
+    let expanded_rows = transcript_total_rows(&app);
+    assert!(
+        expanded_rows > collapsed_rows.saturating_add(line_count as u64 / 2),
+        "Enter did not expand the tall write_file body: collapsed={collapsed_rows}, expanded={expanded_rows}"
+    );
+    let tool_top = app.app.transcript_win().scroll_top();
+    let transcript_buf = app.app.transcript_win().buf;
+    let expanded_lines = app
+        .ui_probe()
+        .buf(transcript_buf)
+        .expect("expanded transcript buffer")
+        .lines();
+    assert!(
+        expanded_lines
+            .iter()
+            .any(|line| line.contains("generated_")),
+        "expanded write_file viewport did not render source rows: {expanded_lines:?}"
+    );
+
+    let top_scroll_ms = measure_tall_write_scroll(
+        &mut app,
+        "tall_write_top_scroll12",
+        crossterm::event::MouseEventKind::ScrollDown,
+        true,
+    );
+
+    jump_to_transcript_row(&mut app, tool_top.saturating_add(line_count as u64 / 2));
+    let middle_scroll_ms = measure_tall_write_scroll(
+        &mut app,
+        "tall_write_middle_scroll12",
+        crossterm::event::MouseEventKind::ScrollDown,
+        true,
+    );
+
+    jump_to_transcript_row(
+        &mut app,
+        tool_top.saturating_add(line_count as u64 * 9 / 10),
+    );
+    let deep_scroll_ms = measure_tall_write_scroll(
+        &mut app,
+        "tall_write_deep_scroll12",
+        crossterm::event::MouseEventKind::ScrollDown,
+        true,
+    );
+
+    TallWriteSample {
+        bytes,
+        lines: line_count,
+        collapsed_scroll_ms,
+        expand_ms,
+        top_scroll_ms,
+        middle_scroll_ms,
+        deep_scroll_ms,
+    }
+}
+
+#[test]
+fn transcript_layout_tall_write_file_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
+    smelt_perf::perf::set_enabled(true);
+    let runs = navigation_bench_runs();
+    let lines = tall_write_line_count();
+    if transcript_bench_warmup_enabled() {
+        let _ = run_tall_write_sample(lines);
+    }
+    let mut samples = Vec::with_capacity(runs);
+    for run in 0..runs {
+        let sample = run_tall_write_sample(lines);
+        eprintln!(
+            "TRANSCRIPT_TALL_WRITE_BENCH_SAMPLE run={} bytes={} lines={} collapsed_scroll12_ms={:.3} expand_ms={:.3} top_scroll12_ms={:.3} middle_scroll12_ms={:.3} deep_scroll12_ms={:.3}",
+            run + 1,
+            sample.bytes,
+            sample.lines,
+            sample.collapsed_scroll_ms,
+            sample.expand_ms,
+            sample.top_scroll_ms,
+            sample.middle_scroll_ms,
+            sample.deep_scroll_ms,
+        );
+        samples.push(sample);
+    }
+    let stats = |get: fn(&TallWriteSample) -> f64| {
+        TailStats::from(&samples.iter().map(get).collect::<Vec<_>>())
+    };
+    let collapsed = stats(|sample| sample.collapsed_scroll_ms);
+    let expand = stats(|sample| sample.expand_ms);
+    let top = stats(|sample| sample.top_scroll_ms);
+    let middle = stats(|sample| sample.middle_scroll_ms);
+    let deep = stats(|sample| sample.deep_scroll_ms);
+    eprintln!(
+        "TRANSCRIPT_TALL_WRITE_BENCH_SUMMARY runs={} bytes={} lines={} collapsed_mean_ms={:.3} collapsed_p95_ms={:.3} expand_mean_ms={:.3} expand_p95_ms={:.3} top_mean_ms={:.3} top_p95_ms={:.3} middle_mean_ms={:.3} middle_p95_ms={:.3} deep_mean_ms={:.3} deep_p95_ms={:.3}",
+        samples.len(),
+        samples[0].bytes,
+        samples[0].lines,
+        collapsed.mean,
+        collapsed.p95,
+        expand.mean,
+        expand.p95,
+        top.mean,
+        top.p95,
+        middle.mean,
+        middle.p95,
+        deep.mean,
+        deep.p95,
+    );
+    eprintln!(
+        "TRANSCRIPT_TALL_WRITE_BENCH_JSON {{\"type\":\"tall_write_file_summary\",\"runs\":{},\"bytes\":{},\"lines\":{},\"collapsed_mean_ms\":{:.3},\"collapsed_p95_ms\":{:.3},\"expand_mean_ms\":{:.3},\"expand_p95_ms\":{:.3},\"top_mean_ms\":{:.3},\"top_p95_ms\":{:.3},\"middle_mean_ms\":{:.3},\"middle_p95_ms\":{:.3},\"deep_mean_ms\":{:.3},\"deep_p95_ms\":{:.3}}}",
+        samples.len(),
+        samples[0].bytes,
+        samples[0].lines,
+        collapsed.mean,
+        collapsed.p95,
+        expand.mean,
+        expand.p95,
+        top.mean,
+        top.p95,
+        middle.mean,
+        middle.p95,
+        deep.mean,
+        deep.p95,
+    );
+}
+
 #[test]
 fn transcript_layout_navigation_benchmark_suite() {
     if !benchmark_target_enabled() {
@@ -1675,13 +2086,14 @@ fn transcript_layout_navigation_benchmark_suite() {
         eprintln!("TRANSCRIPT_LAYOUT_NAV_SKIPPED");
         return;
     }
+    smelt_perf::perf::set_enabled(true);
     let runs = navigation_bench_runs();
     let _warmup = run_navigation_sample();
     let mut samples = Vec::with_capacity(runs);
     for run in 0..runs {
         let sample = run_navigation_sample();
         eprintln!(
-            "TRANSCRIPT_LAYOUT_NAV_SAMPLE run={} rows={} search_ms={:.3} ctrl_d20_ms={:.3} ctrl_u20_ms={:.3} gg_ms={:.3} G_ms={:.3}",
+            "TRANSCRIPT_LAYOUT_NAV_SAMPLE run={} rows={} search_ms={:.3} ctrl_d20_ms={:.3} ctrl_u20_ms={:.3} gg_ms={:.3} G_ms={:.3} previous_user_pill_ms={:.3} bottom_pill_ms={:.3}",
             run + 1,
             sample.rows,
             sample.search_ms,
@@ -1689,6 +2101,8 @@ fn transcript_layout_navigation_benchmark_suite() {
             sample.ctrl_u20_ms,
             sample.gg_ms,
             sample.g_ms,
+            sample.previous_user_pill_ms,
+            sample.bottom_pill_ms,
         );
         samples.push(sample);
     }
@@ -1718,8 +2132,20 @@ fn transcript_layout_navigation_benchmark_suite() {
             .collect::<Vec<_>>(),
     );
     let g = NavStats::from(&samples.iter().map(|sample| sample.g_ms).collect::<Vec<_>>());
+    let previous_user_pill = TailStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.previous_user_pill_ms)
+            .collect::<Vec<_>>(),
+    );
+    let bottom_pill = TailStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.bottom_pill_ms)
+            .collect::<Vec<_>>(),
+    );
     eprintln!(
-        "TRANSCRIPT_LAYOUT_NAV_SUMMARY runs={} rows={} search_mean_ms={:.3} search_stddev_ms={:.3} ctrl_d20_mean_ms={:.3} ctrl_d20_stddev_ms={:.3} ctrl_u20_mean_ms={:.3} ctrl_u20_stddev_ms={:.3} gg_mean_ms={:.3} gg_stddev_ms={:.3} G_mean_ms={:.3} G_stddev_ms={:.3}",
+        "TRANSCRIPT_LAYOUT_NAV_SUMMARY runs={} rows={} search_mean_ms={:.3} search_stddev_ms={:.3} ctrl_d20_mean_ms={:.3} ctrl_d20_stddev_ms={:.3} ctrl_u20_mean_ms={:.3} ctrl_u20_stddev_ms={:.3} gg_mean_ms={:.3} gg_stddev_ms={:.3} G_mean_ms={:.3} G_stddev_ms={:.3} previous_user_pill_mean_ms={:.3} previous_user_pill_stddev_ms={:.3} previous_user_pill_p50_ms={:.3} previous_user_pill_p95_ms={:.3} previous_user_pill_p99_ms={:.3} previous_user_pill_max_ms={:.3} bottom_pill_mean_ms={:.3} bottom_pill_stddev_ms={:.3} bottom_pill_p50_ms={:.3} bottom_pill_p95_ms={:.3} bottom_pill_p99_ms={:.3} bottom_pill_max_ms={:.3}",
         samples.len(),
         samples[0].rows,
         search.mean,
@@ -1732,9 +2158,21 @@ fn transcript_layout_navigation_benchmark_suite() {
         gg.stddev,
         g.mean,
         g.stddev,
+        previous_user_pill.mean,
+        previous_user_pill.stddev,
+        previous_user_pill.p50,
+        previous_user_pill.p95,
+        previous_user_pill.p99,
+        previous_user_pill.max,
+        bottom_pill.mean,
+        bottom_pill.stddev,
+        bottom_pill.p50,
+        bottom_pill.p95,
+        bottom_pill.p99,
+        bottom_pill.max,
     );
     eprintln!(
-        "TRANSCRIPT_LAYOUT_NAV_JSON {{\"type\":\"navigation_summary\",\"runs\":{},\"rows\":{},\"search_mean_ms\":{:.3},\"search_stddev_ms\":{:.3},\"ctrl_d20_mean_ms\":{:.3},\"ctrl_d20_stddev_ms\":{:.3},\"ctrl_u20_mean_ms\":{:.3},\"ctrl_u20_stddev_ms\":{:.3},\"gg_mean_ms\":{:.3},\"gg_stddev_ms\":{:.3},\"G_mean_ms\":{:.3},\"G_stddev_ms\":{:.3}}}",
+        "TRANSCRIPT_LAYOUT_NAV_JSON {{\"type\":\"navigation_summary\",\"runs\":{},\"rows\":{},\"search_mean_ms\":{:.3},\"search_stddev_ms\":{:.3},\"ctrl_d20_mean_ms\":{:.3},\"ctrl_d20_stddev_ms\":{:.3},\"ctrl_u20_mean_ms\":{:.3},\"ctrl_u20_stddev_ms\":{:.3},\"gg_mean_ms\":{:.3},\"gg_stddev_ms\":{:.3},\"G_mean_ms\":{:.3},\"G_stddev_ms\":{:.3},\"previous_user_pill_mean_ms\":{:.3},\"previous_user_pill_stddev_ms\":{:.3},\"previous_user_pill_p50_ms\":{:.3},\"previous_user_pill_p95_ms\":{:.3},\"previous_user_pill_p99_ms\":{:.3},\"previous_user_pill_max_ms\":{:.3},\"bottom_pill_mean_ms\":{:.3},\"bottom_pill_stddev_ms\":{:.3},\"bottom_pill_p50_ms\":{:.3},\"bottom_pill_p95_ms\":{:.3},\"bottom_pill_p99_ms\":{:.3},\"bottom_pill_max_ms\":{:.3}}}",
         samples.len(),
         samples[0].rows,
         search.mean,
@@ -1747,15 +2185,31 @@ fn transcript_layout_navigation_benchmark_suite() {
         gg.stddev,
         g.mean,
         g.stddev,
+        previous_user_pill.mean,
+        previous_user_pill.stddev,
+        previous_user_pill.p50,
+        previous_user_pill.p95,
+        previous_user_pill.p99,
+        previous_user_pill.max,
+        bottom_pill.mean,
+        bottom_pill.stddev,
+        bottom_pill.p50,
+        bottom_pill.p95,
+        bottom_pill.p99,
+        bottom_pill.max,
     );
     eprintln!(
-        "| navigation/search | rows={} | search={}ms | ctrl-d×20={}ms | ctrl-u×20={}ms | gg={}ms | G={}ms |",
+        "| navigation/search | rows={} | search={}ms | ctrl-d×20={}ms | ctrl-u×20={}ms | gg={}ms | G={}ms | previous-user pill={:.2}ms p95={:.2}ms | bottom pill={:.2}ms p95={:.2}ms |",
         samples[0].rows,
         search.display(),
         ctrl_d.display(),
         ctrl_u.display(),
         gg.display(),
         g.display(),
+        previous_user_pill.mean,
+        previous_user_pill.p95,
+        bottom_pill.mean,
+        bottom_pill.p95,
     );
 }
 

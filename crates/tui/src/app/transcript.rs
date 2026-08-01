@@ -4047,7 +4047,11 @@ impl TranscriptDocument {
         record_index: usize,
         row_offset: RowIndex,
         viewport_rows: u16,
-    ) -> Option<(BlockId, RowIndex)> {
+    ) -> Option<(
+        BlockId,
+        RowIndex,
+        crate::content::transcript_buf::TranscriptRowAnchor,
+    )> {
         let block_id = if self.records.total_count().is_some() {
             let range =
                 self.record_window_range_around_center(width, record_index, viewport_rows, true)?;
@@ -4060,12 +4064,24 @@ impl TranscriptDocument {
             self.history().order.get(record_index).copied()?
         };
 
-        let (_, first_row, rows) = self
-            .materialize_exact_loaded_block_layout(lua, width)
-            .into_iter()
-            .find(|(id, _, _)| *id == block_id)?;
-        let row_offset = row_offset.min(rows.saturating_sub(1));
-        Some((block_id, first_row.saturating_add(row_offset)))
+        let global_row_offset = self.approximate_sparse_prefix_row_offset(width);
+        if !self.pin_operation_blocks(&[block_id]) {
+            return None;
+        }
+        let target = self.content.projection.exact_block_row_target(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            block_id,
+            row_offset,
+        );
+        self.unpin_operation_blocks(&[block_id]);
+        let (row_anchor, local_target_row) = target?;
+        Some((
+            block_id,
+            global_row_offset.saturating_add(local_target_row),
+            row_anchor,
+        ))
     }
 
     pub(crate) fn record_block_reveal_position(
@@ -4074,15 +4090,14 @@ impl TranscriptDocument {
         width: u16,
         record_index: usize,
         row_offset: RowIndex,
-        screen_padding_top: RowIndex,
         viewport_rows: u16,
     ) -> Option<TranscriptBlockRevealPosition> {
-        let (block_id, target_row) =
+        let (block_id, target_row, row_anchor) =
             self.record_block_target_row(lua, width, record_index, row_offset, viewport_rows)?;
         Some(TranscriptBlockRevealPosition {
             block_id,
             target_row,
-            scroll_top: target_row.saturating_sub(screen_padding_top),
+            row_anchor,
         })
     }
 
@@ -4956,20 +4971,39 @@ impl TranscriptDocument {
 
     fn local_delta_needs_record_expansion(
         &self,
-        tape: crate::content::transcript_buf::ExactRowTapeState,
+        tape: Option<crate::content::transcript_buf::ExactRowTapeState>,
         viewport_rows: u16,
         rows: isize,
+        anchor_record: Option<usize>,
     ) -> bool {
         let (Some(active), Some(total)) = (self.records.active_range(), self.records.total_count())
         else {
             return false;
         };
+        let active_start = active.start.get();
+        let active_end = active.end.get();
+        // Unmeasured nodes can compress the estimated row tail. Require the semantic
+        // anchor to approach the same record edge before rotating the loaded window.
+        let record_guard = active_end
+            .saturating_sub(active_start)
+            .saturating_div(4)
+            .max(1);
+        let near_record_edge = anchor_record.is_none_or(|record| {
+            (rows < 0 && record.saturating_sub(active_start) <= record_guard)
+                || (rows > 0 && active_end.saturating_sub(record) <= record_guard)
+        });
+        if !near_record_edge {
+            return false;
+        }
+        let Some(tape) = tape else {
+            return true;
+        };
         let target = add_signed_row(tape.rows.clamped_scroll, rows);
         let viewport_rows = RowIndex::from(viewport_rows.max(1));
         let guard_rows = viewport_rows.saturating_mul(TRANSCRIPT_LOCAL_PAGE_GUARD_VIEWPORTS);
-        (rows < 0 && active.start.get() > 0 && target <= guard_rows)
+        (rows < 0 && active_start > 0 && target <= guard_rows)
             || (rows > 0
-                && active.end.get() < total
+                && active_end < total
                 && target
                     .saturating_add(viewport_rows)
                     .saturating_add(guard_rows)
@@ -5023,9 +5057,6 @@ impl TranscriptDocument {
                     .flatten()
             })
             .unwrap_or(fallback_scroll_top);
-        let needs_record_expansion = exact_viewport
-            .map(|(_, tape)| self.local_delta_needs_record_expansion(tape, viewport_rows, rows))
-            .unwrap_or(true);
         let anchor_record = match self.viewport.state.resolved_anchor {
             Some(TranscriptResolvedViewportAnchor {
                 top: TranscriptScrollAnchor::Content(anchor),
@@ -5035,6 +5066,12 @@ impl TranscriptDocument {
                 .and_then(|anchor| anchor.id.as_block_id())
                 .and_then(|block_id| self.record_index_for_block_id(block_id)),
         };
+        let needs_record_expansion = self.local_delta_needs_record_expansion(
+            exact_viewport.map(|(_, tape)| tape),
+            viewport_rows,
+            rows,
+            anchor_record,
+        );
         if needs_record_expansion {
             if let Some(anchor_record) = anchor_record {
                 self.activate_record_window_for_local_delta(
@@ -5229,7 +5266,6 @@ impl TranscriptDocument {
                     width,
                     *record_index,
                     *row_offset,
-                    *screen_padding_top,
                     viewport_rows,
                 ) else {
                     return (
@@ -5243,10 +5279,13 @@ impl TranscriptDocument {
                         None,
                     );
                 }
-                // The semantic target was resolved against the current exact layout. Treating
-                // that row as reflow-stable would reinterpret it through an older projection.
+                let screen_padding_top = (*screen_padding_top).min(isize::MAX as RowIndex) as isize;
                 (
-                    crate::content::transcript_buf::ScrollTarget::visible_row(reveal.scroll_top),
+                    crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                        reveal.target_row,
+                        Some(reveal.row_anchor),
+                        -screen_padding_top,
+                    ),
                     None,
                 )
             }
@@ -5320,7 +5359,11 @@ impl TranscriptDocument {
         if tape.rows.clamped_scroll.saturating_add(exact.row_offset) != fallback_scroll_top {
             return None;
         }
-        if self.local_delta_needs_record_expansion(tape, viewport_rows, rows) {
+        let anchor_record = tape
+            .top_anchor
+            .and_then(|anchor| anchor.id.as_block_id())
+            .and_then(|block_id| self.record_index_for_block_id(block_id));
+        if self.local_delta_needs_record_expansion(Some(tape), viewport_rows, rows, anchor_record) {
             return None;
         }
         let inner = self.content.projection.plan_exact_row_tape_scroll(
@@ -6820,7 +6863,7 @@ mod document_tests {
         });
 
         let first = document
-            .record_block_reveal_position(&lua, 48, 23, 2, 3, 12)
+            .record_block_reveal_position(&lua, 48, 23, 2, 12)
             .expect("first exact reveal");
         let anchor = document
             .row_anchor_at_row(&lua, 48, first.target_row)
@@ -6830,7 +6873,7 @@ mod document_tests {
         assert_eq!(first_snapshot.hydrated_blocks, 0);
 
         let second = document
-            .record_block_reveal_position(&lua, 48, 23, 2, 3, 12)
+            .record_block_reveal_position(&lua, 48, 23, 2, 12)
             .expect("rehydrated exact reveal");
         assert_eq!(second, first);
         assert_eq!(
@@ -9427,7 +9470,7 @@ mod document_tests {
             document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         let first_scroll = rows.clamped_scroll;
         let reveal = document
-            .record_block_reveal_position(&lua, width, record_index, 0, top_padding, viewport_rows)
+            .record_block_reveal_position(&lua, width, record_index, 0, viewport_rows)
             .expect("revealed block position");
         assert_eq!(reveal.block_id, block_id);
         assert_eq!(
@@ -9477,7 +9520,7 @@ mod document_tests {
             document.project_planned(&lua, &mut buf, &theme, plan.expect("projection hydration"));
         assert_ne!(rows.clamped_scroll, first_scroll);
         let reveal = document
-            .record_block_reveal_position(&lua, width, record_index, 0, top_padding, viewport_rows)
+            .record_block_reveal_position(&lua, width, record_index, 0, viewport_rows)
             .expect("revealed block position after prefix refinement");
         assert_eq!(
             reveal.target_row.saturating_sub(rows.clamped_scroll),
@@ -10113,7 +10156,7 @@ pub(crate) struct TranscriptNavigationBlock {
 pub(crate) struct TranscriptBlockRevealPosition {
     pub(crate) block_id: BlockId,
     pub(crate) target_row: RowIndex,
-    pub(crate) scroll_top: RowIndex,
+    pub(crate) row_anchor: crate::content::transcript_buf::TranscriptRowAnchor,
 }
 
 fn transcript_raw_first_line(history: &BlockHistory, id: BlockId) -> String {
@@ -10599,7 +10642,6 @@ impl TuiApp {
             width,
             record_index,
             0,
-            top_padding,
             viewport_rows,
         ) else {
             return false;

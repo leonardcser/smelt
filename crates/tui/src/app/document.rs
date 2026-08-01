@@ -744,7 +744,6 @@ impl TuiApp {
                         viewport_cols.max(1),
                         0,
                         0,
-                        0,
                         viewport_rows,
                     ) {
                         TranscriptScrollIntent::RevealBlock {

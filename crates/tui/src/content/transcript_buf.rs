@@ -2437,6 +2437,49 @@ impl TranscriptProjection {
         Some(TranscriptRowAnchor { id, row_offset })
     }
 
+    pub(crate) fn exact_block_row_target(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        block_id: BlockId,
+        row_offset: RowIndex,
+    ) -> Option<(TranscriptRowAnchor, RowIndex)> {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        let index = self.render_plan.index_for_block(block_id)?;
+        self.pin_display_node_range(index..index.saturating_add(1));
+        let _ = self.exactify_node_range(env, history, index..index.saturating_add(1));
+        self.measurements.remember_active();
+
+        let target = (|| {
+            let node = self.measurements.active.nodes.get(index)?;
+            let exact_height = node.exact_height?;
+            let gap = (self
+                .render_plan
+                .rendered_node_gap(history, index, exact_height as usize)
+                as RowIndex)
+                .min(exact_height);
+            let block_rows = exact_height.saturating_sub(gap);
+            let block_row_offset = row_offset.min(block_rows.saturating_sub(1));
+            let node_row_offset = gap.saturating_add(block_row_offset);
+            let target_row = self
+                .measurements
+                .active
+                .prefix_row(index)
+                .saturating_add(node_row_offset);
+            Some((
+                TranscriptRowAnchor {
+                    id: node.id,
+                    row_offset: node_row_offset,
+                },
+                target_row,
+            ))
+        })();
+        self.display_layouts.set_pinned_nodes(std::iter::empty());
+        target
+    }
+
     fn display_offset_for_node_row(
         &mut self,
         history: &BlockHistory,
@@ -4111,6 +4154,34 @@ pub(crate) mod tests {
         assert_eq!(counters.display_layouts, 1);
         assert_eq!(counters.exact_height_measured_blocks, 1);
         assert!(snapshot(&buf).iter().any(|row| row.line.contains("2s")));
+    }
+
+    #[test]
+    fn exact_block_row_target_measures_only_the_requested_node() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        for i in 0..400 {
+            transcript.push(Block::Text {
+                content: format!("assistant response {i}\n{}", "detail line\n".repeat(8)),
+            });
+        }
+        let target_id = transcript.history.order[237];
+        let mut projection = TranscriptProjection::new();
+        projection.reset_counters();
+
+        let (anchor, target_row) = projection
+            .exact_block_row_target(&lua, &mut transcript.history, 80, target_id, 3)
+            .expect("exact target for loaded block");
+        let counters = projection.counters();
+
+        assert_eq!(anchor.id, RenderNodeId::Block(target_id));
+        assert!(target_row > 0);
+        assert!(anchor.row_offset >= 3);
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.display_layouts, 1);
+        assert_eq!(counters.exact_height_measured_blocks, 1);
+        assert_eq!(counters.range_materialized_blocks, 0);
+        assert_eq!(counters.range_materialized_rows, 0);
     }
 
     #[test]

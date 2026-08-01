@@ -2506,6 +2506,151 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
 }
 
 #[test]
+fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    fn click_named_window(app: &mut TestApp, name: &str) {
+        let win = app
+            .ui_probe()
+            .named_win(name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        let rect = app
+            .ui_probe()
+            .split_rect(win)
+            .or_else(|| {
+                app.ui_probe()
+                    .win(win)
+                    .and_then(|win| win.viewport.map(|viewport| viewport.rect))
+            })
+            .unwrap_or_else(|| panic!("missing rect for {name}"));
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                kind,
+                row: rect.top,
+                column: rect.left,
+                modifiers: KeyModifiers::empty(),
+            })));
+        }
+    }
+
+    let mut app = TestApp::builder()
+        .with_ephemeral(true)
+        .with_vim(true)
+        .build();
+    app.set_terminal_size(100, 24);
+    for i in 0..120 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            text: format!("user target {i:03}"),
+            image_labels: Vec::new(),
+            command: false,
+        });
+        let content = if i == 119 {
+            (0..48)
+                .map(|line| format!("final assistant line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            format!("assistant response {i:03}")
+        };
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text { content });
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.type_char('G');
+    app.render_silent();
+    app.render_silent();
+    let tail_scroll = app.transcript_window().scroll_top;
+
+    click_named_window(&mut app, "smelt.scroll_pills.top.win");
+    app.render_silent();
+    app.render_silent();
+    assert!(app.transcript_window().scroll_top < tail_scroll);
+    let visible = transcript_viewport_lines(&app);
+    assert!(
+        visible
+            .iter()
+            .take(3)
+            .any(|line| line.contains("user target 119")),
+        "previous-user pill did not align its target: {visible:?}"
+    );
+
+    click_named_window(&mut app, "smelt.scroll_pills.bottom.win");
+    app.render_silent();
+    assert!(app.transcript_window().following_tail);
+    assert!(app.transcript_window().scroll_top >= tail_scroll);
+}
+
+#[test]
+fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
+    let mut app = TestApp::builder()
+        .with_ephemeral(true)
+        .with_vim(true)
+        .build();
+    app.set_terminal_size(100, 24);
+    for i in 0..20 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("before write {i:02}"),
+        });
+    }
+    let content = (0..600)
+        .map(|i| format!("pub fn generated_{i:03}() -> usize {{ {i} }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.start_tool(
+        "tall-write-correctness".into(),
+        "write_file".into(),
+        protocol::StyledLines::from_plain("write generated/tall.rs"),
+        std::collections::HashMap::from([
+            ("file_path".into(), serde_json::json!("generated/tall.rs")),
+            ("content".into(), serde_json::json!(content)),
+        ]),
+    );
+    app.finish_tool(
+        "tall-write-correctness",
+        smelt_core::transcript_model::ToolStatus::Ok,
+        None,
+        Some(std::time::Duration::from_millis(50)),
+    );
+    for i in 0..20 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("after write {i:02}"),
+        });
+    }
+    app.render_silent();
+    app.focus_transcript();
+    assert!(app.run_lua("smelt.transcript.fold_all('close')"));
+    assert!(app.reveal_transcript_record_block(20, 0, true));
+    app.render_silent();
+    let collapsed_rows = transcript_total_rows(&app);
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let expanded_rows = transcript_total_rows(&app);
+    assert!(expanded_rows > collapsed_rows + 500);
+    let tool_top = app.transcript_window().scroll_top;
+    let transcript_buf = app.transcript_window().buf;
+    assert!(app
+        .ui_probe()
+        .buf(transcript_buf)
+        .expect("expanded transcript buffer")
+        .lines()
+        .iter()
+        .any(|line| line.contains("generated_")));
+
+    app.type_text(&tool_top.saturating_add(450).to_string());
+    app.type_char('G');
+    app.render_silent();
+    let deep_scroll = app.transcript_window().scroll_top;
+    assert!(deep_scroll > tool_top + 300);
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+    app.render_silent();
+    assert!(app.transcript_window().scroll_top > deep_scroll);
+}
+
+#[test]
 fn committed_view_watcher_dispatches_once_per_revision() {
     let mut app = TestApp::builder().with_ephemeral(true).build();
     app.set_terminal_size(80, 16);
