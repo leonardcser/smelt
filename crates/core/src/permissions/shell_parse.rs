@@ -10,6 +10,7 @@ use smelt_buffer::text::{byte_of_char, slice};
 
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
+const MAX_BRACE_EXPANSION_DEPTH: usize = 16;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
     if has_unrepresentable_io_number(command) || has_deep_arithmetic_parentheses(command) {
@@ -74,15 +75,32 @@ fn arithmetic_body_parentheses_too_deep(body: &str) -> bool {
     false
 }
 
+fn has_deep_brace_expansion(word: &str) -> bool {
+    let mut depth = 0usize;
+    for ch in word.chars() {
+        match ch {
+            '{' => {
+                depth = depth.saturating_add(1);
+                if depth > MAX_BRACE_EXPANSION_DEPTH {
+                    return true;
+                }
+            }
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
-    if has_deep_arithmetic_parentheses(word) {
+    if has_deep_arithmetic_parentheses(word) || has_deep_brace_expansion(word) {
         return None;
     }
     word::parse(word, &ParserOptions::default()).ok()
 }
 
 pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
-    if has_deep_arithmetic_parentheses(word) {
+    if has_deep_arithmetic_parentheses(word) || has_deep_brace_expansion(word) {
         return None;
     }
     word::parse_heredoc(word, &ParserOptions::default()).ok()
@@ -95,6 +113,9 @@ pub(super) enum BraceExpansion {
 }
 
 pub(super) fn brace_expansion(word: &str, limit: usize) -> BraceExpansion {
+    if has_deep_brace_expansion(word) {
+        return BraceExpansion::Unresolved;
+    }
     let parts = match word::parse_brace_expansions(word, &ParserOptions::default()) {
         Ok(Some(parts)) => parts,
         Ok(None) => return BraceExpansion::Absent,
