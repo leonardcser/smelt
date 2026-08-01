@@ -11,6 +11,8 @@ expression: text
 
 
 
+
+
 ────────────────────────────────────────────────────────────────────────────────
  bash: for f in *.rs; do
          rustfmt "$f"
@@ -19,8 +21,6 @@ expression: text
  Allow?
   1. allow once
   2. deny
-  3. allow for * for this session
-  4. allow for * in ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%
