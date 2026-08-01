@@ -561,6 +561,92 @@ fn custom_command_turn_includes_registered_lua_tools() {
 }
 
 #[test]
+fn custom_command_starts_after_replaced_synthetic_history() {
+    fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
+        (0..count)
+            .map(|i| {
+                let body = format!("compacted-{i}");
+                let reasoning_blocks = if i % 4 == 0 {
+                    Vec::new()
+                } else {
+                    vec![protocol::ReasoningBlock {
+                        provider: "fuzz".to_string(),
+                        data: serde_json::Value::Null,
+                    }]
+                };
+                match i % 3 {
+                    0 => protocol::HistoryItem::user(protocol::Content::text(body)),
+                    1 => protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                        Some(protocol::Content::text(body)),
+                        None,
+                        reasoning_blocks,
+                    )),
+                    _ => {
+                        let invocation = protocol::ToolInvocation {
+                            call_id: format!("synth-call-{i:02}"),
+                            name: "synth".to_string(),
+                            arguments: "{}".to_string(),
+                            result: protocol::ToolOutcome {
+                                content: format!("synth-result-{i}"),
+                                is_error: false,
+                                metadata: None,
+                            },
+                            elapsed_ms: None,
+                            called_at_ms: Some(i as u64),
+                        };
+                        protocol::HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
+                            Some(protocol::Content::text(body)),
+                            None,
+                            reasoning_blocks,
+                            vec![invocation],
+                        ))
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn engine_turn_complete(app: &mut TestApp, msg_count: usize) {
+        let turn_id = app.current_turn_id().unwrap_or(0);
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: Some(protocol::CanonicalHistoryDelta::new(
+                0,
+                synth_history(msg_count),
+            )),
+            meta: None,
+        }));
+    }
+
+    let mut app = TestApp::builder()
+        .with_vim(true)
+        .with_mode(AgentMode::normal())
+        .build();
+    app.start_exec("");
+    app.render_silent();
+    engine_turn_complete(&mut app, 127);
+    app.render_silent();
+    app.start_custom_command_with_lua_tool(59)
+        .expect("first custom command should send StartTurn");
+    app.render_silent();
+    engine_turn_complete(&mut app, 47);
+    app.render_silent();
+    app.start_custom_command_with_lua_tool(0)
+        .expect("second custom command should send StartTurn");
+    app.render_silent();
+    app.start_custom_command_with_lua_tool(127)
+        .expect("third custom command should send StartTurn");
+    app.render_silent();
+    engine_turn_complete(&mut app, 127);
+    app.render_silent();
+
+    let payload = app
+        .start_custom_command_with_lua_tool(127)
+        .expect("custom command should send StartTurn after replaced synthetic history");
+    assert!(payload.tools.iter().any(|t| t.name == "fuzz_custom_tool_3"));
+}
+
+#[test]
 fn engine_ask_probe_dispatches_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
     let mut active = app

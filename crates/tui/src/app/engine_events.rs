@@ -224,7 +224,12 @@ impl TuiApp {
 
         let end = self
             .with_dispatched_turn(move |app, turn| {
-                let result = app.handle_engine_event(ev, turn.turn_id, &mut turn.pending);
+                let result = app.handle_engine_event(
+                    ev,
+                    turn.turn_id,
+                    turn.submitted_history_idx,
+                    &mut turn.pending,
+                );
                 turn.assistant_output_started |= result.assistant_output_started;
                 app.dispatch_control(result.control, turn)
             })
@@ -242,10 +247,32 @@ impl TuiApp {
         }
     }
 
+    fn preserve_submitted_item_in_history_update(
+        &self,
+        first_index: usize,
+        mut items: Vec<protocol::HistoryItem>,
+        submitted_history_idx: usize,
+    ) -> Vec<protocol::HistoryItem> {
+        let Some(relative_idx) = submitted_history_idx.checked_sub(first_index) else {
+            return items;
+        };
+        let Some(incoming) = items.get(relative_idx) else {
+            return items;
+        };
+        let existing = self.session_history_range(submitted_history_idx..submitted_history_idx + 1);
+        if let Some(submitted) = existing.first() {
+            if submitted != incoming {
+                items[relative_idx] = submitted.clone();
+            }
+        }
+        items
+    }
+
     fn handle_engine_event(
         &mut self,
         ev: EngineEvent,
         turn_id: u64,
+        submitted_history_idx: usize,
         pending: &mut Vec<PendingTool>,
     ) -> EngineEventResult {
         let mut assistant_output_started = false;
@@ -627,7 +654,13 @@ impl TuiApp {
                     SessionControl::Continue
                 } else {
                     if let Some(history) = history {
-                        self.set_history_from(history.first_index.get(), history.items);
+                        let first_index = history.first_index.get();
+                        let items = self.preserve_submitted_item_in_history_update(
+                            first_index,
+                            history.items,
+                            submitted_history_idx,
+                        );
+                        self.set_history_from(first_index, items);
                     }
                     let payload = meta.clone().unwrap_or(protocol::TurnMeta {
                         elapsed_ms: 0,

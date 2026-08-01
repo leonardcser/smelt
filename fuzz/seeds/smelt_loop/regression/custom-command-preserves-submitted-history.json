@@ -1,0 +1,56 @@
+{
+  "_about": "A final canonical history snapshot can cover the active custom-command request index with unrelated provider history, after a previous replacement and cancellation left the session tail on an assistant item.",
+  "_fix": "Active-turn history updates preserve the submitted request item at its canonical index before replacing the rest of the snapshot, so persistence remains writable and later custom commands can start.",
+  "vim": true,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 127
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 59
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 47
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 0
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 127
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 127
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 127
+      }
+    }
+  ]
+}

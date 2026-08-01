@@ -795,6 +795,7 @@ pub(crate) struct TurnState {
     pub(crate) canonical: bool,
     pub(crate) pending: Vec<PendingTool>,
     pub(crate) permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+    pub(crate) submitted_history_idx: usize,
     pub(crate) rewind_block_idx: Option<usize>,
     pub(crate) assistant_output_started: bool,
     pub(crate) _perf: Option<smelt_perf::perf::Guard>,

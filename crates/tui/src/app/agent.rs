@@ -736,6 +736,7 @@ impl TuiApp {
             canonical: !self.ephemeral(),
             pending: Vec::new(),
             permissions,
+            submitted_history_idx: turn.submitted_history_idx.get() as usize,
             rewind_block_idx: turn.rewind_block_idx,
             assistant_output_started: false,
             _perf: smelt_perf::perf::begin("agent:turn"),
