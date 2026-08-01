@@ -741,6 +741,17 @@ pub(super) fn register(
         },
     )?;
     m.fn_(
+        "history_len",
+        "Return the number of semantic items in the current session history without materializing them.",
+        &[],
+        |_, ()| -> LuaResult<usize> {
+            Ok(
+                crate::lua::try_with_session_host(|host| host.session_history_len())
+                    .unwrap_or_default(),
+            )
+        },
+    )?;
+    m.fn_(
         "history",
         "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.",
         &["opts"],

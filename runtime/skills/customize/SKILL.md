@@ -1583,6 +1583,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Fork the current session: clone its messages into a new session id and switch to it.
 - `smelt.session.history` :: `fun(opts: table?): table`
   Return the semantic session history as compaction-safe items.
+- `smelt.session.history_len` :: `fun(): integer`
+  Return the number of semantic items in the current session history without materializing them.
 - `smelt.session.id` :: `fun(): string`
   Stable session id (matches the on-disk session filename).
 - `smelt.session.info` :: `fun(): table`

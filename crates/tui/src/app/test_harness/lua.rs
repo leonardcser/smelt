@@ -56,12 +56,8 @@ impl TestApp {
         self.app.shutdown_lua()
     }
 
-    pub(crate) fn bring_up_lua(
-        &mut self,
-        kind: &'static str,
-        refresh_agent_inputs: bool,
-    ) -> Option<crate::app::LuaBringUpError> {
-        self.app.bring_up_lua(kind, refresh_agent_inputs)
+    pub(crate) fn drain_launch_ready_hooks(&mut self) {
+        self.app.drain_launch_ready_hooks_for_harness();
     }
 
     #[cfg(test)]

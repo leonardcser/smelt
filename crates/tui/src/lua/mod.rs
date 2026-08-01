@@ -492,6 +492,32 @@ pub struct LuaExecution {
     shared: Arc<LuaShared>,
 }
 
+/// Launch-only owner for finishing generation-zero loading with a live TUI
+/// host. The VM and synchronized registries remain shared with the installed
+/// runtime; launch-local load bookkeeping is consumed back into [`LuaRuntime`]
+/// before the frontend reads it.
+pub struct LuaLaunch {
+    core: smelt_core::lua::runtime::LuaLaunch,
+    shared: Arc<LuaShared>,
+}
+
+impl LuaLaunch {
+    pub(crate) fn load(&mut self, cwd: &std::path::Path) -> smelt_core::trust::TrustState {
+        self.core.load_full_bootstrap();
+        self.core.load_autoload();
+        self.core.load_user_config();
+        self.core.load_global_plugins();
+        self.core.load_project_config(cwd)
+    }
+
+    fn finish(self) -> LuaRuntime {
+        LuaRuntime {
+            core: self.core.finish(),
+            shared: self.shared,
+        }
+    }
+}
+
 impl std::ops::Deref for LuaExecution {
     type Target = smelt_core::lua::runtime::LuaExecution;
 
@@ -576,7 +602,7 @@ impl LuaRuntime {
             runtime_override,
             project_cwd,
         );
-        Self::with_core(core, shared, true)
+        Self::with_core(core, shared, false)
     }
 
     fn with_shared(shared: Arc<LuaShared>) -> Self {
@@ -652,6 +678,23 @@ impl LuaRuntime {
         }
     }
 
+    /// Transfer generation-zero loading to a launch owner.
+    pub(crate) fn continue_launch(&self) -> LuaLaunch {
+        LuaLaunch {
+            core: self.core.continue_launch(),
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// Install a generation-zero runtime after its launch load completes.
+    pub(crate) fn finish_launch(&mut self, launch: LuaLaunch) {
+        *self = launch.finish();
+    }
+
+    pub(crate) fn mark_running(&self) {
+        self.core.mark_running();
+    }
+
     /// Borrow the shared state (e.g. to clone the `Arc` into tokio tasks).
     pub(crate) fn shared(&self) -> &Arc<LuaShared> {
         &self.shared
@@ -688,6 +731,11 @@ impl LuaRuntime {
     /// Call BEFORE [`Self::load_autoload`].
     pub fn load_project_early_init(&mut self, cwd: &std::path::Path) {
         self.core.load_project_early_init(cwd);
+    }
+
+    /// Preserve launch-only declarations for later candidate generations.
+    pub fn freeze_launch_inputs(&mut self) {
+        self.core.freeze_launch_inputs();
     }
 
     pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
@@ -882,6 +930,39 @@ impl LuaGeneration {
 
     pub fn desired(&self) -> &LuaDesiredState {
         &self.desired
+    }
+
+    /// Transfer generation-zero loading while the frontend remains available
+    /// to top-level Lua code through the scoped host.
+    pub(crate) fn continue_launch(&self) -> LuaLaunch {
+        debug_assert_eq!(self.id, 0, "only generation zero can continue launch");
+        self.runtime.continue_launch()
+    }
+
+    /// Reinstall generation zero after its full launch load and refresh every
+    /// declaration snapshot owned by the generation.
+    pub(crate) fn finish_launch(
+        &mut self,
+        launch: LuaLaunch,
+        target_cwd: &std::path::Path,
+        project_trust: smelt_core::trust::TrustState,
+    ) {
+        self.runtime.finish_launch(launch);
+        self.desired = self.runtime.collect_desired_state();
+        self.manifest = LuaLoadManifest::discover(&self.runtime, Some(target_cwd));
+        self.project_trust = project_trust;
+        self.warnings.extend(self.runtime.take_load_warnings());
+    }
+
+    /// Activate resources registered during generation-zero loading without
+    /// invoking candidate effect guards or incrementing the generation.
+    pub(crate) fn activate_launch(&self) -> Result<(), String> {
+        self.runtime
+            .core_shared()
+            .activate_generation_resources()
+            .map_err(|error| error.to_string())?;
+        self.runtime.mark_running();
+        Ok(())
     }
 
     /// Install declarations reconstructed from the committed VM after a live

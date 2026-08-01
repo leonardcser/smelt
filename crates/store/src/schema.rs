@@ -17,6 +17,19 @@ pub(crate) const CANONICAL_CONTENT_TABLES: &[&str] = &[
     "accounting_snapshots",
     "transcript_search",
     "transcript_search_chars",
+    "lineage_branches",
+    "lineage_branch_revisions",
+    "lineage_revisions",
+    "lineage_sequence_roots",
+    "lineage_sequence_nodes",
+    "lineage_sequence_entries",
+    "lineage_payload_object_refs",
+    "lineage_payload_nested_object_refs",
+    "lineage_turns",
+    "lineage_commit_receipts",
+    "lineage_request_attempts",
+    "lineage_session_receipts",
+    "lineage_turn_transitions",
 ];
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
@@ -42,6 +55,39 @@ pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     result
 }
 
+pub(crate) fn migrate_lineage(conn: &mut Connection, app_version: &str) -> Result<()> {
+    let version = user_version(conn)?;
+    if version == 0 {
+        migrate(conn, app_version)?;
+    } else if !is_supported_schema_version(version) {
+        return Err(StoreError::UnsupportedSchema {
+            found: version,
+            expected: SCHEMA_VERSION,
+        });
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    drop_canonical_search_projection(&tx)?;
+    write_store_meta(&tx, SCHEMA_VERSION, app_version)?;
+    tx.commit()?;
+    validate_lineage_schema(conn)
+}
+
+fn drop_canonical_search_projection(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        DROP TRIGGER IF EXISTS transcript_search_ai;
+        DROP TRIGGER IF EXISTS transcript_search_ad;
+        DROP TRIGGER IF EXISTS transcript_search_au;
+        DROP TABLE IF EXISTS transcript_search_fts;
+        DROP TABLE IF EXISTS transcript_search_chars;
+        DROP INDEX IF EXISTS transcript_search_history_idx;
+        DROP TABLE IF EXISTS transcript_search;
+        "#,
+    )?;
+    Ok(())
+}
+
 fn finish_with_cleanup(
     operation: &'static str,
     primary: Result<()>,
@@ -60,6 +106,30 @@ fn finish_with_cleanup(
 }
 
 pub(crate) fn validate_read_only_schema(conn: &Connection) -> Result<()> {
+    validate_schema_version(conn)?;
+    validate_schema_shape(conn, canonical_schema_shape()?)
+}
+
+pub(crate) fn validate_lineage_schema(conn: &Connection) -> Result<()> {
+    validate_schema_version(conn)?;
+    validate_schema_shape(conn, canonical_lineage_schema_shape()?)?;
+    let unexpected_search_objects: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE name = 'transcript_search'
+            OR name = 'transcript_search_chars'
+            OR name LIKE 'transcript_search_fts%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if unexpected_search_objects != 0 {
+        return Err(StoreError::Integrity(
+            "lineage database contains canonical transcript search projection objects".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_schema_version(conn: &Connection) -> Result<()> {
     let version = user_version(conn)?;
     if !is_supported_schema_version(version) {
         return Err(StoreError::UnsupportedSchema {
@@ -67,7 +137,7 @@ pub(crate) fn validate_read_only_schema(conn: &Connection) -> Result<()> {
             expected: SCHEMA_VERSION,
         });
     }
-    validate_schema_shape(conn)
+    Ok(())
 }
 
 pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
@@ -108,6 +178,10 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if (1..=9).contains(&current) {
         migrate_to_v10(conn)?;
+        current = 10;
+    }
+    if current == 10 {
+        migrate_to_v11(conn)?;
     }
     if (1..=10).contains(&current) {
         migrate_to_v11(conn)?;
@@ -134,11 +208,11 @@ fn write_store_meta(conn: &Connection, schema_version: i32, app_version: &str) -
 
 fn ensure_schema_shape(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
-    validate_schema_shape(conn)
+    conn.execute_batch(LINEAGE_SCHEMA)?;
+    validate_schema_shape(conn, canonical_schema_shape()?)
 }
 
-fn validate_schema_shape(conn: &Connection) -> Result<()> {
-    let shape = canonical_schema_shape()?;
+fn validate_schema_shape(conn: &Connection, shape: &SchemaShape) -> Result<()> {
     for table in &shape.tables {
         let Some(actual_sql) = schema_object_sql(conn, "table", &table.name)? else {
             return Err(StoreError::Integrity(format!(
@@ -222,16 +296,41 @@ fn canonical_schema_shape() -> Result<&'static SchemaShape> {
     }
 }
 
+fn canonical_lineage_schema_shape() -> Result<&'static SchemaShape> {
+    static SHAPE: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
+    match SHAPE.get_or_init(load_canonical_lineage_schema_shape) {
+        Ok(shape) => Ok(shape),
+        Err(message) => Err(StoreError::Integrity(message.clone())),
+    }
+}
+
 fn load_canonical_schema_shape() -> std::result::Result<SchemaShape, String> {
-    let conn = Connection::open_in_memory().map_err(|err| err.to_string())?;
-    conn.execute_batch(SCHEMA).map_err(|err| err.to_string())?;
-    let names = schema_object_names(&conn, "table").map_err(|err| err.to_string())?;
+    let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    conn.execute_batch(SCHEMA)
+        .map_err(|error| error.to_string())?;
+    conn.execute_batch(LINEAGE_SCHEMA)
+        .map_err(|error| error.to_string())?;
+    load_schema_shape(&conn)
+}
+
+fn load_canonical_lineage_schema_shape() -> std::result::Result<SchemaShape, String> {
+    let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    conn.execute_batch(SCHEMA)
+        .map_err(|error| error.to_string())?;
+    conn.execute_batch(LINEAGE_SCHEMA)
+        .map_err(|error| error.to_string())?;
+    drop_canonical_search_projection(&conn).map_err(|error| error.to_string())?;
+    load_schema_shape(&conn)
+}
+
+fn load_schema_shape(conn: &Connection) -> std::result::Result<SchemaShape, String> {
+    let names = schema_object_names(conn, "table").map_err(|error| error.to_string())?;
     let mut tables = Vec::new();
     for name in names {
-        let columns = table_columns(&conn, &name).map_err(|err| err.to_string())?;
-        let foreign_keys = table_foreign_keys(&conn, &name).map_err(|err| err.to_string())?;
-        let sql = schema_object_sql(&conn, "table", &name)
-            .map_err(|err| err.to_string())?
+        let columns = table_columns(conn, &name).map_err(|error| error.to_string())?;
+        let foreign_keys = table_foreign_keys(conn, &name).map_err(|error| error.to_string())?;
+        let sql = schema_object_sql(conn, "table", &name)
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("canonical schema table {name} has no SQL"))?;
         tables.push(SchemaTable {
             name,
@@ -242,9 +341,9 @@ fn load_canonical_schema_shape() -> std::result::Result<SchemaShape, String> {
     }
     let mut objects = Vec::new();
     for kind in ["index", "trigger"] {
-        for name in schema_object_names(&conn, kind).map_err(|err| err.to_string())? {
-            let sql = schema_object_sql(&conn, kind, &name)
-                .map_err(|err| err.to_string())?
+        for name in schema_object_names(conn, kind).map_err(|error| error.to_string())? {
+            let sql = schema_object_sql(conn, kind, &name)
+                .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("canonical schema {kind} {name} has no SQL"))?;
             objects.push(SchemaObject {
                 kind: kind.to_string(),
@@ -471,6 +570,12 @@ fn migrate_to_v9(conn: &Connection) -> Result<()> {
          ALTER TABLE transcript_blocks RENAME COLUMN descriptor_idx TO record_idx;
          ALTER TABLE transcript_blocks RENAME COLUMN descriptor_json TO block_json;",
     )?;
+    Ok(())
+}
+
+fn migrate_to_v11(conn: &Connection) -> Result<()> {
+    // Legacy rows remain canonical until an explicit lineage conversion succeeds.
+    conn.execute_batch(LINEAGE_SCHEMA)?;
     Ok(())
 }
 
@@ -1060,6 +1165,8 @@ CREATE TRIGGER IF NOT EXISTS transcript_search_au AFTER UPDATE OF indexed_text O
     VALUES (new.block_idx, new.indexed_text);
 END;
 "#;
+
+const LINEAGE_SCHEMA: &str = include_str!("lineage_schema.sql");
 
 #[cfg(test)]
 mod tests {
@@ -1917,6 +2024,435 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
         let message = err.to_string();
         assert!(message.contains("primary migration failure"));
         assert!(message.contains("pragma restoration failure"));
+    }
+
+    #[test]
+    fn v10_to_v11_migration_preserves_legacy_rows_and_adds_empty_lineage_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO session_state (
+                 singleton, id, title, history_len, transcript_record_count, created_at, updated_at
+             ) VALUES (1, 'legacy-session', 'kept', 0, 0, 10, 20)",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 10).unwrap();
+
+        migrate(&mut conn, "test-v11").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), 11);
+        assert_eq!(
+            conn.query_row(
+                "SELECT id || ':' || title FROM session_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "legacy-session:kept"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM lineage_identity", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        for table in [
+            "lineage_branches",
+            "lineage_branch_revisions",
+            "lineage_payload_object_refs",
+            "lineage_payload_nested_object_refs",
+            "lineage_sequence_nodes",
+            "lineage_sequence_entries",
+            "lineage_sequence_roots",
+            "lineage_revisions",
+            "lineage_turns",
+            "lineage_commit_receipts",
+            "lineage_request_attempts",
+            "lineage_session_receipts",
+            "lineage_turn_transitions",
+            "lineage_retained_revisions",
+        ] {
+            assert!(table_exists(&conn, table).unwrap(), "missing {table}");
+        }
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn lineage_schema_rejects_malformed_identity_hash_kind_extent_and_ownership() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn, "test").unwrap();
+        let lineage = "a".repeat(32);
+        let other_lineage = "b".repeat(32);
+        let object_hash = crate::object::put_object(
+            &conn,
+            b"payload",
+            crate::compression::ObjectCompression::none(),
+        )
+        .unwrap()
+        .hash()
+        .to_string();
+
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_identity (singleton, lineage_id, created_at)
+                 VALUES (1, 'not-an-id', 0)",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO lineage_identity (singleton, lineage_id, created_at)
+             VALUES (1, ?1, 0)",
+            [&lineage],
+        )
+        .unwrap();
+
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_payload_object_refs (
+                     lineage_id, payload_id, payload_kind, object_hash, byte_count
+                 ) VALUES (?1, ?2, 'unknown', ?3, 7)",
+                rusqlite::params![lineage, "c".repeat(64), object_hash],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_payload_object_refs (
+                     lineage_id, payload_id, payload_kind, object_hash, byte_count
+                 ) VALUES (?1, 'bad', 'history', ?2, 7)",
+                rusqlite::params![lineage, object_hash],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_payload_object_refs (
+                     lineage_id, payload_id, payload_kind, object_hash, byte_count
+                 ) VALUES (?1, ?2, 'history', ?3, 7)",
+                rusqlite::params![other_lineage, "c".repeat(64), object_hash],
+            )
+            .is_err());
+
+        let payload = "d".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_payload_object_refs (
+                 lineage_id, payload_id, payload_kind, object_hash, byte_count
+             ) VALUES (?1, ?2, 'history', ?3, 7)",
+            rusqlite::params![lineage, payload, object_hash],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_payload_nested_object_refs (
+                     lineage_id, payload_id, object_hash, object_role, raw_size
+                 ) VALUES (?1, ?2, ?3, 'unknown', 7)",
+                rusqlite::params![lineage, payload, object_hash],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_payload_nested_object_refs (
+                     lineage_id, payload_id, object_hash, object_role, raw_size
+                 ) VALUES (?1, ?2, ?3, 'metadata', -1)",
+                rusqlite::params![lineage, payload, object_hash],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_nodes (
+                     lineage_id, node_id, sequence_kind, node_kind, level,
+                     entry_count, item_count, byte_count
+                 ) VALUES (?1, ?2, 'history', 'unknown', 0, 1, 1, 7)",
+                rusqlite::params![lineage, "e".repeat(64)],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_nodes (
+                     lineage_id, node_id, sequence_kind, node_kind, level,
+                     entry_count, item_count, byte_count
+                 ) VALUES (?1, ?2, 'history', 'leaf', 0, 1, 1, -1)",
+                rusqlite::params![lineage, "e".repeat(64)],
+            )
+            .is_err());
+
+        let node = "e".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_sequence_nodes (
+                 lineage_id, node_id, sequence_kind, node_kind, level,
+                 entry_count, item_count, byte_count
+             ) VALUES (?1, ?2, 'history', 'leaf', 0, 1, 1, 7)",
+            rusqlite::params![lineage, node],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_entries (
+                     lineage_id, node_id, entry_index, entry_kind, payload_id,
+                     item_count, byte_count, cumulative_item_count, cumulative_byte_count
+                 ) VALUES (?1, ?2, 0, 'item', ?3, 1, 7, 2, 7)",
+                rusqlite::params![lineage, node, payload],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO lineage_sequence_entries (
+                 lineage_id, node_id, entry_index, entry_kind, payload_id,
+                 item_count, byte_count, cumulative_item_count, cumulative_byte_count
+             ) VALUES (?1, ?2, 0, 'item', ?3, 1, 7, 1, 7)",
+            rusqlite::params![lineage, node, payload],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_roots (
+                     lineage_id, root_id, root_kind, root_node_id,
+                     depth, item_count, byte_count
+                 ) VALUES (?1, ?2, 'history', ?3, 2, 1, 7)",
+                rusqlite::params![lineage, "f".repeat(64), node],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn lineage_schema_enforces_sequence_kinds_completeness_and_immutability() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn, "test").unwrap();
+        let lineage = "a".repeat(32);
+        conn.execute(
+            "INSERT INTO lineage_identity (singleton, lineage_id, created_at)
+             VALUES (1, ?1, 0)",
+            [&lineage],
+        )
+        .unwrap();
+        let object_hash = crate::object::put_object(
+            &conn,
+            b"payload",
+            crate::compression::ObjectCompression::none(),
+        )
+        .unwrap()
+        .hash()
+        .to_string();
+        let history_payload = "1".repeat(64);
+        let transcript_payload = "2".repeat(64);
+        for (payload_id, payload_kind) in [
+            (&history_payload, "history"),
+            (&transcript_payload, "transcript"),
+        ] {
+            conn.execute(
+                "INSERT INTO lineage_payload_object_refs (
+                     lineage_id, payload_id, payload_kind, object_hash, byte_count
+                 ) VALUES (?1, ?2, ?3, ?4, 7)",
+                rusqlite::params![lineage, payload_id, payload_kind, object_hash],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO lineage_payload_nested_object_refs (
+                 lineage_id, payload_id, object_hash, object_role, raw_size
+             ) VALUES (?1, ?2, ?3, 'metadata', 7)",
+            rusqlite::params![lineage, transcript_payload, object_hash],
+        )
+        .unwrap();
+
+        let history_node = "3".repeat(64);
+        let transcript_node = "4".repeat(64);
+        for (node_id, sequence_kind, payload_id) in [
+            (&history_node, "history", &history_payload),
+            (&transcript_node, "transcript", &transcript_payload),
+        ] {
+            conn.execute(
+                "INSERT INTO lineage_sequence_nodes (
+                     lineage_id, node_id, sequence_kind, node_kind, level,
+                     entry_count, item_count, byte_count
+                 ) VALUES (?1, ?2, ?3, 'leaf', 0, 1, 1, 7)",
+                rusqlite::params![lineage, node_id, sequence_kind],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO lineage_sequence_entries (
+                     lineage_id, node_id, entry_index, entry_kind, payload_id,
+                     item_count, byte_count, cumulative_item_count, cumulative_byte_count
+                 ) VALUES (?1, ?2, 0, 'item', ?3, 1, 7, 1, 7)",
+                rusqlite::params![lineage, node_id, payload_id],
+            )
+            .unwrap();
+        }
+
+        let mismatched_payload_node = "5".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_sequence_nodes (
+                 lineage_id, node_id, sequence_kind, node_kind, level,
+                 entry_count, item_count, byte_count
+             ) VALUES (?1, ?2, 'history', 'leaf', 0, 1, 1, 7)",
+            rusqlite::params![lineage, mismatched_payload_node],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_entries (
+                     lineage_id, node_id, entry_index, entry_kind, payload_id,
+                     item_count, byte_count, cumulative_item_count, cumulative_byte_count
+                 ) VALUES (?1, ?2, 0, 'item', ?3, 1, 7, 1, 7)",
+                rusqlite::params![lineage, mismatched_payload_node, transcript_payload],
+            )
+            .is_err());
+
+        let leaf_with_child = "6".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_sequence_nodes (
+                 lineage_id, node_id, sequence_kind, node_kind, level,
+                 entry_count, item_count, byte_count
+             ) VALUES (?1, ?2, 'history', 'leaf', 0, 1, 1, 7)",
+            rusqlite::params![lineage, leaf_with_child],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_entries (
+                     lineage_id, node_id, entry_index, entry_kind, child_node_id,
+                     item_count, byte_count, cumulative_item_count, cumulative_byte_count
+                 ) VALUES (?1, ?2, 0, 'child', ?3, 1, 7, 1, 7)",
+                rusqlite::params![lineage, leaf_with_child, history_node],
+            )
+            .is_err());
+
+        let internal_with_item = "7".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_sequence_nodes (
+                 lineage_id, node_id, sequence_kind, node_kind, level,
+                 entry_count, item_count, byte_count
+             ) VALUES (?1, ?2, 'history', 'internal', 1, 1, 1, 7)",
+            rusqlite::params![lineage, internal_with_item],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_entries (
+                     lineage_id, node_id, entry_index, entry_kind, payload_id,
+                     item_count, byte_count, cumulative_item_count, cumulative_byte_count
+                 ) VALUES (?1, ?2, 0, 'item', ?3, 1, 7, 1, 7)",
+                rusqlite::params![lineage, internal_with_item, history_payload],
+            )
+            .is_err());
+
+        let mixed_internal = "8".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_sequence_nodes (
+                 lineage_id, node_id, sequence_kind, node_kind, level,
+                 entry_count, item_count, byte_count
+             ) VALUES (?1, ?2, 'history', 'internal', 1, 1, 1, 7)",
+            rusqlite::params![lineage, mixed_internal],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_entries (
+                     lineage_id, node_id, entry_index, entry_kind, child_node_id,
+                     item_count, byte_count, cumulative_item_count, cumulative_byte_count
+                 ) VALUES (?1, ?2, 0, 'child', ?3, 1, 7, 1, 7)",
+                rusqlite::params![lineage, mixed_internal, transcript_node],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_roots (
+                     lineage_id, root_id, root_kind, root_node_id,
+                     depth, item_count, byte_count
+                 ) VALUES (?1, ?2, 'history', ?3, 2, 1, 7)",
+                rusqlite::params![lineage, "9".repeat(64), mixed_internal],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO lineage_sequence_roots (
+                     lineage_id, root_id, root_kind, root_node_id,
+                     depth, item_count, byte_count
+                 ) VALUES (?1, ?2, 'transcript', ?3, 1, 1, 7)",
+                rusqlite::params![lineage, "a".repeat(64), history_node],
+            )
+            .is_err());
+
+        let history_root = "b".repeat(64);
+        conn.execute(
+            "INSERT INTO lineage_sequence_roots (
+                 lineage_id, root_id, root_kind, root_node_id,
+                 depth, item_count, byte_count
+             ) VALUES (?1, ?2, 'history', ?3, 1, 1, 7)",
+            rusqlite::params![lineage, history_root, history_node],
+        )
+        .unwrap();
+        for update in [
+            "UPDATE lineage_payload_object_refs SET byte_count = byte_count",
+            "UPDATE lineage_payload_nested_object_refs SET raw_size = raw_size",
+            "UPDATE lineage_sequence_nodes SET byte_count = byte_count",
+            "UPDATE lineage_sequence_entries SET byte_count = byte_count",
+            "UPDATE lineage_sequence_roots SET byte_count = byte_count",
+        ] {
+            assert!(
+                conn.execute(update, []).is_err(),
+                "update succeeded: {update}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_validation_requires_lineage_tables_indexes_and_triggers() {
+        let mut missing_table = Connection::open_in_memory().unwrap();
+        migrate(&mut missing_table, "test").unwrap();
+        missing_table
+            .execute_batch("DROP TABLE lineage_commit_receipts")
+            .unwrap();
+        let err = validate_read_only_schema(&missing_table).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing table lineage_commit_receipts"),
+            "{err}"
+        );
+
+        let mut altered_index = Connection::open_in_memory().unwrap();
+        migrate(&mut altered_index, "test").unwrap();
+        altered_index
+            .execute_batch(
+                "DROP INDEX lineage_entries_child_idx;
+                 CREATE INDEX lineage_entries_child_idx
+                    ON lineage_sequence_entries(lineage_id, entry_index);",
+            )
+            .unwrap();
+        let err = validate_read_only_schema(&altered_index).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("definition differs for index lineage_entries_child_idx"),
+            "{err}"
+        );
+
+        let mut altered_trigger = Connection::open_in_memory().unwrap();
+        migrate(&mut altered_trigger, "test").unwrap();
+        altered_trigger
+            .execute_batch(
+                "DROP TRIGGER lineage_sequence_root_insert;
+                 CREATE TRIGGER lineage_sequence_root_insert
+                 BEFORE INSERT ON lineage_sequence_roots
+                 BEGIN SELECT 1; END;",
+            )
+            .unwrap();
+        let err = validate_read_only_schema(&altered_trigger).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("definition differs for trigger lineage_sequence_root_insert"),
+            "{err}"
+        );
+
+        let mut missing_receipt_trigger = Connection::open_in_memory().unwrap();
+        migrate(&mut missing_receipt_trigger, "test").unwrap();
+        missing_receipt_trigger
+            .execute_batch("DROP TRIGGER lineage_commit_receipt_delete")
+            .unwrap();
+        let err = validate_read_only_schema(&missing_receipt_trigger).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing trigger lineage_commit_receipt_delete"),
+            "{err}"
+        );
     }
 
     #[test]

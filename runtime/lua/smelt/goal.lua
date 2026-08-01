@@ -14,8 +14,10 @@ local STATE = {
 
 local state = smelt.state.persistent("goal", { debounce_ms = 200 })
 if type(state.sessions) ~= "table" then state.sessions = {} end
+if type(state.context_notes) ~= "table" then state.context_notes = {} end
 if type(state.next_id) ~= "number" then state.next_id = 0 end
 
+local observed_context_sessions = {}
 local auto_continue = require("smelt.auto_continue")
 local setup_done = false
 
@@ -169,9 +171,19 @@ local function context_text(goal)
 end
 
 local function sync_context_note()
+  local key = session_id()
   local text = context_text(session_goal())
+  if not observed_context_sessions[key] and state.context_notes[key] == text then
+    observed_context_sessions[key] = true
+    return
+  end
+  observed_context_sessions[key] = true
   if smelt.session and smelt.session.context_note then
-    pcall(smelt.session.context_note, CONTEXT_NOTE, text)
+    local ok = pcall(smelt.session.context_note, CONTEXT_NOTE, text)
+    if ok then
+      state.context_notes[key] = text
+      state.save()
+    end
   end
 end
 

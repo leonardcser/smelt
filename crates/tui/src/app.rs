@@ -187,6 +187,9 @@ pub struct TuiAppOptions {
     pub skills: Option<Arc<engine::SkillLoader>>,
     pub mcp: Option<Arc<smelt_core::mcp::McpManager>>,
     pub prompt_inputs: Option<crate::prompt_inputs::PromptInputs>,
+    /// Remembered startup selections applied after generation-zero Lua has
+    /// declared the final model and mode catalogs.
+    pub startup_selections: smelt_core::RuntimeSelections,
     pub session_persistence: SessionPersistence,
 }
 
@@ -199,6 +202,7 @@ impl Default for TuiAppOptions {
             skills: None,
             mcp: None,
             prompt_inputs: None,
+            startup_selections: smelt_core::RuntimeSelections::default(),
             session_persistence: SessionPersistence::persistent(),
         }
     }
@@ -258,7 +262,6 @@ pub struct TuiApp {
     transient_render_requested: bool,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
-    session_load_request: u64,
     managed_models: crate::app::managed_models::ManagedModelState,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
@@ -266,6 +269,7 @@ pub struct TuiApp {
     /// API base endpoint-shape warnings already surfaced this session.
     pub(crate) api_base_normalization_warnings: HashSet<String>,
     startup_auth_error: Option<String>,
+    startup_selections: smelt_core::RuntimeSelections,
     /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
     pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
     pub(crate) app_focus: AppFocus,
@@ -440,12 +444,7 @@ pub enum AppEvent {
         busy_token: u64,
         readiness: smelt_core::mcp::McpReadiness,
     },
-    SessionSchemaMigrationCompleted {
-        request: u64,
-        busy_token: u64,
-        session_id: String,
-        result: smelt_core::session::SessionStoreResult<smelt_store::SessionSchemaMigration>,
-    },
+    TranscriptSearchCompleted(crate::app::transcript_search::TranscriptSearchWorkerResult),
     ShutdownSignal,
 }
 
@@ -953,9 +952,9 @@ pub(crate) struct PendingTool {
 #[derive(Clone)]
 pub(crate) struct PendingHistoryAppend {
     item: protocol::HistoryItem,
-    replace_note_kind: Option<protocol::HistoryNoteKind>,
-    replace_context_name: Option<String>,
-    remove_context: bool,
+    coalescing_note_kind: Option<protocol::HistoryNoteKind>,
+    context_name: Option<String>,
+    clear_context: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -970,9 +969,9 @@ impl PendingHistoryAppend {
             item: protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_mode(
                 mode, text,
             )),
-            replace_note_kind: Some(protocol::HistoryNoteKind::ModeChange),
-            replace_context_name: None,
-            remove_context: false,
+            coalescing_note_kind: Some(protocol::HistoryNoteKind::ModeChange),
+            context_name: None,
+            clear_context: false,
         }
     }
 
@@ -982,30 +981,30 @@ impl PendingHistoryAppend {
                 name.clone(),
                 text,
             )),
-            replace_note_kind: Some(protocol::HistoryNoteKind::Context),
-            replace_context_name: Some(name),
-            remove_context: false,
+            coalescing_note_kind: Some(protocol::HistoryNoteKind::Context),
+            context_name: Some(name),
+            clear_context: false,
         }
     }
 
-    pub(crate) fn remove_context(name: String) -> Self {
+    pub(crate) fn clear_context(name: String) -> Self {
         Self {
             item: protocol::HistoryItem::note(protocol::HistoryNote::named_context(
                 name.clone(),
                 String::new(),
             )),
-            replace_note_kind: Some(protocol::HistoryNoteKind::Context),
-            replace_context_name: Some(name),
-            remove_context: true,
+            coalescing_note_kind: Some(protocol::HistoryNoteKind::Context),
+            context_name: Some(name),
+            clear_context: true,
         }
     }
 
     pub(crate) fn process_status(note: protocol::HistoryNote) -> Self {
         Self {
             item: protocol::HistoryItem::note(note),
-            replace_note_kind: None,
-            replace_context_name: None,
-            remove_context: false,
+            coalescing_note_kind: None,
+            context_name: None,
+            clear_context: false,
         }
     }
 
@@ -1023,17 +1022,21 @@ impl PendingHistoryAppend {
         )
     }
 
-    pub(crate) fn replacement_note_kind(&self) -> Option<protocol::HistoryNoteKind> {
-        self.replace_note_kind
+    pub(crate) fn coalescing_note_kind(&self) -> Option<protocol::HistoryNoteKind> {
+        self.coalescing_note_kind
     }
 
-    fn same_replacement_target(&self, other: &Self) -> bool {
-        match (&self.replace_context_name, &other.replace_context_name) {
+    pub(crate) fn context_name(&self) -> Option<&str> {
+        self.context_name.as_deref()
+    }
+
+    fn same_coalescing_target(&self, other: &Self) -> bool {
+        match (&self.context_name, &other.context_name) {
             (Some(a), Some(b)) => a == b,
             (Some(_), None) | (None, Some(_)) => false,
             (None, None) => {
-                self.replace_note_kind.is_some()
-                    && self.replace_note_kind == other.replace_note_kind
+                self.coalescing_note_kind.is_some()
+                    && self.coalescing_note_kind == other.coalescing_note_kind
             }
         }
     }
@@ -1043,7 +1046,7 @@ impl PendingHistoryAppend {
     }
 
     pub(crate) fn lifecycle(&self) -> PendingHistoryLifecycle {
-        if self.replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
+        if self.coalescing_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
             PendingHistoryLifecycle::SessionScoped
         } else {
             PendingHistoryLifecycle::TurnScoped
@@ -1054,7 +1057,7 @@ impl PendingHistoryAppend {
         &self,
         mode_base: Option<protocol::AgentMode>,
     ) -> protocol::HistoryAppend {
-        match self.replace_note_kind {
+        match self.coalescing_note_kind {
             Some(protocol::HistoryNoteKind::ModeChange) => {
                 let note = self.item.as_note().expect("mode history appends are notes");
                 let mode = note.mode().expect("mode history appends require a mode");
@@ -1073,13 +1076,13 @@ impl PendingHistoryAppend {
             }
             Some(protocol::HistoryNoteKind::Context) => {
                 let name = self
-                    .replace_context_name
+                    .context_name
                     .clone()
                     .unwrap_or_else(|| protocol::DEFAULT_CONTEXT_NOTE_NAME.to_string());
-                if self.remove_context {
-                    protocol::HistoryAppend::remove_context_note(name)
+                if self.clear_context {
+                    protocol::HistoryAppend::clear_context(name)
                 } else {
-                    protocol::HistoryAppend::replace_context_note(self.item.clone(), name)
+                    protocol::HistoryAppend::set_context(self.item.clone(), name)
                 }
             }
             Some(kind) => protocol::HistoryAppend::replace_note_kind(self.item.clone(), kind),
@@ -1176,20 +1179,27 @@ impl TuiApp {
         self.prompt_work_state().is_busy()
     }
 
-    pub(crate) fn has_visible_session_history(&self) -> bool {
+    fn visible_session_history(&self) -> Result<bool, String> {
         if let Some(live) = self.conversation.live_session() {
-            return live
-                .any_transcript_visible_before(live.history_len())
-                .unwrap_or_else(|_err| {
-                    smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
-                    false
-                });
+            return live.any_transcript_visible_before(live.history_len());
         }
-        self.conversation
+        Ok(self
+            .conversation
             .session()
             .history
             .iter()
-            .any(protocol::HistoryItem::is_transcript_visible)
+            .any(protocol::HistoryItem::is_transcript_visible))
+    }
+
+    pub(crate) fn has_visible_session_history(&mut self) -> bool {
+        match self.visible_session_history() {
+            Ok(visible) => visible,
+            Err(err) => {
+                smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
+                self.notify_error_sticky(format!("failed to read session history: {err}"));
+                false
+            }
+        }
     }
 
     pub(crate) fn ephemeral(&self) -> bool {
@@ -1208,7 +1218,7 @@ impl TuiApp {
         self.conversation.publish_shared_state();
     }
 
-    pub(crate) fn can_continue_turn(&self) -> bool {
+    pub(crate) fn can_continue_turn(&mut self) -> bool {
         self.has_visible_session_history()
     }
 
@@ -1278,18 +1288,31 @@ impl TuiApp {
         self.core.signals.set_dyn(name, std::rc::Rc::new(next));
     }
 
-    pub(crate) fn mode_history_base(&self) -> protocol::AgentMode {
+    pub(crate) fn mode_history_base(&self) -> Result<protocol::AgentMode, String> {
         let len = self.session_history_len();
-        let last_is_mode_change = self
-            .session_history_range(len.saturating_sub(1)..len)
-            .last()
-            .is_some_and(|item| {
-                item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
-                    && item
-                        .as_note()
-                        .and_then(protocol::HistoryNote::mode)
-                        .is_some()
-            });
+        let last_is_mode_change = if let Some(live) = self.conversation.live_session() {
+            live.history_range(len.saturating_sub(1)..len)?
+                .last()
+                .is_some_and(|item| {
+                    item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+                        && item
+                            .as_note()
+                            .and_then(protocol::HistoryNote::mode)
+                            .is_some()
+                })
+        } else {
+            self.conversation
+                .session()
+                .history
+                .last()
+                .is_some_and(|item| {
+                    item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+                        && item
+                            .as_note()
+                            .and_then(protocol::HistoryNote::mode)
+                            .is_some()
+                })
+        };
         let end = if last_is_mode_change {
             len.saturating_sub(1)
         } else {
@@ -1298,7 +1321,10 @@ impl TuiApp {
         self.mode_at_history_boundary(end)
     }
 
-    pub(crate) fn mode_at_history_boundary(&self, hist_idx: usize) -> protocol::AgentMode {
+    pub(crate) fn mode_at_history_boundary(
+        &self,
+        hist_idx: usize,
+    ) -> Result<protocol::AgentMode, String> {
         let fallback = self
             .conversation
             .session()
@@ -1306,16 +1332,12 @@ impl TuiApp {
             .as_deref()
             .unwrap_or("normal");
         let mode = if let Some(live) = self.conversation.live_session() {
-            live.effective_mode_at(hist_idx, fallback)
-                .unwrap_or_else(|_err| {
-                    smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
-                    fallback.to_string()
-                })
+            live.effective_mode_at(hist_idx, fallback)?
         } else {
             protocol::effective_mode_at(&self.conversation.session().history, hist_idx, fallback)
                 .to_string()
         };
-        protocol::AgentMode::parse(&mode).unwrap_or_else(protocol::AgentMode::normal)
+        Ok(protocol::AgentMode::parse(&mode).unwrap_or_else(protocol::AgentMode::normal))
     }
 
     pub(crate) fn current_context_note_text(&self) -> String {
@@ -1350,59 +1372,97 @@ impl TuiApp {
     pub(crate) fn set_context_note(&mut self, name: String, text: Option<String>) {
         let append = match text {
             Some(text) => PendingHistoryAppend::context(name, text),
-            None => PendingHistoryAppend::remove_context(name),
+            None => PendingHistoryAppend::clear_context(name),
         };
-        if self.agent_is_running() || self.has_visible_session_history() {
-            self.queue_history_append(append);
+        let has_visible_history = if self.agent_is_running() {
+            true
         } else {
-            self.conversation.replace_or_push_history_append(append);
+            match self.visible_session_history() {
+                Ok(visible) => visible,
+                Err(err) => {
+                    smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
+                    self.notify_error_sticky(format!("failed to read session history: {err}"));
+                    return;
+                }
+            }
+        };
+        if has_visible_history {
+            self.queue_history_append(append);
+        } else if let Err(err) = self.conversation.replace_or_push_history_append(append) {
+            smelt_perf::perf::record_value("live_session:history_append_plan_error", 1);
+            self.notify_error_sticky(format!("failed to update session context: {err}"));
         }
     }
 
-    pub(crate) fn mode_append_base(&self) -> protocol::AgentMode {
+    pub(crate) fn mode_append_base(&self) -> Result<protocol::AgentMode, String> {
         if self.agent_is_running() {
-            self.conversation.applied_mode().clone()
+            Ok(self.conversation.applied_mode().clone())
         } else {
             self.mode_history_base()
         }
     }
 
     pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
-        let mode_base = append.mode().map(|_| self.mode_append_base());
+        let mode_base = match append.mode() {
+            Some(_) => match self.mode_append_base() {
+                Ok(mode) => Some(mode),
+                Err(err) => {
+                    smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
+                    self.notify_error_sticky(format!("failed to read session mode: {err}"));
+                    return;
+                }
+            },
+            None => None,
+        };
         let history_append = append.history_append(mode_base);
-        let replace_note_kind = history_append.replacement_note_kind();
+        let coalescing_note_kind = history_append.coalescing_note_kind();
 
         if self.agent_is_running() {
-            let pending_append = if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange)
-            {
-                PendingHistoryAppend {
-                    item: history_append.item.clone(),
-                    replace_note_kind: append.replace_note_kind,
-                    replace_context_name: None,
-                    remove_context: false,
-                }
-            } else {
-                append.clone()
-            };
-            self.conversation.queue_history_append(
+            let pending_append =
+                if coalescing_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
+                    PendingHistoryAppend {
+                        item: history_append.item.clone(),
+                        coalescing_note_kind: append.coalescing_note_kind,
+                        context_name: None,
+                        clear_context: false,
+                    }
+                } else {
+                    append.clone()
+                };
+            if let Err(err) = self.conversation.queue_history_append(
                 pending_append,
                 match &history_append.policy {
                     protocol::HistoryAppendPolicy::ModeChange { base } => Some(base),
                     _ => None,
                 },
-            );
+            ) {
+                smelt_perf::perf::record_value("live_session:history_append_plan_error", 1);
+                self.notify_error_sticky(format!("failed to queue session history: {err}"));
+                return;
+            }
             self.core
                 .engine
                 .send(protocol::UiCommand::AppendHistoryItem {
                     append: history_append,
                 });
-        } else if self.has_visible_session_history() {
-            let result = self.apply_history_append_to_history(&history_append);
-            if let Some(block) = append.transcript_block(&self.lua) {
-                self.commit_history_append_block(block, replace_note_kind, result);
+            return;
+        }
+
+        match self.visible_session_history() {
+            Ok(true) => {
+                let result = self.apply_history_append_to_history(&history_append);
+                if let Some(block) = append.transcript_block(&self.lua) {
+                    self.commit_history_append_block(block, coalescing_note_kind, result);
+                }
             }
-        } else if replace_note_kind.is_some() {
-            self.conversation.remove_matching_history_append(&append);
+            Ok(false) if coalescing_note_kind.is_some() => {
+                self.conversation.remove_matching_history_append(&append);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
+                self.notify_error_sticky(format!("failed to read session history: {err}"));
+            }
         }
     }
 
@@ -1559,6 +1619,7 @@ impl TuiApp {
         lua.core_shared().set_clock(Arc::clone(&clock));
         let TuiAppOptions {
             startup_auth_error,
+            startup_selections,
             app_events,
             managed_models,
             skills,
@@ -1783,11 +1844,11 @@ impl TuiApp {
             transient_render_requested: false,
             last_width: term_w,
             last_height: term_h,
-            session_load_request: 0,
             managed_models,
             busy_stack: BusyStack::default(),
             api_base_normalization_warnings: HashSet::new(),
             startup_auth_error,
+            startup_selections,
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
             prompt_inputs,
@@ -2529,21 +2590,8 @@ impl TuiApp {
                     ));
                 }
             }
-            AppEvent::SessionSchemaMigrationCompleted {
-                request,
-                busy_token,
-                session_id,
-                result,
-            } => {
-                self.busy_stack.release(busy_token);
-                if request == self.session_load_request {
-                    match result {
-                        Ok(_) => self.load_current_session_by_id(&session_id),
-                        Err(error) => {
-                            self.notify_error_sticky(format!("failed to upgrade session: {error}"))
-                        }
-                    }
-                }
+            AppEvent::TranscriptSearchCompleted(result) => {
+                self.handle_transcript_search_worker_result(result)
             }
             AppEvent::ShutdownSignal => self.pending_quit = true,
         }
@@ -2874,29 +2922,88 @@ impl TuiApp {
         let _ = self.core.workspace_files.warmup(self.workspace.cwd_path());
     }
 
-    fn render_normal_after_startup_work(&mut self, workspace_warmup_pending: &mut bool) {
+    fn render_normal_after_startup_work(
+        &mut self,
+        workspace_warmup_pending: &mut bool,
+        pre_first_frame_startup: &mut Option<smelt_perf::perf::Guard>,
+        first_frame_pending: &mut bool,
+    ) {
+        if *first_frame_pending {
+            drop(pre_first_frame_startup.take());
+        }
+        let first_render_startup = if *first_frame_pending {
+            smelt_perf::perf::begin("startup:first_render")
+        } else {
+            None
+        };
         self.render_normal();
+        if std::mem::take(first_frame_pending) {
+            smelt_perf::perf::record_value(
+                "startup:first_frame_at_us",
+                smelt_perf::perf::timestamp_us(),
+            );
+        }
+        drop(first_render_startup);
         if std::mem::take(workspace_warmup_pending) {
             self.warmup_workspace_files();
         }
     }
 
+    pub(crate) fn finalize_graceful_shutdown(&mut self) -> Result<(), String> {
+        if self.conversation.is_active() {
+            self.finish_turn(crate::app::TurnEnd::Cancelled);
+        }
+        self.core
+            .signals
+            .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
+        self.drain_signals_pending();
+        self.stop_background_processes();
+        self.save_session_and_flush();
+        let unflushed = self.session_document_has_unflushed_work().then(|| {
+            format!(
+                "session {} still has unflushed changes",
+                self.conversation.session().id
+            )
+        });
+        let shutdown = self.shutdown_persist().err();
+        match (unflushed, shutdown) {
+            (Some(unflushed), Some(shutdown)) => Err(format!("{unflushed}; {shutdown}")),
+            (Some(error), None) | (None, Some(error)) => Err(error),
+            (None, None) => Ok(()),
+        }
+    }
+
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
-        self.platform.start(http_client);
-        self.submit_managed_model_refreshes();
-        self.refresh_context_window();
+        let platform_startup = smelt_perf::perf::begin("startup:platform");
         crate::theme::detect_background(self.ui.theme_mut());
-        // Install the baked default theme so the first frame renders with
-        // real colors before Lua's `theme.use(...)` runs during bootstrap.
-        // Lua-side colorschemes overwrite this via `smelt.theme.apply`.
+        // Install the background-aware baked theme before Lua loads so a
+        // configured colorscheme remains authoritative for the first frame.
         let is_light = self.ui.theme().is_light();
         let baked = crate::theme::default_baked_with_background(is_light);
         self.install_theme(baked);
+
         // PlatformRuntime owns the terminal envelope and restores it on normal
-        // shutdown, early return, or panic.
+        // shutdown, early return, or panic. Lua title effects are committed only
+        // after the platform has claimed the terminal.
+        self.platform.start(http_client);
+        drop(platform_startup);
+
+        let lua_launch_startup = smelt_perf::perf::begin("startup:lua_launch");
+        let lua_launch_error = self.finish_lua_launch(true);
+        drop(lua_launch_startup);
+        if let Some(error) = lua_launch_error {
+            self.notify_error_sticky(format!("lua init: {error}"));
+        }
+
+        let mut pre_first_frame_startup = smelt_perf::perf::begin("startup:pre_first_frame");
+        let mut first_frame_pending = true;
+        self.submit_managed_model_refreshes();
+        self.refresh_context_window();
 
         if !self.session_is_empty() {
-            self.restore_screen();
+            if !self.conversation.has_live_session() {
+                self.restore_screen();
+            }
             if let Some(ref slug) = self.conversation.session().slug {
                 self.set_task_label(slug.clone());
             }
@@ -2939,21 +3046,6 @@ impl TuiApp {
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
                 .expect("install SIGWINCH listener");
-
-        // Cold-start the Lua context through the same pipeline `/reload`
-        // uses. `main` already ran a pre-TUI plugin pass to extract
-        // engine config - that pass couldn't touch `smelt.win`,
-        // `smelt.overlay`, `smelt.paint`, `smelt.signal.subscribe(...)`, etc.
-        // because no frontend host was lent to Lua yet. Re-running
-        // here inside a scoped frontend entry makes the host live for module
-        // bodies on every Lua-context init (cold start AND `/reload`),
-        // so plain `if persist().is_open then open() end` at module
-        // top works in both. `lifecycle.on("ready")` hooks drain at
-        // the end with `ctx.kind = "launch"`.
-        let load_err = self.bring_up_lua("launch", true);
-        if let Some(err) = load_err {
-            self.notify_error_sticky(format!("lua init: {err}"));
-        }
 
         // Workspace indexing and auto-reload watcher setup are kicked off
         // after the first frame so filesystem subscription and snapshot work
@@ -3032,8 +3124,13 @@ impl TuiApp {
                 self.apply_context_window_update(update);
             }
 
-            if self.drain_idle_work() {
-                self.render_normal_after_startup_work(&mut workspace_warmup_pending);
+            let drained_idle_work = self.drain_idle_work();
+            if drained_idle_work {
+                self.render_normal_after_startup_work(
+                    &mut workspace_warmup_pending,
+                    &mut pre_first_frame_startup,
+                    &mut first_frame_pending,
+                );
                 continue 'main;
             }
 
@@ -3043,8 +3140,13 @@ impl TuiApp {
                 self.handle_process_completed(completion.id, completion.exit_code);
             }
 
-            if self.drain_idle_work() {
-                self.render_normal_after_startup_work(&mut workspace_warmup_pending);
+            let drained_idle_work = self.drain_idle_work();
+            if drained_idle_work {
+                self.render_normal_after_startup_work(
+                    &mut workspace_warmup_pending,
+                    &mut pre_first_frame_startup,
+                    &mut first_frame_pending,
+                );
                 continue 'main;
             }
 
@@ -3089,7 +3191,11 @@ impl TuiApp {
                 }
             }
 
-            self.render_normal_after_startup_work(&mut workspace_warmup_pending);
+            self.render_normal_after_startup_work(
+                &mut workspace_warmup_pending,
+                &mut pre_first_frame_startup,
+                &mut first_frame_pending,
+            );
             if self.auto_reload.start_pending {
                 self.auto_reload.start_setup();
             }
@@ -3333,27 +3439,7 @@ impl TuiApp {
             }
         }
 
-        if self.conversation.is_active() {
-            self.finish_turn(crate::app::TurnEnd::Cancelled);
-        }
-        self.core
-            .signals
-            .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
-        self.drain_signals_pending();
-        self.stop_background_processes();
-        self.save_session_and_flush();
-        let unflushed = self.session_document_has_unflushed_work().then(|| {
-            format!(
-                "session {} still has unflushed changes",
-                self.conversation.session().id
-            )
-        });
-        let shutdown = self.shutdown_persist().err();
-        let persistence_error = match (unflushed, shutdown) {
-            (Some(unflushed), Some(shutdown)) => Some(format!("{unflushed}; {shutdown}")),
-            (Some(error), None) | (None, Some(error)) => Some(error),
-            (None, None) => None,
-        };
+        let persistence_error = self.finalize_graceful_shutdown().err();
 
         // Stop the stdin reader before releasing terminal modes so no background
         // thread can keep consuming bytes after the TUI gives the terminal back.

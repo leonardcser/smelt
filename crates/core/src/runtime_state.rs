@@ -250,11 +250,18 @@ fn dedup_preserving_order<T: PartialEq>(values: Vec<T>) -> Vec<T> {
 }
 
 fn resolve_mode_cycle(inputs: &RuntimeInputs<'_>) -> Vec<AgentMode> {
-    let cycle = inputs
+    let fixed_cycle = inputs.startup.mode_cycle.is_some();
+    let mut cycle = inputs
         .startup
         .mode_cycle
         .clone()
         .unwrap_or_else(|| inputs.registered_modes.to_vec());
+    if !inputs.registered_modes.is_empty() {
+        cycle.retain(|mode| inputs.registered_modes.contains(mode));
+        if fixed_cycle && cycle.is_empty() {
+            cycle = inputs.registered_modes.to_vec();
+        }
+    }
     if cycle.is_empty() {
         AgentMode::default_cycle()
     } else {

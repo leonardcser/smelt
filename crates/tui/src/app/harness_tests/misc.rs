@@ -528,20 +528,27 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
     let preview =
         crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir.clone(), 59, 22)
             .expect("load compact preview before corruption");
-    let db_path = session_dir.join("session.db");
-    let db = smelt_store::SessionDb::open(db_path).expect("open preview fixture database");
+    let lineage = smelt_store::LineageSessionReader::open_existing(
+        session_dir.parent().expect("sessions root"),
+        &session_id,
+    )
+    .expect("open canonical preview fixture");
+    let db = smelt_store::SessionDb::open(lineage.database_path())
+        .expect("open canonical preview fixture database");
     db.connection()
         .execute(
-            "UPDATE transcript_blocks
-             SET block_json = replace(
-                 block_json,
-                 'corrupt preview fixture 79',
-                 'tampered preview fixture 79'
-             )
-             WHERE record_idx = (SELECT MAX(record_idx) FROM transcript_blocks)",
+            "UPDATE objects
+             SET bytes = zeroblob(length(bytes))
+             WHERE hash = (
+                 SELECT object_hash
+                 FROM lineage_payload_object_refs
+                 WHERE payload_kind = 'transcript'
+                 ORDER BY rowid DESC
+                 LIMIT 1
+             )",
             [],
         )
-        .expect("corrupt preview fixture body");
+        .expect("corrupt canonical preview fixture body");
     drop(db);
 
     let mut app = TestApp::builder().build_without_test_home_reset(&guard);

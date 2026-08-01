@@ -78,6 +78,16 @@ impl ConversationRuntime {
         &self.session
     }
 
+    pub(crate) fn install_startup_runtime(&mut self, runtime: &smelt_core::RuntimeState) {
+        self.session.mode = Some(runtime.mode.as_str().to_string());
+        self.session.reasoning_effort = Some(runtime.reasoning_effort);
+        self.session.model = runtime.active_model().map(|model| model.key.clone());
+        self.session.fast_mode = Some(runtime.settings.fast_mode);
+        self.turn.set_applied_mode(runtime.mode.clone());
+        self.turn
+            .set_applied_reasoning_effort(runtime.reasoning_effort);
+    }
+
     pub(crate) fn transcript(&self) -> &super::transcript::TranscriptDocument {
         &self.document.transcript
     }
@@ -665,42 +675,45 @@ impl ConversationRuntime {
         self.document.apply_turn_state(&mut self.session, mutation)
     }
 
+    fn plan_history_append(
+        &self,
+        append: &protocol::HistoryAppend,
+    ) -> Result<protocol::HistoryAppendPlan, String> {
+        if let Some(live) = self.document.live_session.as_ref() {
+            live.plan_history_append(append)
+        } else {
+            protocol::plan_history_append(self.session.history.as_slice(), append)
+                .map_err(|never| match never {})
+        }
+    }
+
     pub(crate) fn apply_history_append(
         &mut self,
         append: &protocol::HistoryAppend,
         identity: smelt_core::session::ContextTokenIdentity,
-    ) -> protocol::HistoryAppendResult {
-        if let Some(live) = self.document.live_session.as_ref() {
-            let old_len = live.history_len();
-            if matches!(append.policy, protocol::HistoryAppendPolicy::Append) {
+    ) -> Result<protocol::HistoryAppendResult, String> {
+        use protocol::HistoryAppendPlan;
+
+        let plan = self.plan_history_append(append)?;
+        let result = match plan {
+            HistoryAppendPlan::Unchanged => protocol::HistoryAppendResult::Unchanged,
+            HistoryAppendPlan::Push => {
                 self.append_history_item(append.item.clone());
-                return protocol::HistoryAppendResult::Pushed;
+                protocol::HistoryAppendResult::Pushed
             }
-
-            let tail_start = old_len.saturating_sub(128);
-            let mut tail = self.history_range(tail_start..old_len);
-            let old_tail = tail.clone();
-            let result = protocol::apply_history_append(&mut tail, append);
-            if result != protocol::HistoryAppendResult::Unchanged {
-                let dirty_offset = old_tail
-                    .iter()
-                    .zip(tail.iter())
-                    .take_while(|(left, right)| left == right)
-                    .count();
-                self.truncate_history(tail_start.saturating_add(dirty_offset), identity.clone());
-                for item in tail.into_iter().skip(dirty_offset) {
-                    self.append_history_item(item);
+            HistoryAppendPlan::ReplaceLast | HistoryAppendPlan::RemoveLast => {
+                let index = self
+                    .history_len()
+                    .checked_sub(1)
+                    .ok_or_else(|| "tail history mutation requires an existing item".to_string())?;
+                self.truncate_history(index, identity);
+                if plan == HistoryAppendPlan::ReplaceLast {
+                    self.append_history_item(append.item.clone());
                 }
+                plan.result()
             }
-            return result;
-        }
-
-        self.apply_history_mutation(super::session_document::HistoryMutation::ApplyAppend {
-            append: append.clone(),
-            identity,
-        })
-        .history_append_result
-        .unwrap_or(protocol::HistoryAppendResult::Unchanged)
+        };
+        Ok(result)
     }
 
     pub(crate) fn append_history_item(&mut self, item: protocol::HistoryItem) -> usize {
@@ -1210,20 +1223,50 @@ impl ConversationRuntime {
         self.turn.refresh_active_permissions(permissions);
     }
 
+    fn coalesce_context_history_append(
+        &mut self,
+        append: &super::PendingHistoryAppend,
+    ) -> Result<bool, String> {
+        if append.context_name().is_none() {
+            return Ok(false);
+        }
+
+        self.turn.remove_matching_history_append(append);
+        let history_append = append.history_append(None);
+        let plan = self.plan_history_append(&history_append)?;
+        debug_assert!(matches!(
+            plan,
+            protocol::HistoryAppendPlan::Unchanged | protocol::HistoryAppendPlan::Push
+        ));
+        if plan == protocol::HistoryAppendPlan::Push {
+            self.turn.replace_or_push_history_append(append.clone());
+        }
+        Ok(true)
+    }
+
     pub(crate) fn queue_history_append(
         &mut self,
         append: super::PendingHistoryAppend,
         mode_base: Option<&protocol::AgentMode>,
-    ) {
-        self.turn.queue_history_append(append, mode_base);
+    ) -> Result<(), String> {
+        if !self.coalesce_context_history_append(&append)? {
+            self.turn.queue_history_append(append, mode_base);
+        }
+        Ok(())
     }
 
     pub(crate) fn pending_context_note(&self, name: &str) -> Option<Option<&str>> {
         self.turn.pending_context_note(name)
     }
 
-    pub(crate) fn replace_or_push_history_append(&mut self, append: super::PendingHistoryAppend) {
-        self.turn.replace_or_push_history_append(append);
+    pub(crate) fn replace_or_push_history_append(
+        &mut self,
+        append: super::PendingHistoryAppend,
+    ) -> Result<(), String> {
+        if !self.coalesce_context_history_append(&append)? {
+            self.turn.replace_or_push_history_append(append);
+        }
+        Ok(())
     }
 
     pub(crate) fn remove_matching_history_append(&mut self, append: &super::PendingHistoryAppend) {
@@ -1578,8 +1621,15 @@ impl ConversationRuntime {
                     Vec::new()
                 });
         }
-        let start = self.session.history.len().saturating_sub(max_items);
-        self.session.history[start..].to_vec()
+        smelt_core::session_runtime::bounded_history_tail(
+            &self.session.history,
+            max_items,
+            max_bytes,
+        )
+        .unwrap_or_else(|_err| {
+            smelt_perf::perf::record_value("session:history_tail_error", 1);
+            Vec::new()
+        })
     }
 
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
@@ -1651,6 +1701,45 @@ impl ConversationRuntime {
 
     pub(crate) fn has_persistence(&self) -> bool {
         self.persistence.is_some()
+    }
+
+    pub(crate) fn request_search_projection(&self) -> bool {
+        self.persistence
+            .as_ref()
+            .is_some_and(crate::persist::SessionPersistence::request_search_projection)
+    }
+
+    pub(crate) fn delete_branch_through_persistence(
+        &self,
+        target: &smelt_core::session_id::SessionId,
+    ) -> Result<bool, String> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Ok(false);
+        };
+        let active_id = smelt_core::session_id::SessionId::parse(&self.session.id)
+            .map_err(|error| error.to_string())?;
+        let active_dir = self.sessions.session_dir(&active_id);
+        let root = active_dir
+            .parent()
+            .ok_or_else(|| "session directory has no storage root".to_string())?;
+        let active = smelt_store::LineageSessionReader::try_open_existing(root, &self.session.id)
+            .map_err(|error| error.to_string())?;
+        let target_reader =
+            smelt_store::LineageSessionReader::try_open_existing(root, target.as_str())
+                .map_err(|error| error.to_string())?;
+        let (Some(active), Some(target_reader)) = (active, target_reader) else {
+            return Ok(false);
+        };
+        if active.lineage_id() != target_reader.lineage_id() {
+            return Ok(false);
+        }
+        persistence
+            .delete_branch(
+                target.clone(),
+                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+            )
+            .map_err(|cause| cause.message)?;
+        Ok(true)
     }
 
     pub(crate) fn has_unflushed_work(&self) -> bool {

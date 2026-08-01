@@ -227,7 +227,7 @@ impl SessionReader {
     pub fn load_full_session(&self) -> Result<Option<FullSession>> {
         let mut session = self.db.load_full_session()?;
         if let Some(session) = &mut session {
-            self.hydrate_legacy_attachments(&mut session.history)?;
+            let _ = self.hydrate_legacy_attachments(&mut session.history)?;
         }
         Ok(session)
     }
@@ -352,12 +352,53 @@ impl SessionReader {
         range: std::ops::Range<usize>,
     ) -> Result<Vec<protocol::HistoryItem>> {
         let mut items = self.db.read_history_items_range(range)?;
-        self.hydrate_legacy_attachments(&mut items)?;
+        let _ = self.hydrate_legacy_attachments(&mut items)?;
+        Ok(items)
+    }
+
+    pub fn read_history_items_tail(
+        &self,
+        end: usize,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<Vec<protocol::HistoryItem>> {
+        let mut items = self.db.read_history_items_tail(end, max_items, max_bytes)?;
+        let hydrated_legacy = self.hydrate_legacy_attachments(&mut items)?;
+        if let (true, Some(max_bytes)) = (hydrated_legacy, max_bytes) {
+            trim_history_tail_to_bytes(&mut items, max_bytes)?;
+        }
         Ok(items)
     }
 
     pub fn legacy_attachment_references(&self, history_end: usize) -> Result<Vec<String>> {
         self.db.legacy_attachment_references(history_end)
+    }
+
+    pub fn history_any_transcript_visible_before(&self, end: usize) -> Result<bool> {
+        self.db.history_any_transcript_visible_before(end)
+    }
+
+    pub fn history_note_projection_at(
+        &self,
+        index: usize,
+    ) -> Result<Option<protocol::HistoryNoteProjection>> {
+        self.db.history_note_projection_at(index)
+    }
+
+    pub fn history_last_context_note_index_before(
+        &self,
+        end: usize,
+        name: &str,
+    ) -> Result<Option<usize>> {
+        self.db.history_last_context_note_index_before(end, name)
+    }
+
+    pub fn history_mode_before(&self, end: usize) -> Result<Option<String>> {
+        self.db.history_mode_before(end)
+    }
+
+    pub fn history_base_mode_range(&self, range: std::ops::Range<usize>) -> Result<Option<String>> {
+        self.db.history_base_mode_range(range)
     }
 
     pub fn legacy_attachment_blob(&self, reference: &str) -> Result<LegacyAttachmentBlob> {
@@ -415,23 +456,101 @@ impl SessionReader {
         self.db.write_search_blob(writer)
     }
 
-    fn hydrate_legacy_attachments(&self, items: &mut [protocol::HistoryItem]) -> Result<()> {
+    fn hydrate_legacy_attachments(&self, items: &mut [protocol::HistoryItem]) -> Result<bool> {
         let session_dir = self
             .db
             .path()
             .parent()
             .ok_or_else(|| StoreError::Integrity("session database has no parent".into()))?;
+        let mut hydrated = false;
         for item in items {
+            if !history_item_has_legacy_attachment(item) {
+                continue;
+            }
             let mut value = serde_json::to_value(&*item)?;
             hydrate_legacy_attachment_value(session_dir, &mut value)?;
             *item = serde_json::from_value(value)?;
+            hydrated = true;
         }
-        Ok(())
+        Ok(hydrated)
     }
+}
+
+fn trim_history_tail_to_bytes(
+    items: &mut Vec<protocol::HistoryItem>,
+    max_bytes: usize,
+) -> Result<()> {
+    let mut start = items.len();
+    let mut budget = protocol::HistoryTailBudget::new(items.len(), Some(max_bytes));
+    for (index, item) in items.iter().enumerate().rev() {
+        if !budget.try_prepend(item)? {
+            break;
+        }
+        start = index;
+    }
+    if start > 0 {
+        *items = items.split_off(start);
+    }
+    Ok(())
 }
 
 // COMPAT(legacy-attachment-blobs): hydrate pre-object-store image references from
 // private external blob files until those sessions have been explicitly migrated.
+fn history_item_has_legacy_attachment(item: &protocol::HistoryItem) -> bool {
+    fn content_has_legacy_attachment(content: &protocol::Content) -> bool {
+        match content {
+            protocol::Content::Text(_) => false,
+            protocol::Content::Parts(parts) => parts.iter().any(|part| {
+                matches!(
+                    part,
+                    protocol::ContentPart::ImageUrl { url, .. } if url.starts_with("blob:")
+                )
+            }),
+        }
+    }
+
+    fn value_has_legacy_attachment(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                let is_legacy_image = map.get("type").and_then(serde_json::Value::as_str)
+                    == Some("image_url")
+                    && map
+                        .get("image_url")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|image| image.get("url"))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|url| url.starts_with("blob:"));
+                is_legacy_image || map.values().any(value_has_legacy_attachment)
+            }
+            serde_json::Value::Array(values) => values.iter().any(value_has_legacy_attachment),
+            _ => false,
+        }
+    }
+
+    match item {
+        protocol::HistoryItem::System { content } | protocol::HistoryItem::User { content, .. } => {
+            content_has_legacy_attachment(content)
+        }
+        protocol::HistoryItem::Assistant(step) => {
+            step.content
+                .as_ref()
+                .is_some_and(content_has_legacy_attachment)
+                || step
+                    .reasoning_blocks
+                    .iter()
+                    .any(|block| value_has_legacy_attachment(&block.data))
+                || step.invocations.iter().any(|invocation| {
+                    invocation
+                        .result
+                        .metadata
+                        .as_ref()
+                        .is_some_and(value_has_legacy_attachment)
+                })
+        }
+        protocol::HistoryItem::Note(_) => false,
+    }
+}
+
 fn hydrate_legacy_attachment_value(
     session_dir: &Path,
     value: &mut serde_json::Value,
@@ -1423,29 +1542,6 @@ impl SessionMaintenance {
         Ok(())
     }
 
-    pub fn import_prefix_from(
-        &mut self,
-        source: &SessionReader,
-        identity: &SessionIdentity,
-        metadata: &SessionMetadata,
-        history_len: usize,
-    ) -> Result<SaveReceipt> {
-        if identity.id != self.writer.session_id() {
-            return Err(StoreError::Integrity(format!(
-                "fork session id mismatch: expected {}, got {}",
-                self.writer.session_id(),
-                identity.id
-            )));
-        }
-        let session = source
-            .db
-            .load_full_session_prefix(history_len)?
-            .ok_or_else(|| StoreError::Integrity("source session metadata is missing".into()))?;
-        let expected = self.writer.db()?.store_head()?;
-        let command = full_session_commit(expected, identity, metadata, &session)?;
-        apply_maintenance_commit(&mut self.writer, &command)
-    }
-
     pub fn commit_session(&mut self, command: &SessionCommit) -> Result<SaveReceipt> {
         apply_maintenance_commit(&mut self.writer, command)
     }
@@ -1458,13 +1554,13 @@ impl SessionMaintenance {
             .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
         let mut changed = 0;
         for item in &mut session.history {
-            let mut value = serde_json::to_value(&*item)?;
-            let before = value.clone();
-            hydrate_legacy_attachment_value(self.writer.session_dir(), &mut value)?;
-            if value != before {
-                *item = serde_json::from_value(value)?;
-                changed += 1;
+            if !history_item_has_legacy_attachment(item) {
+                continue;
             }
+            let mut value = serde_json::to_value(&*item)?;
+            hydrate_legacy_attachment_value(self.writer.session_dir(), &mut value)?;
+            *item = serde_json::from_value(value)?;
+            changed += 1;
         }
         if changed == 0 {
             return Ok(0);
@@ -1982,7 +2078,7 @@ fn path_cstring(path: &Path) -> std::io::Result<std::ffi::CString> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source = path_cstring(source)?;
     let destination = path_cstring(destination)?;
     // SAFETY: both paths are valid, null-terminated byte strings and remain
@@ -2005,7 +2101,7 @@ fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Res
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source = path_cstring(source)?;
     let destination = path_cstring(destination)?;
     // SAFETY: both paths are valid, null-terminated byte strings and remain
@@ -2020,7 +2116,7 @@ fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Res
 }
 
 #[cfg(windows)]
-fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
     // Windows directory rename fails atomically when the destination exists.
     fs::rename(source, destination)
 }
@@ -2032,7 +2128,10 @@ fn rename_without_replacement(source: &Path, destination: &Path) -> std::io::Res
     target_os = "ios",
     windows
 )))]
-fn rename_without_replacement(_source: &Path, _destination: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_without_replacement(
+    _source: &Path,
+    _destination: &Path,
+) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "atomic no-replace rename is unavailable on this platform",
@@ -2081,14 +2180,14 @@ fn finish_operation_cleanup(
     }
 }
 
-fn ensure_private_directory_all(path: &Path) -> Result<()> {
+pub(crate) fn ensure_private_directory_all(path: &Path) -> Result<()> {
     match fs::create_dir_all(path) {
         Ok(()) => ensure_private_directory(path),
         Err(err) => Err(err.into()),
     }
 }
 
-fn ensure_private_directory(path: &Path) -> Result<()> {
+pub(crate) fn ensure_private_directory(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err(StoreError::Io(std::io::Error::new(
@@ -2114,7 +2213,7 @@ fn set_private_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
     #[cfg(not(unix))]
@@ -2122,7 +2221,7 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn reject_symlink(path: &Path) -> Result<()> {
+pub(crate) fn reject_symlink(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             Err(StoreError::Io(std::io::Error::new(
@@ -3159,7 +3258,7 @@ mod tests {
     fn legacy_attachment_blobs_remain_readable_and_missing_blobs_are_explicit() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join(SESSION_ID);
-        let data_url = "data:image/png;base64,AAAA";
+        let data_url = "data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let mut hasher = Sha256::new();
         hasher.update(b"image:");
         hasher.update(data_url.as_bytes());
@@ -3181,6 +3280,17 @@ mod tests {
         let history = reader.read_history_items_range(0..1).unwrap();
         let value = serde_json::to_value(&history[0]).unwrap();
         assert_eq!(value["content"][1]["image_url"]["url"], data_url);
+        let hydrated_bytes = serde_json::to_vec(&history[0]).unwrap().len();
+        assert_eq!(
+            reader
+                .read_history_items_tail(1, 1, Some(hydrated_bytes))
+                .unwrap(),
+            history
+        );
+        assert!(reader
+            .read_history_items_tail(1, 1, Some(hydrated_bytes - 1))
+            .unwrap()
+            .is_empty());
         assert_eq!(
             reader.legacy_attachment_references(1).unwrap(),
             vec![reference.clone()]

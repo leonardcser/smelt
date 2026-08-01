@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -101,6 +101,7 @@ impl PersistenceCause {
             smelt_store::StoreError::OwnershipConflict { .. }
             | smelt_store::StoreError::OwnershipLost => PersistenceFailureClass::Ownership,
             smelt_store::StoreError::UnsupportedSchema { .. }
+            | smelt_store::StoreError::LegacyMigrationRequired { .. }
             | smelt_store::StoreError::OrphanedSession { .. }
             | smelt_store::StoreError::Integrity(_)
             | smelt_store::StoreError::MissingObject { .. }
@@ -299,6 +300,7 @@ enum PersistenceControl {
     WakeDesired,
     AppendRequestAudit(Box<QueuedAudit>),
     RetryBlocked,
+    RequestSearchProjection,
     SubmitTurn {
         intent: Box<SubmitTurnIntent>,
         queued_at: Instant,
@@ -309,6 +311,11 @@ enum PersistenceControl {
         intent: Box<TurnTransitionIntent>,
         deadline: Option<Instant>,
         reply: Option<mpsc::Sender<Result<TurnTransitionAcknowledgement, PersistenceCause>>>,
+    },
+    DeleteBranch {
+        session_id: smelt_core::session_id::SessionId,
+        deadline: Instant,
+        reply: mpsc::Sender<Result<(), PersistenceCause>>,
     },
     Flush {
         target: PersistenceGeneration,
@@ -868,6 +875,60 @@ impl SessionPersistence {
         })
     }
 
+    pub(crate) fn delete_branch(
+        &self,
+        session_id: smelt_core::session_id::SessionId,
+        deadline: Instant,
+    ) -> Result<(), PersistenceCause> {
+        if session_id == self.session_id {
+            return Err(PersistenceCause::invariant(
+                "cannot delete the persistence actor's active branch",
+            ));
+        }
+        let Some(control) = &self.control else {
+            return Err(PersistenceCause::unavailable(
+                "persistence actor control lane is closed",
+            ));
+        };
+        let (reply, result) = mpsc::channel();
+        send_control_until(
+            control,
+            PersistenceControl::DeleteBranch {
+                session_id,
+                deadline,
+                reply,
+            },
+            deadline,
+        )
+        .map_err(|error| {
+            PersistenceCause::unavailable(match error {
+                ControlSendError::Deadline => {
+                    "persistence deadline elapsed before branch deletion was queued"
+                }
+                ControlSendError::Disconnected => {
+                    "persistence actor stopped before branch deletion was queued"
+                }
+            })
+        })?;
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(PersistenceCause::unavailable(
+                "persistence deadline elapsed before branch deletion completed",
+            )
+            .with_unknown_commit());
+        };
+        result.recv_timeout(remaining).unwrap_or_else(|error| {
+            Err(PersistenceCause::unavailable(match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    "persistence deadline elapsed before branch deletion completed"
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "persistence actor stopped before branch deletion completed"
+                }
+            })
+            .with_unknown_commit())
+        })
+    }
+
     pub(crate) fn append_request_audit(
         &self,
         mut intent: RequestAuditIntent,
@@ -978,6 +1039,17 @@ impl SessionPersistence {
         }
         drop(latest);
         result
+    }
+
+    pub(crate) fn request_search_projection(&self) -> bool {
+        let Some(control) = &self.control else {
+            return false;
+        };
+        match control.try_send(PersistenceControl::RequestSearchProjection) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => false,
+        }
     }
 
     pub(crate) fn status(&self) -> SessionPersistenceStatus {
@@ -1435,7 +1507,9 @@ struct PersistenceActor {
     epoch: SessionEpoch,
     latest: Arc<Mutex<LatestIntentState>>,
     publisher: StatusPublisher,
-    writer: Option<smelt_store::OwnedSessionWriter>,
+    writer: Option<smelt_store::OwnedLineageWriter>,
+    search_projector: Option<smelt_store::LineageSearchProjector>,
+    search_projection_requested: bool,
     head: smelt_store::StoreHead,
     durable: PersistenceGeneration,
     last_receipt: Option<smelt_store::SaveReceipt>,
@@ -1485,7 +1559,7 @@ fn persistence_actor(
         let _ = started.send(Err(cause));
         return;
     };
-    let mut writer = match smelt_store::OwnedSessionWriter::open(root, session_id.as_str()) {
+    let mut writer = match smelt_store::OwnedLineageWriter::open(root, session_id.as_str()) {
         Ok(writer) => writer,
         Err(error) => {
             let cause = PersistenceCause::from_store("open session writer", error);
@@ -1547,6 +1621,17 @@ fn persistence_actor(
         durable: generation,
         head: actual_head,
     });
+    let search_projector = match writer.spawn_search_projector() {
+        Ok(projector) => Some(projector),
+        Err(error) => {
+            smelt_perf::perf::record_value("search:projector:spawn_failed", 1);
+            publisher.publish_audit_warning(Some(PersistenceCause::from_store(
+                "start derived search projector",
+                error,
+            )));
+            None
+        }
+    };
     let worker_session_id = session_id.as_str().to_string();
     let mut actor = PersistenceActor {
         sessions,
@@ -1555,6 +1640,8 @@ fn persistence_actor(
         latest,
         publisher,
         writer: Some(writer),
+        search_projector,
+        search_projection_requested: false,
         head: actual_head,
         durable: generation,
         last_receipt: None,
@@ -1590,19 +1677,18 @@ impl PersistenceActor {
     fn run(&mut self, controls: Receiver<PersistenceControl>) {
         loop {
             self.drive_latest();
-            self.drive_audits();
-            let control = match controls.recv() {
+            let control = match controls.try_recv() {
                 Ok(control) => control,
-                Err(_) => {
-                    let omitted = self
-                        .latest_generation()
-                        .filter(|target| *target > self.durable);
-                    self.finish(
-                        omitted,
-                        Some(PersistenceCause::unavailable(
-                            "persistence actor control lane disconnected",
-                        )),
-                    );
+                Err(TryRecvError::Empty) if self.drive_one_audit() => continue,
+                Err(TryRecvError::Empty) => match controls.recv() {
+                    Ok(control) => control,
+                    Err(_) => {
+                        self.finish_after_control_disconnect();
+                        return;
+                    }
+                },
+                Err(TryRecvError::Disconnected) => {
+                    self.finish_after_control_disconnect();
                     return;
                 }
             };
@@ -1629,6 +1715,12 @@ impl PersistenceActor {
                 }
                 PersistenceControl::RetryBlocked => {
                     self.blocked = None;
+                }
+                PersistenceControl::RequestSearchProjection => {
+                    self.search_projection_requested = true;
+                    if let Some(projector) = &self.search_projector {
+                        projector.request();
+                    }
                 }
                 PersistenceControl::SubmitTurn {
                     intent,
@@ -1672,6 +1764,20 @@ impl PersistenceActor {
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                     }
+                }
+                PersistenceControl::DeleteBranch {
+                    session_id,
+                    deadline,
+                    reply,
+                } => {
+                    let result = if Instant::now() >= deadline {
+                        Err(PersistenceCause::unavailable(
+                            "persistence deadline elapsed before branch deletion started",
+                        ))
+                    } else {
+                        self.delete_branch(&session_id)
+                    };
+                    let _ = reply.send(result);
                 }
                 PersistenceControl::Flush {
                     target,
@@ -1790,6 +1896,34 @@ impl PersistenceActor {
         }
     }
 
+    fn delete_branch(
+        &mut self,
+        session_id: &smelt_core::session_id::SessionId,
+    ) -> Result<(), PersistenceCause> {
+        let writer = self.writer.as_mut().expect("actor writer");
+        writer
+            .reopen_connection()
+            .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
+        self.sessions
+            .delete_lineage_branch_with_writer_result(writer, session_id)
+            .map_err(|error| {
+                PersistenceCause::new(PersistenceFailureClass::Environment, error.to_string())
+                    .with_unknown_commit()
+            })
+    }
+
+    fn finish_after_control_disconnect(&mut self) {
+        let omitted = self
+            .latest_generation()
+            .filter(|target| *target > self.durable);
+        self.finish(
+            omitted,
+            Some(PersistenceCause::unavailable(
+                "persistence actor control lane disconnected",
+            )),
+        );
+    }
+
     fn resume_after_cancelled_close(&self) {
         self.latest
             .lock()
@@ -1883,54 +2017,60 @@ impl PersistenceActor {
     }
 
     fn drive_audits(&mut self) {
-        while let Some(index) = self
+        while self.drive_one_audit() {}
+    }
+
+    fn drive_one_audit(&mut self) -> bool {
+        let Some(index) = self
             .audits
             .iter()
             .position(|audit| audit.intent.required_generation <= self.durable)
-        {
-            let result = self.append_audit(index);
-            match result {
-                Ok(_) => {
-                    let audit = self.audits.remove(index).expect("completed audit");
-                    let warning = audit.intent.payload_capture_skipped_bytes.map(|bytes| {
-                        PersistenceCause::new(
-                            PersistenceFailureClass::Environment,
-                            format!(
-                                "request audit payload was compacted after reaching the byte budget ({bytes} bytes omitted)"
-                            ),
-                        )
-                    });
-                    self.publisher.publish_audit_warning(warning);
-                    self.release_audit(&audit);
-                }
-                Err(error) => {
-                    smelt_perf::perf::record_value("persist:audit:failures", 1);
-                    let invalidates_connection = error.invalidates_connection();
-                    let warning = PersistenceCause::from_store("append request audit", error);
-                    let audit = self.audits.remove(index).expect("failed audit");
-                    self.release_audit(&audit);
-                    self.publisher.publish_audit_warning(Some(warning));
-                    if invalidates_connection {
-                        let writer = self.writer.as_mut().expect("actor writer");
-                        writer.invalidate_connection();
-                        if let Err(error) = writer.reopen_connection() {
-                            let cause = PersistenceCause::from_store(
-                                "reopen session writer after request audit failure",
-                                error,
-                            );
-                            let desired = self.latest_generation().unwrap_or(self.durable);
-                            self.blocked = Some((desired, cause.clone()));
-                            self.publisher.publish_state(PersistenceState::Blocked {
-                                desired,
-                                durable: self.durable,
-                                cause,
-                            });
-                            return;
-                        }
+        else {
+            return false;
+        };
+        let result = self.append_audit(index);
+        match result {
+            Ok(_) => {
+                let audit = self.audits.remove(index).expect("completed audit");
+                let warning = audit.intent.payload_capture_skipped_bytes.map(|bytes| {
+                    PersistenceCause::new(
+                        PersistenceFailureClass::Environment,
+                        format!(
+                            "request audit payload was compacted after reaching the byte budget ({bytes} bytes omitted)"
+                        ),
+                    )
+                });
+                self.publisher.publish_audit_warning(warning);
+                self.release_audit(&audit);
+            }
+            Err(error) => {
+                smelt_perf::perf::record_value("persist:audit:failures", 1);
+                let invalidates_connection = error.invalidates_connection();
+                let warning = PersistenceCause::from_store("append request audit", error);
+                let audit = self.audits.remove(index).expect("failed audit");
+                self.release_audit(&audit);
+                self.publisher.publish_audit_warning(Some(warning));
+                if invalidates_connection {
+                    let writer = self.writer.as_mut().expect("actor writer");
+                    writer.invalidate_connection();
+                    if let Err(error) = writer.reopen_connection() {
+                        let cause = PersistenceCause::from_store(
+                            "reopen session writer after request audit failure",
+                            error,
+                        );
+                        let desired = self.latest_generation().unwrap_or(self.durable);
+                        self.blocked = Some((desired, cause.clone()));
+                        self.publisher.publish_state(PersistenceState::Blocked {
+                            desired,
+                            durable: self.durable,
+                            cause,
+                        });
+                        return false;
                     }
                 }
             }
         }
+        true
     }
 
     fn release_audit(&self, audit: &QueuedAudit) {
@@ -1998,6 +2138,7 @@ impl PersistenceActor {
         while let Some(audit) = self.audits.pop_front() {
             self.release_audit(&audit);
         }
+        self.search_projector.take();
         let release_cause = self.writer.take().and_then(|writer| {
             writer
                 .release()
@@ -2468,6 +2609,11 @@ impl PersistenceActor {
         record_save_receipt(&receipt);
         self.sessions
             .publish_session_catalog_commit(command, &receipt, schedule_projections);
+        if self.search_projection_requested {
+            if let Some(projector) = &self.search_projector {
+                projector.request();
+            }
+        }
         Ok(receipt)
     }
 }
@@ -2651,6 +2797,27 @@ mod tests {
 
     const SESSION_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    fn lineage_reader() -> smelt_store::LineageSessionReader {
+        let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
+        smelt_store::LineageSessionReader::open_existing(
+            session_dir.parent().expect("session storage root"),
+            SESSION_ID,
+        )
+        .expect("open canonical lineage session")
+    }
+
+    fn lineage_turn(
+        reader: &smelt_store::LineageSessionReader,
+        turn_id: smelt_store::TurnId,
+    ) -> smelt_store::StoredTurn {
+        reader
+            .turns()
+            .expect("read lineage turns")
+            .into_iter()
+            .find(|turn| turn.turn_id == turn_id)
+            .expect("stored lineage turn")
+    }
+
     fn actor() -> SessionPersistence {
         SessionPersistence::spawn(
             smelt_core::session::SessionStorage::new(smelt_core::config::state_dir()),
@@ -2799,6 +2966,75 @@ mod tests {
     }
 
     #[test]
+    fn canonical_submit_does_not_create_or_touch_derived_search() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let acknowledgement = actor
+            .submit_turn(submit_intent(1, &["sent"]), deadline())
+            .unwrap();
+        let close = actor.close(
+            acknowledgement.persistence.generation,
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(close.cause.is_none());
+
+        let reader = lineage_reader();
+        let search_path = reader.database_path().parent().unwrap().join("search.db");
+        assert!(
+            !search_path.exists(),
+            "canonical submit unexpectedly created derived search storage"
+        );
+    }
+
+    #[test]
+    fn canonical_submit_runs_before_queued_request_audits() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release_actor = actor.pause();
+        for request_id in 1..=4 {
+            actor.append_request_audit(audit(1, 0, request_id)).unwrap();
+        }
+
+        let (submit_reply, submit_result) = mpsc::channel();
+        actor
+            .control
+            .as_ref()
+            .unwrap()
+            .send(PersistenceControl::SubmitTurn {
+                intent: Box::new(submit_intent(1, &["sent"])),
+                queued_at: Instant::now(),
+                deadline: deadline(),
+                reply: submit_reply,
+            })
+            .unwrap();
+        let (paused, pause_started) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        actor
+            .control
+            .as_ref()
+            .unwrap()
+            .send(PersistenceControl::Pause(paused, resumed))
+            .unwrap();
+
+        release_actor.send(()).unwrap();
+        submit_result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        pause_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(actor.pending_audits.load(Ordering::Acquire), 4);
+
+        resume.send(()).unwrap();
+        let close = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(close.cause.is_none());
+    }
+
+    #[test]
     fn actor_flushes_and_closes_the_exact_generation() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
@@ -2832,10 +3068,8 @@ mod tests {
         assert_eq!(acknowledgement.generation, PersistenceGeneration::new(1));
         assert!(actor.thread.is_none());
 
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
-        assert_eq!(reader.store_head().unwrap().history_len.get(), 1);
+        let reader = lineage_reader();
+        assert_eq!(reader.snapshot().unwrap().head.history_len.get(), 1);
     }
 
     #[test]
@@ -2929,9 +3163,7 @@ mod tests {
 
         assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
         assert_eq!(acknowledgement.receipt.session.current.revision.get(), 1);
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
+        let reader = lineage_reader();
         assert_eq!(reader.turns().unwrap().len(), 1);
         let _ = actor.close(
             PersistenceGeneration::new(1),
@@ -2972,9 +3204,7 @@ mod tests {
                 .map_or(0, |entry| entry.total),
             0
         );
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
+        let reader = lineage_reader();
         assert_eq!(reader.turns().unwrap().len(), 1);
         let _ = actor.close(
             PersistenceGeneration::new(1),
@@ -3034,15 +3264,9 @@ mod tests {
             PersistenceFlushOutcome::OwnershipLost { durable, .. }
                 if durable == PersistenceGeneration::new(1)
         ));
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
+        let reader = lineage_reader();
         assert_eq!(
-            reader
-                .turn(submitted.receipt.turn_id)
-                .unwrap()
-                .unwrap()
-                .state,
+            lineage_turn(&reader, submitted.receipt.turn_id).state,
             smelt_store::TurnState::Ready
         );
         drop(reader);
@@ -3055,7 +3279,7 @@ mod tests {
 
         let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
         let root = session_dir.parent().unwrap();
-        let writer = smelt_store::OwnedSessionWriter::open(root, SESSION_ID).unwrap();
+        let writer = smelt_store::OwnedLineageWriter::open_existing(root, SESSION_ID).unwrap();
         assert_eq!(
             writer
                 .startup_recovery()
@@ -3088,9 +3312,7 @@ mod tests {
         assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
         assert_eq!(acknowledgement.receipt.session.previous.revision.get(), 1);
         assert_eq!(acknowledgement.receipt.session.current.revision.get(), 2);
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
+        let reader = lineage_reader();
         assert_eq!(reader.turns().unwrap().len(), 1);
         let _ = actor.close(
             PersistenceGeneration::new(2),
@@ -3384,9 +3606,7 @@ mod tests {
             ClosePolicy::RequireDurable,
         );
 
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
+        let reader = lineage_reader();
         let attempts = reader
             .query_request_attempts(&smelt_store::RequestAuditQuery::default())
             .unwrap();
@@ -3418,10 +3638,8 @@ mod tests {
             .as_ref()
             .is_some_and(|warning| warning.message.contains("injected request audit failure")));
 
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
-                .unwrap();
-        assert_eq!(reader.store_head().unwrap().history_len.get(), 1);
+        let reader = lineage_reader();
+        assert_eq!(reader.snapshot().unwrap().head.history_len.get(), 1);
         assert!(reader
             .query_request_attempts(&smelt_store::RequestAuditQuery::default())
             .unwrap()

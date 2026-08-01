@@ -22,6 +22,18 @@ app_story!(prompt_multiline_input, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(transcript_live_search_preview, |ctx| {
+    ctx.set_viewport(58, 14);
+    ctx.push_user_turn("first question");
+    ctx.push_assistant_text("ordinary answer");
+    ctx.push_user_turn("the release needle appears in this question");
+    ctx.push_assistant_text("ordinary response");
+    ctx.push_user_turn("latest question");
+    ctx.push_assistant_text("tail answer");
+    ctx.preview_transcript_search("release needle");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_slash_command_completion, |ctx| {
     // Typing `/` triggers the slash-command completion popup over
     // the prompt. The aux tip row remains reserved but is covered by

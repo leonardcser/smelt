@@ -69,6 +69,47 @@ fn mode_append_returns_to_base(append: &protocol::HistoryAppend) -> bool {
         .is_some_and(|mode| mode == base.as_str())
 }
 
+fn queue_context_history_item(
+    history: &[HistoryItem],
+    pending: &mut Vec<HistoryItem>,
+    append: &protocol::HistoryAppend,
+) -> bool {
+    let (name, valid) = match &append.policy {
+        protocol::HistoryAppendPolicy::SetContext { name } => (
+            name,
+            append
+                .item
+                .as_note()
+                .and_then(protocol::HistoryNote::context_name)
+                == Some(name.as_str()),
+        ),
+        protocol::HistoryAppendPolicy::ClearContext { name } => (
+            name,
+            append.item.as_note().is_some_and(|note| {
+                note.context_name() == Some(name.as_str()) && note.text().trim().is_empty()
+            }),
+        ),
+        _ => return false,
+    };
+    if !valid {
+        return true;
+    }
+
+    pending.retain(|item| {
+        item.as_note().and_then(protocol::HistoryNote::context_name) != Some(name.as_str())
+    });
+    let plan = protocol::plan_history_append(history, append)
+        .expect("in-memory context append planning is infallible");
+    debug_assert!(matches!(
+        plan,
+        protocol::HistoryAppendPlan::Unchanged | protocol::HistoryAppendPlan::Push
+    ));
+    if plan == protocol::HistoryAppendPlan::Push {
+        pending.push(append.item.clone());
+    }
+    true
+}
+
 struct DispatcherTurnGuard<'a> {
     dispatcher: &'a dyn ToolDispatcher,
     turn_id: u64,
@@ -137,7 +178,8 @@ pub(crate) async fn engine_task(
                             system_prompt: tui_system_prompt,
                             tools,
                         } = *payload;
-                        let loaded_history = match load_model_history(history, &session_dir) {
+                        let loaded_history =
+                            match load_model_history(history, &session_dir, &session_id) {
                             Ok(history) => history,
                             Err(message) => {
                                 let _ = event_tx.send(EngineEvent::TurnError {
@@ -239,6 +281,7 @@ struct LoadedModelHistory {
 fn load_model_history(
     source: protocol::ModelHistorySource,
     session_dir: &std::path::Path,
+    session_id: &str,
 ) -> Result<LoadedModelHistory, String> {
     let _perf = smelt_perf::perf::begin("engine:model_history:load");
     let coordinates = source.coordinates();
@@ -267,12 +310,34 @@ fn load_model_history(
             );
             let mut history = prefix;
             if end_index > first_live_index {
-                let db_path = session_dir.join("session.db");
-                let db = smelt_store::SessionReader::open_database(&db_path)
-                    .map_err(|err| format!("open model history database {db_path:?}: {err}"))?;
-                let mut rows = db
-                    .read_history_items_range(first_live_index..end_index)
-                    .map_err(|err| format!("read model history rows: {err}"))?;
+                let root = session_dir.parent().ok_or_else(|| {
+                    format!("session directory has no storage root: {session_dir:?}")
+                })?;
+                let mut rows =
+                    match smelt_store::LineageSessionReader::try_open_existing(root, session_id)
+                        .map_err(|err| format!("locate model history lineage: {err}"))?
+                    {
+                        Some(reader) => reader
+                            .history_range(
+                                u64::try_from(first_live_index).map_err(|_| {
+                                    "model history start index exceeds u64".to_string()
+                                })?,
+                                u64::try_from(end_index).map_err(|_| {
+                                    "model history end index exceeds u64".to_string()
+                                })?,
+                            )
+                            .map_err(|err| format!("read lineage model history rows: {err}"))?,
+                        None => {
+                            // COMPAT(session-lineage-v1): provider dispatch can
+                            // read an explicitly unmigrated previous-format session.
+                            let db_path = session_dir.join("session.db");
+                            let db = smelt_store::SessionReader::open_database(&db_path).map_err(
+                                |err| format!("open model history database {db_path:?}: {err}"),
+                            )?;
+                            db.read_history_items_range(first_live_index..end_index)
+                                .map_err(|err| format!("read model history rows: {err}"))?
+                        }
+                    };
                 smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
                 history.append(&mut rows);
             }
@@ -1135,38 +1200,12 @@ impl<'a> Turn<'a> {
     }
 
     fn queue_history_item(&mut self, append: protocol::HistoryAppend) {
-        match &append.policy {
-            protocol::HistoryAppendPolicy::ReplaceContextNote { name } => {
-                if protocol::replace_context_note(
-                    &mut self.pending_history_items,
-                    &append.item,
-                    name,
-                ) {
-                    return;
-                }
-                if protocol::replace_context_note(&mut self.history, &append.item, name) {
-                    self.mark_history_changed_from(0);
-                    self.emit_messages_snapshot();
-                    return;
-                }
-                protocol::apply_history_append(&mut self.pending_history_items, &append);
-                return;
-            }
-            protocol::HistoryAppendPolicy::RemoveContextNote { name } => {
-                if protocol::remove_context_note(&mut self.pending_history_items, name) {
-                    return;
-                }
-                if protocol::remove_context_note(&mut self.history, name) {
-                    self.mark_history_changed_from(0);
-                    self.emit_messages_snapshot();
-                }
-                return;
-            }
-            _ => {}
+        if queue_context_history_item(&self.history, &mut self.pending_history_items, &append) {
+            return;
         }
 
-        let replace_note_kind = append.replacement_note_kind();
-        if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
+        let coalescing_note_kind = append.coalescing_note_kind();
+        if coalescing_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
             if let Some(idx) = self
                 .pending_history_items
                 .iter()
@@ -1188,7 +1227,7 @@ impl<'a> Turn<'a> {
                 }
                 return;
             }
-        } else if let Some(kind) = replace_note_kind {
+        } else if let Some(kind) = coalescing_note_kind {
             if protocol::replace_last_note_kind(&mut self.pending_history_items, &append.item, kind)
             {
                 return;
@@ -3294,9 +3333,10 @@ mod tests {
     }
 
     #[test]
-    fn load_model_history_reads_requested_store_range() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+    fn load_model_history_reads_requested_lineage_range() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let session_dir = root.path().join(session_id);
         let old = HistoryItem::user(protocol::Content::text("old"));
         let recent = HistoryItem::user(protocol::Content::text("recent"));
         let reply = HistoryItem::Assistant(protocol::AssistantStep::terminal(
@@ -3304,8 +3344,10 @@ mod tests {
             None,
             Vec::new(),
         ));
-        let command = test_store_commit("s1", vec![old, recent.clone(), reply.clone()]);
-        db.apply_session_commit(&command).unwrap();
+        let command = test_store_commit(session_id, vec![old, recent.clone(), reply.clone()]);
+        let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), session_id).unwrap();
+        writer.commit_session(&command).unwrap();
+        writer.release().unwrap();
 
         let history = load_model_history(
             protocol::ModelHistorySource::store(
@@ -3315,7 +3357,8 @@ mod tests {
                 1,
                 3,
             ),
-            dir.path(),
+            &session_dir,
+            session_id,
         )
         .unwrap();
 
@@ -3333,10 +3376,13 @@ mod tests {
 
     #[test]
     fn model_history_read_completes_after_concurrent_writer_commits() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let session_dir = root.path().join(session_id);
+        std::fs::create_dir(&session_dir).unwrap();
+        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let item = HistoryItem::user(protocol::Content::text("persisted"));
-        let command = test_store_commit("blocked-history", vec![item.clone()]);
+        let command = test_store_commit(session_id, vec![item.clone()]);
         db.apply_session_commit(&command).unwrap();
         db.connection()
             .execute_batch(
@@ -3351,7 +3397,8 @@ mod tests {
 
         let history = load_model_history(
             protocol::ModelHistorySource::store(Vec::new(), 0, 1),
-            dir.path(),
+            &session_dir,
+            session_id,
         )
         .unwrap();
         writer.join().unwrap();
@@ -3620,6 +3667,51 @@ mod tests {
                 command: true,
             } if content.text_content() == "expanded command body" && display == "/reflect"
         ));
+    }
+
+    #[test]
+    fn queued_context_updates_coalesce_without_rewriting_committed_history() {
+        let history = vec![HistoryItem::note(protocol::HistoryNote::named_context(
+            "goal",
+            "committed",
+        ))];
+        let mut pending = Vec::new();
+        let first = protocol::HistoryAppend::set_context(
+            HistoryItem::note(protocol::HistoryNote::named_context("goal", "first")),
+            "goal",
+        );
+        let second = protocol::HistoryAppend::set_context(
+            HistoryItem::note(protocol::HistoryNote::named_context("goal", "second")),
+            "goal",
+        );
+        let clear = protocol::HistoryAppend::clear_context("goal");
+        let restore = protocol::HistoryAppend::set_context(history[0].clone(), "goal");
+
+        assert!(queue_context_history_item(&history, &mut pending, &first));
+        assert!(queue_context_history_item(&history, &mut pending, &second));
+        assert_eq!(pending, vec![second.item]);
+        assert!(queue_context_history_item(&history, &mut pending, &restore));
+        assert!(pending.is_empty());
+
+        assert!(queue_context_history_item(&history, &mut pending, &clear));
+        assert_eq!(pending, vec![clear.item.clone()]);
+        assert!(queue_context_history_item(&history, &mut pending, &clear));
+        assert_eq!(pending, vec![clear.item.clone()]);
+        assert!(queue_context_history_item(&history, &mut pending, &restore));
+        assert!(pending.is_empty());
+
+        let mut never_committed = Vec::new();
+        assert!(queue_context_history_item(
+            &[],
+            &mut never_committed,
+            &first
+        ));
+        assert!(queue_context_history_item(
+            &[],
+            &mut never_committed,
+            &protocol::HistoryAppend::clear_context("goal")
+        ));
+        assert!(never_committed.is_empty());
     }
 
     #[test]

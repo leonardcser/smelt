@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+ first question
+
+
+ the release needle appears in this question
+
+
+
+ latest question
+
+  tip ctrl+enter / ctrl+q, steer the current response w…
+──────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────
+/release needle

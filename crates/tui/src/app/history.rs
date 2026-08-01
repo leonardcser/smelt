@@ -150,23 +150,6 @@ pub(crate) fn materialize_full_transcript_read_only_result(
     )))
 }
 
-fn copy_legacy_attachment_blobs(
-    sessions: &session::SessionStorage,
-    source: &smelt_store::SessionReader,
-    dest: &std::path::Path,
-    references: &[String],
-) -> Result<(), smelt_store::StoreError> {
-    if references.is_empty() {
-        return Ok(());
-    }
-    sessions.create_private_dir_all(dest)?;
-    for reference in references {
-        let blob = source.legacy_attachment_blob(reference)?;
-        sessions.write_private_file(&dest.join(blob.filename), blob.data_url.as_bytes())?;
-    }
-    Ok(())
-}
-
 fn checkpoint_markers_by_history_index(session: &session::Session) -> BTreeMap<usize, Vec<String>> {
     let mut markers = BTreeMap::<usize, Vec<String>>::new();
     for event in &session.checkpoint_events {
@@ -266,9 +249,6 @@ pub(crate) fn load_transcript_tail_from_sqlite_id(
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
     let resolved = sessions.resolve_session_dir_for_read(id)?;
-    if resolved.kind != session::SessionDirKind::Store {
-        return None;
-    }
     load_transcript_tail_from_sqlite_dir(resolved.dir, width, viewport_rows)
 }
 
@@ -1020,10 +1000,19 @@ impl TuiApp {
         let append_result = self
             .conversation
             .apply_history_append(append, self.active_context_token_identity());
-        if append_result == protocol::HistoryAppendResult::RemovedLast {
-            self.sync_task_label_from_session();
+        match append_result {
+            Ok(result) => {
+                if result == protocol::HistoryAppendResult::RemovedLast {
+                    self.sync_task_label_from_session();
+                }
+                result
+            }
+            Err(err) => {
+                smelt_perf::perf::record_value("live_session:history_append_plan_error", 1);
+                self.notify_error_sticky(format!("failed to update session history: {err}"));
+                protocol::HistoryAppendResult::Unchanged
+            }
         }
-        append_result
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {
@@ -1133,6 +1122,7 @@ impl TuiApp {
     }
 
     fn cancel_session_bound_work(&mut self) {
+        self.cancel_live_search(false);
         if self.conversation.is_active() {
             self.cancel_agent();
             self.conversation.clear_active();
@@ -1230,15 +1220,7 @@ impl TuiApp {
             self.conversation.refresh_live_session_header();
         }
 
-        let Some(source_dir) = self
-            .conversation
-            .live_session()
-            .map(|live| live.dir().to_path_buf())
-        else {
-            return;
-        };
         let original_id = self.conversation.session().id.clone();
-        let history_len = self.conversation.history_len();
         let (forked, preserved_intent) = preserved.map_or_else(
             || {
                 let mut forked = self.conversation.session().fork(self.core.env.pid());
@@ -1247,54 +1229,15 @@ impl TuiApp {
             },
             |(forked, intent)| (forked, Some(intent)),
         );
-        let fork_id = match smelt_core::session_id::SessionId::parse(&forked.id) {
-            Ok(id) => id,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare fork id: {err}"));
-                return;
-            }
-        };
-        let fork_dir = self.conversation.sessions().session_dir(&fork_id);
-        let fork_root = fork_dir.parent().expect("fork session root");
-        let (identity, metadata, import_history_len) = match &preserved_intent {
-            Some(intent) => {
-                let Some(history_start) = intent.history.start.as_usize() else {
-                    self.notify_error_sticky(
-                        "failed to prepare fork: history boundary exceeds platform limits".into(),
-                    );
+        let fork_root = self.conversation.sessions().sessions_dir();
+        let mut source =
+            match smelt_store::OwnedLineageWriter::open_existing(&fork_root, &original_id) {
+                Ok(source) => source,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to open source session store: {err}"));
                     return;
-                };
-                (
-                    intent.identity.clone(),
-                    intent.metadata.clone(),
-                    history_start,
-                )
-            }
-            None => {
-                let identity = match session::store_identity_from_session(&forked) {
-                    Ok(identity) => identity,
-                    Err(err) => {
-                        self.notify_error_sticky(format!("failed to prepare fork: {err}"));
-                        return;
-                    }
-                };
-                let metadata = match session::store_metadata_from_session(&forked, history_len) {
-                    Ok(metadata) => metadata,
-                    Err(err) => {
-                        self.notify_error_sticky(format!("failed to prepare fork: {err}"));
-                        return;
-                    }
-                };
-                (identity, metadata, history_len)
-            }
-        };
-        let source = match smelt_store::SessionReader::open_existing(&source_dir) {
-            Ok(source) => source,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to open source session store: {err}"));
-                return;
-            }
-        };
+                }
+            };
         if preserve_unsaved {
             match source.store_head() {
                 Ok(source_head) if source_head == acknowledged_head => {}
@@ -1312,33 +1255,18 @@ impl TuiApp {
                 }
             }
         }
-        let legacy_attachments = match source.legacy_attachment_references(import_history_len) {
-            Ok(references) => references,
+        let imported = match source.fork_current(&forked.id, forked.created_at_ms) {
+            Ok(receipt) => receipt,
             Err(err) => {
-                self.notify_error_sticky(format!(
-                    "failed to inspect source session attachments: {err}"
-                ));
+                self.notify_error_sticky(format!("failed to fork session store: {err}"));
                 return;
             }
         };
-        let mut maintenance = match smelt_store::SessionMaintenance::open(fork_root, &forked.id) {
-            Ok(maintenance) => maintenance,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to own fork destination: {err}"));
-                return;
-            }
-        };
-        let fork_work_dir = maintenance.session_dir().to_path_buf();
-        let imported =
-            match maintenance.import_prefix_from(&source, &identity, &metadata, import_history_len)
-            {
-                Ok(receipt) => receipt,
-                Err(err) => {
-                    self.notify_error_sticky(format!("failed to fork session store: {err}"));
-                    return;
-                }
-            };
         if let Some(intent) = preserved_intent {
+            if let Err(err) = source.switch_branch(&forked.id) {
+                self.notify_error_sticky(format!("failed to select fork destination: {err}"));
+                return;
+            }
             let command = smelt_store::SessionCommit {
                 session_id: forked.id.clone(),
                 expected: imported.current,
@@ -1348,69 +1276,16 @@ impl TuiApp {
                 side_tables: intent.side_tables,
                 transcript_records: intent.records,
             };
-            match maintenance.commit_session(&command) {
-                Ok(_) => {}
-                Err(err) => {
-                    self.notify_error_sticky(format!(
-                        "failed to preserve unsaved fork state: {err}"
-                    ));
-                    return;
-                }
-            }
-        }
-        if let Err(err) = copy_legacy_attachment_blobs(
-            &self.core.sessions,
-            &source,
-            &fork_work_dir.join("blobs"),
-            &legacy_attachments,
-        ) {
-            self.notify_error_sticky(format!("failed to fork legacy session attachments: {err}"));
-            return;
-        }
-        let fork_dir = match maintenance.publish() {
-            Ok(path) => path,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to publish fork destination: {err}"));
+            if let Err(err) = source.commit_session(&command) {
+                self.notify_error_sticky(format!("failed to preserve unsaved fork state: {err:?}"));
                 return;
             }
-        };
-        if let Err(err) = maintenance.release() {
-            self.notify_error_sticky(format!("failed to release fork destination: {err}"));
+        }
+        if let Err(err) = source.release() {
+            self.notify_error_sticky(format!("failed to release lineage writer: {err}"));
             return;
         }
-        let Some((header, store_ref)) = self
-            .core
-            .sessions
-            .load_store_header_for_dir(fork_dir.clone())
-        else {
-            self.notify_error_sticky("failed to load forked session header".into());
-            return;
-        };
-        let store_head = match smelt_store::SessionReader::open_existing(&fork_dir)
-            .and_then(|reader| reader.store_head())
-        {
-            Ok(head) => head,
-            Err(error) => {
-                self.notify_error_sticky(format!("failed to load forked session head: {error}"));
-                return;
-            }
-        };
-        let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
-            fork_dir.clone(),
-            self.last_width,
-            self.last_height,
-        )
-        .unwrap_or_else(|| crate::app::transcript::LoadedTranscript::empty_store(fork_dir));
-        let document = crate::app::session_document::SessionDocument::from_store(
-            header,
-            store_ref,
-            store_head,
-            transcript,
-            self.core.env.pid(),
-            self.core.env.cwd(),
-        )
-        .into_store_backed();
-        self.load_store_backed_session(document);
+        self.load_current_session_by_id(&forked.id);
         self.publish_history_delta("forked");
         self.notify(format!("forked from {original_id}"));
     }
@@ -1577,13 +1452,25 @@ impl TuiApp {
         }
 
         self.install_loaded_session(loaded);
-        let store_head = smelt_store::SessionReader::open_existing(
-            self.conversation
-                .sessions()
-                .dir_for(self.conversation.session()),
-        )
-        .and_then(|reader| reader.store_head())
-        .ok();
+        let session_dir = self
+            .conversation
+            .sessions()
+            .dir_for(self.conversation.session());
+        let session_id = &self.conversation.session().id;
+        let store_head = session_dir.parent().and_then(|root| {
+            match smelt_store::LineageSessionReader::try_open_existing(root, session_id) {
+                Ok(Some(reader)) => reader.snapshot().map(|state| state.head).ok(),
+                Ok(None) => {
+                    // COMPAT(session-lineage-v1): full-session documents from the
+                    // immediately preceding format can still be installed by tests
+                    // and explicit compatibility flows during the migration window.
+                    smelt_store::SessionReader::open_existing(&session_dir)
+                        .and_then(|reader| reader.store_head())
+                        .ok()
+                }
+                Err(_) => None,
+            }
+        });
         self.conversation
             .install_loaded_full_session(transcript, store_head);
         self.claim_writer_access_for_current_session();
@@ -2176,12 +2063,31 @@ impl TuiApp {
         };
         let mut history = prefix;
         if end_index > first_live_index {
-            let db_path = self.conversation.current_session_dir().join("session.db");
-            let db = smelt_store::SessionReader::open_database(&db_path)
-                .map_err(|err| format!("open model history database {db_path:?}: {err}"))?;
-            let mut rows = db
-                .read_history_items_range(first_live_index..end_index)
-                .map_err(|err| format!("read model history rows: {err}"))?;
+            let session_dir = self.conversation.current_session_dir();
+            let sessions_root = session_dir
+                .parent()
+                .ok_or_else(|| "session directory has no storage root".to_string())?;
+            let mut rows = match smelt_store::LineageSessionReader::try_open_existing(
+                sessions_root,
+                &self.conversation.session().id,
+            )
+            .map_err(|err| format!("open canonical model history: {err}"))?
+            {
+                Some(reader) => reader
+                    .history_range(first_live_index as u64, end_index as u64)
+                    .map_err(|err| format!("read canonical model history rows: {err}"))?,
+                None => {
+                    // COMPAT(session-lineage-v1): retain read-only support for the
+                    // immediately preceding format in explicit compatibility tests.
+                    let db_path = session_dir.join("session.db");
+                    smelt_store::SessionReader::open_database(&db_path)
+                        .map_err(|err| {
+                            format!("open previous-format model history {db_path:?}: {err}")
+                        })?
+                        .read_history_items_range(first_live_index..end_index)
+                        .map_err(|err| format!("read previous-format model history rows: {err}"))?
+                }
+            };
             smelt_perf::perf::record_value(
                 "tui:model_history:messages_store_rows",
                 rows.len() as u64,
@@ -2302,7 +2208,10 @@ impl TuiApp {
             self.conversation.session().history[..hist_idx]
                 .iter()
                 .any(HistoryItem::is_transcript_visible)
-                .then(|| self.mode_at_history_boundary(hist_idx))
+                .then(|| {
+                    self.mode_at_history_boundary(hist_idx)
+                        .expect("materialized history mode lookup is infallible")
+                })
         };
 
         let keep_checkpoint_at_boundary = turn_text.is_some()
@@ -2391,6 +2300,33 @@ mod checkpoint_tests {
     use protocol::Content;
     use smelt_core::ContextCheckpoint;
 
+    fn lineage_reader(
+        app: &crate::app::test_harness::TestApp,
+        session_id: &str,
+    ) -> smelt_store::LineageSessionReader {
+        smelt_store::LineageSessionReader::open_existing(
+            app.app.core.sessions.sessions_dir(),
+            session_id,
+        )
+        .expect("open canonical lineage session")
+    }
+
+    fn lineage_history(reader: &smelt_store::LineageSessionReader) -> Vec<protocol::HistoryItem> {
+        let state = reader.snapshot().expect("read lineage state");
+        reader
+            .history_range(0, state.head.history_len.get())
+            .expect("read canonical history")
+    }
+
+    fn lineage_transcript(
+        reader: &smelt_store::LineageSessionReader,
+    ) -> Vec<smelt_store::StoredTranscriptBlock> {
+        let state = reader.snapshot().expect("read lineage state");
+        reader
+            .transcript_range(0, state.transcript_len)
+            .expect("read canonical transcript")
+    }
+
     #[test]
     fn missing_session_model_key_is_retained_as_pending_selection() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
@@ -2466,14 +2402,6 @@ mod checkpoint_tests {
         assert_eq!(value, 0, "{label} recorded {value}, expected no samples");
     }
 
-    fn assert_perf_value_at_most(label: &str, max: u64) {
-        let value = perf_value_max(label);
-        assert!(
-            value <= max,
-            "{label} recorded max {value}, expected <= {max}"
-        );
-    }
-
     fn assert_cached_persist_db() {
         assert_eq!(
             perf_duration_max("store:db:open_read_write"),
@@ -2481,9 +2409,9 @@ mod checkpoint_tests {
             "hot suffix save should reuse the persist worker database connection"
         );
         assert_eq!(
-            perf_value_max("store:db:cached_read_write"),
+            perf_value_max("store:lineage:cached_read_write"),
             1,
-            "hot suffix save did not reuse the persist worker database connection"
+            "hot suffix save did not reuse the lineage writer connection"
         );
     }
 
@@ -2578,12 +2506,8 @@ mod checkpoint_tests {
         app.app.restore_screen();
         app.app.save_session_and_flush();
 
-        let reader =
-            smelt_store::SessionReader::open_existing(app.app.core.sessions.dir_for_id(&id))
-                .expect("open replaced full-session store");
-        let history = reader
-            .read_history_items_range(0..2)
-            .expect("read replaced full-session history");
+        let reader = lineage_reader(&app, &id);
+        let history = lineage_history(&reader);
         assert_eq!(
             history,
             vec![user("replacement user"), assistant("replacement assistant")]
@@ -2651,24 +2575,24 @@ mod checkpoint_tests {
 
     #[test]
     fn recordless_store_resume_falls_back_without_repairing() {
-        let mut app = large_saved_session_app(256);
-        let id = app.app.conversation.session().id.clone();
-        let session_dir = app.app.core.sessions.dir_for_id(&id);
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-        db.connection()
-            .execute_batch(
-                "BEGIN;
-                 UPDATE transcript_blocks
-                 SET record_idx = NULL,
-                     block_json = NULL,
-                     origin_json = NULL,
-                     tool_state_json = NULL;
-                 UPDATE session_state SET transcript_record_count = 0 WHERE singleton = 1;
-                 COMMIT;",
-            )
-            .unwrap();
-        assert_eq!(db.transcript_record_count().unwrap(), 0);
-        drop(db);
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut saved = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        saved.first_user_message = Some("old user 0".into());
+        saved.history = (0usize..256)
+            .map(|index| {
+                if index.is_multiple_of(2) {
+                    user(&format!("old user {index}"))
+                } else {
+                    assistant(&format!("old assistant {index}"))
+                }
+            })
+            .collect();
+        let id = saved.id.clone();
+        app.app
+            .core
+            .sessions
+            .save_result(&saved)
+            .expect("save recordless canonical fixture");
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -2683,17 +2607,20 @@ mod checkpoint_tests {
             perf_value_max("session:transcript:read_only_full_fallback"),
             1
         );
-        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).unwrap();
-        assert_eq!(db.transcript_record_count().unwrap(), 0);
-        drop(db);
+        assert_eq!(
+            lineage_reader(&app, &id).snapshot().unwrap().transcript_len,
+            0
+        );
 
         app.app
             .session_append_history(user("repair records on owned save"));
         app.app.save_session();
         app.app.flush_persist();
 
-        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).unwrap();
-        assert_eq!(db.transcript_record_count().unwrap(), 256);
+        assert_eq!(
+            lineage_reader(&app, &id).snapshot().unwrap().transcript_len,
+            256
+        );
     }
 
     #[test]
@@ -2719,10 +2646,10 @@ mod checkpoint_tests {
             .sessions
             .load_store_header(&id)
             .expect("stored session header should load");
-        let store_head =
-            smelt_store::SessionReader::open_existing(app.app.core.sessions.dir_for_id(&id))
-                .and_then(|reader| reader.store_head())
-                .expect("stored session head should load");
+        let store_head = lineage_reader(&app, &id)
+            .snapshot()
+            .expect("stored lineage state should load")
+            .head;
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
             store_ref,
@@ -2765,13 +2692,8 @@ mod checkpoint_tests {
             app.app.overlays.notification()
         );
 
-        let db = smelt_store::SessionReader::open_database(
-            app.app.core.sessions.dir_for_id(&id).join("session.db"),
-        )
-        .expect("open session db");
-        let rows = db
-            .read_history_items_range(0..3)
-            .expect("read persisted history");
+        let reader = lineage_reader(&app, &id);
+        let rows = lineage_history(&reader);
         assert_eq!(
             rows,
             vec![
@@ -2780,9 +2702,7 @@ mod checkpoint_tests {
                 user("new user")
             ]
         );
-        let records = db
-            .read_all_transcript_records()
-            .expect("read transcript records");
+        let records = lineage_transcript(&reader);
         assert!(records.iter().any(|record| record.history_idx == Some(2)));
     }
 
@@ -2819,13 +2739,8 @@ mod checkpoint_tests {
         ));
         assert_eq!(app.app.conversation.session().history.len(), 3);
 
-        let db = smelt_store::SessionReader::open_database(
-            app.app.core.sessions.dir_for_id(&id).join("session.db"),
-        )
-        .expect("open session db");
-        let rows = db
-            .read_history_items_range(0..3)
-            .expect("read persisted history");
+        let reader = lineage_reader(&app, &id);
+        let rows = lineage_history(&reader);
         assert_eq!(
             rows,
             vec![
@@ -2834,16 +2749,18 @@ mod checkpoint_tests {
                 user("new user")
             ]
         );
-        let records = db
-            .read_all_transcript_records()
-            .expect("read transcript records");
+        let records = lineage_transcript(&reader);
         assert!(records.iter().any(|record| record.history_idx == Some(2)));
     }
 
     #[test]
-    fn normal_request_append_persists_only_dirty_suffix_rows() {
+    fn normal_request_append_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
+        let id = app.app.conversation.session().id.clone();
+        let before = lineage_reader(&app, &id)
+            .snapshot()
+            .expect("read initial canonical session");
 
         app.app.restore_screen();
 
@@ -2871,19 +2788,20 @@ mod checkpoint_tests {
             app.app.conversation.session().history.len(),
             OLD_HISTORY_LEN + 1
         );
-        assert_eq!(perf_value_max("store:session:history_rows_inserted"), 1);
-        assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
-        assert_perf_value_at_most("store:session:history_rows_deleted", 0);
-        assert_perf_value_at_most("store:transcript:dirty_record_suffix_rows", 1);
-        assert_perf_value_at_most("store:transcript:record_db_rows_inserted", 1);
         assert_cached_persist_db();
         assert_no_full_store_reads();
 
-        let db = smelt_store::SessionReader::open_database(app.session_dir().join("session.db"))
-            .expect("open session db");
-        let records = db
-            .read_all_transcript_records()
-            .expect("read transcript records");
+        let reader = lineage_reader(&app, &id);
+        let after = reader.snapshot().expect("read appended canonical session");
+        assert_eq!(after.head.revision.get(), before.head.revision.get() + 1);
+        assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
+        assert_eq!(
+            reader
+                .history_range(OLD_HISTORY_LEN as u64, OLD_HISTORY_LEN as u64 + 1)
+                .expect("read persisted history tail"),
+            vec![user("new user")]
+        );
+        let records = lineage_transcript(&reader);
         assert_eq!(records.len(), OLD_HISTORY_LEN + 1);
         assert_eq!(
             records.last().and_then(|row| row.history_idx),
@@ -2931,10 +2849,13 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn live_session_save_persists_only_dirty_suffix_rows() {
+    fn live_session_save_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         let id = app.app.conversation.session().id.clone();
+        let before = lineage_reader(&app, &id)
+            .snapshot()
+            .expect("read initial canonical session");
         app.app.load_session_by_id(&id);
         assert!(app.app.conversation.has_live_session());
         assert!(app.app.conversation.session().history.is_empty());
@@ -2949,17 +2870,14 @@ mod checkpoint_tests {
 
         assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN + 1);
         assert!(app.app.conversation.session().history.is_empty());
-        assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
-        assert_perf_value_at_most("store:session:history_rows_inserted", 1);
-        assert_perf_value_at_most("store:session:history_rows_deleted", 0);
         assert_no_full_store_reads();
 
-        let db = smelt_store::SessionReader::open_database(
-            app.app.core.sessions.dir_for_id(&id).join("session.db"),
-        )
-        .expect("open session db");
-        let tail = db
-            .read_history_items_range(OLD_HISTORY_LEN..OLD_HISTORY_LEN + 1)
+        let reader = lineage_reader(&app, &id);
+        let after = reader.snapshot().expect("read appended canonical session");
+        assert_eq!(after.head.revision.get(), before.head.revision.get() + 1);
+        assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
+        let tail = reader
+            .history_range(OLD_HISTORY_LEN as u64, OLD_HISTORY_LEN as u64 + 1)
             .expect("read persisted tail");
         assert_eq!(tail, vec![assistant("new assistant")]);
     }
@@ -3049,9 +2967,13 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn history_updated_save_persists_only_dirty_suffix_rows() {
+    fn history_updated_save_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
+        let id = app.app.conversation.session().id.clone();
+        let before = lineage_reader(&app, &id)
+            .snapshot()
+            .expect("read initial canonical session");
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         app.app
@@ -3064,16 +2986,28 @@ mod checkpoint_tests {
             app.app.conversation.session().history.len(),
             OLD_HISTORY_LEN + 1
         );
-        assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
-        assert_perf_value_at_most("store:session:history_rows_inserted", 1);
-        assert_perf_value_at_most("store:session:history_rows_deleted", 0);
         assert_cached_persist_db();
         assert_no_full_store_reads();
+
+        let reader = lineage_reader(&app, &id);
+        let after = reader.snapshot().expect("read appended canonical session");
+        assert_eq!(after.head.revision.get(), before.head.revision.get() + 1);
+        assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
+        assert_eq!(
+            reader
+                .history_range(OLD_HISTORY_LEN as u64, OLD_HISTORY_LEN as u64 + 1)
+                .expect("read persisted history tail"),
+            vec![assistant("new assistant")]
+        );
     }
 
     #[test]
-    fn no_op_save_does_not_enqueue_history_or_record_work() {
+    fn no_op_save_does_not_advance_canonical_revision() {
         let mut app = large_saved_session_app(256);
+        let id = app.app.conversation.session().id.clone();
+        let before = lineage_reader(&app, &id)
+            .snapshot()
+            .expect("read initial canonical session");
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -3086,9 +3020,12 @@ mod checkpoint_tests {
             skipped, 1,
             "no-op save did not take the unchanged fast path"
         );
-        assert_perf_value_absent("store:history:dirty_suffix_rows");
-        assert_perf_value_absent("store:transcript:dirty_record_suffix_rows");
         assert_no_full_store_reads();
+        let after = lineage_reader(&app, &id)
+            .snapshot()
+            .expect("read canonical session after no-op save");
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.revision_id, before.revision_id);
     }
 
     #[test]
@@ -3105,19 +3042,15 @@ mod checkpoint_tests {
             Some("new user".into()),
         );
 
-        let db = smelt_store::SessionReader::open_database(
-            app.app.core.sessions.dir_for_id(&id).join("session.db"),
-        )
-        .expect("open session db");
-        let snapshot = db
-            .load_full_session()
-            .expect("load full session")
-            .expect("stored session");
-        assert_eq!(snapshot.history, vec![user("new user")]);
-        assert_eq!(snapshot.metadata_snapshots.len(), 1);
-        assert_eq!(snapshot.metadata_snapshots[0].0, 1);
+        let reader = lineage_reader(&app, &id);
+        let snapshot = reader.snapshot().expect("read canonical session");
+        assert_eq!(lineage_history(&reader), vec![user("new user")]);
+        assert_eq!(snapshot.side_tables.metadata_snapshots.len(), 1);
+        assert_eq!(snapshot.side_tables.metadata_snapshots[0].0.get(), 1);
         assert_eq!(
-            snapshot.metadata_snapshots[0].1.get("first_user_message"),
+            snapshot.side_tables.metadata_snapshots[0]
+                .1
+                .get("first_user_message"),
             Some(&serde_json::Value::String("new user".into()))
         );
     }
@@ -3140,23 +3073,12 @@ mod checkpoint_tests {
         app.app.save_session();
         app.app.flush_persist();
 
-        let db = smelt_store::SessionReader::open_database(
-            app.app.core.sessions.dir_for_id(&id).join("session.db"),
-        )
-        .expect("open session db");
-        assert_eq!(
-            db.read_history_items_range(0..10)
-                .expect("read persisted history"),
-            Vec::<HistoryItem>::new()
-        );
-        assert!(db
-            .read_all_transcript_records()
-            .expect("read records")
-            .is_empty());
-        assert_eq!(
-            db.store_head().expect("read store head").history_len.get(),
-            0
-        );
+        let reader = lineage_reader(&app, &id);
+        let state = reader.snapshot().expect("read rewound state");
+        assert!(lineage_history(&reader).is_empty());
+        assert!(lineage_transcript(&reader).is_empty());
+        assert_eq!(state.head.history_len.get(), 0);
+        assert_eq!(state.transcript_len, 0);
     }
 
     #[test]
@@ -3283,6 +3205,47 @@ mod checkpoint_tests {
             .order
             .iter()
             .any(|id| matches!(history.block(*id), Some(Block::Mode { text, .. }) if text == "now in apply mode")));
+    }
+
+    #[test]
+    fn resumed_mode_removal_executes_the_shared_append_plan() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.conversation.replace_history_for_harness(vec![
+            HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                "normal",
+                "plan",
+                "plan mode",
+            )),
+            user("planned request"),
+            HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                "normal",
+                "yolo",
+                "yolo mode",
+            )),
+        ]);
+        app.app.restore_screen();
+        app.app.save_session_and_flush();
+        let session_id = app.app.conversation.session().id.clone();
+        app.resume_session(&session_id);
+        assert!(app.app.conversation.has_live_session());
+
+        let result =
+            app.app
+                .apply_history_append_to_history(&protocol::HistoryAppend::mode_change(
+                    HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                        "normal",
+                        "plan",
+                        "plan mode",
+                    )),
+                    protocol::AgentMode::normal(),
+                ));
+
+        assert_eq!(result, protocol::HistoryAppendResult::RemovedLast);
+        assert_eq!(app.app.session_history_len(), 2);
+        assert!(matches!(
+            app.app.session_history_range(1..2).as_slice(),
+            [HistoryItem::User { .. }]
+        ));
     }
 
     #[test]
@@ -3610,8 +3573,8 @@ mod checkpoint_tests {
         assert!(app.app.core.processes.list().is_empty());
     }
 
-    #[test]
-    fn fork_session_cancels_all_lua_tasks() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn fork_session_cancels_all_lua_tasks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app
             .conversation
@@ -4111,9 +4074,8 @@ mod checkpoint_tests {
             .core
             .sessions
             .dir_for(app.app.conversation.session());
-        let expected_record_prefix = smelt_store::SessionReader::open_existing(&session_dir)
-            .and_then(|reader| reader.read_all_transcript_records())
-            .expect("read original transcript records")
+        let session_id = app.app.conversation.session().id.clone();
+        let expected_record_prefix = lineage_transcript(&lineage_reader(&app, &session_id))
             .into_iter()
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
@@ -4206,17 +4168,11 @@ mod checkpoint_tests {
             "save race should not surface a persistence failure: {:?}",
             app.overlays_probe().notification()
         );
-        let reader =
-            smelt_store::SessionReader::open_existing(&session_dir).expect("open rewound session");
-        let head = reader.store_head().expect("read rewound store head");
-        assert_eq!(head.history_len.get() as usize, TARGET_HISTORY_INDEX);
-        assert_eq!(
-            head.transcript_record_count.get() as usize,
-            TARGET_HISTORY_INDEX + 1
-        );
-        let records = reader
-            .read_all_transcript_records()
-            .expect("read rewound transcript records");
+        let reader = lineage_reader(&app, &session_id);
+        let state = reader.snapshot().expect("read rewound lineage state");
+        assert_eq!(state.head.history_len.get() as usize, TARGET_HISTORY_INDEX);
+        assert_eq!(state.transcript_len as usize, TARGET_HISTORY_INDEX + 1);
+        let records = lineage_transcript(&reader);
         assert_eq!(records.len(), TARGET_HISTORY_INDEX + 1);
         assert_eq!(
             &records[..TARGET_HISTORY_INDEX],

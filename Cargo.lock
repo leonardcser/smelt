@@ -1085,6 +1085,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fm-index"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "919bc722dc3c11b2fa742bbeb99f2519fce4031b99304eb6fa2bee087fc69641"
+dependencies = [
+ "num-traits",
+ "serde",
+ "vers-vecs",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3956,6 +3967,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
+name = "vers-vecs"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc0435d0e97f854c537ab74e86072e1389c73251eba2cf46069edadd72d0e860"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4470,8 +4490,12 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "xtask"
 version = "0.5.0-alpha.8"
 dependencies = [
+ "fm-index",
+ "libc",
+ "rusqlite",
  "serde_json",
  "smelt-core",
+ "smelt-perf",
  "smelt-protocol",
  "smelt-store",
  "smelt-tui",

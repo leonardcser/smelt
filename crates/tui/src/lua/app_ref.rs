@@ -1734,6 +1734,13 @@ impl SessionLuaHost<'_> {
         if target.as_str() == self.app.conversation.session().id {
             return Err("cannot delete the active session".to_owned());
         }
+        if self
+            .app
+            .conversation
+            .delete_branch_through_persistence(&target)?
+        {
+            return Ok(());
+        }
         self.app
             .conversation
             .sessions()
@@ -1802,8 +1809,33 @@ impl smelt_core::host::LuaHost for TuiCoreBridge {
     }
 }
 
+#[cfg(any(test, feature = "harness"))]
+fn harness_async_runtime() -> &'static tokio::runtime::Handle {
+    static HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("smelt-harness-async".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build harness async runtime");
+                tx.send(runtime.handle().clone())
+                    .expect("publish harness async runtime");
+                runtime.block_on(std::future::pending::<()>());
+            })
+            .expect("start harness async runtime");
+        rx.recv().expect("receive harness async runtime")
+    })
+}
+
 /// Lend `app` to Lua for the dynamic extent of one Lua entry.
 pub(crate) fn scope_app<R>(app: &mut TuiApp, body: impl FnOnce() -> R) -> R {
+    #[cfg(any(test, feature = "harness"))]
+    let _runtime = tokio::runtime::Handle::try_current()
+        .is_err()
+        .then(|| harness_async_runtime().enter());
     TUI_APP.set(app, || {
         let mut core = TuiCoreBridge;
         smelt_core::host::scope_host(&mut core, || {

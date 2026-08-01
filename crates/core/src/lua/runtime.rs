@@ -294,11 +294,49 @@ pub struct LuaExecution {
     runtime: LuaRuntime,
 }
 
+/// Launch-only owner that finishes loading the generation-zero VM while the
+/// frontend retains access to the same VM and synchronized registries.
+///
+/// Load diagnostics, warnings, and other mutable bookkeeping belong only to
+/// this owner and are not reentrantly observable through the frontend runtime.
+/// The owner is consumed back into the frontend before that bookkeeping is
+/// read. Candidate commit handles are intentionally absent: generation zero
+/// performs live startup effects and is never a candidate.
+pub struct LuaLaunch {
+    runtime: LuaRuntime,
+}
+
 impl std::ops::Deref for LuaExecution {
     type Target = LuaRuntime;
 
     fn deref(&self) -> &Self::Target {
         &self.runtime
+    }
+}
+
+impl LuaLaunch {
+    pub fn load_full_bootstrap(&mut self) {
+        self.runtime.load_full_bootstrap();
+    }
+
+    pub fn load_autoload(&mut self) {
+        self.runtime.load_autoload();
+    }
+
+    pub fn load_user_config(&mut self) {
+        self.runtime.load_user_config();
+    }
+
+    pub fn load_global_plugins(&mut self) {
+        self.runtime.load_global_plugins();
+    }
+
+    pub fn load_project_config(&mut self, cwd: &std::path::Path) -> crate::trust::TrustState {
+        self.runtime.load_project_config(cwd)
+    }
+
+    pub fn finish(self) -> LuaRuntime {
+        self.runtime
     }
 }
 
@@ -314,13 +352,16 @@ impl LuaRuntime {
     pub fn new() -> Self {
         #[allow(clippy::arc_with_non_send_sync)]
         let shared = Arc::new(LuaShared::default());
-        Self::with_shared_and_paths(shared, LuaLoadPaths::from_process(), true)
+        Self::with_host_bootstrap(shared, LuaLoadPaths::from_process())
     }
 
     pub fn with_shared(shared: Arc<LuaShared>) -> Self {
-        Self::with_shared_and_paths(shared, LuaLoadPaths::from_process(), true)
+        Self::with_host_bootstrap(shared, LuaLoadPaths::from_process())
     }
 
+    /// Build a runtime from a captured process environment without evaluating
+    /// bootstrap chunks. The owning frontend loads the appropriate bootstrap
+    /// exactly once after its host capabilities are available.
     pub fn with_shared_for_runtime(
         shared: Arc<LuaShared>,
         env: &engine::env::RuntimeEnv,
@@ -331,15 +372,16 @@ impl LuaRuntime {
         Self::with_shared_and_paths(
             shared,
             LuaLoadPaths::from_runtime(env, config_dir, runtime_override, project_cwd),
-            true,
         )
     }
 
-    fn with_shared_and_paths(
-        shared: Arc<LuaShared>,
-        load_paths: LuaLoadPaths,
-        load_bootstrap: bool,
-    ) -> Self {
+    fn with_host_bootstrap(shared: Arc<LuaShared>, load_paths: LuaLoadPaths) -> Self {
+        let mut runtime = Self::with_shared_and_paths(shared, load_paths);
+        runtime.load_bootstrap();
+        runtime
+    }
+
+    fn with_shared_and_paths(shared: Arc<LuaShared>, load_paths: LuaLoadPaths) -> Self {
         shared.set_runtime_home(&load_paths.home);
         shared.set_project_cwd(load_paths.project_cwd.as_deref());
         let lua = Lua::new();
@@ -385,9 +427,6 @@ impl LuaRuntime {
             }
         }
         runtime.snapshot_native_modules();
-        if load_bootstrap {
-            runtime.load_bootstrap();
-        }
         runtime
     }
 
@@ -396,25 +435,44 @@ impl LuaRuntime {
         shared: Arc<LuaShared>,
         target_cwd: Option<&std::path::Path>,
     ) -> Self {
-        Self::with_shared_and_paths(shared, self.load_paths.for_target_cwd(target_cwd), false)
+        Self::with_shared_and_paths(shared, self.load_paths.for_target_cwd(target_cwd))
+    }
+
+    fn clone_without_candidate_commits(&self) -> Self {
+        Self {
+            lua: self.lua.clone(),
+            load_error: self.load_error.clone(),
+            load_failure_location: self.load_failure_location.clone(),
+            shared: Arc::clone(&self.shared),
+            init_lua_path: self.init_lua_path.clone(),
+            bootstrap_mode: self.bootstrap_mode,
+            load_paths: self.load_paths.clone(),
+            launch_inputs: self.launch_inputs.clone(),
+            load_warnings: self.load_warnings.clone(),
+            loaded_files: Arc::clone(&self.loaded_files),
+            candidate_commits: Vec::new(),
+        }
     }
 
     /// Clone the VM-facing portion needed for synchronous callback execution.
     pub fn execution(&self) -> LuaExecution {
         LuaExecution {
-            runtime: Self {
-                lua: self.lua.clone(),
-                load_error: self.load_error.clone(),
-                load_failure_location: self.load_failure_location.clone(),
-                shared: Arc::clone(&self.shared),
-                init_lua_path: self.init_lua_path.clone(),
-                bootstrap_mode: self.bootstrap_mode,
-                load_paths: self.load_paths.clone(),
-                launch_inputs: self.launch_inputs.clone(),
-                load_warnings: self.load_warnings.clone(),
-                loaded_files: Arc::clone(&self.loaded_files),
-                candidate_commits: Vec::new(),
-            },
+            runtime: self.clone_without_candidate_commits(),
+        }
+    }
+
+    /// Transfer generation-zero loading to a launch owner.
+    ///
+    /// The owner shares the existing VM and registries. It must be consumed
+    /// with [`LuaLaunch::finish`] and installed back into the frontend before
+    /// normal callback execution begins.
+    pub fn continue_launch(&self) -> LuaLaunch {
+        debug_assert!(
+            self.candidate_commits.is_empty(),
+            "candidate runtimes cannot continue generation-zero loading"
+        );
+        LuaLaunch {
+            runtime: self.clone_without_candidate_commits(),
         }
     }
 

@@ -387,23 +387,54 @@ pub(crate) fn request_attempts(
     conn: &Connection,
     query: &RequestAuditQuery,
 ) -> Result<Vec<RequestAuditSummary>> {
+    request_attempts_for_branch(conn, query, None)
+}
+
+pub(crate) fn lineage_request_attempts(
+    conn: &Connection,
+    lineage_id: &str,
+    session_id: &str,
+    query: &RequestAuditQuery,
+) -> Result<Vec<RequestAuditSummary>> {
+    request_attempts_for_branch(conn, query, Some((lineage_id, session_id)))
+}
+
+fn request_attempts_for_branch(
+    conn: &Connection,
+    query: &RequestAuditQuery,
+    branch: Option<(&str, &str)>,
+) -> Result<Vec<RequestAuditSummary>> {
     let mut sql = String::from(
         "SELECT a.id, a.request_id, a.kind, a.turn_id, a.ask_id, a.started_at, a.completed_at,
                 a.provider, a.model, a.api_base, a.url, a.http_status, a.history_len, a.attempt,
                 a.stream, a.prompt_cache_key, a.background, a.raw_body_size, body.object_hash,
                 response.object_hash, a.response_summary, error.object_hash, a.error_summary,
                 s.stats_json, s.total_cost_micros, s.tokens_per_sec
-         FROM request_attempts a
-         LEFT JOIN request_stats s ON s.request_attempt_id = a.id
-         LEFT JOIN request_object_refs body
-           ON body.request_attempt_id = a.id AND body.role IN ('body_json', 'body_manifest')
-         LEFT JOIN request_object_refs response
-           ON response.request_attempt_id = a.id AND response.role = 'response'
-         LEFT JOIN request_object_refs error
-           ON error.request_attempt_id = a.id AND error.role = 'error'",
+         FROM request_attempts a",
+    );
+    if branch.is_some() {
+        sql.push_str(
+            " JOIN lineage_request_attempts lineage_request
+                ON lineage_request.request_attempt_id = a.id",
+        );
+    }
+    sql.push_str(
+        " LEFT JOIN request_stats s ON s.request_attempt_id = a.id
+          LEFT JOIN request_object_refs body
+            ON body.request_attempt_id = a.id AND body.role IN ('body_json', 'body_manifest')
+          LEFT JOIN request_object_refs response
+            ON response.request_attempt_id = a.id AND response.role = 'response'
+          LEFT JOIN request_object_refs error
+            ON error.request_attempt_id = a.id AND error.role = 'error'",
     );
     let mut clauses: Vec<&str> = Vec::new();
     let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+    if let Some((lineage_id, session_id)) = branch {
+        clauses.push("lineage_request.lineage_id = ?");
+        values.push(Box::new(lineage_id.to_owned()));
+        clauses.push("lineage_request.session_id = ?");
+        values.push(Box::new(session_id.to_owned()));
+    }
     push_i64(
         &mut clauses,
         &mut values,
@@ -531,6 +562,31 @@ const LATEST_CONTEXT_TOKENS_SQL: &str = "SELECT s.context_tokens
      ORDER BY a.started_at DESC, a.id DESC
      LIMIT 1";
 
+fn request_stats_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestAuditStats> {
+    let total_cost_micros: i64 = row.get(4)?;
+    Ok(RequestAuditStats {
+        request_count: nonnegative_u64(row.get(0)?),
+        error_count: nonnegative_u64(row.get(1)?),
+        streaming_count: nonnegative_u64(row.get(2)?),
+        raw_response_count: nonnegative_u64(row.get(3)?),
+        total_cost_usd: total_cost_micros as f64 / 1_000_000.0,
+        total_elapsed_ms: nonnegative_u64(row.get(5)?),
+        total_prompt_tokens: nonnegative_u64(row.get(6)?),
+        total_completion_tokens: nonnegative_u64(row.get(7)?),
+        total_cache_read_tokens: nonnegative_u64(row.get(8)?),
+        total_cache_write_tokens: nonnegative_u64(row.get(9)?),
+        total_reasoning_tokens: nonnegative_u64(row.get(10)?),
+        first_request_ms: row.get::<_, Option<i64>>(11)?.map(nonnegative_u64),
+        latest_timestamp_ms: row.get::<_, Option<i64>>(12)?.map(nonnegative_u64),
+        max_context_tokens: row
+            .get::<_, Option<i64>>(13)?
+            .map(|value| nonnegative_u64(value) as u32),
+        latest_provider_kind: None,
+        latest_model: None,
+        latest_context_tokens: None,
+    })
+}
+
 pub(crate) fn request_stats(conn: &Connection) -> Result<RequestAuditStats> {
     let mut stats = conn.query_row(
         "SELECT COUNT(a.id),
@@ -556,30 +612,7 @@ pub(crate) fn request_stats(conn: &Connection) -> Result<RequestAuditStats> {
          FROM request_attempts a
          LEFT JOIN request_stats s ON s.request_attempt_id = a.id",
         [],
-        |row| {
-            let total_cost_micros: i64 = row.get(4)?;
-            Ok(RequestAuditStats {
-                request_count: nonnegative_u64(row.get(0)?),
-                error_count: nonnegative_u64(row.get(1)?),
-                streaming_count: nonnegative_u64(row.get(2)?),
-                raw_response_count: nonnegative_u64(row.get(3)?),
-                total_cost_usd: total_cost_micros as f64 / 1_000_000.0,
-                total_elapsed_ms: nonnegative_u64(row.get(5)?),
-                total_prompt_tokens: nonnegative_u64(row.get(6)?),
-                total_completion_tokens: nonnegative_u64(row.get(7)?),
-                total_cache_read_tokens: nonnegative_u64(row.get(8)?),
-                total_cache_write_tokens: nonnegative_u64(row.get(9)?),
-                total_reasoning_tokens: nonnegative_u64(row.get(10)?),
-                first_request_ms: row.get::<_, Option<i64>>(11)?.map(nonnegative_u64),
-                latest_timestamp_ms: row.get::<_, Option<i64>>(12)?.map(nonnegative_u64),
-                max_context_tokens: row
-                    .get::<_, Option<i64>>(13)?
-                    .map(|value| nonnegative_u64(value) as u32),
-                latest_provider_kind: None,
-                latest_model: None,
-                latest_context_tokens: None,
-            })
-        },
+        request_stats_from_row,
     )?;
 
     if let Some((provider, model)) = conn
@@ -593,6 +626,78 @@ pub(crate) fn request_stats(conn: &Connection) -> Result<RequestAuditStats> {
     }
     stats.latest_context_tokens = conn
         .query_row(LATEST_CONTEXT_TOKENS_SQL, [], |row| row.get::<_, i64>(0))
+        .optional()?
+        .map(|value| nonnegative_u64(value) as u32);
+    Ok(stats)
+}
+
+pub(crate) fn lineage_request_stats(
+    conn: &Connection,
+    lineage_id: &str,
+    session_id: &str,
+) -> Result<RequestAuditStats> {
+    let branch = params![lineage_id, session_id];
+    let mut stats = conn.query_row(
+        "SELECT COUNT(a.id),
+                COALESCE(SUM(CASE WHEN a.error_summary IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN a.stream != 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM request_object_refs response
+                    WHERE response.request_attempt_id = a.id AND response.role = 'response'
+                ) THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(s.total_cost_micros), 0),
+                COALESCE(SUM(CASE
+                    WHEN a.completed_at IS NOT NULL THEN MAX(a.completed_at - a.started_at, 0)
+                    ELSE 0
+                END), 0),
+                COALESCE(SUM(s.input_tokens), 0),
+                COALESCE(SUM(s.output_tokens), 0),
+                COALESCE(SUM(s.cached_input_tokens), 0),
+                COALESCE(SUM(s.cache_write_tokens), 0),
+                COALESCE(SUM(s.reasoning_tokens), 0),
+                MIN(a.started_at),
+                MAX(a.started_at),
+                MAX(s.context_tokens)
+         FROM request_attempts a
+         JOIN lineage_request_attempts branch
+           ON branch.request_attempt_id = a.id
+         LEFT JOIN request_stats s ON s.request_attempt_id = a.id
+         WHERE branch.lineage_id = ?1 AND branch.session_id = ?2",
+        branch,
+        request_stats_from_row,
+    )?;
+
+    if let Some((provider, model)) = conn
+        .query_row(
+            "SELECT a.provider, a.model
+             FROM request_attempts a
+             JOIN lineage_request_attempts branch
+               ON branch.request_attempt_id = a.id
+             WHERE branch.lineage_id = ?1 AND branch.session_id = ?2
+             ORDER BY a.started_at DESC, a.id DESC
+             LIMIT 1",
+            params![lineage_id, session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    {
+        stats.latest_provider_kind = provider;
+        stats.latest_model = model;
+    }
+    stats.latest_context_tokens = conn
+        .query_row(
+            "SELECT s.context_tokens
+             FROM request_attempts a
+             JOIN lineage_request_attempts branch
+               ON branch.request_attempt_id = a.id
+             JOIN request_stats s ON s.request_attempt_id = a.id
+             WHERE branch.lineage_id = ?1 AND branch.session_id = ?2
+               AND s.context_tokens IS NOT NULL
+             ORDER BY a.started_at DESC, a.id DESC
+             LIMIT 1",
+            params![lineage_id, session_id],
+            |row| row.get::<_, i64>(0),
+        )
         .optional()?
         .map(|value| nonnegative_u64(value) as u32);
     Ok(stats)

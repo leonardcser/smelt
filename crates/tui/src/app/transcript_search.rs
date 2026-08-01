@@ -6,6 +6,9 @@ use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::smelt_edit::{DocPosition, RowIndex};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
 const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
@@ -15,6 +18,7 @@ pub(crate) struct TranscriptSearchSession {
     pub(super) key: TranscriptSearchKey,
     pub(super) total_rows: RowIndex,
     pub(super) candidate_backed: bool,
+    origin_block_idx: Option<u64>,
     pub(super) candidate_blocks: Vec<u64>,
     pub(super) candidates: Vec<usize>,
     pub(super) scanned: Vec<bool>,
@@ -33,7 +37,274 @@ pub(super) struct TranscriptSearchIndex {
 
 pub(super) struct TranscriptSearchStore {
     session_dir: std::path::PathBuf,
-    db: smelt_store::SessionReader,
+    reader: TranscriptSearchReader,
+}
+
+enum TranscriptSearchReader {
+    Legacy(smelt_store::SessionReader),
+    Lineage(smelt_store::LineageSessionReader),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptSearchContext {
+    pub(crate) session_id: String,
+}
+
+#[derive(Debug)]
+pub struct TranscriptSearchWorkerResult {
+    pub(crate) generation: u64,
+    pub(crate) context: TranscriptSearchContext,
+    pub(crate) query: String,
+    pub(crate) direction: SearchDirection,
+    pub(crate) candidates: SqliteTranscriptCandidateBlocks,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TranscriptSearchWorkerRequest {
+    pub(super) generation: u64,
+    pub(super) context: TranscriptSearchContext,
+    pub(super) session_dir: std::path::PathBuf,
+    pub(super) query: String,
+    pub(super) origin_block_idx: Option<u64>,
+    pub(super) direction: SearchDirection,
+}
+
+#[derive(Default)]
+struct TranscriptSearchWorkerState {
+    pending: Option<TranscriptSearchWorkerRequest>,
+    shutdown: bool,
+}
+
+struct TranscriptSearchWorkerShared {
+    state: Mutex<TranscriptSearchWorkerState>,
+    changed: Condvar,
+    latest_generation: AtomicU64,
+    #[cfg(test)]
+    delay_ms: AtomicU64,
+}
+
+pub(super) struct TranscriptSearchWorker {
+    shared: Arc<TranscriptSearchWorkerShared>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl TranscriptSearchWorker {
+    pub(super) fn spawn(
+        event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
+    ) -> Self {
+        let shared = Arc::new(TranscriptSearchWorkerShared {
+            state: Mutex::new(TranscriptSearchWorkerState::default()),
+            changed: Condvar::new(),
+            latest_generation: AtomicU64::new(0),
+            #[cfg(test)]
+            delay_ms: AtomicU64::new(0),
+        });
+        let worker_shared = Arc::clone(&shared);
+        let thread = thread::Builder::new()
+            .name("smelt-transcript-search".into())
+            .spawn(move || transcript_search_worker_loop(worker_shared, event_tx))
+            .expect("failed to spawn transcript search worker");
+        Self {
+            shared,
+            thread: Some(thread),
+        }
+    }
+
+    pub(super) fn request(&self, request: TranscriptSearchWorkerRequest) {
+        self.shared
+            .latest_generation
+            .store(request.generation, Ordering::Release);
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending = Some(request);
+        self.shared.changed.notify_one();
+    }
+
+    pub(super) fn cancel(&self, generation: u64) {
+        self.shared
+            .latest_generation
+            .store(generation, Ordering::Release);
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending = None;
+        self.shared.changed.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_delay(&self, delay: std::time::Duration) {
+        self.shared.delay_ms.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+    }
+}
+
+impl Drop for TranscriptSearchWorker {
+    fn drop(&mut self) {
+        self.shared.latest_generation.fetch_add(1, Ordering::AcqRel);
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.shutdown = true;
+        state.pending = None;
+        self.shared.changed.notify_one();
+        let _ = self.thread.take();
+    }
+}
+
+fn transcript_search_worker_loop(
+    shared: Arc<TranscriptSearchWorkerShared>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
+) {
+    loop {
+        let request = {
+            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            while state.pending.is_none() && !state.shutdown {
+                state = shared
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            if state.shutdown {
+                return;
+            }
+            state.pending.take().expect("pending search request")
+        };
+
+        #[cfg(test)]
+        {
+            let mut remaining = shared.delay_ms.load(Ordering::Acquire);
+            while remaining > 0 {
+                if shared.latest_generation.load(Ordering::Acquire) != request.generation {
+                    break;
+                }
+                let sleep_ms = remaining.min(5);
+                thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                remaining -= sleep_ms;
+            }
+        }
+        if shared.latest_generation.load(Ordering::Acquire) != request.generation {
+            continue;
+        }
+
+        let candidates = persistent_transcript_candidate_blocks(&request).unwrap_or_default();
+        if shared.latest_generation.load(Ordering::Acquire) != request.generation {
+            continue;
+        }
+        if event_tx
+            .send(crate::app::AppEvent::TranscriptSearchCompleted(
+                TranscriptSearchWorkerResult {
+                    generation: request.generation,
+                    context: request.context,
+                    query: request.query,
+                    direction: request.direction,
+                    candidates,
+                },
+            ))
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+fn persistent_transcript_candidate_blocks(
+    request: &TranscriptSearchWorkerRequest,
+) -> smelt_store::Result<SqliteTranscriptCandidateBlocks> {
+    let store = TranscriptSearchStore::open(request.session_dir.clone())?;
+    let store_direction = match request.direction {
+        SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
+        SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
+    };
+    let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
+    let mut page = store.search_candidate_page(
+        &request.query,
+        request.origin_block_idx,
+        store_direction,
+        limit,
+    )?;
+    if request.origin_block_idx.is_some() && page.len() < limit {
+        let wrapped = store.search_candidate_page(
+            &request.query,
+            None,
+            store_direction,
+            limit - page.len(),
+        )?;
+        for candidate in wrapped {
+            if !page
+                .iter()
+                .any(|seen| seen.block_idx == candidate.block_idx)
+            {
+                page.push(candidate);
+            }
+        }
+    }
+    Ok(SqliteTranscriptCandidateBlocks {
+        block_indices: page
+            .into_iter()
+            .map(|candidate| candidate.block_idx)
+            .collect(),
+        available: true,
+    })
+}
+
+impl TranscriptSearchStore {
+    fn open(session_dir: std::path::PathBuf) -> smelt_store::Result<Self> {
+        let lineage = session_dir
+            .parent()
+            .zip(session_dir.file_name().and_then(|name| name.to_str()))
+            .filter(|(_, session_id)| {
+                session_id.len() == 64
+                    && session_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(|(sessions_root, session_id)| {
+                smelt_store::LineageSessionReader::try_open_existing(sessions_root, session_id)
+            })
+            .transpose()?
+            .flatten();
+        let reader = match lineage {
+            Some(reader) => TranscriptSearchReader::Lineage(reader),
+            None => {
+                // COMPAT(session-lineage-v1): retain read-only search for the
+                // immediately preceding format in explicit compatibility tests.
+                TranscriptSearchReader::Legacy(smelt_store::SessionReader::open_database(
+                    session_dir.join("session.db"),
+                )?)
+            }
+        };
+        Ok(Self {
+            session_dir,
+            reader,
+        })
+    }
+
+    fn search_candidate_page(
+        &self,
+        query: &str,
+        origin_block_idx: Option<u64>,
+        direction: smelt_store::TranscriptSearchDirection,
+        limit: usize,
+    ) -> smelt_store::Result<Vec<smelt_store::TranscriptSearchCandidate>> {
+        match &self.reader {
+            TranscriptSearchReader::Legacy(reader) => {
+                reader.search_transcript_candidate_page(query, origin_block_idx, direction, limit)
+            }
+            TranscriptSearchReader::Lineage(reader) => {
+                reader.search_transcript_candidate_page(query, origin_block_idx, direction, limit)
+            }
+        }
+    }
+
+    fn record_count(&self) -> smelt_store::Result<usize> {
+        match &self.reader {
+            TranscriptSearchReader::Legacy(reader) => reader.transcript_record_count(),
+            TranscriptSearchReader::Lineage(reader) => {
+                usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
+                    smelt_store::StoreError::Integrity(
+                        "lineage transcript length exceeds platform limits".into(),
+                    )
+                })
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -51,9 +322,9 @@ pub(super) struct TranscriptSearchKey {
 }
 
 #[derive(Clone, Debug, Default)]
-struct SqliteTranscriptCandidateBlocks {
-    block_indices: Vec<u64>,
-    available: bool,
+pub(crate) struct SqliteTranscriptCandidateBlocks {
+    pub(crate) block_indices: Vec<u64>,
+    pub(crate) available: bool,
 }
 
 impl TranscriptSearchIndex {
@@ -214,8 +485,10 @@ impl TuiApp {
         candidate_blocks: &[u64],
         origin: DocPosition,
         direction: SearchDirection,
+        preferred_origin_block: Option<u64>,
     ) {
-        let origin_block = self.transcript_candidate_origin_block(origin, direction);
+        let origin_block = preferred_origin_block
+            .or_else(|| self.transcript_candidate_origin_block(origin, direction));
         let Some(block_idx) =
             transcript_search_activation_block(candidate_blocks, origin_block, direction)
         else {
@@ -230,7 +503,7 @@ impl TuiApp {
         );
     }
 
-    fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
+    pub(super) fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
         let Some(start) = self.conversation.transcript().history().record_dirty_from() else {
             return Vec::new();
         };
@@ -259,7 +532,7 @@ impl TuiApp {
         out
     }
 
-    fn transcript_search_store(&mut self) -> Option<&smelt_store::SessionReader> {
+    fn transcript_search_store(&mut self) -> Option<&TranscriptSearchStore> {
         let session_dir = self
             .conversation
             .transcript()
@@ -271,14 +544,10 @@ impl TuiApp {
             .transcript_search_store()
             .is_none_or(|store| store.session_dir != session_dir)
         {
-            let db =
-                smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
-            self.overlays
-                .install_transcript_search_store(TranscriptSearchStore { session_dir, db });
+            let store = TranscriptSearchStore::open(session_dir).ok()?;
+            self.overlays.install_transcript_search_store(store);
         }
-        self.overlays
-            .transcript_search_store()
-            .map(|store| &store.db)
+        self.overlays.transcript_search_store()
     }
 
     fn sqlite_transcript_candidate_blocks(
@@ -287,6 +556,10 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> SqliteTranscriptCandidateBlocks {
+        smelt_perf::perf::record_value(
+            "search:transcript:projection_requested",
+            u64::from(self.conversation.request_search_projection()),
+        );
         let dirty_blocks = self.dirty_transcript_candidate_blocks(query);
         let width = self.transcript_width() as u16;
         let origin_block = self
@@ -306,16 +579,11 @@ impl TuiApp {
         let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
-                .search_transcript_candidate_page(query, origin_block, store_direction, limit)
+                .search_candidate_page(query, origin_block, store_direction, limit)
                 .ok()?;
             if origin_block.is_some() && page.len() < limit {
                 let wrapped = db
-                    .search_transcript_candidate_page(
-                        query,
-                        None,
-                        store_direction,
-                        limit - page.len(),
-                    )
+                    .search_candidate_page(query, None, store_direction, limit - page.len())
                     .ok()?;
                 for candidate in wrapped {
                     if !page
@@ -326,8 +594,7 @@ impl TuiApp {
                     }
                 }
             }
-            if page.is_empty() && !records_persisted && db.transcript_record_count().ok() == Some(0)
-            {
+            if page.is_empty() && !records_persisted && db.record_count().ok() == Some(0) {
                 return None;
             }
             Some(page)
@@ -404,10 +671,34 @@ impl TuiApp {
         direction: SearchDirection,
     ) -> Option<TranscriptSearchSession> {
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
+        self.new_transcript_search_session_with_candidates(
+            query,
+            origin,
+            direction,
+            sqlite_candidates,
+            None,
+        )
+    }
+
+    pub(super) fn new_transcript_search_session_with_candidates(
+        &mut self,
+        query: &str,
+        origin: DocPosition,
+        direction: SearchDirection,
+        sqlite_candidates: SqliteTranscriptCandidateBlocks,
+        preferred_origin_block: Option<u64>,
+    ) -> Option<TranscriptSearchSession> {
         let candidate_backed = sqlite_candidates.available;
         let candidate_blocks = sqlite_candidates.block_indices;
+        let origin_block_idx = preferred_origin_block
+            .or_else(|| self.transcript_candidate_origin_block(origin, direction));
         if candidate_backed {
-            self.activate_transcript_search_candidate_window(&candidate_blocks, origin, direction);
+            self.activate_transcript_search_candidate_window(
+                &candidate_blocks,
+                origin,
+                direction,
+                origin_block_idx,
+            );
         }
         let (key, candidates, scanned_len, indexed_total_rows) = {
             let candidate_blocks_slice = candidate_backed.then_some(candidate_blocks.as_slice());
@@ -436,6 +727,7 @@ impl TuiApp {
             key,
             total_rows,
             candidate_backed,
+            origin_block_idx,
             candidate_blocks,
             candidates,
             scanned: vec![false; scanned_len],
@@ -496,6 +788,7 @@ impl TuiApp {
                 &sqlite_candidates.block_indices,
                 origin,
                 direction,
+                None,
             );
         }
         let candidate_blocks = sqlite_candidates
@@ -748,7 +1041,9 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> Option<u64> {
-        let origin_block = self.transcript_candidate_origin_block(origin, direction);
+        let origin_block = session
+            .origin_block_idx
+            .or_else(|| self.transcript_candidate_origin_block(origin, direction));
         match direction {
             SearchDirection::Forward => {
                 if let Some(origin_block) = origin_block {

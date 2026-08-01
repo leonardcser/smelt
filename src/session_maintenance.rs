@@ -186,16 +186,60 @@ fn inspect_or_migrate_session(session_id: String, dry_run: bool) -> SessionMigra
         }
     };
     match status {
-        smelt_store::SessionSchemaStatus::Current { version } => SessionMigrationOutput {
-            session_id,
-            status: SessionMigrationState::Current,
-            from_version: Some(version),
-            to_version: Some(version),
-            supported_version: None,
-            duration_ms: operation_duration_ms(started),
-            error_kind: None,
-            error: None,
-        },
+        smelt_store::SessionSchemaStatus::Current { version } => {
+            let already_lineage = smelt_core::session::load_store_header_result(&session_id)
+                .ok()
+                .flatten()
+                .is_some_and(|(_, store)| {
+                    matches!(
+                        store.location,
+                        smelt_core::session::SessionStoreLocation::Lineage { .. }
+                    )
+                });
+            if already_lineage {
+                SessionMigrationOutput {
+                    session_id,
+                    status: SessionMigrationState::Current,
+                    from_version: Some(version),
+                    to_version: Some(version),
+                    supported_version: None,
+                    duration_ms: operation_duration_ms(started),
+                    error_kind: None,
+                    error: None,
+                }
+            } else if dry_run {
+                SessionMigrationOutput {
+                    session_id,
+                    status: SessionMigrationState::WouldMigrate,
+                    from_version: Some(version),
+                    to_version: Some(version),
+                    supported_version: None,
+                    duration_ms: operation_duration_ms(started),
+                    error_kind: None,
+                    error: None,
+                }
+            } else {
+                match smelt_core::session::migrate_legacy_session_result(&session_id) {
+                    Ok(_) => SessionMigrationOutput {
+                        session_id,
+                        status: SessionMigrationState::Migrated,
+                        from_version: Some(version),
+                        to_version: Some(version),
+                        supported_version: None,
+                        duration_ms: operation_duration_ms(started),
+                        error_kind: None,
+                        error: None,
+                    },
+                    Err(error) => migration_error_output(
+                        session_id,
+                        Some(version),
+                        Some(version),
+                        started,
+                        error,
+                    ),
+                }
+            }
+        }
         smelt_store::SessionSchemaStatus::Upgradeable { found, target } if dry_run => {
             SessionMigrationOutput {
                 session_id,
@@ -210,20 +254,27 @@ fn inspect_or_migrate_session(session_id: String, dry_run: bool) -> SessionMigra
         }
         smelt_store::SessionSchemaStatus::Upgradeable { found, target } => {
             match smelt_core::session::migrate_session_schema_result(&session_id) {
-                Ok(migration) => SessionMigrationOutput {
-                    session_id,
-                    status: if migration.migrated {
-                        SessionMigrationState::Migrated
-                    } else {
-                        SessionMigrationState::Current
-                    },
-                    from_version: Some(migration.from_version),
-                    to_version: Some(migration.to_version),
-                    supported_version: None,
-                    duration_ms: operation_duration_ms(started),
-                    error_kind: None,
-                    error: None,
-                },
+                Ok(migration) => {
+                    match smelt_core::session::migrate_legacy_session_result(&session_id) {
+                        Ok(_) => SessionMigrationOutput {
+                            session_id,
+                            status: SessionMigrationState::Migrated,
+                            from_version: Some(migration.from_version),
+                            to_version: Some(migration.to_version),
+                            supported_version: None,
+                            duration_ms: operation_duration_ms(started),
+                            error_kind: None,
+                            error: None,
+                        },
+                        Err(error) => migration_error_output(
+                            session_id,
+                            Some(migration.from_version),
+                            Some(migration.to_version),
+                            started,
+                            error,
+                        ),
+                    }
+                }
                 Err(error) => migration_error_output(
                     session_id,
                     Some(found),

@@ -631,6 +631,7 @@ fn catalog_session_from_commit(
     let metadata = &command.metadata;
     CatalogSession {
         id: receipt.session_id.clone(),
+        lineage_id: None,
         title: metadata.title.clone(),
         slug: metadata.slug.clone(),
         first_user_message: metadata.first_user_message.clone(),
@@ -829,6 +830,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
     let mut candidates = 0_u64;
     let mut available = 0_u64;
     let mut unavailable = 0_u64;
+    let mut seen_ids = HashSet::new();
     if let Some(entries) = entries {
         for entry in entries {
             let entry = entry.map_err(|error| {
@@ -843,6 +845,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
             if crate::session_id::SessionId::parse(&id).is_err() {
                 continue;
             }
+            seen_ids.insert(id.clone());
             candidates += 1;
             if tombstones.contains(&id) {
                 seen_tombstones.insert(id.clone());
@@ -869,6 +872,40 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
                             format!("reconcile unavailable session {id}: {catalog_error}")
                         })?;
                 }
+            }
+        }
+    }
+    let lineage_ids = smelt_store::lineage_session_ids(&handle.sessions_root)
+        .map_err(|error| format!("enumerate lineage branches for catalog: {error}"))?;
+    for id in lineage_ids {
+        if !seen_ids.insert(id.clone()) {
+            continue;
+        }
+        candidates += 1;
+        if tombstones.contains(&id) {
+            seen_tombstones.insert(id.clone());
+        }
+        match load_projection(&handle.state_root, &handle.sessions_root, &id) {
+            Ok(session) => {
+                available += 1;
+                let revision = session.source_revision;
+                catalog
+                    .upsert_available_for_reconciliation(&session, scan_id)
+                    .map_err(|error| format!("reconcile lineage session {id}: {error}"))?;
+                handle.clear_projected(&id, revision);
+            }
+            Err(error) => {
+                unavailable += 1;
+                catalog
+                    .upsert_unavailable_for_reconciliation(
+                        &id,
+                        &error.kind,
+                        &error.summary,
+                        scan_id,
+                    )
+                    .map_err(|catalog_error| {
+                        format!("reconcile unavailable lineage session {id}: {catalog_error}")
+                    })?;
             }
         }
     }
@@ -934,6 +971,52 @@ fn load_projection(
 ) -> Result<CatalogSession, ProjectionError> {
     let session_dir = root.join(id);
     let db_path = session_dir.join("session.db");
+    let lineage =
+        smelt_store::LineageSessionReader::try_open_existing(root, id).map_err(|error| {
+            ProjectionError {
+                kind: "corrupt".into(),
+                summary: format!("locate lineage session {id} for catalog projection: {error}"),
+            }
+        })?;
+    if let Some(reader) = lineage {
+        let state = reader.snapshot().map_err(|error| ProjectionError {
+            kind: "corrupt".into(),
+            summary: format!("read lineage session {id} for catalog projection: {error}"),
+        })?;
+        if state.identity.id != id {
+            return Err(ProjectionError {
+                kind: "corrupt".into(),
+                summary: format!(
+                    "persisted lineage branch id {} does not match requested session {id}",
+                    state.identity.id
+                ),
+            });
+        }
+        let metadata = state.metadata;
+        return Ok(CatalogSession {
+            id: state.identity.id,
+            lineage_id: Some(state.lineage_id),
+            title: metadata.title,
+            slug: metadata.slug,
+            first_user_message: metadata.first_user_message,
+            cwd: metadata.cwd,
+            mode: metadata.mode,
+            reasoning_effort: metadata.reasoning_effort,
+            model: metadata.model,
+            fast_mode: metadata.fast_mode,
+            parent_id: state.identity.parent_id,
+            context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
+            history_len: Some(state.head.history_len.get()),
+            text_bytes: Some(state.history_text_bytes),
+            created_at: state.identity.created_at,
+            updated_at: metadata.updated_at,
+            source_revision: state.head.revision.get(),
+            availability: CatalogAvailability::Available,
+            error_kind: None,
+            error_summary: None,
+            last_seen_scan: 0,
+        });
+    }
     if let Err(error) =
         crate::session_store::reject_symlink_in(state_root, &session_dir, "project catalog")
     {
@@ -1039,6 +1122,7 @@ fn load_projection(
     let metadata = stored.metadata;
     Ok(CatalogSession {
         id: stored.identity.id,
+        lineage_id: None,
         title: metadata.title,
         slug: metadata.slug,
         first_user_message: metadata.first_user_message,
@@ -1203,6 +1287,7 @@ mod tests {
     fn stale_catalog_row() -> CatalogSession {
         CatalogSession {
             id: SESSION_ID.into(),
+            lineage_id: None,
             title: Some("stale".into()),
             slug: None,
             first_user_message: None,

@@ -1399,6 +1399,50 @@ async fn process_run_happy_path() {
     assert!(err.is_none());
 }
 
+#[test]
+fn runtime_constructor_defers_bootstrap_until_explicit_load() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let runtime_dir = root.path().join("runtime");
+    for relative_path in smelt_core::lua::runtime::BOOTSTRAP_FILES {
+        let path = runtime_dir.join("smelt").join(relative_path);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("bootstrap parent");
+        let source = if *relative_path == "_bootstrap.lua" {
+            "BOOTSTRAP_COUNT = (BOOTSTRAP_COUNT or 0) + 1\n"
+        } else {
+            ""
+        };
+        std::fs::write(path, source).expect("bootstrap override");
+    }
+
+    let env = engine::env::RuntimeEnv::scripted(
+        4242,
+        root.path().join("home"),
+        root.path().join("config"),
+        root.path().join("state"),
+        root.path().join("cache"),
+        root.path().join("data"),
+        root.path().join("process-runtime"),
+        root.path().join("workspace"),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    #[allow(clippy::arc_with_non_send_sync)]
+    let shared = Arc::new(LuaShared::default());
+    let mut rt = LuaRuntime::with_shared_for_runtime(shared, &env, None, Some(runtime_dir), None);
+
+    assert_eq!(
+        rt.lua
+            .globals()
+            .get::<Option<i64>>("BOOTSTRAP_COUNT")
+            .unwrap(),
+        None
+    );
+
+    rt.load_full_bootstrap();
+
+    assert_eq!(rt.load_error, None);
+    assert_eq!(get_global::<i64>(&rt, "BOOTSTRAP_COUNT"), 1);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn process_run_uses_runtime_cwd_without_core_host() {
     let root = tempfile::tempdir().expect("runtime root");

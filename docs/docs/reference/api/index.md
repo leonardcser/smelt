@@ -88,7 +88,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.prompt`](prompt.md) - 12 function(s)
 - [`smelt.render`](render.md) - 4 function(s)
 - [`smelt.search`](search.md) - 1 function(s)
-- [`smelt.session`](session.md) - 34 function(s) - 1 internal function(s)
+- [`smelt.session`](session.md) - 35 function(s) - 1 internal function(s)
 - [`smelt.session.messages`](session_messages.md) - 1 function(s)
 - [`smelt.session.slug`](session_slug.md) - 1 function(s)
 - [`smelt.session.title`](session_title.md) - 2 function(s)

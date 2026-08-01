@@ -611,18 +611,30 @@ fn session_requests_json(
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
-    sessions
-        .ensure_session_db_read_only(&dir)
-        .map_err(|err| err.to_string())?;
-    let db_path = dir.join("session.db");
-    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
-    let attempts = db
-        .query_request_attempts(&smelt_store::RequestAuditQuery {
-            limit: u32::MAX,
-            order: smelt_store::RequestAuditOrder::OldestFirst,
-            ..Default::default()
-        })
-        .map_err(|err| err.to_string())?;
+    let query = smelt_store::RequestAuditQuery {
+        limit: u32::MAX,
+        order: smelt_store::RequestAuditOrder::OldestFirst,
+        ..Default::default()
+    };
+    let attempts = if let Some(reader) =
+        smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id)
+            .map_err(|err| err.to_string())?
+    {
+        reader
+            .query_request_attempts(&query)
+            .map_err(|err| err.to_string())?
+    } else {
+        // COMPAT(session-lineage-v1): inspection remains read-only for
+        // previous-format sessions until explicit migration.
+        sessions
+            .ensure_session_db_read_only(&dir)
+            .map_err(|err| err.to_string())?;
+        let db_path = dir.join("session.db");
+        smelt_store::SessionReader::open_database(&db_path)
+            .map_err(|err| err.to_string())?
+            .query_request_attempts(&query)
+            .map_err(|err| err.to_string())?
+    };
     let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
     serde_json::to_string(&values)
         .map(Some)
@@ -665,15 +677,26 @@ fn request_payload_json(
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
-    sessions
-        .ensure_session_db_read_only(&dir)
-        .map_err(|err| err.to_string())?;
-    let db_path = dir.join("session.db");
-    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
-    let Some(payloads) = db
-        .request_payloads(attempt_id)
-        .map_err(|err| err.to_string())?
-    else {
+    let payloads = if let Some(reader) =
+        smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id)
+            .map_err(|err| err.to_string())?
+    {
+        reader
+            .request_payloads(attempt_id)
+            .map_err(|err| err.to_string())?
+    } else {
+        // COMPAT(session-lineage-v1): payload inspection remains read-only for
+        // previous-format sessions until explicit migration.
+        sessions
+            .ensure_session_db_read_only(&dir)
+            .map_err(|err| err.to_string())?;
+        let db_path = dir.join("session.db");
+        smelt_store::SessionReader::open_database(&db_path)
+            .map_err(|err| err.to_string())?
+            .request_payloads(attempt_id)
+            .map_err(|err| err.to_string())?
+    };
+    let Some(payloads) = payloads else {
         return Ok(None);
     };
     serde_json::to_string(&serde_json::json!({
@@ -833,10 +856,17 @@ fn request_stats_for_session(
     let Ok(session_dir) = session_dir(sessions, id) else {
         return RequestStats::default();
     };
-    let db_path = session_dir.join("session.db");
-    smelt_store::SessionReader::open_database(&db_path)
-        .and_then(|db| db.request_audit_stats())
-        .unwrap_or_default()
+    match smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id) {
+        Ok(Some(reader)) => reader.request_audit_stats().unwrap_or_default(),
+        Ok(None) => {
+            // COMPAT(session-lineage-v1): inspector maintenance remains able to
+            // summarize the immediately preceding format during migration.
+            smelt_store::SessionReader::open_database(session_dir.join("session.db"))
+                .and_then(|db| db.request_audit_stats())
+                .unwrap_or_default()
+        }
+        Err(_) => RequestStats::default(),
+    }
 }
 
 #[cfg(test)]
@@ -913,8 +943,8 @@ mod tests {
 
     fn append_request_audit(sessions: &smelt_core::session::SessionStorage, id: &str) -> i64 {
         let sessions_dir = sessions.sessions_dir();
-        let mut writer = smelt_store::OwnedSessionWriter::open(sessions_dir, id)
-            .expect("open canonical session writer");
+        let mut writer = smelt_store::OwnedLineageWriter::open_existing(sessions_dir, id)
+            .expect("open canonical lineage writer");
         let attempt_id = writer
             .append_request_attempt(
                 &protocol::request_log::RequestLogEntry {
@@ -1136,14 +1166,14 @@ mod tests {
             "/work/corrupt",
             200,
         );
-        std::fs::write(
-            state
-                .sessions
-                .dir_for_id(NEWER_SESSION_ID)
-                .join("session.db"),
-            b"not a sqlite database",
+        let lineage = smelt_store::LineageSessionReader::open_existing(
+            state.sessions.sessions_dir(),
+            NEWER_SESSION_ID,
         )
         .unwrap();
+        let database_path = lineage.database_path().to_path_buf();
+        drop(lineage);
+        std::fs::write(database_path, b"not a sqlite database").unwrap();
 
         for path in [
             format!("/api/sessions/{NEWER_SESSION_ID}"),

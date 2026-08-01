@@ -171,8 +171,8 @@ pub enum HistoryNoteKind {
 pub enum HistoryAppendPolicy {
     Append,
     ReplaceNoteKind { kind: HistoryNoteKind },
-    ReplaceContextNote { name: String },
-    RemoveContextNote { name: String },
+    SetContext { name: String },
+    ClearContext { name: String },
     ModeChange { base: crate::mode::AgentMode },
 }
 
@@ -190,14 +190,109 @@ pub enum HistoryAppendResult {
     RemovedLast,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryNoteProjection {
+    pub kind: HistoryNoteKind,
+    pub mode: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryTailBudget {
+    remaining_items: usize,
+    max_bytes: Option<usize>,
+    json_bytes: usize,
+    limit_reached: bool,
+}
+
+impl HistoryTailBudget {
+    pub fn new(max_items: usize, max_bytes: Option<usize>) -> Self {
+        Self {
+            remaining_items: max_items,
+            max_bytes,
+            json_bytes: 0,
+            limit_reached: false,
+        }
+    }
+
+    pub fn can_prepend_bytes(&self, bytes: usize) -> bool {
+        self.remaining_items > 0
+            && self
+                .max_bytes
+                .is_none_or(|limit| bytes <= limit.saturating_sub(self.json_bytes))
+    }
+
+    pub fn try_prepend(&mut self, item: &HistoryItem) -> Result<bool, serde_json::Error> {
+        if self.remaining_items == 0 {
+            self.limit_reached = true;
+            return Ok(false);
+        }
+        let bytes = if self.max_bytes.is_some() {
+            serde_json::to_vec(item)?.len()
+        } else {
+            0
+        };
+        Ok(self.try_prepend_bytes(bytes))
+    }
+
+    pub fn try_prepend_bytes(&mut self, bytes: usize) -> bool {
+        if !self.can_prepend_bytes(bytes) {
+            self.limit_reached = true;
+            return false;
+        }
+        self.remaining_items = self.remaining_items.saturating_sub(1);
+        self.json_bytes = self.json_bytes.saturating_add(bytes);
+        true
+    }
+
+    pub fn json_bytes(&self) -> usize {
+        self.json_bytes
+    }
+
+    pub fn remaining_bytes(&self) -> Option<usize> {
+        self.max_bytes
+            .map(|limit| limit.saturating_sub(self.json_bytes))
+    }
+
+    pub fn limit_reached(&self) -> bool {
+        self.limit_reached
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoryAppendPlan {
+    Unchanged,
+    Push,
+    ReplaceLast,
+    RemoveLast,
+}
+
+impl HistoryAppendPlan {
+    pub fn result(self) -> HistoryAppendResult {
+        match self {
+            Self::Unchanged => HistoryAppendResult::Unchanged,
+            Self::Push => HistoryAppendResult::Pushed,
+            Self::ReplaceLast => HistoryAppendResult::ReplacedLast,
+            Self::RemoveLast => HistoryAppendResult::RemovedLast,
+        }
+    }
+}
+
+pub trait HistoryAppendView {
+    type Error;
+
+    fn history_len(&self) -> usize;
+    fn last_note_projection(&self) -> Result<Option<HistoryNoteProjection>, Self::Error>;
+    fn last_context_note_index(&self, name: &str) -> Result<Option<usize>, Self::Error>;
+    fn history_item_matches(&self, index: usize, item: &HistoryItem) -> Result<bool, Self::Error>;
+    fn effective_mode_at(&self, index: usize, fallback: &str) -> Result<String, Self::Error>;
+}
+
 impl HistoryAppendPolicy {
-    pub fn replacement_note_kind(&self) -> Option<HistoryNoteKind> {
+    pub fn coalescing_note_kind(&self) -> Option<HistoryNoteKind> {
         match self {
             Self::Append => None,
             Self::ReplaceNoteKind { kind } => Some(*kind),
-            Self::ReplaceContextNote { .. } | Self::RemoveContextNote { .. } => {
-                Some(HistoryNoteKind::Context)
-            }
+            Self::SetContext { .. } | Self::ClearContext { .. } => Some(HistoryNoteKind::Context),
             Self::ModeChange { .. } => Some(HistoryNoteKind::ModeChange),
         }
     }
@@ -218,18 +313,18 @@ impl HistoryAppend {
         }
     }
 
-    pub fn replace_context_note(item: HistoryItem, name: impl Into<String>) -> Self {
+    pub fn set_context(item: HistoryItem, name: impl Into<String>) -> Self {
         Self {
             item,
-            policy: HistoryAppendPolicy::ReplaceContextNote { name: name.into() },
+            policy: HistoryAppendPolicy::SetContext { name: name.into() },
         }
     }
 
-    pub fn remove_context_note(name: impl Into<String>) -> Self {
+    pub fn clear_context(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
             item: HistoryItem::note(HistoryNote::named_context(name.clone(), String::new())),
-            policy: HistoryAppendPolicy::RemoveContextNote { name },
+            policy: HistoryAppendPolicy::ClearContext { name },
         }
     }
 
@@ -240,8 +335,8 @@ impl HistoryAppend {
         }
     }
 
-    pub fn replacement_note_kind(&self) -> Option<HistoryNoteKind> {
-        self.policy.replacement_note_kind()
+    pub fn coalescing_note_kind(&self) -> Option<HistoryNoteKind> {
+        self.policy.coalescing_note_kind()
     }
 }
 
@@ -353,6 +448,17 @@ impl HistoryNote {
     pub fn to_model_text(&self) -> String {
         match self {
             HistoryNote::ModeChange { text, .. } => crate::note::mode_change_note(text),
+            HistoryNote::Context { name, text }
+                if text.trim().is_empty() && name == DEFAULT_CONTEXT_NOTE_NAME =>
+            {
+                crate::note::cleared_session_context_note()
+            }
+            HistoryNote::Context { name, text } if text.trim().is_empty() => {
+                crate::note::cleared_context_note(name)
+            }
+            HistoryNote::Context { name, text } if name != DEFAULT_CONTEXT_NOTE_NAME => {
+                crate::note::named_context_note(name, text)
+            }
             HistoryNote::Context { text, .. } => crate::note::context_note(text),
             HistoryNote::ProcessStatus { text, .. } => crate::note::process_status_note(text),
         }
@@ -540,124 +646,144 @@ pub fn replace_last_note_kind(
     true
 }
 
-pub fn replace_context_note(items: &mut [HistoryItem], item: &HistoryItem, name: &str) -> bool {
-    let Some(note) = item.as_note() else {
-        return false;
-    };
-    if note.context_name() != Some(name) {
-        return false;
+impl HistoryAppendView for [HistoryItem] {
+    type Error = std::convert::Infallible;
+
+    fn history_len(&self) -> usize {
+        self.len()
     }
-    let Some(existing) = items.iter_mut().rev().find(|existing| {
-        existing
-            .as_note()
-            .and_then(HistoryNote::context_name)
-            .is_some_and(|context_name| context_name == name)
-    }) else {
-        return false;
-    };
-    *existing = item.clone();
-    true
+
+    fn last_note_projection(&self) -> Result<Option<HistoryNoteProjection>, Self::Error> {
+        Ok(self
+            .last()
+            .and_then(HistoryItem::as_note)
+            .map(|note| HistoryNoteProjection {
+                kind: note.kind(),
+                mode: note.mode().map(str::to_string),
+            }))
+    }
+
+    fn last_context_note_index(&self, name: &str) -> Result<Option<usize>, Self::Error> {
+        Ok(self
+            .iter()
+            .rposition(|item| item.as_note().and_then(HistoryNote::context_name) == Some(name)))
+    }
+
+    fn history_item_matches(&self, index: usize, item: &HistoryItem) -> Result<bool, Self::Error> {
+        Ok(self.get(index) == Some(item))
+    }
+
+    fn effective_mode_at(&self, index: usize, fallback: &str) -> Result<String, Self::Error> {
+        Ok(effective_mode_at(self, index, fallback).to_string())
+    }
 }
 
-pub fn remove_context_note(items: &mut Vec<HistoryItem>, name: &str) -> bool {
-    let Some(idx) = items.iter().rposition(|existing| {
-        existing
-            .as_note()
-            .and_then(HistoryNote::context_name)
-            .is_some_and(|context_name| context_name == name)
-    }) else {
-        return false;
-    };
-    items.remove(idx);
-    true
+pub fn plan_history_append<V: HistoryAppendView + ?Sized>(
+    view: &V,
+    append: &HistoryAppend,
+) -> Result<HistoryAppendPlan, V::Error> {
+    let len = view.history_len();
+    match &append.policy {
+        HistoryAppendPolicy::Append => Ok(HistoryAppendPlan::Push),
+        HistoryAppendPolicy::ReplaceNoteKind { kind } => {
+            if append.item.note_kind() == Some(*kind)
+                && view
+                    .last_note_projection()?
+                    .is_some_and(|note| note.kind == *kind)
+            {
+                Ok(HistoryAppendPlan::ReplaceLast)
+            } else {
+                Ok(HistoryAppendPlan::Push)
+            }
+        }
+        HistoryAppendPolicy::SetContext { name } => {
+            if append.item.as_note().and_then(HistoryNote::context_name) != Some(name.as_str()) {
+                return Ok(HistoryAppendPlan::Unchanged);
+            }
+            let Some(index) = view.last_context_note_index(name)? else {
+                return Ok(HistoryAppendPlan::Push);
+            };
+            if view.history_item_matches(index, &append.item)? {
+                Ok(HistoryAppendPlan::Unchanged)
+            } else {
+                Ok(HistoryAppendPlan::Push)
+            }
+        }
+        HistoryAppendPolicy::ClearContext { name } => {
+            let Some(note) = append.item.as_note() else {
+                return Ok(HistoryAppendPlan::Unchanged);
+            };
+            if note.context_name() != Some(name.as_str()) || !note.text().trim().is_empty() {
+                return Ok(HistoryAppendPlan::Unchanged);
+            }
+            let Some(index) = view.last_context_note_index(name)? else {
+                return Ok(HistoryAppendPlan::Unchanged);
+            };
+            if view.history_item_matches(index, &append.item)? {
+                Ok(HistoryAppendPlan::Unchanged)
+            } else {
+                Ok(HistoryAppendPlan::Push)
+            }
+        }
+        HistoryAppendPolicy::ModeChange { base } => {
+            let Some(new_mode) = append.item.as_note().and_then(HistoryNote::mode) else {
+                return Ok(
+                    if append.item.note_kind() == Some(HistoryNoteKind::ModeChange)
+                        && view
+                            .last_note_projection()?
+                            .is_some_and(|note| note.kind == HistoryNoteKind::ModeChange)
+                    {
+                        HistoryAppendPlan::ReplaceLast
+                    } else {
+                        HistoryAppendPlan::Push
+                    },
+                );
+            };
+            let fallback = append
+                .item
+                .as_note()
+                .and_then(HistoryNote::base_mode)
+                .unwrap_or(base.as_str());
+            let last = view.last_note_projection()?;
+            if last
+                .as_ref()
+                .is_some_and(|note| note.kind == HistoryNoteKind::ModeChange)
+            {
+                if last.as_ref().is_some_and(|note| note.mode.is_some())
+                    && new_mode == view.effective_mode_at(len.saturating_sub(1), fallback)?
+                {
+                    Ok(HistoryAppendPlan::RemoveLast)
+                } else {
+                    Ok(HistoryAppendPlan::ReplaceLast)
+                }
+            } else if new_mode == view.effective_mode_at(len, fallback)? {
+                Ok(HistoryAppendPlan::Unchanged)
+            } else {
+                Ok(HistoryAppendPlan::Push)
+            }
+        }
+    }
 }
 
 pub fn apply_history_append(
     items: &mut Vec<HistoryItem>,
     append: &HistoryAppend,
 ) -> HistoryAppendResult {
-    match &append.policy {
-        HistoryAppendPolicy::Append => {
-            items.push(append.item.clone());
-            HistoryAppendResult::Pushed
+    let plan = plan_history_append(items.as_slice(), append)
+        .expect("in-memory history append planning is infallible");
+    match plan {
+        HistoryAppendPlan::Unchanged => {}
+        HistoryAppendPlan::Push => items.push(append.item.clone()),
+        HistoryAppendPlan::ReplaceLast => {
+            *items
+                .last_mut()
+                .expect("replace-last plan requires history") = append.item.clone();
         }
-        HistoryAppendPolicy::ReplaceNoteKind { kind } => {
-            if replace_last_note_kind(items, &append.item, *kind) {
-                HistoryAppendResult::ReplacedLast
-            } else {
-                items.push(append.item.clone());
-                HistoryAppendResult::Pushed
-            }
-        }
-        HistoryAppendPolicy::ReplaceContextNote { name } => {
-            if append.item.as_note().and_then(HistoryNote::context_name) != Some(name.as_str()) {
-                return HistoryAppendResult::Unchanged;
-            }
-            if replace_context_note(items, &append.item, name) {
-                HistoryAppendResult::ReplacedLast
-            } else {
-                items.push(append.item.clone());
-                HistoryAppendResult::Pushed
-            }
-        }
-        HistoryAppendPolicy::RemoveContextNote { name } => {
-            if remove_context_note(items, name) {
-                HistoryAppendResult::RemovedLast
-            } else {
-                HistoryAppendResult::Unchanged
-            }
-        }
-        HistoryAppendPolicy::ModeChange { base } => {
-            append_mode_change(items, append.item.clone(), base)
+        HistoryAppendPlan::RemoveLast => {
+            items.pop().expect("remove-last plan requires history");
         }
     }
-}
-
-fn append_mode_change(
-    items: &mut Vec<HistoryItem>,
-    item: HistoryItem,
-    mode_base: &crate::mode::AgentMode,
-) -> HistoryAppendResult {
-    let Some(new_mode) = item
-        .as_note()
-        .and_then(HistoryNote::mode)
-        .map(str::to_string)
-    else {
-        if replace_last_note_kind(items, &item, HistoryNoteKind::ModeChange) {
-            return HistoryAppendResult::ReplacedLast;
-        }
-        items.push(item);
-        return HistoryAppendResult::Pushed;
-    };
-
-    let fallback = item
-        .as_note()
-        .and_then(HistoryNote::base_mode)
-        .unwrap_or(mode_base.as_str());
-    let last_mode = items
-        .last()
-        .is_some_and(|last| last.note_kind() == Some(HistoryNoteKind::ModeChange));
-
-    if last_mode {
-        let last_has_mode = items
-            .last()
-            .and_then(HistoryItem::as_note)
-            .and_then(HistoryNote::mode)
-            .is_some();
-        if last_has_mode && new_mode == effective_mode_at(items, items.len() - 1, fallback) {
-            items.pop();
-            return HistoryAppendResult::RemovedLast;
-        }
-        *items.last_mut().expect("last mode note") = item;
-        return HistoryAppendResult::ReplacedLast;
-    }
-
-    if new_mode == effective_mode_at(items, items.len(), fallback) {
-        return HistoryAppendResult::Unchanged;
-    }
-
-    items.push(item);
-    HistoryAppendResult::Pushed
+    plan.result()
 }
 
 pub fn effective_mode_at<'a>(
@@ -984,6 +1110,24 @@ mod tests {
     }
 
     #[test]
+    fn history_tail_budget_enforces_item_and_byte_limits() {
+        let item = HistoryItem::user(Content::text("tail"));
+        let item_bytes = serde_json::to_vec(&item).unwrap().len();
+        let mut budget = HistoryTailBudget::new(2, Some(item_bytes * 2));
+
+        assert!(budget.try_prepend(&item).unwrap());
+        assert!(budget.try_prepend(&item).unwrap());
+        assert!(!budget.try_prepend(&item).unwrap());
+        assert_eq!(budget.json_bytes(), item_bytes * 2);
+        assert_eq!(budget.remaining_bytes(), Some(0));
+        assert!(budget.limit_reached());
+
+        let mut undersized = HistoryTailBudget::new(1, Some(item_bytes - 1));
+        assert!(!undersized.try_prepend(&item).unwrap());
+        assert_eq!(undersized.json_bytes(), 0);
+    }
+
+    #[test]
     fn effective_mode_at_uses_transition_base_after_rewind_boundary() {
         let history = vec![
             HistoryItem::user(Content::text("before")),
@@ -1212,46 +1356,54 @@ mod tests {
     }
 
     #[test]
-    fn context_notes_use_stable_model_prefix() {
+    fn context_notes_are_model_visible_replacement_events() {
         let note = HistoryNote::context("Current working directory: /work.");
-        assert_eq!(
-            note.to_model_text(),
-            "[smelt:context] Current working directory: /work."
-        );
+        let expected = "[smelt:context] Session context replaces earlier session context:\nCurrent working directory: /work.";
+        assert_eq!(note.to_model_text(), expected);
         assert_eq!(
             history_to_messages(&[HistoryItem::note(note.clone())])[0]
                 .content
                 .as_ref()
                 .map(Content::text_content)
                 .as_deref(),
-            Some("[smelt:context] Current working directory: /work.")
+            Some(expected)
+        );
+        assert_eq!(
+            HistoryNote::named_context(DEFAULT_CONTEXT_NOTE_NAME, "").to_model_text(),
+            "[smelt:context] Session context is no longer active. Ignore earlier session context."
         );
     }
 
     #[test]
-    fn named_context_notes_replace_only_matching_name() {
+    fn named_context_updates_append_without_rewriting_history() {
         let mut history = vec![
-            HistoryItem::note(HistoryNote::named_context("cwd", "cwd one")),
+            HistoryItem::note(HistoryNote::named_context("plugin", "plugin one")),
             HistoryItem::note(HistoryNote::named_context("goal", "goal one")),
         ];
+        let update = HistoryItem::note(HistoryNote::named_context("plugin", "plugin two"));
 
         assert_eq!(
             apply_history_append(
                 &mut history,
-                &HistoryAppend::replace_context_note(
-                    HistoryItem::note(HistoryNote::named_context("cwd", "cwd two")),
-                    "cwd",
-                ),
+                &HistoryAppend::set_context(update.clone(), "plugin"),
             ),
-            HistoryAppendResult::ReplacedLast
+            HistoryAppendResult::Pushed
         );
-
+        assert_eq!(history.last(), Some(&update));
+        assert_eq!(history.len(), 3);
         assert_eq!(
-            history,
-            vec![
-                HistoryItem::note(HistoryNote::named_context("cwd", "cwd two")),
-                HistoryItem::note(HistoryNote::named_context("goal", "goal one")),
-            ]
+            history
+                .last()
+                .and_then(HistoryItem::as_note)
+                .map(HistoryNote::to_model_text),
+            Some(
+                "[smelt:context] Named context \"plugin\" replaces earlier context with the same name:\nplugin two"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            apply_history_append(&mut history, &HistoryAppend::set_context(update, "plugin"),),
+            HistoryAppendResult::Unchanged
         );
     }
 
@@ -1264,7 +1416,7 @@ mod tests {
         assert_eq!(
             apply_history_append(
                 &mut history,
-                &HistoryAppend::replace_context_note(
+                &HistoryAppend::set_context(
                     HistoryItem::note(HistoryNote::named_context("goal", "goal one")),
                     "cwd",
                 ),
@@ -1278,23 +1430,41 @@ mod tests {
                 "cwd", "cwd one"
             ))]
         );
+
+        let mismatched_remove = HistoryAppend {
+            item: HistoryItem::note(HistoryNote::named_context("goal", "")),
+            policy: HistoryAppendPolicy::ClearContext { name: "cwd".into() },
+        };
+        assert_eq!(
+            apply_history_append(&mut history, &mismatched_remove),
+            HistoryAppendResult::Unchanged
+        );
     }
 
     #[test]
-    fn removing_named_context_note_leaves_other_names() {
+    fn removing_named_context_appends_model_visible_tombstone_once() {
         let mut history = vec![
             HistoryItem::note(HistoryNote::named_context("cwd", "cwd")),
             HistoryItem::note(HistoryNote::named_context("goal", "goal")),
         ];
+        let remove = HistoryAppend::clear_context("goal");
 
         assert_eq!(
-            apply_history_append(&mut history, &HistoryAppend::remove_context_note("goal")),
-            HistoryAppendResult::RemovedLast
+            apply_history_append(&mut history, &remove),
+            HistoryAppendResult::Pushed
         );
-
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.last(), Some(&remove.item));
         assert_eq!(
-            history,
-            vec![HistoryItem::note(HistoryNote::named_context("cwd", "cwd"))]
+            history.last().and_then(HistoryItem::as_note).map(HistoryNote::to_model_text),
+            Some(
+                "[smelt:context] Named context \"goal\" is no longer active. Ignore earlier context with this name."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            apply_history_append(&mut history, &remove),
+            HistoryAppendResult::Unchanged
         );
     }
 

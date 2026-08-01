@@ -122,6 +122,14 @@ fun(opts: table?): table
 
 Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.
 
+## `smelt.session.history_len`
+
+```lua
+fun(): integer
+```
+
+Return the number of semantic items in the current session history without materializing them.
+
 ## `smelt.session.id`
 
 ```lua

@@ -59,6 +59,10 @@ pub fn run(args: Vec<String>) {
     let mut active_memory_bytes: Option<String> = None;
     let mut hot_path_history: Option<String> = None;
     let mut hot_path_item_bytes: Option<String> = None;
+    let mut hot_path_operations: Option<String> = None;
+    let mut hot_path_fixture: Option<String> = None;
+    let mut hot_path_heterogeneous = false;
+    let mut save_request_only = false;
     let mut no_warmup = false;
 
     let mut iter = args.into_iter();
@@ -91,6 +95,24 @@ pub fn run(args: Vec<String>) {
                     Some(take_positive_usize_arg(&mut iter, "--resumed-wheel-ticks"));
             }
             "--save-request" => hot_path = true,
+            "--save-request-only" => {
+                hot_path = true;
+                save_request_only = true;
+            }
+            "--save-request-operations" => {
+                hot_path = true;
+                hot_path_operations =
+                    Some(take_required_arg(&mut iter, "--save-request-operations"));
+            }
+            "--save-request-fixture" => {
+                hot_path = true;
+                save_request_only = true;
+                hot_path_fixture = Some(take_required_arg(&mut iter, "--save-request-fixture"));
+            }
+            "--save-request-heterogeneous" => {
+                hot_path = true;
+                hot_path_heterogeneous = true;
+            }
             "--active-memory" => active_memory = true,
             "--active-memory-bytes" => {
                 active_memory = true;
@@ -168,6 +190,15 @@ pub fn run(args: Vec<String>) {
     if let Some(item_bytes) = hot_path_item_bytes {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH_ITEM_BYTES", item_bytes));
     }
+    if let Some(operations) = hot_path_operations {
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH_OPERATIONS", operations));
+    }
+    if let Some(fixture) = hot_path_fixture {
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH_FIXTURE", fixture));
+    }
+    if hot_path_heterogeneous {
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH_HETEROGENEOUS", "1".into()));
+    }
 
     eprintln!(
         "running transcript layout benchmark: profile={} runs={}",
@@ -176,7 +207,11 @@ pub fn run(args: Vec<String>) {
     );
     run_tui_bench(
         "bench-transcript-layout",
-        "transcript_layout_",
+        if save_request_only {
+            "transcript_layout_hot_path_benchmark_suite"
+        } else {
+            "transcript_layout_"
+        },
         release,
         env,
     );
@@ -239,7 +274,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -260,6 +295,10 @@ fn print_usage() {
     );
     eprintln!("--active-memory-bytes N sets its generated transcript size; default is 50 MiB.");
     eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
+    eprintln!("--save-request-only skips unrelated transcript layout and navigation suites.");
+    eprintln!("--save-request-operations CSV runs only named hot-path operations.");
+    eprintln!("--save-request-fixture PATH copies and resumes a prepared real-session snapshot, then measures only Enter and its first render by default.");
+    eprintln!("--save-request-heterogeneous generates mixed text, reasoning, notes, tools, and large object-backed metadata.");
     eprintln!(
         "--save-request-history N sets its generated hot-path history length; default is 1024."
     );

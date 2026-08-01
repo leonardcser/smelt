@@ -67,6 +67,10 @@ session.fork = nil
 ---@type fun(opts: table?): table
 session.history = nil
 
+--- Return the number of semantic items in the current session history without materializing them.
+---@type fun(): integer
+session.history_len = nil
+
 --- Stable session id (matches the on-disk session filename).
 ---@type fun(): string
 session.id = nil

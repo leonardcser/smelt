@@ -32,7 +32,7 @@ fn assert_safe_dialog_fallback(app: &TestApp) {
 fn splash_paint_stays_below_global_overlays() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    assert_eq!(app.bring_up_lua("launch", true), None);
+    app.drain_launch_ready_hooks();
     assert!(app.run_lua(
         r#"
         local buf = smelt.buf.new({ name = "test.paint_order.buf" })

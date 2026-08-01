@@ -314,6 +314,8 @@ struct DerivedRevisionDoctor {
 struct SessionBackupManifest {
     format_version: u32,
     session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lineage_id: Option<String>,
     schema_version: i32,
     created_at_ms: u64,
     database_file: String,
@@ -679,11 +681,27 @@ fn doctor_session(reference: &str) -> SessionDoctorOutput {
         }
     };
     let result = (|| {
-        let reader = smelt_store::SessionReader::open_existing(&dir)?;
-        let report = reader.doctor_report()?;
-        let canonical_revision = reader.store_head()?.revision.get();
-        let nonterminal_turns = reader
-            .turns()?
+        let sessions_root = dir.parent().ok_or_else(|| {
+            smelt_store::StoreError::Integrity("session has no storage root".into())
+        })?;
+        let (report, canonical_revision, turns) =
+            match smelt_store::LineageSessionReader::try_open_existing(sessions_root, &session_id)?
+            {
+                Some(reader) => {
+                    let report = reader.doctor_report()?;
+                    let canonical_revision = reader.snapshot()?.head.revision.get();
+                    (report, canonical_revision, reader.turns()?)
+                }
+                None => {
+                    // COMPAT(session-lineage-v1): doctor remains read-only for
+                    // previous-format sessions until explicit migration.
+                    let reader = smelt_store::SessionReader::open_existing(&dir)?;
+                    let report = reader.doctor_report()?;
+                    let canonical_revision = reader.store_head()?.revision.get();
+                    (report, canonical_revision, reader.turns()?)
+                }
+            };
+        let nonterminal_turns = turns
             .into_iter()
             .filter(|turn| {
                 matches!(
@@ -781,6 +799,21 @@ fn print_doctor_output(output: &SessionDoctorOutput) {
     if let Some(error) = &catalog.error {
         println!("catalog_error: {error}");
     }
+    if let Some(search) = &report.search {
+        println!(
+            "search: state={} format_version={} ready_segments={} total_segments={} database_bytes={}",
+            search.state.as_str(),
+            search
+                .format_version
+                .map_or_else(|| "none".to_string(), |version| version.to_string()),
+            search.ready_segments,
+            search.total_segments,
+            search.database_bytes
+        );
+        if let Some(error) = &search.error {
+            println!("search_error: {error}");
+        }
+    }
     for issue in &report.issues {
         println!("issue: {issue}");
     }
@@ -838,6 +871,35 @@ fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
     }))
 }
 
+fn with_lineage_writer<T>(
+    reference: &str,
+    action: impl FnOnce(&mut smelt_store::OwnedLineageWriter) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    let (session_id, dir) = resolve_session_target(reference)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| "session directory has no parent".to_string())?;
+    let Some(reader) = smelt_store::LineageSessionReader::try_open_existing(root, &session_id)
+        .map_err(|err| format!("failed to locate lineage session: {err}"))?
+    else {
+        return Ok(None);
+    };
+    drop(reader);
+    let mut writer = smelt_store::OwnedLineageWriter::open_existing(root, session_id)
+        .map_err(|err| format!("failed to acquire lineage maintenance ownership: {err}"))?;
+    let result = action(&mut writer);
+    let release = writer
+        .release()
+        .map_err(|err| format!("failed to release lineage maintenance ownership: {err}"));
+    match (result, release) {
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+        (Ok(value), Ok(())) => Ok(Some(value)),
+    }
+}
+
+// COMPAT(session-lineage-v1): maintenance commands delegate here only when the
+// selected session has not been explicitly migrated to lineage storage.
 fn with_session_maintenance<T>(
     reference: &str,
     action: impl FnOnce(&mut smelt_store::SessionMaintenance) -> Result<T, String>,
@@ -871,20 +933,66 @@ fn run_session_command(args: SessionArgs) {
         SessionCommand::Backup(args) => {
             let manifest_path = backup_manifest_path(&args.output);
             let result = resolve_session_target(&args.session).and_then(|(session_id, dir)| {
-                let reader = smelt_store::SessionReader::open_existing(dir)
-                    .map_err(|err| format!("failed to open session: {err}"))?;
-                reader
-                    .backup_to(&args.output)
-                    .map_err(|err| format!("failed to back up session: {err}"))?;
-                let finalize = (|| {
-                    let backup = smelt_store::SessionReader::open_database(&args.output)
-                        .map_err(|err| format!("failed to verify backup: {err}"))?;
-                    let manifest = SessionBackupManifest {
-                        format_version: 1,
+                let sessions_root = dir
+                    .parent()
+                    .ok_or_else(|| "session directory has no storage root".to_string())?;
+                let backup_result = (|| {
+                    let backup = match smelt_store::LineageSessionReader::try_open_existing(
+                        sessions_root,
+                        &session_id,
+                    )
+                    .map_err(|err| format!("failed to locate lineage session: {err}"))?
+                    {
+                        Some(reader) => {
+                            let lineage_id = reader.lineage_id().to_owned();
+                            reader
+                                .backup_to(&args.output)
+                                .map_err(|err| format!("failed to back up lineage: {err}"))?;
+                            let report =
+                                smelt_store::verify_lineage_backup(&args.output, &lineage_id)
+                                    .map_err(|err| {
+                                        format!("failed to verify lineage backup: {err}")
+                                    })?;
+                            (2, Some(lineage_id), report.schema_version, report.stats)
+                        }
+                        None => {
+                            // COMPAT(session-lineage-v1): explicit backups remain
+                            // available for previous-format sessions.
+                            let reader = smelt_store::SessionReader::open_existing(&dir)
+                                .map_err(|err| format!("failed to open session: {err}"))?;
+                            reader
+                                .backup_to(&args.output)
+                                .map_err(|err| format!("failed to back up session: {err}"))?;
+                            let backup = smelt_store::SessionReader::open_database(&args.output)
+                                .map_err(|err| format!("failed to verify backup: {err}"))?;
+                            (
+                                1,
+                                None,
+                                backup.schema_version().map_err(|err| {
+                                    format!("failed to inspect backup schema: {err}")
+                                })?,
+                                backup.storage_stats().map_err(|err| {
+                                    format!("failed to inspect backup sizes: {err}")
+                                })?,
+                            )
+                        }
+                    };
+                    Ok::<_, String>(backup)
+                })();
+                let (format_version, lineage_id, schema_version, stats) = match backup_result {
+                    Ok(backup) => backup,
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&args.output);
+                        return Err(error);
+                    }
+                };
+                let finalize = write_backup_manifest(
+                    &manifest_path,
+                    &SessionBackupManifest {
+                        format_version,
                         session_id,
-                        schema_version: backup
-                            .schema_version()
-                            .map_err(|err| format!("failed to inspect backup schema: {err}"))?,
+                        lineage_id,
+                        schema_version,
                         created_at_ms: smelt_core::session::now_ms(),
                         database_file: args
                             .output
@@ -892,12 +1000,9 @@ fn run_session_command(args: SessionArgs) {
                             .unwrap_or_default()
                             .to_string_lossy()
                             .into_owned(),
-                        stats: backup
-                            .storage_stats()
-                            .map_err(|err| format!("failed to inspect backup sizes: {err}"))?,
-                    };
-                    write_backup_manifest(&manifest_path, &manifest)
-                })();
+                        stats,
+                    },
+                );
                 if finalize.is_err() {
                     let _ = std::fs::remove_file(&args.output);
                 }
@@ -935,18 +1040,73 @@ fn run_session_command(args: SessionArgs) {
                 Err("one or more orphaned session directories could not be quarantined".into())
             }
         }),
-        SessionCommand::Gc(args) => with_session_maintenance(&args.session, |maintenance| {
-            let deleted = maintenance
-                .garbage_collect_objects()
-                .map_err(|err| format!("failed to collect session objects: {err}"))?;
-            println!("deleted_objects: {deleted}");
-            Ok(())
-        }),
-        SessionCommand::Vacuum(args) => with_session_maintenance(&args.session, |maintenance| {
-            maintenance
-                .vacuum()
-                .map_err(|err| format!("failed to vacuum session: {err}"))
-        }),
+        SessionCommand::Gc(args) => {
+            match with_lineage_writer(&args.session, |writer| {
+                const RECLAMATION_ROWS_PER_TRANSACTION: usize = 256;
+                let mut branch_heads_cleared = 0usize;
+                let mut canonical_rows_deleted = 0usize;
+                let mut objects_deleted = 0usize;
+                let mut search_segments_deleted = 0usize;
+                let mut transactions = 0usize;
+                loop {
+                    let step = writer
+                        .reclaim_step(RECLAMATION_ROWS_PER_TRANSACTION)
+                        .map_err(|err| format!("failed to reclaim lineage data: {err}"))?;
+                    transactions = transactions.saturating_add(1);
+                    branch_heads_cleared =
+                        branch_heads_cleared.saturating_add(step.branch_heads_cleared);
+                    canonical_rows_deleted =
+                        canonical_rows_deleted.saturating_add(step.canonical_rows_deleted);
+                    objects_deleted = objects_deleted.saturating_add(step.objects_deleted);
+                    search_segments_deleted =
+                        search_segments_deleted.saturating_add(step.search_segments_deleted);
+                    if step.complete {
+                        break;
+                    }
+                    if step.work_rows() == 0 {
+                        return Err("lineage reclamation made no bounded progress".into());
+                    }
+                }
+                let vacuum = writer
+                    .vacuum()
+                    .map_err(|err| format!("failed to vacuum reclaimed lineage pages: {err}"))?;
+                println!("cleared_branch_heads: {branch_heads_cleared}");
+                println!("deleted_canonical_rows: {canonical_rows_deleted}");
+                println!("deleted_objects: {objects_deleted}");
+                println!("deleted_search_segments: {search_segments_deleted}");
+                println!("free_pages_before: {}", vacuum.free_pages_before);
+                println!("free_pages_after: {}", vacuum.free_pages_after);
+                println!("pages_reclaimed: {}", vacuum.pages_reclaimed);
+                println!("transactions: {transactions}");
+                Ok(())
+            }) {
+                Ok(Some(())) => Ok(()),
+                Ok(None) => with_session_maintenance(&args.session, |maintenance| {
+                    let deleted = maintenance
+                        .garbage_collect_objects()
+                        .map_err(|err| format!("failed to collect session objects: {err}"))?;
+                    println!("deleted_objects: {deleted}");
+                    Ok(())
+                }),
+                Err(error) => Err(error),
+            }
+        }
+        SessionCommand::Vacuum(args) => {
+            match with_lineage_writer(&args.session, |writer| {
+                writer
+                    .vacuum()
+                    .map(|_| ())
+                    .map_err(|err| format!("failed to vacuum lineage: {err}"))
+            }) {
+                Ok(Some(())) => Ok(()),
+                Ok(None) => with_session_maintenance(&args.session, |maintenance| {
+                    maintenance
+                        .vacuum()
+                        .map_err(|err| format!("failed to vacuum session: {err}"))
+                }),
+                Err(error) => Err(error),
+            }
+        }
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
@@ -991,6 +1151,31 @@ fn maybe_run_lsp_daemon_command(runtime: &tokio::runtime::Runtime) -> bool {
     true
 }
 
+fn restore_canonical_session_cwd_for_launch(
+    env: &engine::env::RuntimeEnv,
+    id_or_prefix: &str,
+) -> Option<PathBuf> {
+    let sessions = smelt_core::session::SessionStorage::from_env(env);
+    let resolved = sessions
+        .resolve_session_dir_for_read_result(id_or_prefix)
+        .ok()?;
+    if resolved.kind != smelt_core::session::SessionDirKind::Lineage {
+        return None;
+    }
+    let (header, _) = sessions.load_store_header_result(id_or_prefix).ok()??;
+    let requested = header.meta.cwd.as_deref()?.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    let cwd = std::fs::canonicalize(requested).ok()?;
+    if !cwd.is_dir() || std::env::set_current_dir(&cwd).is_err() {
+        return None;
+    }
+    std::env::set_var("PWD", &cwd);
+    env.set_cwd(cwd.clone());
+    Some(cwd)
+}
+
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
@@ -1006,10 +1191,18 @@ fn main() {
         return;
     }
 
+    if std::env::args_os().any(|arg| arg == "--bench") {
+        smelt_perf::perf::enable();
+        smelt_perf::alloc::enable();
+        smelt_perf::perf::timestamp_us();
+    }
+
+    let runtime_startup = smelt_perf::perf::begin("startup:tokio_runtime");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("create tokio runtime");
+    drop(runtime_startup);
     if maybe_run_lsp_daemon_command(&runtime) {
         return;
     }
@@ -1017,17 +1210,21 @@ fn main() {
 }
 
 async fn async_main() {
+    let environment_startup = smelt_perf::perf::begin("startup:environment");
     let env = Arc::new(engine::env::RuntimeEnv::snapshot());
+    drop(environment_startup);
 
     // Mirror the embedded runtime tree to `<XDG_DATA_HOME>/smelt/builtins/`
     // on first launch / after a version bump, so the `customize` skill
     // can point the agent at on-disk source for inspection. Best-effort:
     // a failure here just means the skill's example links won't resolve,
     // not that smelt can't run.
+    let builtins_startup = smelt_perf::perf::begin("startup:extract_builtins");
     let data_dir = env.xdg_data().join("smelt");
     if let Err(e) = smelt_core::lua::ensure_builtins_extracted(&data_dir) {
         eprintln!("smelt: failed to extract built-in runtime: {e}");
     }
+    drop(builtins_startup);
 
     // Two-pass startup so `early.lua` can declare extra CLI flags
     // before argv is parsed:
@@ -1043,7 +1240,8 @@ async fn async_main() {
     //
     // We do the early run BEFORE detecting the `auth` subcommand
     // because clap can't know about Lua flags until early has fired.
-    let cwd = startup::resolve_project_cwd(std::env::args_os(), env.cwd());
+    let lua_early_startup = smelt_perf::perf::begin("startup:lua_early");
+    let mut cwd = startup::resolve_project_cwd(std::env::args_os(), env.cwd());
     env.set_cwd(cwd.clone());
     let mut lua_runtime = tui::lua::LuaRuntime::new_for_runtime(
         &env,
@@ -1054,7 +1252,9 @@ async fn async_main() {
     lua_runtime.load_bundled_early();
     lua_runtime.load_early_init();
     lua_runtime.load_project_early_init(&cwd);
+    drop(lua_early_startup);
 
+    let cli_parse_startup = smelt_perf::perf::begin("startup:cli_parse");
     let lua_flag_specs: Vec<tui::CliFlagSpec> = lua_runtime
         .core_shared()
         .cli_flag_specs
@@ -1063,10 +1263,15 @@ async fn async_main() {
         .unwrap_or_default();
 
     let (mut args, lua_flag_values) = parse_with_lua_flags(&lua_flag_specs);
+    let startup_resume = lua_flag_values.get("resume").and_then(|value| match value {
+        tui::CliFlagValue::String(id) if !id.is_empty() => Some(id.clone()),
+        _ => None,
+    });
     if let Ok(mut map) = lua_runtime.core_shared().cli_flag_values.lock() {
         *map = lua_flag_values;
     }
     lua_runtime.freeze_launch_inputs();
+    drop(cli_parse_startup);
 
     if let Some(command) = args.command.take() {
         match command {
@@ -1101,6 +1306,16 @@ async fn async_main() {
         }
     }
 
+    if !args.headless {
+        if let Some(restored_cwd) = startup_resume
+            .as_deref()
+            .and_then(|id| restore_canonical_session_cwd_for_launch(&env, id))
+        {
+            cwd = restored_cwd;
+        }
+    }
+
+    let resolution_startup = smelt_perf::perf::begin("startup:resolution");
     smelt_core::session::request_session_catalog_reconciliation();
 
     if let Some(ref path) = args.config {
@@ -1129,19 +1344,36 @@ async fn async_main() {
         std::process::exit(1);
     }
 
-    lua_runtime.load_autoload();
-    lua_runtime.load_user_config();
-    lua_runtime.load_global_plugins();
     let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
-    let project_trust = lua_runtime.load_project_config(&cwd);
-    let lua_cfg = lua_runtime.to_config();
+    let (resolved_startup, project_trust) = if args.headless {
+        lua_runtime.load_full_bootstrap();
+        lua_runtime.load_autoload();
+        lua_runtime.load_user_config();
+        lua_runtime.load_global_plugins();
+        let project_trust = lua_runtime.load_project_config(&cwd);
+        let resolved = startup::resolve(
+            &args,
+            lua_runtime.to_config(),
+            &lua_runtime.mode_names(),
+            &env,
+        );
+        if let Some(err) = lua_runtime.load_error() {
+            eprintln!("warning: lua init: {err}");
+        }
+        (resolved, project_trust)
+    } else {
+        let inputs = startup::parse(&args, &env);
+        let project_trust = lua_runtime.project_trust_state(&cwd);
+        let resolved = startup::resolve_provisional(
+            &inputs,
+            lua_runtime.to_config(),
+            &lua_runtime.mode_names(),
+        );
+        (resolved, project_trust)
+    };
     let lua_permission_rules = lua_runtime.permission_rules_snapshot();
     let lua_tool_defaults = lua_runtime.tool_defaults();
-    let lua_modes = lua_runtime.mode_names();
     let lua_mode_behaviors = lua_runtime.mode_behaviors();
-    if let Some(err) = lua_runtime.load_error() {
-        eprintln!("warning: lua init: {err}");
-    }
 
     // One reqwest client shared across startup tasks (Codex / Copilot auth refresh,
     // context-window fetch) so we only build one rustls config + parse webpki-roots
@@ -1152,13 +1384,13 @@ async fn async_main() {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let s = startup::resolve(&args, lua_cfg, &lua_modes, &env);
     let startup::ResolvedStartup {
         runtime,
         startup_overrides,
+        startup_selections,
         managed_models,
         mut startup_auth_error,
-    } = s;
+    } = resolved_startup;
     lua_runtime
         .core_shared()
         .lsp
@@ -1171,11 +1403,6 @@ async fn async_main() {
             "warning: invalid --log-level {}, defaulting to info",
             args.log_level
         );
-    }
-
-    if args.bench {
-        smelt_perf::perf::enable();
-        smelt_perf::alloc::enable();
     }
 
     std::thread::spawn(tui::warm_up_syntect);
@@ -1199,7 +1426,9 @@ async fn async_main() {
         );
         std::process::exit(1);
     }
+    drop(resolution_startup);
 
+    let services_startup = smelt_perf::perf::begin("startup:services");
     let shared_session: Arc<Mutex<Option<tui::app::SharedSessionState>>> =
         Arc::new(Mutex::new(None));
     let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1348,6 +1577,8 @@ async fn async_main() {
         },
         dispatcher,
     );
+    drop(services_startup);
+
     let color_mode = match args.color {
         ColorMode::Auto => smelt_core::ColorMode::Auto,
         ColorMode::Always => smelt_core::ColorMode::Always,
@@ -1421,6 +1652,7 @@ async fn async_main() {
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
+        let tui_construct_startup = smelt_perf::perf::begin("startup:tui_construct");
         let session_persistence = if args.ephemeral {
             match tui::app::SessionPersistence::ephemeral() {
                 Ok(persistence) => persistence,
@@ -1449,9 +1681,11 @@ async fn async_main() {
                 skills: Some(Arc::clone(&skill_loader)),
                 mcp: Some(Arc::clone(&mcp_manager)),
                 prompt_inputs: Some(prompt_inputs),
+                startup_selections,
                 session_persistence,
             },
         );
+        drop(tui_construct_startup);
         redirect_stderr();
 
         println!();

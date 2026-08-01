@@ -1,8 +1,6 @@
 use std::time::{Duration, Instant};
 
-use protocol::{
-    HistoryAppend, HistoryAppendResult, HistoryItem, ReasoningEffort, TokenUsage, TurnMeta,
-};
+use protocol::{HistoryItem, ReasoningEffort, TokenUsage, TurnMeta};
 use smelt_core::content::stream_parser::{StreamParser, ToolDraftUpdate, ToolStart};
 use smelt_core::session::{
     ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionMeta, SessionStoreRef,
@@ -631,10 +629,6 @@ pub(crate) enum HistoryMutation {
         block: Option<Block>,
         first_user_message: Option<String>,
     },
-    ApplyAppend {
-        append: HistoryAppend,
-        identity: ContextTokenIdentity,
-    },
     TruncateFrom {
         index: usize,
         identity: ContextTokenIdentity,
@@ -816,7 +810,6 @@ pub(crate) struct DocumentChange {
     pub(crate) history_idx: Option<usize>,
     pub(crate) history_dirty_from: Option<usize>,
     pub(crate) block_id: Option<BlockId>,
-    pub(crate) history_append_result: Option<HistoryAppendResult>,
     pub(crate) turn_meta: Option<TurnMeta>,
 }
 
@@ -980,31 +973,6 @@ impl SessionDocument {
                 block,
                 first_user_message,
             ),
-            HistoryMutation::ApplyAppend { append, identity } => {
-                let old_len = session.history.len();
-                let append_result = protocol::apply_history_append(&mut session.history, &append);
-                let dirty_from = match append_result {
-                    HistoryAppendResult::Unchanged => None,
-                    HistoryAppendResult::Pushed => Some(old_len),
-                    HistoryAppendResult::ReplacedLast | HistoryAppendResult::RemovedLast => {
-                        Some(old_len.saturating_sub(1))
-                    }
-                };
-                let turn_meta = if append_result == HistoryAppendResult::RemovedLast {
-                    let turn_meta = session.prune_rewindable_snapshots(session.history.len());
-                    session.clear_context_tokens_baseline_if_mismatched(&identity);
-                    turn_meta
-                } else {
-                    None
-                };
-                DocumentChange {
-                    session_dirty: dirty_from.is_some(),
-                    history_dirty_from: dirty_from,
-                    history_append_result: Some(append_result),
-                    turn_meta,
-                    ..Default::default()
-                }
-            }
             HistoryMutation::TruncateFrom { index, identity } => {
                 let dirty_from = if let Some(live_session) = live_session.as_deref_mut() {
                     let index = index.min(live_session.history_len());
@@ -2210,63 +2178,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_history_append_mutation_replaces_history_and_reports_dirty_range() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![HistoryItem::note(protocol::HistoryNote::named_context(
-            "cwd", "old",
-        ))];
-
-        let result = apply_history(
-            &mut session,
-            HistoryMutation::ApplyAppend {
-                append: HistoryAppend::replace_context_note(
-                    HistoryItem::note(protocol::HistoryNote::named_context("cwd", "new")),
-                    "cwd",
-                ),
-                identity: token_identity(),
-            },
-        );
-
-        assert!(result.session_dirty);
-        assert_eq!(
-            result.history_append_result,
-            Some(HistoryAppendResult::ReplacedLast)
-        );
-        assert_eq!(result.history_dirty_from, Some(0));
-        assert_eq!(session.history.len(), 1);
-        assert_eq!(
-            session.history[0]
-                .as_note()
-                .map(protocol::HistoryNote::text),
-            Some("new")
-        );
-    }
-
-    #[test]
-    fn removing_history_item_prunes_rewindable_side_tables_atomically() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![HistoryItem::note(protocol::HistoryNote::named_context(
-            "cwd", "old",
-        ))];
-        session.snapshot_context_at(1);
-
-        let result = apply_history(
-            &mut session,
-            HistoryMutation::ApplyAppend {
-                append: HistoryAppend::remove_context_note("cwd"),
-                identity: token_identity(),
-            },
-        );
-
-        assert_eq!(
-            result.history_append_result,
-            Some(HistoryAppendResult::RemovedLast)
-        );
-        assert!(session.history.is_empty());
-        assert!(session.context_snapshots.is_empty());
-    }
-
-    #[test]
     fn truncate_history_mutation_updates_history_and_reports_dirty_range() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![
@@ -3135,10 +3046,8 @@ mod tests {
             revision: receipt.current.revision.get(),
             degraded_warnings: Vec::new(),
         };
-        let store_ref = SessionStoreRef {
-            db_path: session_dir.join("session.db"),
-            session_dir,
-        };
+        let store_ref =
+            SessionStoreRef::legacy(session_dir.clone(), session_dir.join("session.db"));
         let mut session = stored.clone();
         session.history.clear();
         let mut document = TuiSessionDocument::new(TranscriptDocument::new());

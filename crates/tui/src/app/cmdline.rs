@@ -129,6 +129,10 @@ impl TuiApp {
         target: crate::smelt_edit::WinId,
         direction: SearchDirection,
     ) {
+        if self.well_known.cmdline.is_some() {
+            return;
+        }
+        self.begin_live_search(target, direction);
         self.open_status_input(CmdlineMode::Search { target, direction });
     }
 
@@ -281,13 +285,16 @@ impl TuiApp {
                     return Some(false);
                 }
                 if matches!(self.overlays.cmdline_mode(), CmdlineMode::Search { .. }) {
-                    self.clear_search();
+                    self.cancel_live_search(true);
                 }
                 self.close_cmdline();
                 Some(false)
             }
             CmdlineInputAction::Submit => Some(self.cmdline_submit()),
             CmdlineInputAction::CloseIfEmpty if self.cmdline_text().is_empty() => {
+                if matches!(self.overlays.cmdline_mode(), CmdlineMode::Search { .. }) {
+                    self.cancel_live_search(true);
+                }
                 self.close_cmdline();
                 Some(false)
             }
@@ -348,6 +355,13 @@ impl TuiApp {
         if text != old_text {
             self.cmdline_dismiss_completer();
             self.overlays.reset_cmdline_history_browse();
+            self.cmdline_search_text_changed(text);
+        }
+    }
+
+    fn cmdline_search_text_changed(&mut self, text: String) {
+        if let CmdlineMode::Search { target, direction } = self.overlays.cmdline_mode() {
+            self.update_live_search(target, direction, text);
         }
     }
 
@@ -399,12 +413,14 @@ impl TuiApp {
                 let cursor = entry.len();
                 self.cmdline_set_payload(&entry, cursor);
                 self.cmdline_dismiss_completer();
+                self.cmdline_search_text_changed(entry);
             }
             HistoryStepOwned::Restore { stash } => {
                 self.overlays.restore_cmdline_history_stash();
                 let cursor = stash.len();
                 self.cmdline_set_payload(&stash, cursor);
                 self.cmdline_dismiss_completer();
+                self.cmdline_search_text_changed(stash);
             }
         }
     }
@@ -437,7 +453,7 @@ impl TuiApp {
                 let kind = command_history_kind(mode, &line);
                 self.overlays.push_cmdline_history(kind, line.clone());
                 self.close_cmdline();
-                self.submit_search(target, direction, line);
+                self.confirm_live_search(target, direction, line);
                 false
             }
         }

@@ -53,7 +53,10 @@ fn delete_refuses_session_owned_by_another_process() {
         err,
         smelt_core::session::SessionStoreError::ReadOnlyOwnerConflict { .. }
     ));
-    assert!(session_dir.exists());
+    assert!(
+        smelt_store::LineageSessionReader::open_existing(session_dir.parent().unwrap(), id).is_ok(),
+        "canonical lineage branch remains available"
+    );
     touch(&release);
     assert!(owner.wait().unwrap().success());
 }

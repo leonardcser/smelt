@@ -1009,7 +1009,7 @@ mod tests {
     use serde_json::json;
 
     fn test_cwd() -> PathBuf {
-        std::env::current_dir().expect("test cwd")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
     #[tokio::test]

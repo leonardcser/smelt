@@ -53,6 +53,72 @@ fn sparse_display_only_search_app() -> TestApp {
     app
 }
 
+fn wait_for_live_search(app: &mut TestApp) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if app
+            .overlays_probe()
+            .search_session()
+            .and_then(|session| session.current_range())
+            .is_some()
+        {
+            return;
+        }
+        if let Some(event) = app.try_recv_app_event() {
+            app.app.handle_app_event(event);
+            app.render_silent();
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "live transcript search did not complete"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+fn wait_for_search_query(app: &mut TestApp, query: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if app
+            .overlays_probe()
+            .search_session()
+            .is_some_and(|session| session.query == query)
+        {
+            return;
+        }
+        if let Some(event) = app.try_recv_app_event() {
+            app.app.handle_app_event(event);
+            app.render_silent();
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "live transcript search for {query:?} did not complete"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+fn drain_app_events_for(app: &mut TestApp, duration: std::time::Duration) {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        if let Some(event) = app.try_recv_app_event() {
+            app.app.handle_app_event(event);
+            app.render_silent();
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+fn begin_slow_persisted_search(app: &mut TestApp) {
+    app.app
+        .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
+    app.type_char('/');
+    app.type_text("needle");
+}
+
 fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTranscriptBlock {
     smelt_store::StoredTranscriptBlock {
         block_idx,
@@ -73,6 +139,231 @@ fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTransc
         ),
         tool_state_json: None,
     }
+}
+
+#[test]
+fn transcript_search_previews_live_and_enter_confirms_without_moving_again() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_char('g');
+    app.type_char('g');
+    let original_row = transcript_row_cursor_row(&app);
+
+    app.type_char('/');
+    app.type_text("row 090");
+    app.render_silent();
+
+    assert!(app.state().cmdline_open);
+    let preview_row = transcript_row_cursor_row(&app);
+    assert!(preview_row > original_row);
+    let preview = app
+        .overlays_probe()
+        .search_session()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("live search preview");
+    assert_eq!(preview.start.row, preview_row);
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    assert!(!app.state().cmdline_open);
+    assert_eq!(transcript_row_cursor_row(&app), preview_row);
+}
+
+#[test]
+fn transcript_search_escape_and_empty_query_restore_original_anchor() {
+    for empty_query in [false, true] {
+        let mut app = row_document_transcript_app(100, true);
+        app.type_char('2');
+        app.type_char('0');
+        app.type_char('G');
+        app.render_silent();
+        let original_row = transcript_row_cursor_row(&app);
+        let original_scroll_top = app.transcript_window().scroll_top;
+
+        app.type_char('/');
+        app.type_text("row 090");
+        app.render_silent();
+        assert_ne!(transcript_row_cursor_row(&app), original_row);
+
+        if empty_query {
+            for _ in 0.."row 090".len() {
+                app.press(KeyCode::Backspace);
+            }
+            app.render_silent();
+            assert!(app.state().cmdline_open);
+        } else {
+            app.press(KeyCode::Esc);
+            app.render_silent();
+            assert!(!app.state().cmdline_open);
+        }
+        assert_eq!(transcript_row_cursor_row(&app), original_row);
+        assert_eq!(app.transcript_window().scroll_top, original_scroll_top);
+    }
+}
+
+#[test]
+fn transcript_search_paste_and_history_changes_preview_live() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_char('g');
+    app.type_char('g');
+    app.type_char('/');
+    app.app
+        .cmdline_handle_event(crossterm::event::Event::Paste("row 090".into()));
+    app.render_silent();
+    let pasted_row = transcript_row_cursor_row(&app);
+    assert!(pasted_row > 0);
+    app.press(KeyCode::Enter);
+
+    app.type_char('g');
+    app.type_char('g');
+    app.type_char('/');
+    app.press(KeyCode::Up);
+    app.render_silent();
+    assert_eq!(transcript_row_cursor_row(&app), pasted_row);
+    assert!(app.state().cmdline_open);
+}
+
+#[test]
+fn transcript_search_previews_unloaded_match_before_enter() {
+    let mut app = sparse_display_only_search_app();
+    app.type_char('G');
+    app.type_char('/');
+    app.type_text("early needle");
+
+    wait_for_live_search(&mut app);
+    assert!(app.state().cmdline_open);
+    let matched = app
+        .overlays_probe()
+        .search_session()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("unloaded live search preview");
+    let row = app
+        .transcript_rows_and_breaks_range(matched.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(row.contains("early needle"), "previewed row: {row:?}");
+}
+
+#[test]
+fn transcript_search_no_match_clears_preview_and_restores_original_anchor() {
+    let mut app = sparse_display_only_search_app();
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    let original_row = transcript_row_cursor_row(&app);
+    let original_scroll_top = app.transcript_window().scroll_top;
+
+    app.type_char('/');
+    app.type_text("tail needle");
+    wait_for_live_search(&mut app);
+    assert_ne!(transcript_row_cursor_row(&app), original_row);
+
+    for _ in 0.."tail needle".len() {
+        app.press(KeyCode::Backspace);
+    }
+    app.type_text("absent query");
+    wait_for_search_query(&mut app, "absent query");
+
+    let session = app
+        .overlays_probe()
+        .search_session()
+        .expect("current no-match search session");
+    assert!(session.current_range().is_none());
+    assert_eq!(transcript_row_cursor_row(&app), original_row);
+    assert_eq!(app.transcript_window().scroll_top, original_scroll_top);
+    assert!(app.state().cmdline_open);
+}
+
+#[test]
+fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
+    let mut app = sparse_display_only_search_app();
+    app.type_char('G');
+    app.app
+        .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
+    app.type_char('/');
+
+    let mut samples = Vec::new();
+    for character in "tail".chars() {
+        let started = std::time::Instant::now();
+        app.type_char(character);
+        app.render_silent();
+        samples.push(started.elapsed());
+    }
+    for _ in 0..4 {
+        let started = std::time::Instant::now();
+        app.press(KeyCode::Backspace);
+        app.render_silent();
+        samples.push(started.elapsed());
+    }
+    for character in "early needle".chars() {
+        let started = std::time::Instant::now();
+        app.type_char(character);
+        app.render_silent();
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+    eprintln!("TRANSCRIPT_LIVE_SEARCH_FRAME_P95_US {}", p95.as_micros());
+    assert!(
+        p95 <= std::time::Duration::from_millis(16),
+        "live search key handling and redraw p95 was {p95:?}"
+    );
+
+    app.press(KeyCode::Enter);
+    wait_for_live_search(&mut app);
+    let matched = app
+        .overlays_probe()
+        .search_session()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("latest live search result");
+    let row = app
+        .transcript_rows_and_breaks_range(matched.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(
+        row.contains("early needle"),
+        "stale search moved to {row:?}"
+    );
+}
+
+#[test]
+fn transcript_search_session_switch_discards_pending_results() {
+    let mut app = sparse_display_only_search_app();
+    begin_slow_persisted_search(&mut app);
+    let previous_id = app.session_snapshot().id.clone();
+    let replacement =
+        smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
+
+    app.load_session(replacement);
+    assert_ne!(app.session_snapshot().id, previous_id);
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
+    assert!(app.overlays_probe().search_session().is_none());
+}
+
+#[test]
+fn transcript_search_rewind_cancels_pending_results() {
+    let mut app = sparse_display_only_search_app();
+    begin_slow_persisted_search(&mut app);
+
+    app.rewind_to_block(Some(100), false);
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
+    assert!(app.overlays_probe().search_session().is_none());
+}
+
+#[test]
+fn transcript_search_session_close_cancels_pending_results() {
+    let mut app = sparse_display_only_search_app();
+    begin_slow_persisted_search(&mut app);
+    let previous_id = app.session_snapshot().id.clone();
+
+    app.reset_session();
+    assert_ne!(app.session_snapshot().id, previous_id);
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
+    assert!(app.overlays_probe().search_session().is_none());
 }
 
 #[test]
@@ -122,7 +413,7 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     app.type_char('/');
     app.type_text("needle");
     app.press(KeyCode::Enter);
-    app.render_silent();
+    wait_for_live_search(&mut app);
 
     let tail_match = app
         .overlays_probe()
@@ -173,7 +464,7 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     app.type_char('/');
     app.type_text("needle");
     app.press(KeyCode::Enter);
-    app.render_silent();
+    wait_for_live_search(&mut app);
     let tail_match = app
         .overlays_probe()
         .search_session()
@@ -215,7 +506,7 @@ fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
     app.type_char('/');
     app.type_text("needle");
     app.press(KeyCode::Enter);
-    app.render_silent();
+    wait_for_live_search(&mut app);
     let early_match = app
         .overlays_probe()
         .search_session()

@@ -235,11 +235,46 @@ impl TestApp {
         self.app.core.permissions.replace(permissions);
     }
 
+    /// Allow tool paths outside the injected workspace in focused harness flows.
+    pub fn allow_permissions_outside_cwd(&mut self) {
+        let mut permissions = self.app.core.permissions.snapshot().as_ref().clone();
+        permissions.set_restrict_to_workspace(false);
+        self.app.core.permissions.replace(permissions);
+    }
+
     pub(crate) fn replace_permissions_for_harness(
         &mut self,
         permissions: smelt_core::permissions::Permissions,
     ) {
         self.app.core.permissions.replace(permissions);
+    }
+
+    /// Force one tool through the confirmation path for deterministic harness flows.
+    pub fn require_tool_confirmation(&mut self, tool: &str, patterns: &[String]) {
+        let permissions =
+            self.app
+                .core
+                .permissions
+                .snapshot()
+                .with_overrides(&protocol::PermissionOverrides {
+                    tools: Some(protocol::RuleSetOverride {
+                        ask: vec![tool.to_owned()],
+                        ..Default::default()
+                    }),
+                    subcommands: [(
+                        tool.to_owned(),
+                        protocol::RuleSetOverride {
+                            ask: patterns.to_vec(),
+                            ..Default::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                });
+        self.app.core.permissions.replace(permissions);
+        self.app
+            .conversation
+            .refresh_active_permissions(self.app.core.permissions.snapshot());
     }
 
     /// Add one session-scoped blanket tool approval.
@@ -707,6 +742,10 @@ impl TestApp {
         self.app.save_session_and_flush();
     }
 
+    pub(crate) fn finalize_graceful_shutdown(&mut self) -> Result<(), String> {
+        self.app.finalize_graceful_shutdown()
+    }
+
     pub(crate) fn save_session(&mut self) {
         self.app.save_session();
     }
@@ -802,7 +841,7 @@ impl TestApp {
         self.app.session_path_grants()
     }
 
-    pub(crate) fn focus_transcript(&mut self) {
+    pub fn focus_transcript(&mut self) {
         self.app.app_focus = AppFocus::Content;
         self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
     }

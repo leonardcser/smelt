@@ -7,7 +7,7 @@ use rusqlite::{named_params, params, params_from_iter, Connection, OpenFlags, Op
 
 use crate::{Result, StoreError};
 
-pub const CATALOG_SCHEMA_VERSION: i32 = 1;
+pub const CATALOG_SCHEMA_VERSION: i32 = 2;
 pub const MAX_CATALOG_PAGE_SIZE: u32 = 10_000;
 
 const CATALOG_SCHEMA: &str = r#"
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS catalog_meta (
 
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
+    lineage_id TEXT,
     title TEXT,
     slug TEXT,
     first_user_message TEXT,
@@ -75,6 +76,7 @@ impl CatalogAvailability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogSession {
     pub id: String,
+    pub lineage_id: Option<String>,
     pub title: Option<String>,
     pub slug: Option<String>,
     pub first_user_message: Option<String>,
@@ -104,6 +106,7 @@ impl CatalogSession {
     ) -> Self {
         Self {
             id: id.into(),
+            lineage_id: None,
             title: None,
             slug: None,
             first_user_message: None,
@@ -244,14 +247,15 @@ impl Catalog {
         };
         let sql = format!(
             "INSERT INTO sessions (
-                id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+                id, lineage_id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
                 updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
              ) VALUES (
-                :id, :title, :slug, :first_user_message, :cwd, :mode, :reasoning_effort, :model,
+                :id, :lineage_id, :title, :slug, :first_user_message, :cwd, :mode, :reasoning_effort, :model,
                 :fast_mode, :parent_id, :context_tokens, :history_len, :text_bytes, :created_at,
                 :updated_at, :source_revision, 'available', NULL, NULL, :last_seen_scan
              ) ON CONFLICT(id) DO UPDATE SET
+                lineage_id = COALESCE(excluded.lineage_id, sessions.lineage_id),
                 title = excluded.title,
                 slug = excluded.slug,
                 first_user_message = excluded.first_user_message,
@@ -276,6 +280,7 @@ impl Catalog {
             &sql,
             named_params! {
                 ":id": session.id,
+                ":lineage_id": session.lineage_id,
                 ":title": session.title,
                 ":slug": session.slug,
                 ":first_user_message": session.first_user_message,
@@ -546,7 +551,7 @@ fn catalog_metadata(conn: &Connection) -> Result<CatalogMetadata> {
 
 fn query_session(conn: &Connection, id: &str) -> Result<Option<CatalogSession>> {
     let mut statement = conn.prepare(
-        "SELECT id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+        "SELECT id, lineage_id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
                 updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
          FROM sessions WHERE id = ?1",
@@ -562,7 +567,7 @@ fn query_page(conn: &Connection, query: &CatalogQuery) -> Result<CatalogPage> {
         )));
     }
     let mut sql = String::from(
-        "SELECT id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+        "SELECT id, lineage_id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
                 updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
          FROM sessions",
@@ -614,7 +619,7 @@ fn query_page(conn: &Connection, query: &CatalogQuery) -> Result<CatalogPage> {
 }
 
 fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> Result<CatalogSession> {
-    let fast_mode = match row.get::<_, Option<i64>>(8)? {
+    let fast_mode = match row.get::<_, Option<i64>>(9)? {
         None => None,
         Some(0) => Some(false),
         Some(1) => Some(true),
@@ -624,31 +629,32 @@ fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> Result<CatalogSession> {
             )))
         }
     };
-    let status: String = row.get(16)?;
+    let status: String = row.get(17)?;
     Ok(CatalogSession {
         id: row.get(0)?,
-        title: row.get(1)?,
-        slug: row.get(2)?,
-        first_user_message: row.get(3)?,
-        cwd: row.get(4)?,
-        mode: row.get(5)?,
-        reasoning_effort: row.get(6)?,
-        model: row.get(7)?,
+        lineage_id: row.get(1)?,
+        title: row.get(2)?,
+        slug: row.get(3)?,
+        first_user_message: row.get(4)?,
+        cwd: row.get(5)?,
+        mode: row.get(6)?,
+        reasoning_effort: row.get(7)?,
+        model: row.get(8)?,
         fast_mode,
-        parent_id: row.get(9)?,
-        context_tokens: optional_nonnegative_u64(row.get(10)?, "context_tokens")?,
-        history_len: optional_nonnegative_u64(row.get(11)?, "history_len")?,
-        text_bytes: optional_nonnegative_u64(row.get(12)?, "text_bytes")?,
-        created_at: row.get::<_, Option<i64>>(13)?.unwrap_or(0),
-        updated_at: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
+        parent_id: row.get(10)?,
+        context_tokens: optional_nonnegative_u64(row.get(11)?, "context_tokens")?,
+        history_len: optional_nonnegative_u64(row.get(12)?, "history_len")?,
+        text_bytes: optional_nonnegative_u64(row.get(13)?, "text_bytes")?,
+        created_at: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
+        updated_at: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
         source_revision: nonnegative_u64(
-            row.get::<_, Option<i64>>(15)?.unwrap_or(0),
+            row.get::<_, Option<i64>>(16)?.unwrap_or(0),
             "source_revision",
         )?,
         availability: CatalogAvailability::from_str(&status)?,
-        error_kind: row.get(17)?,
-        error_summary: row.get(18)?,
-        last_seen_scan: nonnegative_u64(row.get(19)?, "last_seen_scan")?,
+        error_kind: row.get(18)?,
+        error_summary: row.get(19)?,
+        last_seen_scan: nonnegative_u64(row.get(20)?, "last_seen_scan")?,
     })
 }
 
@@ -697,6 +703,7 @@ mod tests {
     fn row(id: &str, revision: u64, updated_at: i64) -> CatalogSession {
         CatalogSession {
             id: id.into(),
+            lineage_id: None,
             title: Some(format!("title-{id}")),
             slug: None,
             first_user_message: Some(format!("message-{id}")),
@@ -891,12 +898,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut catalog = Catalog::open(temp.path().join("catalog.db")).unwrap();
         let mut current = row("same", 5, 50);
+        current.lineage_id = Some("a".repeat(32));
         catalog.upsert_available(&current).unwrap();
         catalog
             .upsert_unavailable("same", "sqlite", "temporarily unavailable")
             .unwrap();
 
         current.title = Some("repaired".into());
+        current.lineage_id = None;
         assert!(catalog.upsert_available(&current).unwrap());
         let mut stale = row("same", 4, 100);
         stale.title = Some("stale".into());
@@ -905,6 +914,10 @@ mod tests {
         let page = catalog.page(&CatalogQuery::default()).unwrap();
         assert_eq!(page.sessions[0].title.as_deref(), Some("repaired"));
         assert_eq!(page.sessions[0].source_revision, 5);
+        assert_eq!(
+            page.sessions[0].lineage_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
         assert_eq!(
             page.sessions[0].availability,
             CatalogAvailability::Available

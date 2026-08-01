@@ -821,7 +821,7 @@ mod tests {
             .pending_history_appends()
             .iter()
             .filter(|append| {
-                append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+                append.coalescing_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
             })
             .collect()
     }

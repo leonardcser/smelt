@@ -96,6 +96,18 @@ pub const TRANSCRIPT_EXTENT_PROFILE_WIDTHS: [u16; 6] = [20, 40, 80, 120, 160, 24
 pub const TRANSCRIPT_EXTENT_CHUNK_RECORDS: usize = 64;
 const TRANSCRIPT_EXTENT_PROFILE_VERSION: i64 = 1;
 const TRANSCRIPT_EXTENT_BACKFILL_BATCH_RECORDS: usize = 256;
+const TRANSCRIPT_EXTENT_BACKFILL_BATCH_SQL: &str =
+    "SELECT b.block_idx, b.record_idx, b.kind, b.estimated_text_bytes,
+            COALESCE(b.preview_text, ''),
+            COALESCE((SELECT s.indexed_text
+                      FROM transcript_search s
+                      WHERE s.block_idx = b.block_idx), '')
+     FROM transcript_blocks b
+     WHERE b.block_json IS NOT NULL
+       AND b.extent_profile_version != ?1
+       AND b.record_idx > ?2
+     ORDER BY b.record_idx
+     LIMIT ?3";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TranscriptExtentProfile {
@@ -456,20 +468,106 @@ pub(crate) fn read_history_items_range(
     Ok(out)
 }
 
-fn decode_history_row(
+pub(crate) fn read_history_items_tail(
     conn: &Connection,
+    end: usize,
+    max_items: usize,
+    max_bytes: Option<usize>,
+) -> Result<Vec<HistoryItem>> {
+    let _perf = perf::begin("store:history:read_tail");
+    if end == 0 || max_items == 0 || max_bytes == Some(0) {
+        record_history_tail_read(0, 0, 0);
+        return Ok(Vec::new());
+    }
+
+    let end = checked_i64(end as u64, "end_idx")?;
+    let limit = checked_i64(max_items as u64, "max_items")?;
+    let mut stmt = conn.prepare(
+        "SELECT idx, kind, json, hash
+         FROM history_items
+         WHERE idx < ?1
+         ORDER BY idx DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![end, limit], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out = Vec::with_capacity(max_items.min(end as usize));
+    let mut budget = protocol::HistoryTailBudget::new(max_items, max_bytes);
+    let mut stored_json_bytes = 0u64;
+    let mut rows_considered = 0usize;
+    for row in rows {
+        let (idx, kind, json, hash) = row?;
+        rows_considered = rows_considered.saturating_add(1);
+        stored_json_bytes = stored_json_bytes.saturating_add(json.len() as u64);
+        let mut value = validate_history_row(idx, &kind, &json, &hash)?;
+        if !budget.can_prepend_bytes(history_object_bytes(&value)) {
+            break;
+        }
+        rehydrate_object_refs(conn, &mut value)?;
+        let item: HistoryItem = serde_json::from_value(value)?;
+        if !budget.try_prepend(&item)? {
+            break;
+        }
+        out.push(item);
+    }
+    out.reverse();
+    record_history_tail_read(rows_considered, out.len(), stored_json_bytes);
+    Ok(out)
+}
+
+fn record_history_tail_read(rows_considered: usize, rows_returned: usize, json_bytes: u64) {
+    perf::record_value("store:history:rows_read", rows_considered as u64);
+    perf::record_value(
+        "store:history:read_tail_rows_considered",
+        rows_considered as u64,
+    );
+    perf::record_value(
+        "store:history:read_tail_rows_returned",
+        rows_returned as u64,
+    );
+    perf::record_value("store:history:json_bytes_read", json_bytes);
+}
+
+pub(crate) fn history_object_bytes(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            if let Some(reference) = map.get(OBJECT_REF_KEY) {
+                return reference
+                    .get("raw_size")
+                    .and_then(Value::as_u64)
+                    .and_then(|size| usize::try_from(size).ok())
+                    .unwrap_or(0);
+            }
+            map.values().fold(0usize, |total, child| {
+                total.saturating_add(history_object_bytes(child))
+            })
+        }
+        Value::Array(values) => values.iter().fold(0usize, |total, child| {
+            total.saturating_add(history_object_bytes(child))
+        }),
+        _ => 0,
+    }
+}
+
+fn validate_history_row(
     idx: i64,
     stored_kind: &str,
     json: &str,
     stored_hash: &str,
-) -> Result<HistoryItem> {
+) -> Result<Value> {
     let actual_hash = sha256_hex(json.as_bytes());
     if actual_hash != stored_hash {
         return Err(StoreError::Integrity(format!(
             "history row {idx} hash mismatch: stored {stored_hash}, actual {actual_hash}"
         )));
     }
-    let mut value: Value = serde_json::from_str(json)?;
+    let value: Value = serde_json::from_str(json)?;
     let actual_kind = value
         .get("kind")
         .and_then(Value::as_str)
@@ -479,6 +577,17 @@ fn decode_history_row(
             "history row {idx} kind mismatch: stored {stored_kind:?}, decoded {actual_kind:?}"
         )));
     }
+    Ok(value)
+}
+
+fn decode_history_row(
+    conn: &Connection,
+    idx: i64,
+    stored_kind: &str,
+    json: &str,
+    stored_hash: &str,
+) -> Result<HistoryItem> {
+    let mut value = validate_history_row(idx, stored_kind, json, stored_hash)?;
     rehydrate_object_refs(conn, &mut value)?;
     serde_json::from_value(value).map_err(Into::into)
 }
@@ -526,6 +635,150 @@ fn collect_legacy_attachment_references(
         }
         _ => {}
     }
+}
+
+pub(crate) fn history_any_transcript_visible_before(conn: &Connection, end: usize) -> Result<bool> {
+    let _perf = perf::begin("store:history:any_visible_before");
+    let end = checked_i64(end as u64, "end_idx")?;
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM history_items INDEXED BY history_items_kind_idx
+             WHERE kind IN ('user', 'assistant') AND idx < ?1
+             UNION ALL
+             SELECT 1
+             FROM history_items INDEXED BY history_items_kind_idx
+             WHERE kind = 'note'
+               AND idx < ?1
+               AND COALESCE(json_extract(json, '$.note_kind'), '') != 'context'
+         )",
+        [end],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub(crate) fn history_note_projection_at(
+    conn: &Connection,
+    index: usize,
+) -> Result<Option<protocol::HistoryNoteProjection>> {
+    let _perf = perf::begin("store:history:note_projection_at");
+    let index = checked_i64(index as u64, "history_idx")?;
+    let fields = conn
+        .query_row(
+            "SELECT json_extract(json, '$.note_kind'),
+                    json_type(json, '$.mode'),
+                    CASE WHEN json_type(json, '$.mode') = 'text'
+                         THEN json_extract(json, '$.mode')
+                    END
+             FROM history_items
+             WHERE idx = ?1 AND kind = 'note'",
+            [index],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((kind, mode_type, mode)) = fields else {
+        return Ok(None);
+    };
+    let kind = match kind.as_deref() {
+        Some("mode_change") => protocol::HistoryNoteKind::ModeChange,
+        Some("context") => protocol::HistoryNoteKind::Context,
+        Some("process_status") => protocol::HistoryNoteKind::ProcessStatus,
+        other => {
+            return Err(StoreError::Integrity(format!(
+                "history note {index} has invalid note kind {other:?}"
+            )))
+        }
+    };
+    if mode_type.as_deref().is_some_and(|kind| kind != "text") {
+        return Err(StoreError::Integrity(format!(
+            "history note {index} has non-text mode"
+        )));
+    }
+    Ok(Some(protocol::HistoryNoteProjection { kind, mode }))
+}
+
+pub(crate) fn history_last_context_note_index_before(
+    conn: &Connection,
+    end: usize,
+    name: &str,
+) -> Result<Option<usize>> {
+    let _perf = perf::begin("store:history:last_context_note_index_before");
+    let end = checked_i64(end as u64, "end_idx")?;
+    let index = conn
+        .query_row(
+            "SELECT idx
+             FROM history_items
+             WHERE idx < ?1
+               AND kind = 'note'
+               AND json_extract(json, '$.note_kind') = 'context'
+               AND COALESCE(
+                   json_extract(json, '$.name'),
+                   ?2
+               ) = ?3
+             ORDER BY idx DESC
+             LIMIT 1",
+            params![end, protocol::DEFAULT_CONTEXT_NOTE_NAME, name],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    index
+        .map(|index| {
+            usize::try_from(index).map_err(|_| {
+                StoreError::Integrity(format!("negative history context index {index}"))
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn history_mode_before(conn: &Connection, end: usize) -> Result<Option<String>> {
+    let _perf = perf::begin("store:history:mode_before");
+    let end = checked_i64(end as u64, "end_idx")?;
+    conn.query_row(
+        "SELECT json_extract(json, '$.mode')
+         FROM history_items
+         WHERE idx < ?1
+           AND kind = 'note'
+           AND json_type(json, '$.mode') = 'text'
+         ORDER BY idx DESC
+         LIMIT 1",
+        [end],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub(crate) fn history_base_mode_range(
+    conn: &Connection,
+    range: Range<usize>,
+) -> Result<Option<String>> {
+    let _perf = perf::begin("store:history:base_mode_range");
+    if range.end <= range.start {
+        return Ok(None);
+    }
+    let start = checked_i64(range.start as u64, "start_idx")?;
+    let end = checked_i64(range.end as u64, "end_idx")?;
+    conn.query_row(
+        "SELECT json_extract(json, '$.base_mode')
+         FROM history_items
+         WHERE idx >= ?1
+           AND idx < ?2
+           AND kind = 'note'
+           AND json_type(json, '$.base_mode') = 'text'
+         ORDER BY idx
+         LIMIT 1",
+        params![start, end],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub(crate) fn history_item_count(conn: &Connection) -> Result<usize> {
@@ -977,12 +1230,20 @@ pub(crate) fn transcript_record_index_for_block_idx(
     Ok(index.map(|index| TranscriptRecordOffset::new(index.max(0) as usize)))
 }
 
-fn estimated_text_rows(text: &str, width: u16) -> u64 {
-    let width = usize::from(width.max(1));
-    text.lines()
-        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width) as u64)
-        .sum::<u64>()
-        .max(1)
+fn estimated_text_row_profile(text: &str) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] {
+    let mut rows = [0u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()];
+    for line in text.lines() {
+        let cells = if line.is_ascii() {
+            line.len()
+        } else {
+            UnicodeWidthStr::width(line)
+        }
+        .max(1) as u64;
+        for (total, width) in rows.iter_mut().zip(TRANSCRIPT_EXTENT_PROFILE_WIDTHS) {
+            *total = total.saturating_add(cells.div_ceil(u64::from(width)));
+        }
+    }
+    rows.map(|rows| rows.max(1))
 }
 
 fn transcript_record_extent_profile(
@@ -1007,9 +1268,12 @@ fn transcript_record_extent_profile(
     } else {
         estimated_text_bytes.saturating_sub(text.len() as u64)
     };
-    TranscriptExtentProfile::new(TRANSCRIPT_EXTENT_PROFILE_WIDTHS.map(|width| {
-        estimated_text_rows(text, width)
-            .saturating_add(omitted_bytes.div_ceil(u64::from(width)))
+    let text_rows = estimated_text_row_profile(text);
+    TranscriptExtentProfile::new(std::array::from_fn(|index| {
+        text_rows[index]
+            .saturating_add(
+                omitted_bytes.div_ceil(u64::from(TRANSCRIPT_EXTENT_PROFILE_WIDTHS[index])),
+            )
             .saturating_add(1)
     }))
 }
@@ -1145,31 +1409,28 @@ pub(crate) fn transcript_record_estimated_rows(
 pub(crate) fn backfill_transcript_extent_profiles(conn: &Connection) -> Result<()> {
     let _perf = perf::begin("store:transcript:extent_profile_backfill");
     let mut backfilled = 0usize;
+    let mut last_record_idx = -1i64;
     loop {
         let profiles = {
-            let mut stmt = conn.prepare(
-                "SELECT b.block_idx, b.kind, b.estimated_text_bytes,
-                        COALESCE(b.preview_text, ''), COALESCE(s.indexed_text, '')
-                 FROM transcript_blocks b
-                 LEFT JOIN transcript_search s ON s.block_idx = b.block_idx
-                 WHERE b.block_json IS NOT NULL AND b.extent_profile_version != ?1
-                 ORDER BY b.record_idx
-                 LIMIT ?2",
-            )?;
+            let _perf = perf::begin("store:transcript:extent_profile_backfill:read_compute");
+            let mut stmt = conn.prepare(TRANSCRIPT_EXTENT_BACKFILL_BATCH_SQL)?;
             let profiles = stmt
                 .query_map(
                     params![
                         TRANSCRIPT_EXTENT_PROFILE_VERSION,
+                        last_record_idx,
                         TRANSCRIPT_EXTENT_BACKFILL_BATCH_RECORDS as i64
                     ],
                     |row| {
                         let block_idx = row.get::<_, i64>(0)?;
-                        let kind = row.get::<_, String>(1)?;
-                        let estimated_text_bytes = row.get::<_, i64>(2)?.max(0) as u64;
-                        let preview_text = row.get::<_, String>(3)?;
-                        let indexed_text = row.get::<_, String>(4)?;
+                        let record_idx = row.get::<_, i64>(1)?;
+                        let kind = row.get::<_, String>(2)?;
+                        let estimated_text_bytes = row.get::<_, i64>(3)?.max(0) as u64;
+                        let preview_text = row.get::<_, String>(4)?;
+                        let indexed_text = row.get::<_, String>(5)?;
                         Ok((
                             block_idx,
+                            record_idx,
                             transcript_record_extent_profile(
                                 &kind,
                                 estimated_text_bytes,
@@ -1182,10 +1443,12 @@ pub(crate) fn backfill_transcript_extent_profiles(conn: &Connection) -> Result<(
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             profiles
         };
-        if profiles.is_empty() {
+        let Some((_, batch_last_record_idx, _)) = profiles.last() else {
             break;
-        }
+        };
+        last_record_idx = *batch_last_record_idx;
 
+        let _perf = perf::begin("store:transcript:extent_profile_backfill:update");
         let mut update = conn.prepare(
             "UPDATE transcript_blocks
              SET extent_profile_version = ?1,
@@ -1193,7 +1456,7 @@ pub(crate) fn backfill_transcript_extent_profiles(conn: &Connection) -> Result<(
                  extent_rows_120 = ?5, extent_rows_160 = ?6, extent_rows_240 = ?7
              WHERE block_idx = ?8",
         )?;
-        for (block_idx, profile) in &profiles {
+        for (block_idx, _, profile) in &profiles {
             let rows = profile.rows();
             update.execute(params![
                 TRANSCRIPT_EXTENT_PROFILE_VERSION,
@@ -1219,6 +1482,7 @@ pub(crate) fn rebuild_transcript_extent_chunks(
     conn: &Connection,
     start_record_idx: usize,
 ) -> Result<()> {
+    let _perf = perf::begin("store:transcript:extent_chunks_rebuild");
     let first_chunk = start_record_idx / TRANSCRIPT_EXTENT_CHUNK_RECORDS;
     conn.execute(
         "DELETE FROM transcript_extent_chunks WHERE chunk_idx >= ?1",
@@ -1793,6 +2057,10 @@ struct NormalizedHistoryItem {
     refs: Vec<(String, HistoryObjectRole)>,
 }
 
+pub(crate) fn history_search_text(item: &HistoryItem) -> Result<String> {
+    Ok(collect_text(&serde_json::to_value(item)?, 64 * 1024))
+}
+
 fn normalized_history_value(
     item: &HistoryItem,
     compression: ObjectCompression,
@@ -1818,6 +2086,16 @@ fn normalized_history_value(
         search_text,
         refs,
     })
+}
+
+pub(crate) fn serialize_normalized_history_item(
+    conn: &Connection,
+    item: &HistoryItem,
+    compression: ObjectCompression,
+) -> Result<Vec<u8>> {
+    Ok(normalized_history_value(item, compression, Some(conn))?
+        .json
+        .into_bytes())
 }
 
 fn insert_normalized_history_item(
@@ -1895,7 +2173,7 @@ fn normalize_attachments(
     Ok(())
 }
 
-fn normalize_metadata(
+pub(crate) fn normalize_metadata(
     conn: Option<&Connection>,
     value: &mut Value,
     compression: ObjectCompression,
@@ -2106,6 +2384,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn text_row_profile_matches_independent_width_counts() {
+        for text in ["", "short\na much longer line", "ASCII and unicode 界🙂\n"] {
+            let profile = estimated_text_row_profile(text);
+            let expected = TRANSCRIPT_EXTENT_PROFILE_WIDTHS.map(|width| {
+                let width = usize::from(width);
+                text.lines()
+                    .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width) as u64)
+                    .sum::<u64>()
+                    .max(1)
+            });
+            assert_eq!(profile, expected);
+        }
+    }
+
+    #[test]
     fn history_reads_verify_hash_kind_and_required_objects() {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::schema::migrate(&mut conn, "test").unwrap();
@@ -2148,6 +2441,135 @@ mod tests {
             read_history_items_range(&conn, 0..1),
             Err(StoreError::MissingObject { .. })
         ));
+    }
+
+    #[test]
+    fn bounded_history_tail_stops_before_hydrating_an_over_budget_object() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let object_backed = HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
+            None,
+            None,
+            Vec::new(),
+            vec![protocol::ToolInvocation {
+                call_id: "large-call".into(),
+                name: "large-tool".into(),
+                arguments: "{}".into(),
+                result: protocol::ToolOutcome {
+                    content: "large result".into(),
+                    is_error: false,
+                    metadata: Some(json!({ "payload": "x".repeat(32 * 1024) })),
+                },
+                elapsed_ms: None,
+            }],
+        ));
+        let newest = vec![
+            HistoryItem::user(protocol::Content::text("newer")),
+            HistoryItem::user(protocol::Content::text("newest")),
+        ];
+        let history = vec![
+            HistoryItem::user(protocol::Content::text("oldest")),
+            object_backed,
+            newest[0].clone(),
+            newest[1].clone(),
+        ];
+        replace_history_suffix(&conn, 0, &history, ObjectCompression::none()).unwrap();
+        let newest_bytes = newest
+            .iter()
+            .map(|item| serde_json::to_vec(item).unwrap().len())
+            .sum();
+
+        conn.execute_batch("PRAGMA foreign_keys = OFF; DELETE FROM objects;")
+            .unwrap();
+        assert_eq!(
+            read_history_items_tail(&conn, history.len(), 10, Some(newest_bytes)).unwrap(),
+            newest
+        );
+    }
+
+    #[test]
+    fn bounded_history_tail_preserves_newest_suffix_semantics() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let history = vec![
+            HistoryItem::user(protocol::Content::text("one")),
+            HistoryItem::user(protocol::Content::text("two")),
+            HistoryItem::user(protocol::Content::text("three")),
+        ];
+        replace_history_suffix(&conn, 0, &history, ObjectCompression::none()).unwrap();
+        let newest_bytes = serde_json::to_vec(&history[2]).unwrap().len();
+
+        assert_eq!(
+            read_history_items_tail(&conn, history.len(), 2, None).unwrap(),
+            history[1..].to_vec()
+        );
+        assert_eq!(
+            read_history_items_tail(&conn, history.len(), 3, Some(newest_bytes)).unwrap(),
+            history[2..].to_vec()
+        );
+        assert!(read_history_items_tail(
+            &conn,
+            history.len(),
+            3,
+            Some(newest_bytes.saturating_sub(1))
+        )
+        .unwrap()
+        .is_empty());
+        assert!(read_history_items_tail(&conn, history.len(), 0, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn history_semantic_projections_do_not_require_payload_hydration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let history = vec![
+            HistoryItem::system("system"),
+            HistoryItem::note(protocol::HistoryNote::context("hidden")),
+            HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                "normal",
+                "plan",
+                "switch mode",
+            )),
+        ];
+        replace_history_suffix(&conn, 0, &history, ObjectCompression::none()).unwrap();
+
+        assert!(!history_any_transcript_visible_before(&conn, 2).unwrap());
+        assert!(history_any_transcript_visible_before(&conn, 3).unwrap());
+        assert_eq!(history_mode_before(&conn, 2).unwrap(), None);
+        assert_eq!(
+            history_mode_before(&conn, 3).unwrap().as_deref(),
+            Some("plan")
+        );
+        assert_eq!(history_note_projection_at(&conn, 0).unwrap(), None);
+        assert_eq!(
+            history_note_projection_at(&conn, 1).unwrap(),
+            Some(protocol::HistoryNoteProjection {
+                kind: protocol::HistoryNoteKind::Context,
+                mode: None,
+            })
+        );
+        assert_eq!(
+            history_note_projection_at(&conn, 2).unwrap(),
+            Some(protocol::HistoryNoteProjection {
+                kind: protocol::HistoryNoteKind::ModeChange,
+                mode: Some("plan".into()),
+            })
+        );
+        assert_eq!(
+            history_last_context_note_index_before(&conn, 3, protocol::DEFAULT_CONTEXT_NOTE_NAME)
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            history_last_context_note_index_before(&conn, 3, "goal").unwrap(),
+            None
+        );
+        assert_eq!(
+            history_base_mode_range(&conn, 0..3).unwrap().as_deref(),
+            Some("normal")
+        );
     }
 
     #[test]
@@ -2235,6 +2657,103 @@ mod tests {
                 .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
             "{details:#?}"
         );
+    }
+
+    #[test]
+    fn extent_profile_backfill_uses_indexed_keyset_and_search_lookups() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let details = query_plan_details(
+            &conn,
+            TRANSCRIPT_EXTENT_BACKFILL_BATCH_SQL,
+            rusqlite::params![TRANSCRIPT_EXTENT_PROFILE_VERSION, -1_i64, 256_i64],
+        );
+
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("SEARCH b USING INDEX") && detail.contains("record_idx>?")
+            }),
+            "{details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH s USING INTEGER PRIMARY KEY")),
+            "{details:#?}"
+        );
+        assert!(
+            details.iter().all(|detail| !detail.contains("SCAN s")),
+            "{details:#?}"
+        );
+    }
+
+    #[test]
+    fn extent_profile_backfill_handles_gaps_and_interleaved_current_profiles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let row_count = TRANSCRIPT_EXTENT_BACKFILL_BATCH_RECORDS * 2 + 18;
+        for block_idx in 0..row_count {
+            let record_idx = block_idx * 2;
+            let current = block_idx % 3 == 0;
+            let indexed_text = format!(
+                "record {record_idx}\n{}",
+                "heterogeneous wrapped content 界 ".repeat(block_idx % 9 + 1)
+            );
+            conn.execute(
+                "INSERT INTO transcript_blocks (
+                     block_idx, record_idx, kind, estimated_text_bytes, preview_text, block_json,
+                     extent_profile_version, extent_rows_20, extent_rows_40, extent_rows_80,
+                     extent_rows_120, extent_rows_160, extent_rows_240
+                 ) VALUES (?1, ?2, 'text', ?3, '', '{}', ?4, ?5, ?5, ?5, ?5, ?5, ?5)",
+                params![
+                    block_idx as i64,
+                    record_idx as i64,
+                    indexed_text.len() as i64,
+                    if current {
+                        TRANSCRIPT_EXTENT_PROFILE_VERSION
+                    } else {
+                        0
+                    },
+                    if current { 7 } else { 0 },
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript_search (block_idx, indexed_text) VALUES (?1, ?2)",
+                params![block_idx as i64, indexed_text],
+            )
+            .unwrap();
+        }
+
+        backfill_transcript_extent_profiles(&conn).unwrap();
+
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_blocks
+                 WHERE block_json IS NOT NULL AND extent_profile_version != ?1",
+                [TRANSCRIPT_EXTENT_PROFILE_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0);
+        let preserved: [i64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] = conn
+            .query_row(
+                "SELECT extent_rows_20, extent_rows_40, extent_rows_80,
+                        extent_rows_120, extent_rows_160, extent_rows_240
+                 FROM transcript_blocks WHERE block_idx = 0",
+                [],
+                |row| extent_profile_rows_from_row(row, 0),
+            )
+            .unwrap();
+        assert_eq!(preserved, [7; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()]);
+        let backfilled_version: i64 = conn
+            .query_row(
+                "SELECT extent_profile_version FROM transcript_blocks WHERE block_idx = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backfilled_version, TRANSCRIPT_EXTENT_PROFILE_VERSION);
     }
 
     #[test]

@@ -125,6 +125,31 @@ fn bring_up_error(
     }
 }
 
+fn startup_auth_error(
+    runtime: &mut smelt_core::RuntimeState,
+    managed_models: &smelt_core::ManagedModels,
+) -> Option<String> {
+    let active = runtime.active_model()?;
+    let error = if let Some(provider) =
+        engine::auth::AuthProvider::from_provider_type(&active.provider_type)
+    {
+        (!managed_models.provider(provider).authenticated)
+            .then(|| format!("not logged in to managed provider {provider:?}"))
+    } else {
+        crate::app::agent::lookup_api_key(&active.api_key_env, |name| std::env::var(name))
+            .err()
+            .map(|error| error.message())
+    };
+    if error.is_some() {
+        if let Some(active) = runtime.active_model_mut() {
+            active.availability = smelt_core::ModelAvailability::Unavailable {
+                reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+            };
+        }
+    }
+    error
+}
+
 struct LuaTuiGeneration {
     ui: crate::smelt_edit::Ui,
     paint_registry: crate::lua::paint::PaintRegistry,
@@ -170,8 +195,8 @@ impl TuiApp {
         }
     }
 
-    /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
-    /// shared cold-start + reload pipeline) with a user-facing toast.
+    /// `/reload` entry point. Runs the transactional candidate pipeline and
+    /// reports its outcome with a user-facing toast.
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn reload_lua(&mut self) {
         self.reload_lua_inner(LuaReloadKind::Manual);
@@ -293,8 +318,111 @@ impl TuiApp {
         !self.prompt_input_is_busy() && self.ui.active_modal().is_none()
     }
 
-    /// Build and commit a fresh Lua generation. This pipeline is shared by
-    /// interactive launch, manual reload, and automatic config reload.
+    /// Finish loading the generation-zero VM after the frontend and terminal
+    /// exist. Early files have already run so dynamic CLI flags are available;
+    /// every remaining launch file executes here exactly once with a live host.
+    pub(crate) fn finish_lua_launch(&mut self, run_ready_hooks: bool) -> Option<LuaBringUpError> {
+        let selections = self.startup_selections.clone();
+        let target_cwd = self.core.env.cwd().clone();
+        let mut launch = self.lua.continue_launch();
+        let (launch, project_trust) = crate::lua::scope_app(self, || {
+            let project_trust = launch.load(&target_cwd);
+            (launch, project_trust)
+        });
+        self.lua
+            .finish_launch(launch, &target_cwd, project_trust.clone());
+        self.project_trust = Some(project_trust);
+
+        let load_failure = self.lua.load_error().map(|error| LuaBringUpError {
+            message: error.to_string(),
+            location: self.lua.load_failure_location().cloned().unwrap_or(
+                smelt_core::lua::LuaLoadFailureLocation {
+                    phase: "load",
+                    path: None,
+                },
+            ),
+        });
+
+        let runtime_failure =
+            match self.resolve_lua_runtime_config_with(self.lua.desired(), &selections, None) {
+                Ok((mut next_runtime, next_managed_models)) => {
+                    let next_permissions = smelt_core::permissions::resolve_permissions(
+                        &self.lua.desired().permissions.rules,
+                        &self.lua.desired().permissions.tool_defaults,
+                        self.lua.desired().modes.behaviors.clone(),
+                        &next_runtime.settings,
+                        smelt_core::permissions::PermissionRuntimePaths {
+                            cwd: &target_cwd,
+                            home: self.core.env.home(),
+                        },
+                        &self.core.workspace_permissions,
+                        self.core.permissions.paths_fn(),
+                    );
+                    let auth_error = startup_auth_error(&mut next_runtime, &next_managed_models);
+
+                    if let Err(error) = self.lua.activate_launch() {
+                        return Some(bring_up_error(
+                            "activation",
+                            None,
+                            format!("activate Lua launch: {error}"),
+                        ));
+                    }
+                    self.command_catalog
+                        .activate(self.lua.command_names_handle());
+                    self.core.lua_generation = self.lua.id;
+
+                    self.managed_models.replace_catalog(next_managed_models);
+                    self.commit_lua_runtime_config(next_runtime, next_permissions);
+                    self.startup_auth_error = auth_error;
+                    self.conversation.install_startup_runtime(&self.core.config);
+                    self.workspace.refresh(std::path::Path::new(
+                        &self.core.config.settings.worktree_root,
+                    ));
+                    self.core.engine.send(protocol::UiCommand::SetMode {
+                        mode: self.core.config.mode.clone(),
+                    });
+                    self.core
+                        .engine
+                        .send(protocol::UiCommand::SetReasoningEffort {
+                            effort: self.core.config.reasoning_effort,
+                        });
+                    self.core.engine.send(protocol::UiCommand::SetFastMode {
+                        enabled: self.core.config.settings.fast_mode,
+                    });
+
+                    self.reconcile_auto_reload();
+                    self.reconcile_runtime_controllers();
+                    self.publish_diff_signals();
+
+                    let lua_shared = std::sync::Arc::clone(self.lua.shared());
+                    if let Err(error) = crate::lua::api::terminal::commit_staged_title(&lua_shared)
+                    {
+                        self.notify_error_sticky(format!("terminal title: {error}"));
+                    }
+                    for (kind, source, message) in
+                        crate::lua::api::notify::take_staged_notices(&lua_shared)
+                    {
+                        self.record_notice(kind, source, message);
+                    }
+                    lua_shared.commit_staged_logs();
+                    None
+                }
+                Err(error) => Some(bring_up_error("runtime_resolution", None, error)),
+            };
+        for warning in self.lua.warnings().to_vec() {
+            self.notify_warn(warning);
+        }
+
+        self.refresh_main_layout();
+        if load_failure.is_none() && runtime_failure.is_none() && run_ready_hooks {
+            self.run_lua_ready_hooks("launch");
+        }
+
+        load_failure.or(runtime_failure)
+    }
+
+    /// Build and commit a fresh Lua generation for manual reload, automatic
+    /// config reload, or a cwd transition.
     ///
     /// Candidate evaluation uses fresh Lua registries plus an isolated fork of
     /// generation-owned TUI state. The committed runtime, resolved values,
@@ -314,11 +442,6 @@ impl TuiApp {
         refresh_agent_inputs: bool,
     ) -> Option<LuaBringUpError> {
         self.bring_up_lua_at(kind, refresh_agent_inputs, None, true, true)
-    }
-
-    #[cfg(any(test, feature = "harness"))]
-    pub(crate) fn bring_up_lua_for_harness(&mut self) -> Option<LuaBringUpError> {
-        self.bring_up_lua_at("launch", false, None, false, false)
     }
 
     pub(crate) fn bring_up_lua_for_cwd(
@@ -474,21 +597,32 @@ impl TuiApp {
         // until the first render, while resize/reload paths see the Lua layout.
         self.refresh_main_layout();
         if run_ready_hooks {
-            let hooks = self.lua.take_lifecycle_hooks("ready");
-            let lua = self.lua.lua().clone();
-            for function in hooks {
-                let lua = lua.clone();
-                let result = crate::lua::scope_app(self, move || -> mlua::Result<()> {
-                    let table = lua.create_table()?;
-                    table.set("kind", kind)?;
-                    function.call(table)
-                });
-                if let Err(error) = result {
-                    self.notify_error_sticky(format!("lifecycle.ready: {error}"));
-                }
-            }
+            self.run_lua_ready_hooks(kind);
         }
         None
+    }
+
+    fn run_lua_ready_hooks(&mut self, kind: &'static str) {
+        let hooks = self.lua.take_lifecycle_hooks("ready");
+        let lua = self.lua.lua().clone();
+        for function in hooks {
+            let lua = lua.clone();
+            let result = crate::lua::scope_app(self, move || -> mlua::Result<()> {
+                let table = lua.create_table()?;
+                table.set("kind", kind)?;
+                function.call(table)
+            });
+            if let Err(error) = result {
+                self.notify_error_sticky(format!("lifecycle.ready: {error}"));
+            }
+        }
+    }
+
+    /// Drain generation-zero ready hooks retained by the snapshot harness.
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn drain_launch_ready_hooks_for_harness(&mut self) {
+        self.refresh_main_layout();
+        self.run_lua_ready_hooks("launch");
     }
 
     fn discard_lua_candidate_resources(&mut self, generation: u64) {
@@ -568,6 +702,19 @@ impl TuiApp {
         &self,
         desired: &crate::lua::LuaDesiredState,
     ) -> Result<(smelt_core::RuntimeState, smelt_core::ManagedModels), String> {
+        self.resolve_lua_runtime_config_with(
+            desired,
+            &smelt_core::RuntimeSelections::default(),
+            Some(&self.core.config),
+        )
+    }
+
+    fn resolve_lua_runtime_config_with(
+        &self,
+        desired: &crate::lua::LuaDesiredState,
+        selections: &smelt_core::RuntimeSelections,
+        previous: Option<&smelt_core::RuntimeState>,
+    ) -> Result<(smelt_core::RuntimeState, smelt_core::ManagedModels), String> {
         let mut config = desired.config.clone();
         let mut managed_models = self.managed_models.catalog().clone();
         managed_models.inject_oauth_providers(&mut config);
@@ -579,8 +726,8 @@ impl TuiApp {
             startup: &self.core.startup_overrides,
             available_models: &available_models,
             registered_modes: &desired.modes.cycle,
-            selections: &smelt_core::RuntimeSelections::default(),
-            previous: Some(&self.core.config),
+            selections,
+            previous,
             headless: false,
         })
         .map_err(|error| format!("runtime config reconciliation failed: {error}"))?;
@@ -742,6 +889,7 @@ impl TuiApp {
 
     /// Rewind to a transcript block, or to before the first turn when `block_idx` is `None`.
     pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
+        self.cancel_live_search(false);
         if let Some(bidx) = block_idx {
             if self.conversation.is_active() {
                 self.cancel_agent();
@@ -776,57 +924,16 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        self.session_load_request = self
-            .session_load_request
-            .checked_add(1)
-            .expect("session load request counter overflowed");
-        if matches!(
-            self.core.sessions.session_schema_status_result(id),
-            Ok(smelt_store::SessionSchemaStatus::Upgradeable { .. })
-        ) {
-            self.upgrade_and_load_session(id);
-            return;
-        }
-        self.load_current_session_by_id(id);
-    }
-
-    fn upgrade_and_load_session(&mut self, id: &str) {
-        let session_id = match self.core.sessions.resolve_prefix(id) {
-            Ok(id) => id.into_string(),
-            Err(error) => {
-                self.notify_error_sticky(format!("failed to resolve session: {error}"));
+        if let Ok(resolved) = self.core.sessions.resolve_session_dir_for_read_result(id) {
+            if resolved.kind == smelt_core::session::SessionDirKind::Store {
+                self.notify_error_sticky(format!(
+                    "session {} uses the previous storage format; run `smelt session migrate {}` and retry",
+                    resolved.id, resolved.id
+                ));
                 return;
             }
-        };
-        let request = self.session_load_request;
-        let busy_token = self
-            .busy_stack
-            .push(format!("upgrading session {}", &session_id[..8]));
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let sessions = self.core.sessions.clone();
-            let app_event_tx = self.platform.app_event_sender();
-            runtime.spawn_blocking(move || {
-                let result = sessions.migrate_session_schema_result(&session_id);
-                let _ = app_event_tx.send(crate::app::AppEvent::SessionSchemaMigrationCompleted {
-                    request,
-                    busy_token,
-                    session_id,
-                    result,
-                });
-            });
-        } else {
-            let result = self
-                .core
-                .sessions
-                .migrate_session_schema_result(&session_id);
-            self.busy_stack.release(busy_token);
-            match result {
-                Ok(_) => self.load_current_session_by_id(&session_id),
-                Err(error) => {
-                    self.notify_error_sticky(format!("failed to upgrade session: {error}"))
-                }
-            }
         }
+        self.load_current_session_by_id(id);
     }
 
     pub(crate) fn load_current_session_by_id(&mut self, id: &str) {

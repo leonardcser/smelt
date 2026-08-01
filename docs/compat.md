@@ -88,6 +88,35 @@ with `COMPAT(<id>)`.
 - Tests:
   - `checkpoint_marker_origin_round_trips_with_history_boundary`
 
+## session-lineage-v1
+
+- Remove after: the minor release following the lineage-default release, unless a
+  separately approved extension records exact retained versions and a removal date
+- Why: explicitly migrate the immediately preceding per-session `session.db` format
+  into canonical per-lineage storage without automatic conversion during ordinary
+  startup, resume, mutation, fork, rewind, or search
+- Code:
+  - `crates/store/src/lineage_access.rs`: migration-only reader and shared writer
+    fencing
+  - `crates/core/src/session.rs`, `crates/core/src/session_store.rs`, and TUI/CLI
+    inspection paths: read-only compatibility entry points
+- Tests:
+  - explicit migration, staged publication, retry, writer fencing, and ordinary
+    resume rejection regressions
+
+## last-session-commit-descriptor-len
+
+- Remove after: schema v8 sessions whose final idempotency receipt predates the
+  transcript record terminology no longer need to accept new writes
+- Why: schema v9 renamed `descriptor_len` to `transcript_record_count`, including
+  inside the JSON `last_session_commit` receipt; the table migration cannot
+  rename fields in that opaque metadata value
+- Code:
+  - `crates/store/src/session_commit.rs`: deserialize the legacy store-head field
+    while always serializing the canonical field name
+- Tests:
+  - `store_head_reads_legacy_descriptor_len_and_writes_canonical_name`
+
 ## storage-root-lease
 
 - Remove after: schema versions older than v6 are no longer supported for

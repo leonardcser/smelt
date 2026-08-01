@@ -2,8 +2,8 @@
 
 //! File-backed state-machine fuzzing for canonical session persistence. Commands
 //! run through the public writer, reader, and maintenance APIs. An independent
-//! in-memory model checks canonical history, side tables, transcript_records, revisions,
-//! idempotency, rollback, reopen, backup, fork, repair, and garbage collection.
+//! in-memory model checks canonical history, side tables, transcript records, revisions,
+//! idempotency, rollback, reopen, backup, repair, and garbage collection.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -41,9 +41,6 @@ enum Op {
     },
     Reopen,
     Backup,
-    ForkPrefix {
-        keep: u8,
-    },
     Maintain {
         kind: u8,
     },
@@ -79,7 +76,6 @@ struct Model {
     last_commit: Option<(SessionCommit, SaveReceipt)>,
     next_sequence: u64,
     backup_id: u64,
-    fork_id: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -132,7 +128,6 @@ fn run(input: Input) {
             ),
             Op::Reopen => reopen(&session_root, &mut writer),
             Op::Backup => backup(temp.path(), &session_dir, &mut model),
-            Op::ForkPrefix { keep } => fork_prefix(temp.path(), &session_dir, &mut model, keep),
             Op::Maintain { kind } => {
                 maintain(&session_root, &session_dir, &mut writer, &model, kind)
             }
@@ -308,69 +303,6 @@ fn backup(root: &Path, session_dir: &Path, model: &mut Model) {
     reader.backup_to(&path).unwrap();
     let backup = SessionReader::open_database(&path).unwrap();
     assert_reader(&backup, model);
-}
-
-fn fork_prefix(root: &Path, session_dir: &Path, model: &mut Model, keep: u8) {
-    let (Some(identity), Some(metadata)) = (&model.identity, &model.metadata) else {
-        return;
-    };
-    model.fork_id = model.fork_id.saturating_add(1);
-    let prefix = usize::from(keep) % (model.history.len() + 1);
-    let fork_id = format!("{:064x}", model.fork_id);
-    let fork_dir = root.join(&fork_id);
-    let source = SessionReader::open_existing(session_dir).unwrap();
-    let mut fork_identity = identity.clone();
-    fork_identity.id = fork_id.clone();
-    fork_identity.parent_id = Some(SESSION_ID.to_string());
-    let mut fork_metadata = metadata.clone();
-    fork_metadata.checkpoint_json = None;
-
-    let mut maintenance = SessionMaintenance::open(root, &fork_id).unwrap();
-    maintenance
-        .import_prefix_from(&source, &fork_identity, &fork_metadata, prefix)
-        .unwrap();
-    maintenance.publish().unwrap();
-    maintenance.release().unwrap();
-
-    let fork = SessionReader::open_existing(&fork_dir).unwrap();
-    fork.quick_check().unwrap();
-    let report = fork.doctor_report().unwrap();
-    assert!(report.healthy, "fork doctor issues: {:?}", report.issues);
-    let snapshot = fork.load_full_session().unwrap().unwrap();
-    assert_eq!(snapshot.history, model.history[..prefix]);
-    assert_eq!(snapshot.session.head.history_len.get(), prefix as u64);
-    assert_eq!(snapshot.session.identity, fork_identity);
-    assert_eq!(snapshot.session.metadata, fork_metadata);
-    assert_eq!(
-        snapshot.turn_metas,
-        prefix_rows(&model.turn_metas, prefix),
-        "fork lost turn metadata from the retained prefix"
-    );
-    assert_eq!(
-        snapshot.metadata_snapshots,
-        prefix_rows(&model.metadata_snapshots, prefix),
-        "fork lost metadata snapshots from the retained prefix"
-    );
-    assert_eq!(
-        snapshot.context_snapshots,
-        prefix_rows(&model.context_snapshots, prefix),
-        "fork lost context snapshots from the retained prefix"
-    );
-    assert_eq!(
-        fork.read_all_transcript_records().unwrap(),
-        model.transcript_records[..prefix],
-        "fork lost transcript records from the retained prefix"
-    );
-    assert_eq!(
-        fork.storage_stats().unwrap().object_rows,
-        attachment_object_count(&model.history[..prefix]),
-        "fork copied unreachable objects or lost reachable attachments"
-    );
-    assert!(fork.degraded_warnings().unwrap().is_empty());
-    drop(fork);
-
-    SessionMaintenance::delete_session(root, &fork_id).unwrap();
-    assert!(!fork_dir.exists(), "deleted fork still exists");
 }
 
 fn maintain(
@@ -595,13 +527,6 @@ type SideTables = (
     Vec<(u64, serde_json::Value)>,
     Vec<(u64, serde_json::Value)>,
 );
-
-fn prefix_rows(rows: &[(u64, serde_json::Value)], prefix: usize) -> Vec<(u64, serde_json::Value)> {
-    rows.iter()
-        .filter(|(index, _)| *index <= prefix as u64)
-        .cloned()
-        .collect()
-}
 
 fn attachment_object_count(history: &[HistoryItem]) -> u64 {
     let mut urls = std::collections::BTreeSet::new();

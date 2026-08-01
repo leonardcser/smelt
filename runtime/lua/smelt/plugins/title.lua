@@ -74,9 +74,9 @@ local function update_title(new_text)
     if submitted == "" or submitted:sub(1, 1) == "!" then return end
   end
 
-  -- Gather all prior user messages from the session history.
+  -- Gather recent user messages without materializing the full session history.
   local history = smelt.session.messages.list()
-  local target_history_len = #smelt.session.history()
+  local target_history_len = smelt.session.history_len()
   local user_msgs = {}
   for _, m in ipairs(history) do
     if m.role == "user" and m.content and m.content ~= "" then

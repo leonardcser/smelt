@@ -15,13 +15,17 @@ fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
     .expect("session saved")
 }
 
-fn session_revision(app: &TestApp, id: &str) -> u64 {
-    smelt_store::SessionReader::open_existing(app.core_probe().sessions.dir_for_id(id))
-        .unwrap()
-        .store_head()
-        .unwrap()
-        .revision
-        .get()
+fn lineage_reader(id: &str) -> smelt_store::LineageSessionReader {
+    let session_dir = smelt_core::session::dir_for_id(id);
+    smelt_store::LineageSessionReader::open_existing(
+        session_dir.parent().expect("sessions root"),
+        id,
+    )
+    .unwrap()
+}
+
+fn session_revision(_app: &TestApp, id: &str) -> u64 {
+    lineage_reader(id).snapshot().unwrap().head.revision.get()
 }
 
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
@@ -43,8 +47,48 @@ fn legacy_preserve_order_hash<T: serde::Serialize>(value: &T) -> u64 {
     seahash::hash(&bytes)
 }
 
+fn convert_lineage_session_to_legacy(session_id: &str) {
+    let session_dir = smelt_core::session::dir_for_id(session_id);
+    let sessions_root = session_dir.parent().expect("sessions root");
+    let Some(reader) =
+        smelt_store::LineageSessionReader::try_open_existing(sessions_root, session_id).unwrap()
+    else {
+        return;
+    };
+    let state = reader.snapshot().unwrap();
+    let history = reader
+        .history_range(0, state.head.history_len.get())
+        .unwrap();
+    let records = reader.transcript_range(0, state.transcript_len).unwrap();
+    drop(reader);
+    std::fs::remove_dir_all(sessions_root.join("lineages")).unwrap();
+    let mut writer = smelt_store::OwnedSessionWriter::open(sessions_root, session_id).unwrap();
+    writer
+        .commit_session(&smelt_store::SessionCommit {
+            session_id: session_id.to_owned(),
+            expected: smelt_store::StoreHead::default(),
+            identity: state.identity,
+            metadata: state.metadata,
+            history: smelt_store::HistorySuffix {
+                start: smelt_store::HistoryIndex::ZERO,
+                final_len: state.head.history_len,
+                items: history,
+            },
+            side_tables: state.side_tables,
+            transcript_records: Some(smelt_store::TranscriptRecordSuffix {
+                start: smelt_store::TranscriptRecordIndex::ZERO,
+                records,
+            }),
+        })
+        .unwrap();
+    writer.publish().unwrap();
+    writer.release().unwrap();
+}
+
 fn rewrite_tool_record_hashes_as_legacy(session_id: &str) -> usize {
-    let db_path = smelt_core::session::dir_for_id(session_id).join("session.db");
+    convert_lineage_session_to_legacy(session_id);
+    let session_dir = smelt_core::session::dir_for_id(session_id);
+    let db_path = session_dir.join("session.db");
     let mut db = smelt_store::SessionDb::open(db_path).unwrap();
     let mut records = db.read_all_transcript_records().unwrap();
     let mut rewritten = 0;
@@ -173,24 +217,52 @@ fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) ->
     app.session_snapshot().id.clone()
 }
 
-async fn next_app_event(app: &mut TestApp) -> crate::app::AppEvent {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        if let Some(event) = app.try_recv_app_event() {
-            return event;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for app event"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+#[test]
+fn explicit_resume_requires_previous_format_migration_without_modifying_storage() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    convert_lineage_session_to_legacy(&session_id);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db_path = session_dir.join("session.db");
+    let db_before = std::fs::read(&db_path).unwrap();
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let initial_session_id = resumed.session_snapshot().id.clone();
+    resumed.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.session_snapshot().id, initial_session_id);
+    assert_eq!(std::fs::read(&db_path).unwrap(), db_before);
+    assert!(smelt_store::LineageSessionReader::try_open_existing(
+        session_dir.parent().unwrap(),
+        &session_id,
+    )
+    .unwrap()
+    .is_none());
+    let notification = resumed
+        .overlays_probe()
+        .notification()
+        .expect("explicit migration notification");
+    assert!(notification.lifetime.is_sticky());
+    assert!(notification.summary.contains(&format!(
+        "run `smelt session migrate {session_id}` and retry"
+    )));
+
+    smelt_core::session::migrate_legacy_session_result(&session_id).unwrap();
+    resumed.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.session_snapshot().id, session_id);
+    assert_eq!(resumed.app.session_history_len(), 1);
+    assert_eq!(
+        loaded_session(&resumed, &session_id).history,
+        vec![HistoryItem::user(Content::text("persisted before resume"))]
+    );
 }
 
 #[test]
-fn explicit_resume_migrates_old_supported_schema_before_bounded_load() {
+fn explicit_resume_does_not_automatically_upgrade_previous_schema() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
+    convert_lineage_session_to_legacy(&session_id);
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     let db_path = session_dir.join("session.db");
     let db = smelt_store::SessionDb::open(&db_path).unwrap();
@@ -200,35 +272,39 @@ fn explicit_resume_migrates_old_supported_schema_before_bounded_load() {
     drop(db);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    let sessions_root = session_dir.parent().unwrap();
+    let initial_session_id = resumed.session_snapshot().id.clone();
+    resumed.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.session_snapshot().id, initial_session_id);
+    assert!(!resumed.working_state().busy);
     assert_eq!(
-        smelt_store::session_schema_status(sessions_root, &session_id).unwrap(),
+        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
         smelt_store::SessionSchemaStatus::Upgradeable {
             found: 9,
             target: smelt_store::SCHEMA_VERSION,
         }
     );
+    let notification = resumed
+        .overlays_probe()
+        .notification()
+        .expect("explicit migration notification");
+    assert!(notification.summary.contains(&format!(
+        "run `smelt session migrate {session_id}` and retry"
+    )));
 
+    smelt_core::session::migrate_session_schema_result(&session_id).unwrap();
+    smelt_core::session::migrate_legacy_session_result(&session_id).unwrap();
     resumed.load_session_by_id(&session_id);
 
     assert_eq!(resumed.session_snapshot().id, session_id);
     assert_eq!(resumed.app.session_history_len(), 1);
-    assert_eq!(
-        smelt_store::session_schema_status(sessions_root, &session_id).unwrap(),
-        smelt_store::SessionSchemaStatus::Current {
-            version: smelt_store::SCHEMA_VERSION,
-        }
-    );
-    assert_eq!(
-        loaded_session(&resumed, &session_id).history,
-        vec![HistoryItem::user(Content::text("persisted before resume"))]
-    );
 }
 
 #[test]
-fn explicit_resume_rejects_future_schema_without_modifying_or_loading_it() {
+fn explicit_resume_rejects_future_previous_format_without_modifying_or_loading_it() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
+    convert_lineage_session_to_legacy(&session_id);
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     let future_version = smelt_store::SCHEMA_VERSION + 1;
     let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
@@ -252,72 +328,11 @@ fn explicit_resume_rejects_future_schema_without_modifying_or_loading_it() {
     let notification = resumed
         .overlays_probe()
         .notification()
-        .expect("future schema error notification");
+        .expect("explicit migration notification");
     assert!(notification.lifetime.is_sticky());
-    assert!(notification.summary.contains("unsupported session schema"));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn explicit_resume_migration_completes_off_thread_before_loading() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-    db.connection()
-        .execute_batch("PRAGMA user_version = 9")
-        .unwrap();
-    drop(db);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    let initial_session_id = resumed.session_snapshot().id.clone();
-    resumed.load_session_by_id(&session_id);
-    assert_eq!(resumed.session_snapshot().id, initial_session_id);
-    assert!(resumed.working_state().busy);
-
-    let event = next_app_event(&mut resumed).await;
-    assert_eq!(resumed.session_snapshot().id, initial_session_id);
-
-    resumed.handle_app_event(event);
-
-    assert!(!resumed.working_state().busy);
-    assert_eq!(resumed.session_snapshot().id, session_id);
-    assert_eq!(resumed.app.session_history_len(), 1);
-    assert_eq!(
-        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
-        smelt_store::SessionSchemaStatus::Current {
-            version: smelt_store::SCHEMA_VERSION,
-        }
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn stale_schema_migration_completion_does_not_replace_newer_load_request() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-    db.connection()
-        .execute_batch("PRAGMA user_version = 9")
-        .unwrap();
-    drop(db);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    let initial_session_id = resumed.session_snapshot().id.clone();
-    resumed.load_session_by_id(&session_id);
-    assert!(resumed.working_state().busy);
-    resumed.load_session_by_id("missing-session");
-
-    let event = next_app_event(&mut resumed).await;
-    resumed.handle_app_event(event);
-
-    assert!(!resumed.working_state().busy);
-    assert_eq!(resumed.session_snapshot().id, initial_session_id);
-    assert_eq!(
-        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
-        smelt_store::SessionSchemaStatus::Current {
-            version: smelt_store::SCHEMA_VERSION,
-        }
-    );
+    assert!(notification.summary.contains(&format!(
+        "run `smelt session migrate {session_id}` and retry"
+    )));
 }
 
 #[test]
@@ -486,6 +501,8 @@ fn resumed_turn_hydrates_legacy_multi_arg_tool_record_suffix_for_save() {
     };
     let legacy_tool_records = rewrite_tool_record_hashes_as_legacy(&session_id);
     assert_eq!(legacy_tool_records, RECORD_COUNT / 2);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
 
     let mut app = TestApp::builder().build_without_test_home_reset(&guard);
     app.load_session_by_id(&session_id);
@@ -512,9 +529,7 @@ fn resumed_turn_hydrates_legacy_multi_arg_tool_record_suffix_for_save() {
     assert_eq!(loaded_content_hash, block.content_hash());
 
     app.require_transcript_record_resave_from_for_harness(0);
-    app.use_model(app.core_probe().config.available_models[0].clone());
-    app.type_text("continue the session");
-    app.press(KeyCode::Enter);
+    app.start_submitted_turn("continue the session");
 
     assert!(
         app.agent_running(),
@@ -592,7 +607,8 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
     app.flush_persist();
     assert!(
         !app.session_document_has_unflushed_work(),
-        "shifted record save was not acknowledged"
+        "shifted record save was not acknowledged: {:?}",
+        app.overlays_probe().notification()
     );
     assert_eq!(
         app.conversation_probe().transcript().record_total_count(),
@@ -641,11 +657,10 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
         app.overlays_probe().notification()
     );
 
-    let reader =
-        smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
-            .unwrap();
+    let reader = lineage_reader(&session_id);
+    let state = reader.snapshot().unwrap();
     let durable_previews = reader
-        .read_all_transcript_records()
+        .transcript_range(0, state.transcript_len)
         .unwrap()
         .into_iter()
         .map(|record| record.preview_text)
@@ -743,8 +758,9 @@ fn history_only_process_status_session_accepts_persisted_follow_up() {
         app.session_snapshot().id.clone()
     };
 
-    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
-    let db = smelt_store::SessionDb::open(db_path).unwrap();
+    convert_lineage_session_to_legacy(&session_id);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
     db.connection()
         .execute("DELETE FROM transcript_search", [])
         .unwrap();
@@ -752,6 +768,7 @@ fn history_only_process_status_session_accepts_persisted_follow_up() {
         .execute("DELETE FROM transcript_blocks", [])
         .unwrap();
     drop(db);
+    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
@@ -813,6 +830,130 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
         loaded.history.last(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "final generation"
     ));
+}
+
+#[test]
+fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.session_snapshot().id.clone();
+
+    app.commit_request_history_item(
+        HistoryItem::user(Content::text("first prompt")),
+        Some(Block::User {
+            text: "first prompt".into(),
+            image_labels: Vec::new(),
+            command: false,
+        }),
+    );
+    app.commit_request_history_item(
+        HistoryItem::assistant(AssistantStep::terminal(
+            Some(Content::text("first reply")),
+            None,
+            Vec::new(),
+        )),
+        Some(Block::Text {
+            content: "first reply".into(),
+        }),
+    );
+    let retained_block_len = app.transcript_block_count();
+    let retained = lineage_reader(&session_id).snapshot().unwrap();
+
+    app.commit_request_history_item(
+        HistoryItem::user(Content::text("discarded prompt")),
+        Some(Block::User {
+            text: "discarded prompt".into(),
+            image_labels: Vec::new(),
+            command: false,
+        }),
+    );
+    app.commit_request_history_item(
+        HistoryItem::assistant(AssistantStep::terminal(
+            Some(Content::text("discarded reply")),
+            None,
+            Vec::new(),
+        )),
+        Some(Block::Text {
+            content: "discarded reply".into(),
+        }),
+    );
+    let extended_reader = lineage_reader(&session_id);
+    let extended = extended_reader.snapshot().unwrap();
+    let extended_stats = extended_reader.storage_stats().unwrap();
+    assert_ne!(extended.history_root_id, retained.history_root_id);
+    assert_ne!(extended.transcript_root_id, retained.transcript_root_id);
+
+    app.rewind_to_block(Some(retained_block_len), false);
+    app.save_session_and_flush();
+
+    let rewound_reader = lineage_reader(&session_id);
+    let rewound = rewound_reader.snapshot().unwrap();
+    let rewound_stats = rewound_reader.storage_stats().unwrap();
+    assert_eq!(rewound.history_root_id, retained.history_root_id);
+    assert_eq!(rewound.transcript_root_id, retained.transcript_root_id);
+    assert_eq!(rewound.head.history_len, retained.head.history_len);
+    assert_eq!(
+        rewound.head.transcript_record_count,
+        retained.head.transcript_record_count
+    );
+    assert!(
+        rewound_stats.object_rows >= extended_stats.object_rows,
+        "rewind synchronously reclaimed canonical suffix objects"
+    );
+
+    drop(rewound_reader);
+    drop(extended_reader);
+    drop(app);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    let restarted = lineage_reader(&session_id).snapshot().unwrap();
+    assert_eq!(restarted.history_root_id, retained.history_root_id);
+    assert_eq!(restarted.transcript_root_id, retained.transcript_root_id);
+    assert_eq!(restarted.head.history_len, retained.head.history_len);
+    assert_eq!(
+        restarted.head.transcript_record_count,
+        retained.head.transcript_record_count
+    );
+    assert_eq!(resumed.session_message_count(), 2);
+    assert_eq!(resumed.transcript_block_count(), retained_block_len);
+}
+
+#[test]
+fn graceful_exit_restarts_from_lineage_without_creating_previous_format_storage() {
+    let guard = test_home_guard();
+    let (session_id, canonical) = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        let session_id = app.session_snapshot().id.clone();
+        let session_dir = smelt_core::session::dir_for_id(&session_id);
+        let previous_format = session_dir.join("session.db");
+
+        app.session_append_history(HistoryItem::user(Content::text(
+            "persisted through graceful exit",
+        )));
+        app.finalize_graceful_shutdown()
+            .expect("graceful shutdown persists the current generation");
+
+        assert!(!previous_format.exists());
+        let canonical = lineage_reader(&session_id).snapshot().unwrap();
+        assert_eq!(canonical.head.history_len.get(), 1);
+        (session_id, canonical)
+    };
+
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let previous_format = session_dir.join("session.db");
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.session_message_count(), 1);
+    assert_eq!(
+        resumed.session_history_range(0..1),
+        vec![HistoryItem::user(Content::text(
+            "persisted through graceful exit"
+        ))]
+    );
+    assert_eq!(lineage_reader(&session_id).snapshot().unwrap(), canonical);
+    assert!(!previous_format.exists());
 }
 
 #[test]
@@ -918,15 +1059,20 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let lineages_dir = session_dir.parent().unwrap().join("lineages");
     std::fs::create_dir_all(session_dir.parent().unwrap()).unwrap();
-    std::fs::write(&session_dir, "permanently blocks directory creation").unwrap();
+    std::fs::write(&lineages_dir, "permanently blocks directory creation").unwrap();
     app.session_append_history(HistoryItem::user(Content::text("cannot save")));
 
     app.save_session_and_flush();
 
     assert!(app.session_document_has_unflushed_work());
     assert!(app.overlays_probe().notification().is_some());
-    assert!(!session_dir.join("session.db").exists());
+    assert!(smelt_store::LineageSessionReader::try_open_existing(
+        session_dir.parent().unwrap(),
+        &session_id,
+    )
+    .is_err());
 }
 
 #[test]
@@ -964,27 +1110,13 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
     });
     app.flush_persist();
 
-    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
-    let db = smelt_store::SessionDb::open_read_only(db_path).unwrap();
-    let shared_roles: i64 = db
-        .connection()
-        .query_row(
-            "SELECT COUNT(*)
-             FROM request_object_refs body
-             JOIN request_object_refs response
-               ON response.request_attempt_id = body.request_attempt_id
-              AND response.object_hash = body.object_hash
-             WHERE body.role = 'body_json' AND response.role = 'response'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(shared_roles, 1);
-    let attempts = db
+    let reader = lineage_reader(&session_id);
+    let attempts = reader
         .query_request_attempts(&smelt_store::RequestAuditQuery::default())
         .unwrap();
     assert_eq!(attempts.len(), 1);
-    let payloads = db.request_payloads(attempts[0].id).unwrap().unwrap();
+    assert_eq!(attempts[0].body_hash, attempts[0].response_hash);
+    let payloads = reader.request_payloads(attempts[0].id).unwrap().unwrap();
     assert_eq!(payloads.body, Some(serde_json::json!({})));
     assert_eq!(payloads.response, Some(serde_json::json!({})));
 }
@@ -1013,9 +1145,7 @@ fn stale_request_audit_after_session_switch_is_rejected() {
     app.flush_persist();
 
     for id in [&old_id, &new_id] {
-        let reader =
-            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(id)).unwrap();
-        assert!(reader
+        assert!(lineage_reader(id)
             .query_request_attempts(&smelt_store::RequestAuditQuery::default())
             .unwrap()
             .is_empty());
@@ -1038,15 +1168,89 @@ fn sparse_fork_publishes_a_complete_destination() {
 
     let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
-    let fork_dir = smelt_core::session::dir_for_id(&fork_id);
-    let reader = smelt_store::SessionReader::open_existing(&fork_dir).unwrap();
-    let stored = reader.stored_session().unwrap().unwrap();
+    let reader = lineage_reader(&fork_id);
+    let stored = reader.snapshot().unwrap();
     assert_eq!(stored.identity.id, fork_id);
     assert_eq!(
         stored.identity.parent_id.as_deref(),
         Some(session_id.as_str())
     );
-    assert_eq!(reader.read_history_items_range(0..1).unwrap().len(), 1);
+    assert_eq!(reader.history_range(0, 1).unwrap().len(), 1);
+}
+
+#[test]
+fn branch_switching_resumes_each_branch_at_its_exact_root() {
+    let guard = test_home_guard();
+    let source_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.session_append_history(HistoryItem::user(Content::text("shared root")));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&source_id);
+    resumed.fork_session();
+    let fork_id = resumed.session_snapshot().id.clone();
+    let source_revision = lineage_reader(&source_id).snapshot().unwrap().revision_id;
+    resumed.session_append_history(HistoryItem::user(Content::text("fork only")));
+    resumed.save_session_and_flush();
+    let fork_revision = lineage_reader(&fork_id).snapshot().unwrap().revision_id;
+
+    resumed.load_session_by_id(&source_id);
+    assert_eq!(resumed.session_snapshot().id, source_id);
+    assert_eq!(resumed.app.session_history_len(), 1);
+    assert_eq!(
+        lineage_reader(&source_id).snapshot().unwrap().revision_id,
+        source_revision
+    );
+
+    resumed.load_session_by_id(&fork_id);
+    assert_eq!(resumed.session_snapshot().id, fork_id);
+    assert_eq!(resumed.app.session_history_len(), 2);
+    assert_eq!(
+        lineage_reader(&fork_id).snapshot().unwrap().revision_id,
+        fork_revision
+    );
+}
+
+#[test]
+fn deleting_source_branch_leaves_active_fork_intact() {
+    let guard = test_home_guard();
+    let source_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.session_append_history(HistoryItem::user(Content::text("shared fork history")));
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&source_id);
+    resumed.fork_session();
+    let fork_id = resumed.session_snapshot().id.clone();
+    resumed
+        .set_lua_string_global("SOURCE_SESSION_ID", source_id.clone())
+        .unwrap();
+
+    resumed
+        .run_lua_result("smelt.session.delete(SOURCE_SESSION_ID)")
+        .expect("delete source branch through the user-facing session API");
+
+    assert!(
+        smelt_store::LineageSessionReader::try_open_existing(
+            smelt_core::session::dir_for_id(&source_id)
+                .parent()
+                .unwrap(),
+            &source_id,
+        )
+        .unwrap()
+        .is_none(),
+        "deleted source branch is no longer visible"
+    );
+    assert_eq!(resumed.session_snapshot().id, fork_id);
+    let fork = lineage_reader(&fork_id);
+    assert_eq!(
+        fork.history_range(0, 1).unwrap(),
+        vec![HistoryItem::user(Content::text("shared fork history"))]
+    );
 }
 
 #[test]
@@ -1063,10 +1267,12 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
         app.save_session_and_flush();
         app.session_snapshot().id.clone()
     };
-    let source_dir = smelt_core::session::dir_for_id(&session_id);
-    let source = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
-    let source_history = source.read_history_items_range(0..700).unwrap();
-    let source_records = source.read_all_transcript_records().unwrap();
+    let source = lineage_reader(&session_id);
+    let source_state = source.snapshot().unwrap();
+    let source_history = source.history_range(0, 700).unwrap();
+    let source_records = source
+        .transcript_range(0, source_state.transcript_len)
+        .unwrap();
     assert_eq!(source_history.len(), 700);
     assert_eq!(source_records.len(), 700);
 
@@ -1088,17 +1294,49 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
             < source_records.len()
     );
 
+    let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
+    let fork_started = std::time::Instant::now();
     resumed.fork_session();
+    let fork_elapsed = fork_started.elapsed();
+    let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
+    let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
+    assert!(
+        fork_elapsed < std::time::Duration::from_millis(100),
+        "large visible fork exceeded the interaction ceiling: {fork_elapsed:?}"
+    );
+    assert!(
+        allocated_bytes <= 4 * 1024 * 1024,
+        "large visible fork allocated {allocated_bytes} bytes on the UI thread"
+    );
     let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
-    let fork = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&fork_id))
-        .unwrap();
+    let fork = lineage_reader(&fork_id);
+    let fork_state = fork.snapshot().unwrap();
+    assert_eq!(fork.history_range(0, 700).unwrap(), source_history);
     assert_eq!(
-        fork.read_history_items_range(0..700).unwrap(),
-        source_history
+        fork.transcript_range(0, fork_state.transcript_len).unwrap(),
+        source_records
     );
-    assert_eq!(fork.read_all_transcript_records().unwrap(), source_records);
+
+    let mut switch_durations = Vec::with_capacity(20);
+    for index in 0..20 {
+        let target = if index % 2 == 0 {
+            &session_id
+        } else {
+            &fork_id
+        };
+        let started = std::time::Instant::now();
+        resumed.load_session_by_id(target);
+        switch_durations.push(started.elapsed());
+        assert_eq!(resumed.app.session_history_len(), 700);
+    }
+    switch_durations.sort_unstable();
+    assert!(
+        switch_durations[18] < std::time::Duration::from_millis(100),
+        "large branch-switch p95 exceeded the interaction ceiling: {:?}",
+        switch_durations[18]
+    );
 }
 
 #[test]
@@ -1128,7 +1366,7 @@ fn sparse_fork_does_not_copy_unreferenced_legacy_blobs() {
 
 #[cfg(unix)]
 #[test]
-fn sparse_fork_rejects_symlinked_legacy_attachment() {
+fn legacy_session_load_rejects_symlinked_attachment_before_migration() {
     use std::os::unix::fs::symlink;
 
     const DATA_URL: &str = "data:image/png;base64,OUTSIDE";
@@ -1142,15 +1380,14 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
         app.session_snapshot().id.clone()
     };
     let source_dir = smelt_core::session::dir_for_id(&session_id);
-    let reader = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
-    let stored = reader.stored_session().unwrap().unwrap();
-    drop(reader);
+    let stored = lineage_reader(&session_id).snapshot().unwrap();
     let root = source_dir.parent().expect("sessions root");
+    std::fs::remove_dir_all(root.join("lineages")).unwrap();
     let mut writer = smelt_store::OwnedSessionWriter::open(root, &session_id).unwrap();
     writer
         .commit_session(&smelt_store::SessionCommit {
             session_id: session_id.clone(),
-            expected: stored.head,
+            expected: smelt_store::StoreHead::default(),
             identity: stored.identity,
             metadata: stored.metadata,
             history: smelt_store::HistorySuffix {
@@ -1165,24 +1402,24 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
             transcript_records: None,
         })
         .unwrap();
+    writer.publish().unwrap();
     writer.release().unwrap();
 
     let blob_dir = source_dir.join("blobs");
     std::fs::create_dir(&blob_dir).unwrap();
     let blob_path = blob_dir.join(format!("{HASH}.png"));
     std::fs::write(&blob_path, DATA_URL).unwrap();
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
-    assert!(resumed.conversation_probe().has_live_session());
-
     let external = tempfile::tempdir().unwrap();
     let target = external.path().join("private-image");
     std::fs::write(&target, DATA_URL).unwrap();
     std::fs::remove_file(&blob_path).unwrap();
     symlink(&target, &blob_path).unwrap();
-    resumed.fork_session();
 
-    assert_eq!(resumed.session_snapshot().id, session_id);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+
+    assert!(!resumed.conversation_probe().has_live_session());
+    assert_ne!(resumed.session_snapshot().id, session_id);
     assert!(resumed.overlays_probe().notification().is_some());
     let sessions = smelt_core::session::list_sessions();
     assert_eq!(sessions.len(), 1, "unexpected sessions: {sessions:#?}");
@@ -1202,11 +1439,9 @@ fn shutdown_flushes_record_only_transcript_blocks() {
     });
     app.save_session_and_flush();
 
-    let db = smelt_store::SessionReader::open_database(
-        smelt_core::session::dir_for_id(&session_id).join("session.db"),
-    )
-    .unwrap();
-    let rows = db.read_all_transcript_records().unwrap();
+    let reader = lineage_reader(&session_id);
+    let state = reader.snapshot().unwrap();
+    let rows = reader.transcript_range(0, state.transcript_len).unwrap();
     assert!(
         rows.iter().any(|row| row
             .preview_text
@@ -1235,7 +1470,9 @@ fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
         app.session_snapshot().id.clone()
     };
 
-    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
+    convert_lineage_session_to_legacy(&session_id);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db_path = session_dir.join("session.db");
     let db = smelt_store::SessionDb::open(&db_path).unwrap();
     assert_eq!(db.transcript_record_count().unwrap(), 2);
     db.connection()
@@ -1245,6 +1482,7 @@ fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
         )
         .unwrap();
     drop(db);
+    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
@@ -1268,18 +1506,17 @@ fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
     );
     drop(resumed);
 
-    let db = smelt_store::SessionDb::open_read_only(&db_path).unwrap();
-    let (count, min, max): (i64, Option<i64>, Option<i64>) = db
-        .connection()
-        .query_row(
-            "SELECT COUNT(*), MIN(record_idx), MAX(record_idx)
-             FROM transcript_blocks WHERE block_json IS NOT NULL",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!((count, min, max), (3, Some(0), Some(2)));
-    drop(db);
+    let reader = lineage_reader(&session_id);
+    let state = reader.snapshot().unwrap();
+    assert_eq!(state.transcript_len, 3);
+    assert_eq!(
+        reader
+            .transcript_range(0, state.transcript_len)
+            .unwrap()
+            .len(),
+        3
+    );
+    drop(reader);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
@@ -1290,10 +1527,15 @@ fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
         kind: protocol::ReasoningKind::Raw,
     });
     resumed.save_session_and_flush();
-    assert!(resumed.overlays_probe().notification().is_none());
+    assert!(
+        resumed.overlays_probe().notification().is_none(),
+        "dense append save failed: {:?}",
+        resumed.overlays_probe().notification()
+    );
 
-    let db = smelt_store::SessionReader::open_database(&db_path).unwrap();
-    let rows = db.read_all_transcript_records().unwrap();
+    let reader = lineage_reader(&session_id);
+    let state = reader.snapshot().unwrap();
+    let rows = reader.transcript_range(0, state.transcript_len).unwrap();
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().any(|row| row
         .preview_text
@@ -1713,7 +1955,9 @@ fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
         app.session_snapshot().id.clone()
     };
 
-    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
+    convert_lineage_session_to_legacy(&session_id);
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let db_path = session_dir.join("session.db");
     let db = smelt_store::SessionDb::open(&db_path).unwrap();
     let checkpoint = serde_json::json!({
         "kind": "compaction",
@@ -1728,6 +1972,7 @@ fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
         )
         .unwrap();
     drop(db);
+    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
@@ -1836,13 +2081,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     writer.save_session_and_flush();
 
     let session_id = writer.session_snapshot().id.clone();
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db_path = session_dir.join("session.db");
-    let before = smelt_store::SessionReader::open_database(&db_path)
-        .unwrap()
-        .stored_session()
-        .unwrap()
-        .expect("session state before read-only resume");
+    let before = lineage_reader(&session_id).snapshot().unwrap();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     reader.load_session_by_id(&session_id);
 
@@ -1856,18 +2095,15 @@ fn resuming_session_with_active_writer_is_read_only() {
     assert_eq!(result, HistoryAppendResult::Unchanged);
     reader.save_session_and_flush();
 
-    let after = smelt_store::SessionReader::open_database(&db_path)
-        .unwrap()
-        .stored_session()
-        .unwrap()
-        .expect("session state after read-only resume");
+    let after_reader = lineage_reader(&session_id);
+    let after = after_reader.snapshot().unwrap();
     assert_eq!(after.head.revision, before.head.revision);
     assert_eq!(after.head.history_len, before.head.history_len);
     assert_eq!(
-        smelt_store::SessionReader::open_database(&db_path)
+        after_reader
+            .history_range(0, after.head.history_len.get())
             .unwrap()
-            .history_item_count()
-            .unwrap(),
+            .len(),
         1
     );
 }
@@ -1921,18 +2157,19 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
     assert!(!resumed.session_document_has_unflushed_work());
     assert!(resumed.session_snapshot().history.is_empty());
     assert!(resumed.conversation_probe().has_live_session());
-    let reader = smelt_store::SessionReader::open_existing(
-        resumed.core_probe().sessions.dir_for_id(&fork_id),
-    )
-    .unwrap();
-    let record_rows = reader.read_all_transcript_records().unwrap();
+    let reader = lineage_reader(&fork_id);
+    let state = reader.snapshot().unwrap();
+    let record_rows = reader.transcript_range(0, state.transcript_len).unwrap();
     assert!(record_rows
         .iter()
         .any(|row| row.preview_text.contains("unsaved ownership-loss record")));
-    let full = reader.load_full_session().unwrap().unwrap();
-    assert!(full.turn_metas.iter().any(|(history_len, meta)| {
-        *history_len == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
-    }));
+    assert!(state
+        .side_tables
+        .turn_metas
+        .iter()
+        .any(|(history_len, meta)| {
+            history_len.get() == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
+        }));
     let forked = loaded_session(&resumed, &fork_id);
     assert_eq!(forked.parent_id.as_deref(), Some(session_id.as_str()));
     assert_eq!(forked.history.len(), 2);
@@ -1979,8 +2216,8 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
     ));
 }
 
-#[test]
-fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
+#[tokio::test(flavor = "current_thread")]
+async fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
     fn compacted_marker_count(app: &TestApp) -> usize {
         let history = app.conversation_probe().transcript().history();
         (0..history.len())
@@ -2334,12 +2571,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     writer.save_session_and_flush();
 
     let session_id = writer.session_snapshot().id.clone();
-    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
-    let before = smelt_store::SessionReader::open_database(&db_path)
-        .unwrap()
-        .stored_session()
-        .unwrap()
-        .expect("session state before readonly loops");
+    let before = lineage_reader(&session_id).snapshot().unwrap();
     for idx in 0..5 {
         let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
         reader.load_session_by_id(&session_id);
@@ -2355,18 +2587,15 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
         reader.save_session_and_flush();
     }
 
-    let after = smelt_store::SessionReader::open_database(&db_path)
-        .unwrap()
-        .stored_session()
-        .unwrap()
-        .expect("session state after readonly loops");
+    let after_reader = lineage_reader(&session_id);
+    let after = after_reader.snapshot().unwrap();
     assert_eq!(after.head.revision, before.head.revision);
     assert_eq!(after.head.history_len, before.head.history_len);
     assert_eq!(
-        smelt_store::SessionReader::open_database(&db_path)
+        after_reader
+            .history_range(0, after.head.history_len.get())
             .unwrap()
-            .history_item_count()
-            .unwrap(),
+            .len(),
         1
     );
 }

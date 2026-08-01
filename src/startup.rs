@@ -130,26 +130,27 @@ where
     }
 }
 
-/// Fully resolved startup parameters, produced by [`resolve`] before the engine starts.
+/// Immutable command-line and remembered selections captured before normal Lua
+/// configuration is evaluated.
+#[derive(Clone)]
+pub struct StartupInputs {
+    pub startup_overrides: smelt_core::StartupOverrides,
+    pub selections: smelt_core::RuntimeSelections,
+}
+
+/// Fully resolved startup parameters produced before the engine starts.
 pub struct ResolvedStartup {
     pub runtime: smelt_core::RuntimeState,
     pub startup_overrides: smelt_core::StartupOverrides,
+    pub startup_selections: smelt_core::RuntimeSelections,
     pub managed_models: smelt_core::ManagedModels,
     pub startup_auth_error: Option<String>,
 }
 
-/// Resolve all startup configuration through the shared pure runtime resolver.
-pub fn resolve(
-    args: &Args,
-    cfg: smelt_core::config::Config,
-    registered_modes: &[AgentMode],
-    env: &engine::env::RuntimeEnv,
-) -> ResolvedStartup {
-    let mut cfg = cfg;
-    let mut managed_models = smelt_core::ManagedModels::load(&cfg, 0);
-    managed_models.inject_oauth_providers(&mut cfg);
-    managed_models.sync_desired(&cfg, 0);
-
+/// Parse immutable startup policy without depending on declarations from normal
+/// Lua configuration. Interactive startup resolves these inputs again after the
+/// generation-zero load has declared its final model and mode catalogs.
+pub fn parse(args: &Args, env: &engine::env::RuntimeEnv) -> StartupInputs {
     let mut settings = std::collections::HashMap::new();
     for pair in &args.set {
         let Some((key, value)) = pair.split_once('=') else {
@@ -182,7 +183,7 @@ pub fn resolve(
                 std::process::exit(1);
             }
         };
-        let mut validation = cfg.settings.clone();
+        let mut validation = smelt_core::config::ResolvedSettings::default();
         if let Err(error) = validation.set(key, &parsed) {
             eprintln!("error: --set {pair}: {error}");
             std::process::exit(1);
@@ -197,21 +198,17 @@ pub fn resolve(
     }
 
     let parse_mode = |value: &str| {
-        AgentMode::parse(value)
-            .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
-            .unwrap_or_else(|| {
-                eprintln!("warning: invalid or unregistered mode '{value}', defaulting to normal");
-                AgentMode::normal()
-            })
+        AgentMode::parse(value).unwrap_or_else(|| {
+            eprintln!("warning: invalid mode '{value}', defaulting to normal");
+            AgentMode::normal()
+        })
     };
     let mode = args.mode.as_deref().map(parse_mode);
-    let mode_cycle = args.mode_cycle.as_deref().and_then(|items| {
-        let modes = AgentMode::parse_list(items)
-            .into_iter()
-            .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
-            .collect::<Vec<_>>();
-        (!modes.is_empty()).then_some(modes)
-    });
+    let mode_cycle = args
+        .mode_cycle
+        .as_deref()
+        .map(AgentMode::parse_list)
+        .filter(|cycle| !cycle.is_empty());
     let reasoning_effort = args.reasoning_effort.as_deref().map(|value| {
         ReasoningEffort::parse(value).unwrap_or_else(|| {
             eprintln!("warning: invalid reasoning effort '{value}', defaulting to off");
@@ -256,31 +253,53 @@ pub fn resolve(
         mode: recent.mode(),
         reasoning_effort: recent.reasoning_effort,
     };
+
+    StartupInputs {
+        startup_overrides,
+        selections,
+    }
+}
+
+fn resolve_inputs(
+    inputs: StartupInputs,
+    mut cfg: smelt_core::config::Config,
+    registered_modes: &[AgentMode],
+    headless: bool,
+    validate_auth: bool,
+) -> ResolvedStartup {
+    let mut managed_models = smelt_core::ManagedModels::load(&cfg, 0);
+    managed_models.inject_oauth_providers(&mut cfg);
+    managed_models.sync_desired(&cfg, 0);
     let mut available_models = cfg.resolve_models();
     managed_models.inject(&cfg, &mut available_models);
 
     let mut runtime = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
         config: &cfg,
-        startup: &startup_overrides,
+        startup: &inputs.startup_overrides,
         available_models: &available_models,
         registered_modes,
-        selections: &selections,
+        selections: &inputs.selections,
         previous: None,
-        headless: args.headless,
+        headless,
     })
     .unwrap_or_else(|error| {
         eprintln!("error: {error}");
         std::process::exit(1);
     });
 
-    let startup_auth_error = runtime.active_model().and_then(|model| {
-        let managed_provider = engine::auth::AuthProvider::from_provider_type(&model.provider_type);
-        if let Some(provider) = managed_provider {
-            return (!managed_models.provider(provider).authenticated)
-                .then(|| format!("not logged in to managed provider {provider:?}"));
-        }
-        validate_api_key(&model.api_key_env).err()
-    });
+    let startup_auth_error = validate_auth
+        .then(|| {
+            runtime.active_model().and_then(|model| {
+                let managed_provider =
+                    engine::auth::AuthProvider::from_provider_type(&model.provider_type);
+                if let Some(provider) = managed_provider {
+                    return (!managed_models.provider(provider).authenticated)
+                        .then(|| format!("not logged in to managed provider {provider:?}"));
+                }
+                validate_api_key(&model.api_key_env).err()
+            })
+        })
+        .flatten();
     if startup_auth_error.is_some() {
         if let Some(active) = runtime.active_model_mut() {
             active.availability = smelt_core::ModelAvailability::Unavailable {
@@ -291,10 +310,40 @@ pub fn resolve(
 
     ResolvedStartup {
         runtime,
-        startup_overrides,
+        startup_overrides: inputs.startup_overrides,
+        startup_selections: inputs.selections,
         managed_models,
         startup_auth_error,
     }
+}
+
+/// Resolve fully evaluated configuration for headless startup.
+pub fn resolve(
+    args: &Args,
+    cfg: smelt_core::config::Config,
+    registered_modes: &[AgentMode],
+    env: &engine::env::RuntimeEnv,
+) -> ResolvedStartup {
+    resolve_inputs(parse(args, env), cfg, registered_modes, args.headless, true)
+}
+
+/// Resolve a safe interactive shell before normal Lua configuration runs. Model
+/// and mode selections are intentionally deferred until the live frontend has
+/// completed the generation-zero load.
+pub fn resolve_provisional(
+    inputs: &StartupInputs,
+    cfg: smelt_core::config::Config,
+    registered_modes: &[AgentMode],
+) -> ResolvedStartup {
+    let mut provisional = inputs.clone();
+    provisional.startup_overrides.model = None;
+    provisional.startup_overrides.mode = None;
+    provisional.startup_overrides.mode_cycle = None;
+    provisional.selections = smelt_core::RuntimeSelections::default();
+    let mut resolved = resolve_inputs(provisional, cfg, registered_modes, false, false);
+    resolved.startup_overrides = inputs.startup_overrides.clone();
+    resolved.startup_selections = inputs.selections.clone();
+    resolved
 }
 
 #[cfg(test)]

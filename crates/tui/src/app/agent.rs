@@ -162,9 +162,9 @@ impl TurnLifecycle {
         self.pending_history_appends()
             .iter()
             .rev()
-            .find(|pending| pending.replace_context_name.as_deref() == Some(name))
+            .find(|pending| pending.context_name.as_deref() == Some(name))
             .map(|pending| {
-                if pending.remove_context {
+                if pending.clear_context {
                     None
                 } else {
                     pending.item.as_note().map(protocol::HistoryNote::text)
@@ -177,13 +177,13 @@ impl TurnLifecycle {
         append: PendingHistoryAppend,
         mode_base: Option<&protocol::AgentMode>,
     ) {
-        if append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
+        if append.coalescing_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
             let Some(new_mode) = append.mode() else {
                 self.replace_or_push_history_append(append);
                 return;
             };
             let existing = self.pending_history_appends.iter().position(|pending| {
-                pending.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+                pending.coalescing_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
             });
             if let Some(index) = existing {
                 if mode_base.is_some_and(|base| base.as_str() == new_mode) {
@@ -200,11 +200,11 @@ impl TurnLifecycle {
     }
 
     pub(crate) fn replace_or_push_history_append(&mut self, append: PendingHistoryAppend) {
-        if append.replacement_note_kind().is_some() {
+        if append.coalescing_note_kind().is_some() {
             if let Some(existing) = self
                 .pending_history_appends
                 .iter_mut()
-                .find(|pending| pending.same_replacement_target(&append))
+                .find(|pending| pending.same_coalescing_target(&append))
             {
                 *existing = append;
                 return;
@@ -215,7 +215,7 @@ impl TurnLifecycle {
 
     pub(crate) fn remove_matching_history_append(&mut self, append: &PendingHistoryAppend) {
         self.pending_history_appends
-            .retain(|pending| !pending.same_replacement_target(append));
+            .retain(|pending| !pending.same_coalescing_target(append));
     }
 
     pub(crate) fn take_matching_history_append(
@@ -1848,6 +1848,36 @@ pub(crate) fn lookup_api_key(
 mod tests {
     use super::*;
 
+    fn lineage_reader(
+        app: &crate::app::test_harness::TestApp,
+    ) -> smelt_store::LineageSessionReader {
+        let session_dir = app.session_dir();
+        smelt_store::LineageSessionReader::open_existing(
+            session_dir.parent().expect("session storage root"),
+            &app.app.conversation.session().id,
+        )
+        .expect("open canonical lineage session")
+    }
+
+    fn lineage_history(reader: &smelt_store::LineageSessionReader) -> Vec<protocol::HistoryItem> {
+        let head = reader.snapshot().expect("read lineage state").head;
+        reader
+            .history_range(0, head.history_len.get())
+            .expect("read lineage history")
+    }
+
+    fn lineage_turn(
+        reader: &smelt_store::LineageSessionReader,
+        turn_id: u64,
+    ) -> smelt_store::StoredTurn {
+        reader
+            .turns()
+            .expect("read lineage turns")
+            .into_iter()
+            .find(|turn| turn.turn_id == smelt_store::TurnId::new(turn_id))
+            .expect("stored lineage turn")
+    }
+
     #[test]
     fn turn_lifecycle_owns_continuation_and_callback_generations() {
         let mut lifecycle = TurnLifecycle::new(
@@ -1912,12 +1942,33 @@ mod tests {
             Some(Some("second"))
         );
 
-        lifecycle.replace_or_push_history_append(PendingHistoryAppend::remove_context(
+        lifecycle.replace_or_push_history_append(PendingHistoryAppend::clear_context(
             "project".to_string(),
         ));
         assert_eq!(lifecycle.pending_history_append_count(), 1);
         assert_eq!(lifecycle.pending_context_note("project"), Some(None));
         assert_eq!(lifecycle.pending_context_note("other"), None);
+    }
+
+    #[test]
+    fn conversation_cancels_context_updates_that_restore_committed_state() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.conversation.append_history_item(HistoryItem::note(
+            protocol::HistoryNote::named_context("project", "committed"),
+        ));
+
+        app.app
+            .set_context_note("project".into(), Some("pending".into()));
+        assert_eq!(app.app.conversation.pending_history_append_count(), 1);
+        app.app
+            .set_context_note("project".into(), Some("committed".into()));
+        assert_eq!(app.app.conversation.pending_history_append_count(), 0);
+
+        app.app.set_context_note("project".into(), None);
+        assert_eq!(app.app.conversation.pending_history_append_count(), 1);
+        app.app
+            .set_context_note("project".into(), Some("committed".into()));
+        assert_eq!(app.app.conversation.pending_history_append_count(), 0);
     }
 
     #[test]
@@ -2215,17 +2266,10 @@ mod tests {
 
         app.app.discard_turn(crate::app::TurnEnd::Complete);
 
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir())
-            .expect("open completed session");
-        let stored = reader
-            .turn(smelt_store::TurnId::new(turn_id))
-            .unwrap()
-            .expect("stored turn");
+        let reader = lineage_reader(&app);
+        let stored = lineage_turn(&reader, turn_id);
         assert_eq!(stored.state, smelt_store::TurnState::Completed);
-        let head = reader.store_head().unwrap();
-        let history = reader
-            .read_history_items_range(0..head.history_len.get() as usize)
-            .unwrap();
+        let history = lineage_history(&reader);
         assert!(matches!(
             history.last(),
             Some(HistoryItem::Assistant { .. })
@@ -2261,13 +2305,9 @@ mod tests {
                 if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
         assert!(app.app.session_document_has_unflushed_work());
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
+        let reader = lineage_reader(&app);
         assert_eq!(
-            reader
-                .turn(smelt_store::TurnId::new(turn_id))
-                .unwrap()
-                .unwrap()
-                .state,
+            lineage_turn(&reader, turn_id).state,
             smelt_store::TurnState::Running
         );
     }
@@ -2337,14 +2377,9 @@ mod tests {
             committed_at <= dispatched_at,
             "expected SubmitTurn commit ({committed_at}) before dispatch ({dispatched_at})"
         );
-        let session_dir = app.session_dir();
-        let reader = smelt_store::SessionReader::open_database(session_dir.join("session.db"))
-            .expect("open committed session");
-        let head = reader.store_head().expect("read committed head");
-        let stored_turn = reader
-            .turn(smelt_store::TurnId::new(payload.turn_id))
-            .expect("read submitted turn")
-            .expect("submitted turn exists");
+        let reader = lineage_reader(&app);
+        let head = reader.snapshot().expect("read canonical state").head;
+        let stored_turn = lineage_turn(&reader, payload.turn_id);
         assert_eq!(stored_turn.kind, smelt_store::TurnKind::User);
         assert!(matches!(
             stored_turn.state,
@@ -2359,9 +2394,7 @@ mod tests {
             Some(stored_turn.submitted_revision.get())
         );
         assert!(head.revision >= stored_turn.submitted_revision);
-        let history = reader
-            .read_history_items_range(0..head.history_len.get() as usize)
-            .expect("read committed history");
+        let history = lineage_history(&reader);
         assert!(matches!(
             history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "phase zero submit"
@@ -2387,7 +2420,16 @@ mod tests {
 
         assert_eq!(app.state().prompt_text, "retry this exact input");
         assert!(!app.state().agent_running);
-        assert_eq!(app.app.session_history_len(), 1);
+        assert_eq!(app.app.session_history_len(), 2);
+        let history = app.app.session_history_range(0..2);
+        assert!(history.last().is_some_and(|item| {
+            item.as_note().is_some_and(|note| {
+                note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
+            })
+        }));
+        assert!(history
+            .iter()
+            .all(|item| !matches!(item, HistoryItem::User { .. })));
         assert!(app.actions().iter().all(|action| !matches!(
             action,
             crate::app::test_harness::Action::EngineSend(command)
@@ -2399,12 +2441,9 @@ mod tests {
         app.press(crossterm::event::KeyCode::Enter);
         assert!(app.agent_running());
         let _ = app.app.flush_persist();
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
-        let head = reader.store_head().unwrap();
-        let history = reader
-            .read_history_items_range(0..head.history_len.get() as usize)
-            .unwrap();
-        assert_eq!(history.len(), 2);
+        let reader = lineage_reader(&app);
+        let history = lineage_history(&reader);
+        assert_eq!(history.len(), 3);
         assert_eq!(
             history
                 .iter()
@@ -2415,7 +2454,7 @@ mod tests {
     }
 
     #[test]
-    fn command_submit_failure_rolls_back_staged_history_and_retries_once() {
+    fn command_submit_failure_rolls_back_request_and_retains_context_event() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app
             .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
@@ -2440,7 +2479,15 @@ mod tests {
             )
             .is_none());
 
-        assert_eq!(app.app.session_history_len(), baseline_history_len);
+        assert_eq!(app.app.session_history_len(), baseline_history_len + 1);
+        assert!(app
+            .app
+            .session_history_range(baseline_history_len..baseline_history_len + 1)
+            .first()
+            .and_then(HistoryItem::as_note)
+            .is_some_and(|note| {
+                note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
+            }));
         assert_eq!(
             app.app.conversation.transcript().history().order.len(),
             baseline_transcript_len
@@ -2463,12 +2510,9 @@ mod tests {
             )
             .expect("command retry starts");
         app.app.conversation.set_active(Some(turn));
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
-        let head = reader.store_head().unwrap();
-        let history = reader
-            .read_history_items_range(0..head.history_len.get() as usize)
-            .unwrap();
-        assert_eq!(history.len(), baseline_history_len + 1);
+        let reader = lineage_reader(&app);
+        let history = lineage_history(&reader);
+        assert_eq!(history.len(), baseline_history_len + 2);
         assert_eq!(
             history
                 .iter()
@@ -2479,7 +2523,7 @@ mod tests {
     }
 
     #[test]
-    fn note_submit_failure_rolls_back_staged_history_and_retries_once() {
+    fn note_submit_failure_rolls_back_request_and_retains_context_event() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app
             .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
@@ -2497,7 +2541,15 @@ mod tests {
 
         assert!(app.app.begin_process_status_turn(note.clone()).is_none());
 
-        assert_eq!(app.app.session_history_len(), baseline_history_len);
+        assert_eq!(app.app.session_history_len(), baseline_history_len + 1);
+        assert!(app
+            .app
+            .session_history_range(baseline_history_len..baseline_history_len + 1)
+            .first()
+            .and_then(HistoryItem::as_note)
+            .is_some_and(|note| {
+                note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
+            }));
         assert_eq!(
             app.app.conversation.transcript().history().order.len(),
             baseline_transcript_len
@@ -2514,12 +2566,9 @@ mod tests {
             .begin_process_status_turn(note)
             .expect("note retry starts");
         app.app.conversation.set_active(Some(turn));
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
-        let head = reader.store_head().unwrap();
-        let history = reader
-            .read_history_items_range(0..head.history_len.get() as usize)
-            .unwrap();
-        assert_eq!(history.len(), baseline_history_len + 1);
+        let reader = lineage_reader(&app);
+        let history = lineage_history(&reader);
+        assert_eq!(history.len(), baseline_history_len + 2);
         assert_eq!(
             history
                 .iter()
@@ -2560,7 +2609,7 @@ mod tests {
             .drain_engine_sends()
             .into_iter()
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir()).unwrap();
+        let reader = lineage_reader(&app);
         assert!(reader.turns().unwrap().is_empty());
     }
 
@@ -2575,8 +2624,7 @@ mod tests {
             .is_none());
         let _ = app.app.flush_persist();
 
-        let reader = smelt_store::SessionReader::open_existing(app.session_dir())
-            .expect("submitted session was published");
+        let reader = lineage_reader(&app);
         let turns = reader.turns().expect("read turns");
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].state, smelt_store::TurnState::Failed);
@@ -2614,10 +2662,7 @@ mod tests {
                 crate::app::test_harness::Action::EngineSend(command)
                     if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
             )));
-            let reader = smelt_store::SessionReader::open_existing(
-                app.app.core.sessions.dir_for_id(&session_id),
-            )
-            .expect("open committed session");
+            let reader = lineage_reader(&app);
             assert_eq!(
                 reader.turns().unwrap()[0].state,
                 smelt_store::TurnState::Ready
@@ -2643,7 +2688,7 @@ mod tests {
         }
 
         let root = session_dir.parent().expect("session root");
-        let writer = smelt_store::OwnedSessionWriter::open(root, &session_id)
+        let writer = smelt_store::OwnedLineageWriter::open_existing(root, &session_id)
             .expect("writable restart recovers nonterminal turn");
         let recovery = writer
             .startup_recovery()
@@ -2652,13 +2697,9 @@ mod tests {
             recovery.interrupted_turns,
             vec![smelt_store::TurnId::new(1)]
         );
-        let reader = smelt_store::SessionReader::open_existing(session_dir).unwrap();
+        let reader = smelt_store::LineageSessionReader::open_existing(root, &session_id).unwrap();
         assert_eq!(
-            reader
-                .turn(smelt_store::TurnId::new(1))
-                .unwrap()
-                .unwrap()
-                .state,
+            lineage_turn(&reader, 1).state,
             smelt_store::TurnState::Interrupted
         );
         writer.release().unwrap();
@@ -2681,16 +2722,9 @@ mod tests {
             app.app.conversation.set_active(Some(turn));
             let _ = app.app.flush_persist();
             session_id = app.app.conversation.session().id.clone();
-            let reader = smelt_store::SessionReader::open_existing(
-                app.app.core.sessions.dir_for_id(&session_id),
-            )
-            .unwrap();
+            let reader = lineage_reader(&app);
             assert_eq!(
-                reader
-                    .turn(smelt_store::TurnId::new(turn_id))
-                    .unwrap()
-                    .unwrap()
-                    .state,
+                lineage_turn(&reader, turn_id).state,
                 smelt_store::TurnState::Running
             );
         }
@@ -2722,21 +2756,14 @@ mod tests {
             Some(turn_id)
         );
         assert!(!resumed.app.conversation.is_read_only());
-        let reader = smelt_store::SessionReader::open_existing(
-            resumed.app.core.sessions.dir_for_id(&session_id),
-        )
-        .unwrap();
+        let reader = lineage_reader(&resumed);
         assert_eq!(
-            reader
-                .turn(smelt_store::TurnId::new(turn_id))
-                .unwrap()
-                .unwrap()
-                .state,
+            lineage_turn(&reader, turn_id).state,
             smelt_store::TurnState::Interrupted
         );
         assert_eq!(
             resumed.app.conversation.acknowledged_head(),
-            reader.store_head().unwrap()
+            reader.snapshot().unwrap().head
         );
     }
 
@@ -2796,6 +2823,69 @@ mod tests {
             app.app.conversation.session().history.len(),
             old_history_len + 1
         );
+    }
+
+    #[test]
+    fn request_start_appends_clear_for_deep_named_context() {
+        const TRAILING_HISTORY_LEN: usize = 1024;
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut session =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.first_user_message = Some("old user".into());
+        session
+            .history
+            .push(HistoryItem::note(protocol::HistoryNote::named_context(
+                "goal", "old goal",
+            )));
+        session.history.extend((0..TRAILING_HISTORY_LEN).map(|idx| {
+            if idx.is_multiple_of(2) {
+                HistoryItem::user(Content::text(format!("old user {idx}")))
+            } else {
+                HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                    Some(Content::text(format!("old assistant {idx}"))),
+                    None,
+                    Vec::new(),
+                ))
+            }
+        }));
+        app.app.load_session(session);
+        app.app.restore_screen();
+        app.app.ensure_current_context_note();
+        app.app.apply_pending_history_appends_for_request();
+        app.app.save_session();
+        app.app.flush_persist();
+
+        app.app.set_context_note("goal".into(), None);
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+        let turn = app
+            .app
+            .begin_agent_turn("new request", Content::text("new request"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "request did not start: read_only={}, notification={:?}",
+                    app.app.conversation.is_read_only(),
+                    app.app
+                        .overlays
+                        .notification()
+                        .map(|notification| notification.summary.as_str())
+                )
+            });
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        app.app.conversation.set_active(Some(turn));
+
+        assert_no_full_request_start_reads(&snapshot);
+        assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 2);
+        assert_perf_value_at_most(&snapshot, "store:session:history_rows_inserted", 2);
+        assert_perf_value_at_most(&snapshot, "store:session:history_rows_deleted", 0);
+        let tail = app.app.session_history_range(
+            app.app.session_history_len().saturating_sub(2)..app.app.session_history_len(),
+        );
+        assert!(tail[0]
+            .as_note()
+            .is_some_and(|note| note.context_name() == Some("goal") && note.text().is_empty()));
+        assert!(matches!(tail[1], HistoryItem::User { .. }));
     }
 
     #[test]

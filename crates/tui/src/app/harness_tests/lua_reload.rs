@@ -36,6 +36,137 @@ fn worktree_repo() -> tempfile::TempDir {
 }
 
 #[test]
+fn launch_and_reload_evaluate_each_lua_phase_once_per_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config_dir = root.path().join("config");
+    let runtime_dir = root.path().join("runtime");
+    let runtime_smelt = runtime_dir.join("smelt");
+    let project_dir = root.path().join("project");
+    let project_config_dir = project_dir.join(".smelt");
+
+    std::fs::create_dir_all(config_dir.join("plugins")).unwrap();
+    std::fs::create_dir_all(runtime_smelt.join("commands")).unwrap();
+    std::fs::create_dir_all(&project_config_dir).unwrap();
+
+    let bootstrap = format!(
+        "_G.__bootstrap_count = (_G.__bootstrap_count or 0) + 1\n{}",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../runtime/lua/smelt/_bootstrap.lua"
+        ))
+    );
+    std::fs::write(runtime_smelt.join("_bootstrap.lua"), bootstrap).unwrap();
+
+    let color_command = format!(
+        "_G.__autoload_count = (_G.__autoload_count or 0) + 1\n{}",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../runtime/lua/smelt/commands/color.lua"
+        ))
+    );
+    std::fs::write(runtime_smelt.join("commands/color.lua"), color_command).unwrap();
+    std::fs::write(
+        config_dir.join("early.lua"),
+        "_G.__early_count = (_G.__early_count or 0) + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        "_G.__config_count = (_G.__config_count or 0) + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("plugins/count.lua"),
+        "_G.__plugin_count = (_G.__plugin_count or 0) + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project_config_dir.join("early.lua"),
+        "_G.__project_early_count = (_G.__project_early_count or 0) + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project_config_dir.join("init.lua"),
+        "_G.__project_count = (_G.__project_count or 0) + 1\n",
+    )
+    .unwrap();
+
+    smelt_core::trust::TrustStore::new(home.join("state/smelt"))
+        .mark_trusted(&project_dir)
+        .unwrap();
+
+    let mut app = TestApp::builder()
+        .with_runtime_home(&home)
+        .with_lua_load_paths(&config_dir, Some(runtime_dir))
+        .with_cwd(&project_dir)
+        .build();
+
+    assert_eq!(app.lua_probe().id, 0, "launch must retain generation zero");
+    for name in [
+        "__bootstrap_count",
+        "__early_count",
+        "__autoload_count",
+        "__config_count",
+        "__plugin_count",
+        "__project_early_count",
+        "__project_count",
+    ] {
+        assert_eq!(app.lua_int_global(name), Some(1), "{name} launch count");
+    }
+
+    app.reload_lua();
+
+    assert_eq!(app.lua_probe().id, 1, "reload must commit generation one");
+    for name in [
+        "__bootstrap_count",
+        "__autoload_count",
+        "__config_count",
+        "__plugin_count",
+        "__project_count",
+    ] {
+        assert_eq!(app.lua_int_global(name), Some(1), "{name} reload count");
+    }
+}
+
+#[test]
+fn generation_zero_respects_lua_vim_config_unless_startup_overrides_it() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "smelt.settings.vim = true\n").unwrap();
+
+    let app = TestApp::builder().with_init_lua(&init).build();
+    assert!(app.core_probe().config.settings.vim);
+
+    let app = TestApp::builder()
+        .with_init_lua(&init)
+        .with_vim(false)
+        .build();
+    assert!(!app.core_probe().config.settings.vim);
+}
+
+#[test]
+fn generation_zero_filters_explicit_mode_cycle_against_final_lua_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"smelt.mode.register({ name = "review", after = "normal" })"#,
+    )
+    .unwrap();
+    let normal = AgentMode::normal();
+    let review = AgentMode::parse("review").unwrap();
+    let unavailable = AgentMode::parse("unavailable").unwrap();
+
+    let app = TestApp::builder()
+        .with_init_lua(&init)
+        .with_mode_cycle(vec![normal.clone(), review.clone(), unavailable])
+        .build();
+
+    assert_eq!(app.core_probe().config.mode_cycle, vec![normal, review]);
+}
+
+#[test]
 fn lua_config_auto_reload_success_notifies_for_real_edits() {
     let mut app = TestApp::builder().build();
     assert!(app.state().notification.is_none());
@@ -1228,15 +1359,25 @@ fn lua_context_note_updates_named_history_notes_independently() {
             .filter_map(protocol::HistoryItem::as_note)
             .filter(|note| note.kind() == protocol::HistoryNoteKind::Context)
             .count(),
-        2
+        3
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter_map(protocol::HistoryItem::as_note)
+            .filter(|note| note.context_name() == Some("goal"))
+            .map(protocol::HistoryNote::text)
+            .collect::<Vec<_>>(),
+        vec!["first goal", "second goal"]
     );
 
     assert!(app.run_lua(r#"smelt.session.context_note("goal", nil)"#));
     let history = &app.session_snapshot().history;
-    assert!(!history.iter().any(|item| matches!(
-        item,
-        protocol::HistoryItem::Note(note) if note.context_name() == Some("goal")
-    )));
+    assert!(history
+        .iter()
+        .filter_map(protocol::HistoryItem::as_note)
+        .rfind(|note| note.context_name() == Some("goal"))
+        .is_some_and(|note| note.text().is_empty()));
     assert!(history.iter().any(|item| matches!(
         item,
         protocol::HistoryItem::Note(note)
@@ -2572,8 +2713,7 @@ fn empty_banner_returns_to_startup_position_after_resize_round_trip() {
 
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    let err = app.bring_up_lua("launch", true);
-    assert_eq!(err, None);
+    app.drain_launch_ready_hooks();
 
     let startup = banner_label_rect(&app);
 
@@ -2609,8 +2749,7 @@ fn empty_banner_stays_inside_transcript_when_prompt_grows() {
 
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    let err = app.bring_up_lua("launch", true);
-    assert_eq!(err, None);
+    app.drain_launch_ready_hooks();
 
     app.type_text("one\ntwo\nthree\nfour\nfive\nsix");
     paint_and_emit_resize(&mut app);
@@ -3410,13 +3549,10 @@ fn reload_lua_drains_ready_hooks_with_kind_reload() {
     .unwrap();
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    // Cold-start `TestApp` skips the `on_ready` drain (storybook
-    // tests don't want interactive decoration like the splash
-    // banner). Fire it manually here since this test specifically
-    // covers the `kind = "launch"` drain.
-    {
-        let _ = app.bring_up_lua("launch", true);
-    }
+    // `TestApp` retains launch-ready hooks so storybook snapshots do not
+    // receive interactive decoration such as the splash banner. This test
+    // explicitly drains the generation-zero hooks.
+    app.drain_launch_ready_hooks();
 
     let read = |app: &mut TestApp, k: &str| -> String {
         app.eval_lua(&format!(
@@ -3672,7 +3808,7 @@ fn reload_lua_cancels_in_flight_tasks() {
         r#"
             _G.__task_completed__ = false
             smelt.spawn(function()
-                smelt.sleep(10_000)  -- long sleep so the task is still parked
+                smelt.sleep(10000)  -- long sleep so the task is still parked
                 _G.__task_completed__ = true
             end)
             "#,
@@ -3822,39 +3958,44 @@ fn scheduled_reload_runs_after_turn_is_idle() {
 }
 
 #[test]
-fn hot_reload_reconciles_plan_mode_cycle_and_permissions() {
+fn hot_reload_reconciles_new_mode_cycle_and_permissions() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(&init, "-- initially empty\n").unwrap();
 
-    let mut app = TestApp::builder()
-        .with_init_lua(&init)
-        .with_mode_cycle(vec![
-            AgentMode::normal(),
-            AgentMode::parse("apply").unwrap(),
-            AgentMode::parse("yolo").unwrap(),
-        ])
-        .build();
-    let plan = AgentMode::parse("plan").unwrap();
-    assert!(!app.core_probe().config.mode_cycle.contains(&plan));
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let review = AgentMode::parse("review").unwrap();
+    assert!(!app.core_probe().config.mode_cycle.contains(&review));
 
-    std::fs::write(&init, "require(\"smelt.plugins.plan_mode\")\n").unwrap();
-    {
-        app.reload_lua();
-    }
+    std::fs::write(
+        &init,
+        r#"
+        smelt.mode.register({ name = "review", after = "normal" })
+        smelt.permissions.extend({
+          review = {
+            tools = {
+              allow = { "review_result" },
+              deny = { "smelt_reload" },
+            },
+          },
+        })
+        "#,
+    )
+    .unwrap();
+    app.reload_lua();
 
-    assert!(app.core_probe().config.mode_cycle.contains(&plan));
+    assert!(app.core_probe().config.mode_cycle.contains(&review));
     let outcome = app.core_probe().permissions.evaluate_tool(
-        plan.clone(),
+        review.clone(),
         smelt_core::permissions::ToolOrigin::Lua,
         "smelt_reload",
         &std::collections::HashMap::new(),
     );
     assert_eq!(outcome.decision, protocol::Decision::Deny);
     let outcome = app.core_probe().permissions.evaluate_tool(
-        plan,
+        review,
         smelt_core::permissions::ToolOrigin::Lua,
-        "present_plan",
+        "review_result",
         &std::collections::HashMap::new(),
     );
     assert_eq!(outcome.decision, protocol::Decision::Allow);

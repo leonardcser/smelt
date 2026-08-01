@@ -23,6 +23,9 @@ pub enum StoreError {
         owner: Option<String>,
     },
     OwnershipLost,
+    LegacyMigrationRequired {
+        session_id: String,
+    },
     OrphanedSession {
         found: i32,
     },
@@ -97,6 +100,10 @@ impl fmt::Display for StoreError {
                 None => f.write_str("session is owned by another writer"),
             },
             StoreError::OwnershipLost => f.write_str("session writer ownership was lost"),
+            StoreError::LegacyMigrationRequired { session_id } => write!(
+                f,
+                "session {session_id} uses the previous storage format; run `smelt session migrate {session_id}`"
+            ),
             StoreError::OrphanedSession { found } => write!(
                 f,
                 "orphaned session schema version {found} has no canonical identity or session content"

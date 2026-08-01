@@ -18,7 +18,16 @@ fn saved_session(number: u128) -> smelt_core::session::Session {
         .push(protocol::HistoryItem::user(protocol::Content::text(
             "migration fixture",
         )));
-    smelt_core::session::save_result(&session).unwrap();
+    let sessions_root = smelt_core::session::dir_for(&session)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut writer = smelt_store::OwnedSessionWriter::open(&sessions_root, &session.id).unwrap();
+    writer
+        .commit_session(&smelt_core::session::initial_store_commit_from_session(&session).unwrap())
+        .unwrap();
+    writer.publish().unwrap();
+    writer.release().unwrap();
     session
 }
 
@@ -95,23 +104,31 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     let manifest = state.path().join("portable.db.manifest.json");
     assert!(backup.is_file());
     assert!(manifest.is_file());
-    let backup_reader = smelt_store::SessionReader::open_database(&backup).unwrap();
-    assert_eq!(
-        backup_reader.stored_session().unwrap().unwrap().identity.id,
-        session.id
+    let manifest_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(manifest_json["format_version"], 2);
+    let lineage_id = manifest_json["lineage_id"].as_str().unwrap();
+    assert!(
+        smelt_store::verify_lineage_backup(&backup, lineage_id)
+            .unwrap()
+            .healthy
     );
 
-    for args in [
-        vec!["session", "gc", session.id.as_str()],
-        vec!["session", "vacuum", session.id.as_str()],
-    ] {
-        let output = smelt(state.path(), &args);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let gc = smelt(state.path(), &["session", "gc", &session.id]);
+    assert!(
+        gc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    let gc = String::from_utf8(gc.stdout).unwrap();
+    assert!(gc.contains("deleted_canonical_rows:"), "{gc}");
+    assert!(gc.contains("deleted_search_segments: 0"), "{gc}");
+    let vacuum = smelt(state.path(), &["session", "vacuum", &session.id]);
+    assert!(
+        vacuum.status.success(),
+        "{}",
+        String::from_utf8_lossy(&vacuum.stderr)
+    );
     let repeated_backup = smelt(
         state.path(),
         &["session", "backup", &session.id, backup.to_str().unwrap()],
@@ -119,7 +136,7 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     assert!(!repeated_backup.status.success());
 
     let sessions_root = session_dir.parent().expect("sessions root");
-    let mut writer = smelt_store::OwnedSessionWriter::open_existing(sessions_root, &session.id)
+    let mut writer = smelt_store::OwnedLineageWriter::open_existing(sessions_root, &session.id)
         .expect("open canonical writer");
     let previous = writer.store_head().unwrap();
     session
@@ -169,11 +186,97 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     assert!(plain.contains("nonterminal_turn: id=1 state=ready"));
     assert!(plain.contains("catalog: state="));
 
-    let reader = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
+    let reader =
+        smelt_store::LineageSessionReader::open_existing(sessions_root, &session.id).unwrap();
     assert_eq!(
-        reader.turn(receipt.turn_id).unwrap().unwrap().state,
+        reader
+            .turns()
+            .unwrap()
+            .into_iter()
+            .find(|turn| turn.turn_id == receipt.turn_id)
+            .unwrap()
+            .state,
         smelt_store::TurnState::Ready,
         "doctor must not mutate nonterminal turns"
+    );
+}
+
+#[test]
+fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
+    let state = tempfile::tempdir().unwrap();
+    let guard = ProcessEnvironmentGuard::capture();
+    guard.set_var("XDG_STATE_HOME", state.path());
+    let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+    session.id = "a".repeat(64);
+    session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text(
+            "shared prefix",
+        )));
+    smelt_core::session::save_result(&session).unwrap();
+    let sessions_root = smelt_core::session::dir_for(&session)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let target_id = "b".repeat(64);
+    let mut writer =
+        smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &session.id).unwrap();
+    writer.fork_current(&target_id, 2).unwrap();
+    let shared = writer.store_head().unwrap();
+    session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text(
+            "abandoned suffix",
+        )));
+    let command = smelt_core::session::store_commit_from_session(
+        &session,
+        shared,
+        shared.history_len.get() as usize,
+    )
+    .unwrap();
+    let abandoned = writer.commit_session(&command).unwrap();
+    assert_eq!(abandoned.current.revision.get(), 2);
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    writer.rewind_to_sequence(1, updated_at).unwrap();
+    writer.release().unwrap();
+
+    let gc = smelt(state.path(), &["session", "gc", &session.id]);
+    assert!(
+        gc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    let output = String::from_utf8(gc.stdout).unwrap();
+    assert!(output.contains("deleted_canonical_rows:"), "{output}");
+    assert!(!output.contains("deleted_canonical_rows: 0"), "{output}");
+
+    for branch in [&session.id, &target_id] {
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(&sessions_root, branch).unwrap();
+        let history = reader.history_range(0, 1).unwrap();
+        assert_eq!(
+            history,
+            vec![protocol::HistoryItem::user(protocol::Content::text(
+                "shared prefix"
+            ))]
+        );
+    }
+
+    let repeated = smelt(state.path(), &["session", "gc", &target_id]);
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated = String::from_utf8(repeated.stdout).unwrap();
+    assert!(repeated.contains("deleted_canonical_rows: 0"), "{repeated}");
+    assert!(repeated.contains("deleted_objects: 0"), "{repeated}");
+    assert!(
+        repeated.contains("deleted_search_segments: 0"),
+        "{repeated}"
     );
 }
 
@@ -193,6 +296,69 @@ fn session_migrate_all_succeeds_for_empty_storage() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["sessions"], serde_json::json!([]));
     assert_eq!(report["summary"]["total"], 0);
+}
+
+#[test]
+fn session_migrate_current_previous_format_dry_run_then_migrates_once() {
+    let state = tempfile::tempdir().unwrap();
+    let guard = ProcessEnvironmentGuard::capture();
+    guard.set_var("XDG_STATE_HOME", state.path());
+    let session = saved_session(100);
+    let session_dir = smelt_core::session::dir_for(&session);
+    let sessions_root = session_dir.parent().unwrap();
+
+    let dry_run = smelt(
+        state.path(),
+        &["session", "migrate", &session.id, "--dry-run", "--json"],
+    );
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(report["sessions"][0]["status"], "would_migrate");
+    assert_eq!(
+        report["sessions"][0]["from_version"],
+        smelt_store::SCHEMA_VERSION
+    );
+    assert_eq!(
+        report["sessions"][0]["to_version"],
+        smelt_store::SCHEMA_VERSION
+    );
+    assert!(
+        smelt_store::LineageSessionReader::try_open_existing(sessions_root, &session.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(session_dir.join("session.db").is_file());
+
+    let migrated = smelt(state.path(), &["session", "migrate", &session.id, "--json"]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    assert_eq!(report["sessions"][0]["status"], "migrated");
+    assert_eq!(report["summary"]["migrated"], 1);
+    let lineage =
+        smelt_store::LineageSessionReader::open_existing(sessions_root, &session.id).unwrap();
+    assert_eq!(lineage.history_range(0, 1).unwrap().len(), 1);
+    assert!(
+        session_dir.join("session.db").is_file(),
+        "explicit migration retains the previous format during the compatibility window"
+    );
+
+    let current = smelt(state.path(), &["session", "migrate", &session.id, "--json"]);
+    assert!(
+        current.status.success(),
+        "{}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(report["sessions"][0]["status"], "current");
+    assert_eq!(report["summary"]["current"], 1);
 }
 
 #[test]
@@ -246,6 +412,14 @@ fn session_migrate_single_dry_run_and_prefix_upgrade() {
             version: smelt_store::SCHEMA_VERSION,
         }
     );
+    assert!(
+        smelt_store::LineageSessionReader::open_existing(
+            smelt_core::session::dir_for(&session).parent().unwrap(),
+            &session.id,
+        )
+        .is_ok(),
+        "schema upgrade is followed by canonical lineage migration"
+    );
 }
 
 #[test]
@@ -254,6 +428,7 @@ fn session_migrate_all_reports_every_schema_and_continues_after_failures() {
     let guard = ProcessEnvironmentGuard::capture();
     guard.set_var("XDG_STATE_HOME", state.path());
     let current = saved_session(201);
+    smelt_core::session::migrate_legacy_session_result(&current.id).unwrap();
     let future = saved_session(202);
     let unrecognized = saved_session(203);
     let missing_identity = saved_session(204);

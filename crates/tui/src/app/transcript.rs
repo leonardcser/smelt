@@ -203,14 +203,6 @@ impl LoadedTranscript {
         }
     }
 
-    pub(crate) fn empty_store(session_dir: PathBuf) -> Self {
-        Self {
-            transcript: Transcript::new(),
-            record_window: None,
-            session_dir: Some(session_dir),
-        }
-    }
-
     pub(crate) fn tail_from_sqlite_dir(
         session_dir: PathBuf,
         width: u16,
@@ -258,18 +250,46 @@ fn compact_record_rows(
     smelt_core::transcript_model::compact_block_rows(start.get(), rows).ok()
 }
 
+enum TranscriptStoreReader {
+    Legacy(smelt_store::SessionReader),
+    Lineage(smelt_store::LineageSessionReader),
+}
+
 struct SqliteTranscriptStore {
-    db: smelt_store::SessionReader,
+    reader: TranscriptStoreReader,
     #[cfg(test)]
     extent_read_count: std::cell::Cell<usize>,
 }
 
 impl SqliteTranscriptStore {
     fn open_read_only(session_dir: impl AsRef<std::path::Path>) -> smelt_store::Result<Self> {
-        let db =
-            smelt_store::SessionReader::open_database(session_dir.as_ref().join("session.db"))?;
+        let session_dir = session_dir.as_ref();
+        let lineage = session_dir
+            .parent()
+            .zip(session_dir.file_name().and_then(|name| name.to_str()))
+            .filter(|(_, session_id)| {
+                session_id.len() == 64
+                    && session_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(|(root, session_id)| {
+                smelt_store::LineageSessionReader::try_open_existing(root, session_id)
+            })
+            .transpose()?
+            .flatten();
+        let reader = match lineage {
+            Some(reader) => TranscriptStoreReader::Lineage(reader),
+            None => {
+                // COMPAT(session-lineage-v1): retain read-only transcript access
+                // for the immediately preceding format in explicit compatibility tests.
+                TranscriptStoreReader::Legacy(smelt_store::SessionReader::open_database(
+                    session_dir.join("session.db"),
+                )?)
+            }
+        };
         Ok(Self {
-            db,
+            reader,
             #[cfg(test)]
             extent_read_count: std::cell::Cell::new(0),
         })
@@ -280,8 +300,19 @@ impl SqliteTranscriptStore {
         width: u16,
         target_rows: u16,
     ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
-        self.db
-            .read_transcript_record_tail_for_rows(width, target_rows)
+        match &self.reader {
+            TranscriptStoreReader::Legacy(db) => {
+                db.read_transcript_record_tail_for_rows(width, target_rows)
+            }
+            TranscriptStoreReader::Lineage(reader) => {
+                let total = usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
+                    smelt_store::StoreError::Integrity(
+                        "lineage transcript length exceeds platform limits".into(),
+                    )
+                })?;
+                reader.transcript_tail_for_rows_with_total(total, width, target_rows)
+            }
+        }
     }
 
     fn read_record_slice(
@@ -289,8 +320,45 @@ impl SqliteTranscriptStore {
         range: smelt_store::TranscriptRecordRange,
         total_count: usize,
     ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
-        self.db
-            .read_transcript_record_slice_with_total(range, total_count)
+        match &self.reader {
+            TranscriptStoreReader::Legacy(db) => {
+                db.read_transcript_record_slice_with_total(range, total_count)
+            }
+            TranscriptStoreReader::Lineage(reader) => {
+                reader.transcript_record_slice_with_total(range, total_count)
+            }
+        }
+    }
+
+    fn record_index_for_block_idx(&self, block_idx: u64) -> smelt_store::Result<Option<usize>> {
+        match &self.reader {
+            TranscriptStoreReader::Legacy(reader) => Ok(reader
+                .transcript_record_index_for_block_idx(block_idx)?
+                .map(|index| index.get())),
+            TranscriptStoreReader::Lineage(reader) => {
+                const CHUNK_RECORDS: u64 = 256;
+
+                let transcript_len = reader.snapshot()?.transcript_len;
+                let mut start = 0;
+                while start < transcript_len {
+                    let end = start.saturating_add(CHUNK_RECORDS).min(transcript_len);
+                    if let Some(offset) = reader
+                        .transcript_object_backed_range(start, end)?
+                        .iter()
+                        .position(|record| record.block_idx == block_idx)
+                    {
+                        let index = usize::try_from(start).map_err(|_| {
+                            smelt_store::StoreError::Integrity(
+                                "lineage transcript offset exceeds platform limits".into(),
+                            )
+                        })?;
+                        return Ok(Some(index.saturating_add(offset)));
+                    }
+                    start = end;
+                }
+                Ok(None)
+            }
+        }
     }
 
     fn read_hydration_records(
@@ -298,10 +366,7 @@ impl SqliteTranscriptStore {
         range: smelt_store::TranscriptRecordRange,
         total_count: usize,
     ) -> Option<Vec<TranscriptBlockRecordWithId>> {
-        let slice = self
-            .db
-            .read_transcript_record_slice_with_total(range, total_count)
-            .ok()?;
+        let slice = self.read_record_slice(range, total_count).ok()?;
         slice
             .into_records()
             .into_iter()
@@ -314,15 +379,123 @@ impl SqliteTranscriptStore {
         #[cfg(test)]
         self.extent_read_count
             .set(self.extent_read_count.get().saturating_add(1));
-        self.db
-            .transcript_record_estimated_rows(range.into(), width)
+        match &self.reader {
+            TranscriptStoreReader::Legacy(db) => {
+                db.transcript_record_estimated_rows(range.into(), width)
+            }
+            TranscriptStoreReader::Lineage(reader) => {
+                let records =
+                    reader.transcript_object_backed_range(range.start as u64, range.end as u64)?;
+                let width = u64::from(width.max(1));
+                Ok(records.into_iter().fold(0_u64, |rows, record| {
+                    rows.saturating_add(
+                        record
+                            .estimated_text_bytes
+                            .saturating_add(width - 1)
+                            .saturating_div(width)
+                            .max(1)
+                            .saturating_add(1),
+                    )
+                }))
+            }
+        }
+    }
+
+    fn record_before_kind(
+        &self,
+        kind: &str,
+        before_or_at: usize,
+    ) -> smelt_store::Result<Option<(usize, smelt_store::StoredTranscriptBlock)>> {
+        match &self.reader {
+            TranscriptStoreReader::Legacy(db) => {
+                let Some(record) =
+                    db.read_transcript_record_before_kind_at_index(kind, before_or_at as u64)?
+                else {
+                    return Ok(None);
+                };
+                let Some(index) = db.transcript_record_index_for_block_idx(record.block_idx)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((index.get(), record)))
+            }
+            TranscriptStoreReader::Lineage(reader) => {
+                const CHUNK: usize = 256;
+                let total = usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
+                    smelt_store::StoreError::Integrity(
+                        "lineage transcript length exceeds platform limits".into(),
+                    )
+                })?;
+                let mut end = before_or_at.saturating_add(1).min(total);
+                while end > 0 {
+                    let start = end.saturating_sub(CHUNK);
+                    if let Some((offset, record)) = reader
+                        .transcript_object_backed_range(start as u64, end as u64)?
+                        .into_iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, record)| record.kind == kind)
+                    {
+                        return Ok(Some((start.saturating_add(offset), record)));
+                    }
+                    end = start;
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn record_after_kind(
+        &self,
+        kind: &str,
+        after_or_at: usize,
+    ) -> smelt_store::Result<Option<(usize, smelt_store::StoredTranscriptBlock)>> {
+        match &self.reader {
+            TranscriptStoreReader::Legacy(db) => {
+                let Some(record) =
+                    db.read_transcript_record_after_kind_at_index(kind, after_or_at as u64)?
+                else {
+                    return Ok(None);
+                };
+                let Some(index) = db.transcript_record_index_for_block_idx(record.block_idx)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((index.get(), record)))
+            }
+            TranscriptStoreReader::Lineage(reader) => {
+                const CHUNK: usize = 256;
+                let total = usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
+                    smelt_store::StoreError::Integrity(
+                        "lineage transcript length exceeds platform limits".into(),
+                    )
+                })?;
+                let mut start = after_or_at.min(total);
+                while start < total {
+                    let end = start.saturating_add(CHUNK).min(total);
+                    if let Some((offset, record)) = reader
+                        .transcript_object_backed_range(start as u64, end as u64)?
+                        .into_iter()
+                        .enumerate()
+                        .find(|(_, record)| record.kind == kind)
+                    {
+                        return Ok(Some((start.saturating_add(offset), record)));
+                    }
+                    start = end;
+                }
+                Ok(None)
+            }
+        }
     }
 
     fn extent_chunks(&self) -> smelt_store::Result<Vec<smelt_store::TranscriptExtentChunk>> {
         #[cfg(test)]
         self.extent_read_count
             .set(self.extent_read_count.get().saturating_add(1));
-        self.db.transcript_extent_chunks()
+        match &self.reader {
+            TranscriptStoreReader::Legacy(db) => db.transcript_extent_chunks(),
+            TranscriptStoreReader::Lineage(_) => Ok(Vec::new()),
+        }
     }
 
     #[cfg(test)]
@@ -3392,12 +3565,12 @@ impl TranscriptDocument {
     }
 
     fn stored_record_index_for_block_idx(&self, block_idx: u64) -> Option<usize> {
-        let session_dir = self.records.session_dir()?.clone();
-        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
-        db.transcript_record_index_for_block_idx(block_idx)
+        let session_dir = self.records.session_dir()?;
+        SqliteTranscriptStore::open_read_only(session_dir)
+            .ok()?
+            .record_index_for_block_idx(block_idx)
             .ok()
             .flatten()
-            .map(|index| index.get())
     }
 
     pub(crate) fn activate_record_window_for_block_idx(
@@ -3687,34 +3860,23 @@ impl TranscriptDocument {
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, StoredBlockWithId)> {
         let session_dir = self.records.session_dir()?;
-        let fallback_db;
-        let db = if let Some(store) = self.store_cache.cached_store_for_session(session_dir) {
-            &store.db
+        let fallback_store;
+        let store = if let Some(store) = self.store_cache.cached_store_for_session(session_dir) {
+            store
         } else {
-            fallback_db =
-                smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
-            &fallback_db
+            fallback_store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+            &fallback_store
         };
-        let record = match direction {
+        let (index, record) = match direction {
             TranscriptNavigationDirection::Previous => {
                 let before = anchor_index.checked_sub(1)?;
-                db.read_transcript_record_before_kind_at_index(role, before as u64)
-                    .ok()
-                    .flatten()?
+                store.record_before_kind(role, before).ok().flatten()?
             }
-            TranscriptNavigationDirection::Next => db
-                .read_transcript_record_after_kind_at_index(
-                    role,
-                    anchor_index.saturating_add(1) as u64,
-                )
+            TranscriptNavigationDirection::Next => store
+                .record_after_kind(role, anchor_index.saturating_add(1))
                 .ok()
                 .flatten()?,
         };
-        let index = db
-            .transcript_record_index_for_block_idx(record.block_idx)
-            .ok()
-            .flatten()?
-            .get();
         let estimated_text_bytes = record.estimated_text_bytes;
         let preview = record.preview_text.clone();
         let record = TranscriptBlockRecordWithId::try_from(record).ok()?;
@@ -4037,13 +4199,14 @@ impl TranscriptDocument {
         total: usize,
     ) -> Range<smelt_store::TranscriptRecordOffset> {
         let count = self.record_window_count(width, viewport_rows, total);
-        let mut start = center
+        let centered_start = center
             .saturating_sub(count / 2)
             .min(total.saturating_sub(count));
+        let mut start = centered_start;
         if count >= TRANSCRIPT_RECORD_PAGE_SIZE {
             start = start / TRANSCRIPT_RECORD_PAGE_SIZE * TRANSCRIPT_RECORD_PAGE_SIZE;
-            if start.saturating_add(count) > total {
-                start = total.saturating_sub(count);
+            if center >= start.saturating_add(count) {
+                start = centered_start;
             }
         }
         let end = start.saturating_add(count).min(total);
@@ -4195,23 +4358,23 @@ impl TranscriptDocument {
 
     fn activate_record_window_range(
         &mut self,
-        range: Range<smelt_store::TranscriptRecordOffset>,
+        projection_range: Range<smelt_store::TranscriptRecordOffset>,
     ) -> bool {
-        let mut projection_range = if self
+        let mut cache_range = if self
             .records
             .total_count()
             .is_some_and(|total| total > TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS)
         {
-            self.records.sparse.cache_range_around(&range)
+            self.records.sparse.cache_range_around(&projection_range)
         } else {
-            range.clone()
+            projection_range.clone()
         };
         if self.records.session_dir().is_none()
-            && !self.records.sparse.range_is_loaded(&projection_range)
+            && !self.records.sparse.range_is_loaded(&cache_range)
         {
-            projection_range = range;
+            cache_range = projection_range.clone();
         }
-        self.activate_record_projection_range(projection_range.clone(), projection_range)
+        self.activate_record_projection_range(projection_range, cache_range)
     }
 
     fn activate_record_projection_range(
@@ -9570,6 +9733,56 @@ mod document_tests {
     }
 
     #[test]
+    fn sparse_tail_projection_keeps_the_loaded_resume_window_active() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let dir = tempfile::tempdir().unwrap();
+        let records = transcript_records(900);
+        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            860..900,
+            Some(dir.path().to_path_buf()),
+        ));
+        let active_before = document.records.active_range.clone();
+        let loaded_before = document.loaded_record_count();
+
+        for _ in 0..3 {
+            document
+                .plan_projection_measured(
+                    &lua,
+                    80,
+                    &theme,
+                    crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    10,
+                )
+                .expect("tail projection");
+        }
+
+        assert_eq!(document.records.active_range, active_before);
+        assert_eq!(document.loaded_record_count(), loaded_before);
+    }
+
+    #[test]
+    fn centered_record_window_contains_every_requested_record() {
+        let records = transcript_records(700);
+        let document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..512,
+            None,
+        ));
+
+        for center in 0..records.len() {
+            let range = document.record_window_range_for_center(100, center, 32, records.len());
+            assert!(
+                range.start.get() <= center && center < range.end.get(),
+                "record {center} escaped window {:?}",
+                range.start.get()..range.end.get()
+            );
+        }
+    }
+
+    #[test]
     fn sparse_row_jump_loads_bounded_record_window() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
@@ -10437,12 +10650,25 @@ impl TuiApp {
         }
         let appends = self.conversation.take_pending_history_appends();
         for append in appends {
-            let mode_base = append.mode().map(|_| self.mode_append_base());
+            let mode_base = match append.mode() {
+                Some(_) => match self.mode_append_base() {
+                    Ok(mode) => Some(mode),
+                    Err(err) => {
+                        smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
+                        self.notify_error_sticky(format!("failed to read session mode: {err}"));
+                        self.conversation
+                            .replace_or_push_history_append(append)
+                            .expect("mode append coalescing does not read context history");
+                        continue;
+                    }
+                },
+                None => None,
+            };
             let history_append = append.history_append(mode_base);
-            let replace_note_kind = history_append.replacement_note_kind();
+            let coalescing_note_kind = history_append.coalescing_note_kind();
             let result = self.apply_history_append_to_history(&history_append);
             if let Some(block) = append.transcript_block(&self.lua) {
-                self.commit_history_append_block(block, replace_note_kind, result);
+                self.commit_history_append_block(block, coalescing_note_kind, result);
             }
         }
     }
@@ -10451,25 +10677,25 @@ impl TuiApp {
         let Some(append) = self.conversation.take_matching_history_append(item) else {
             return;
         };
-        if append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
+        if append.coalescing_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
             if let Some(mode) = append.mode().and_then(protocol::AgentMode::parse) {
                 self.conversation.set_applied_mode(mode);
             }
         }
-        let result = if append.replacement_note_kind().is_some() {
+        let result = if append.coalescing_note_kind().is_some() {
             protocol::HistoryAppendResult::ReplacedLast
         } else {
             protocol::HistoryAppendResult::Pushed
         };
         if let Some(block) = append.transcript_block(&self.lua) {
-            self.commit_history_append_block(block, append.replacement_note_kind(), result);
+            self.commit_history_append_block(block, append.coalescing_note_kind(), result);
         }
     }
 
     pub(crate) fn commit_history_append_block(
         &mut self,
         block: Block,
-        replace_note_kind: Option<protocol::HistoryNoteKind>,
+        coalescing_note_kind: Option<protocol::HistoryNoteKind>,
         result: protocol::HistoryAppendResult,
     ) {
         match result {
@@ -10478,7 +10704,7 @@ impl TuiApp {
                 self.remove_last_mode_block();
             }
             protocol::HistoryAppendResult::ReplacedLast => {
-                if self.rewrite_last_mode_block(block.clone(), replace_note_kind) {
+                if self.rewrite_last_mode_block(block.clone(), coalescing_note_kind) {
                     return;
                 }
                 self.push_block(block);
@@ -10490,9 +10716,9 @@ impl TuiApp {
     fn rewrite_last_mode_block(
         &mut self,
         block: Block,
-        replace_note_kind: Option<protocol::HistoryNoteKind>,
+        coalescing_note_kind: Option<protocol::HistoryNoteKind>,
     ) -> bool {
-        if replace_note_kind != Some(protocol::HistoryNoteKind::ModeChange) {
+        if coalescing_note_kind != Some(protocol::HistoryNoteKind::ModeChange) {
             return false;
         }
         let history = self.conversation.transcript().history();

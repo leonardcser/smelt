@@ -260,6 +260,14 @@ impl OverlayRuntime {
         completer.picker.map(|picker| (picker, completer.selected))
     }
 
+    pub(super) fn search_state(&self) -> &SearchState {
+        &self.search
+    }
+
+    pub(super) fn search_state_mut(&mut self) -> &mut SearchState {
+        &mut self.search
+    }
+
     pub(crate) fn search_session(&self) -> Option<&SearchSession> {
         self.search.session.as_ref()
     }

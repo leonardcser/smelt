@@ -41,6 +41,7 @@ impl AppStoryCtx {
             .build();
         app.run_lua_result("smelt.time.format = smelt.time.format_utc")
             .expect("pin storybook timestamp formatting to UTC");
+        app.allow_permissions_outside_cwd();
         Self {
             app,
             name: name.to_string(),
@@ -353,6 +354,8 @@ impl AppStoryCtx {
         approval_patterns: Vec<String>,
     ) {
         let summary = self.app.tool_summary(tool_name, &args);
+        self.app
+            .require_tool_confirmation(tool_name, &approval_patterns);
         self.start_turn();
         self.app
             .request_permission(1, "call-1", tool_name, args, approval_patterns, summary);
@@ -414,6 +417,15 @@ impl AppStoryCtx {
     /// Type a string into the prompt as individual key events.
     pub fn type_prompt(&mut self, s: &str) {
         self.app.type_text(s);
+    }
+
+    pub fn preview_transcript_search(&mut self, query: &str) {
+        self.app.focus_transcript();
+        self.app
+            .configure_transcript_vim(true, tui::smelt_edit::VimMode::Normal);
+        self.app.type_char('/');
+        self.app.type_text(query);
+        self.app.render_silent();
     }
 
     /// Press `ctrl+s` to toggle the prompt stash. Use this to drive the

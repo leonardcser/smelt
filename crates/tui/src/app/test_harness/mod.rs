@@ -225,7 +225,7 @@ pub struct TestApp {
 }
 
 pub struct TestAppBuilder {
-    vim: bool,
+    vim: Option<bool>,
     mode: AgentMode,
     mode_cycle: Option<Vec<AgentMode>>,
     init_lua: Option<std::path::PathBuf>,
@@ -242,7 +242,7 @@ pub struct TestAppBuilder {
 impl Default for TestAppBuilder {
     fn default() -> Self {
         Self {
-            vim: false,
+            vim: None,
             mode: AgentMode::normal(),
             mode_cycle: None,
             init_lua: None,
@@ -259,9 +259,9 @@ impl Default for TestAppBuilder {
 }
 
 impl TestAppBuilder {
-    /// Enable vim-mode on the prompt window.
+    /// Set a fixed startup override for vim-mode on the prompt window.
     pub fn with_vim(mut self, vim: bool) -> Self {
-        self.vim = vim;
+        self.vim = Some(vim);
         self
     }
 
@@ -356,7 +356,7 @@ impl TestAppBuilder {
         home: PathBuf,
         runtime_dir: Option<tempfile::TempDir>,
     ) -> TestApp {
-        let (engine, cmd_rx, output_injector) = match self.engine {
+        let (engine, mut cmd_rx, output_injector) = match self.engine {
             Some(engine) => (engine, None, None),
             None => {
                 let (engine, cmd_rx, output_injector) = EngineHandle::for_test();
@@ -368,11 +368,12 @@ impl TestAppBuilder {
             smelt_core::permissions::Permissions::load(),
         );
         let settings = smelt_core::config::ResolvedSettings {
-            vim: self.vim,
+            vim: self.vim.unwrap_or_default(),
             ..Default::default()
         };
         let shared_session = Arc::new(Mutex::new(None));
 
+        let explicit_mode_cycle = self.mode_cycle.clone();
         let mode_cycle = self.mode_cycle.unwrap_or_else(|| {
             vec![
                 AgentMode::normal(),
@@ -401,8 +402,22 @@ impl TestAppBuilder {
             ..Default::default()
         };
         let available_models = desired.resolve_models();
-        let startup_overrides = smelt_core::StartupOverrides::default();
+        let startup_overrides = smelt_core::StartupOverrides {
+            mode_cycle: explicit_mode_cycle,
+            settings: self
+                .vim
+                .map(|vim| {
+                    (
+                        "vim".to_string(),
+                        smelt_core::config::SettingValue::Bool(vim),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
         let selections = smelt_core::RuntimeSelections {
+            model: self.model_available.then(|| "test/test-model".to_string()),
             mode: Some(self.mode),
             reasoning_effort: Some(ReasoningEffort::Off),
             ..Default::default()
@@ -450,14 +465,14 @@ impl TestAppBuilder {
             xdg_cache,
             xdg_data,
             xdg_runtime,
-            cwd,
+            cwd.clone(),
             std::num::NonZeroUsize::new(1).unwrap(),
         ));
         let mut lua = crate::lua::LuaRuntime::new_for_runtime(
             &env,
             Some(lua_config_dir),
             self.lua_runtime_override,
-            None,
+            Some(cwd.clone()),
         );
         // Match production's pre-frontend phase so candidate reloads inherit
         // early.lua builtin opt-outs and CLI declarations as launch inputs.
@@ -466,6 +481,25 @@ impl TestAppBuilder {
         if let Some(path) = self.init_lua {
             lua.set_init_lua_path(path);
         }
+        lua.load_bundled_early();
+        if self.model_available {
+            lua.lua()
+                .load(
+                    r#"
+                    _G.__smelt_test_provider = smelt.provider.register("test", {
+                        type = "openai-compatible",
+                        api_base = "https://example.invalid/v1",
+                        api_key_env = "",
+                        models = { "test-model" },
+                    })
+                    "#,
+                )
+                .exec()
+                .expect("register harness test provider");
+        }
+        lua.load_early_init();
+        lua.load_project_early_init(&cwd);
+        lua.freeze_launch_inputs();
 
         let session_persistence = if self.ephemeral {
             crate::app::SessionPersistence::ephemeral().expect("ephemeral session directory")
@@ -483,22 +517,25 @@ impl TestAppBuilder {
             Arc::clone(&clock) as Arc<dyn engine::clock::Clock>,
             env,
             crate::app::TuiAppOptions {
+                startup_selections: selections,
                 session_persistence,
                 ..Default::default()
             },
         );
 
-        // Match production startup: re-run bootstrap + autoload + init.lua
-        // with a live frontend host so module bodies that touch TUI surfaces
-        // (e.g. `smelt.prompt.win():on(...)`) behave as they do during
-        // production startup via `bring_up_lua` →
-        // `lua.reload`. Stories skip the `on_ready` drain on purpose:
-        // it's reserved for interactive decoration (splash banner, etc.)
-        // that storybook snapshots should not include.
-        let _ = app.bring_up_lua_for_harness();
+        // Match production startup by finishing generation-zero loading with a
+        // live frontend host. Stories skip the `on_ready` drain on purpose:
+        // it is reserved for interactive decoration that storybook snapshots
+        // should not include.
+        if let Some(error) = app.finish_lua_launch(false) {
+            panic!("test app Lua launch failed: {error}");
+        }
         app.conversation.clear_pending_history_appends();
         app.pump_lua();
         app.drain_idle_work();
+        if let Some(rx) = cmd_rx.as_mut() {
+            while rx.try_recv().is_ok() {}
+        }
 
         // Pin spinner glyph and wall-clock time for snapshot determinism.
         // The production `smelt.spinner.glyph()` and `wave_color_at()` use
@@ -724,10 +761,42 @@ mod runtime_path_tests {
         first.app.save_session_and_flush();
         second.app.save_session_and_flush();
 
-        assert!(first.app.core.sessions.dir_for_id(&first_id).is_dir());
-        assert!(second.app.core.sessions.dir_for_id(&second_id).is_dir());
-        assert!(!first.app.core.sessions.dir_for_id(&second_id).is_dir());
-        assert!(!second.app.core.sessions.dir_for_id(&first_id).is_dir());
+        assert!(smelt_store::LineageSessionReader::open_existing(
+            first.app.core.sessions.sessions_dir(),
+            &first_id,
+        )
+        .is_ok());
+        assert!(smelt_store::LineageSessionReader::open_existing(
+            second.app.core.sessions.sessions_dir(),
+            &second_id,
+        )
+        .is_ok());
+        assert!(smelt_store::LineageSessionReader::try_open_existing(
+            first.app.core.sessions.sessions_dir(),
+            &second_id,
+        )
+        .unwrap()
+        .is_none());
+        assert!(smelt_store::LineageSessionReader::try_open_existing(
+            second.app.core.sessions.sessions_dir(),
+            &first_id,
+        )
+        .unwrap()
+        .is_none());
+        assert!(!first
+            .app
+            .core
+            .sessions
+            .dir_for_id(&first_id)
+            .join("session.db")
+            .exists());
+        assert!(!second
+            .app
+            .core
+            .sessions
+            .dir_for_id(&second_id)
+            .join("session.db")
+            .exists());
         assert_eq!(first.app.core.sessions.list_sessions()[0].id, first_id);
         assert_eq!(second.app.core.sessions.list_sessions()[0].id, second_id);
 

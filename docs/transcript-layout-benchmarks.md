@@ -85,12 +85,36 @@ calling internal persistence methods:
 cargo xtask bench-transcript-layout --runs 3 --skip-nav \
   --workloads tiny_blocks_1mib --save-request-history 10000
 
+# Isolate Enter from unrelated layout and navigation benchmarks.
+TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 20 \
+  --save-request-only --save-request-operations submit_enter \
+  --save-request-history 1024
+
+# Generate mixed user, assistant, reasoning, note, tool, and large
+# object-backed metadata rows.
+TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 10 \
+  --save-request-only --save-request-operations submit_enter \
+  --save-request-history 1024 --save-request-heterogeneous
+
+# Replay a copied session.db fixture through normal resume and Enter paths.
+TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 20 \
+  --save-request-fixture ~/tmp/session-fixtures/<session-id> \
+  --save-request-operations submit_enter
+
 # Byte and memory scaling with 2,000 history items of at least 8 KiB each.
 mkdir -p ~/tmp
 TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 1 --skip-nav \
   --workloads tiny_blocks_1mib --save-request-history 2000 \
   --save-request-item-bytes 8192
 ```
+
+A fixture path may name either a session directory or its `session.db`. The
+parent directory name must be the session ID. The harness uses SQLite's online
+backup API so the snapshot includes committed WAL state, writes it into an
+isolated test home, resumes it through the normal application path, and mutates
+only that snapshot. Backup and resume setup are reported separately and are
+outside the measured Enter interval. Never benchmark by opening a live session
+database read-write.
 
 The suite reports:
 
@@ -106,18 +130,152 @@ The suite reports:
   allocation-free token-estimate JSON counting. The same prepared message vector
   is reused by the provider when the prepare hook does not mutate history.
 
-Each hot-path sample includes calling-thread allocations, process-wide allocation
-and deallocation churn, retained allocator bytes before and after the operation,
-full invariant-validation row count, derived search-blob rows and bytes, and the
-number and bytes of user turns cloned during submission. The process-level
-`BENCH_MEMORY_SUMMARY` reports peak RSS for the complete isolated benchmark
-process.
+Summaries report mean, standard deviation, p50, p95, p99, and maximum latency.
+Each sample separates total Enter time from persistence queue wait,
+`submit_turn`, SQLite transaction commit, complete `agent:begin_turn`, and
+project-context preparation. It also includes calling-thread allocations,
+process-wide allocation and deallocation churn, retained allocator bytes before
+and after the operation, full invariant-validation row count, derived
+search-blob rows and bytes, and the number and bytes of user turns cloned during
+submission. Perf rows expose storage row counts, object hydration, Lua callback
+cost, and other nested phases. The process-level `BENCH_MEMORY_SUMMARY` reports
+peak RSS for the complete isolated benchmark process.
 
 Use a dedicated invocation for each size when comparing peak RSS. Peak RSS is a
 process high-water mark and cannot be attributed to a later phase after a larger
 fixture has already run. Put `TMPDIR` under `~/tmp` for 50 MiB and 500 MiB runs so
 large temporary databases and spill files do not consume the limited `/tmp`
 filesystem.
+
+### Production-session Enter investigation
+
+Synthetic short rows did not reproduce the reported multi-second send stall. The
+investigation therefore inventoried production sessions read-only, copied selected
+databases with SQLite's online backup API, and pressed Enter through the normal
+resume, Lua callback, canonical persistence, durable receipt, and `StartTurn`
+path. SQLite backup and resume time are outside the measured interval.
+
+The first reproduced stall was not the durable commit. A 1,934-row, object-heavy
+session spent about 1.76 seconds in a title-plugin Lua callback. The callback read
+a bounded message list and then requested history only to count it. The resumed
+`LiveSession` tail implementation hydrated and cloned up to 200 object-heavy
+rows, repeatedly serialized the shrinking vector, removed rows from the front,
+and repeated that work for both reads. The final implementation gives count-only
+callers `smelt.session.history_len()` and reads tails newest-first under item and
+hydrated-byte budgets. Object reference sizes are checked before hydration, each
+accepted row is serialized once, and the in-memory and SQLite-backed paths have
+the same bounds.
+
+A second fixture exposed a deeper canonical-history problem. Clearing a named
+context item at history index 6,526 physically removed that row and rewrote the
+following 1,017 rows. Named context updates and clears are now append-only
+semantic events. Updates state that they replace earlier same-name context;
+clears append a model-visible tombstone. Identical current values remain no-ops.
+This preserves canonical and provider-cache prefixes and makes Enter proportional
+to the new event suffix instead of the distance to an old context row.
+
+| Isolated release workload | Runs | Enter mean | Enter p95 | Enter max | First redraw mean | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| 1,024 generated short rows | 30 | 14.346 ms | 14.899 ms | 15.270 ms | not sampled | 34,192 KiB |
+| 1,934-row object-heavy copy | 20 | 30.216 ms | 30.966 ms | 31.188 ms | not sampled | 46,264 KiB |
+| 758-row heterogeneous copy | 3 | 18.982 ms | 19.499 ms | 19.499 ms | 5.248 ms | 43,936 KiB |
+| 7,543-row deep-context copy | 3 | 44.702 ms | 45.729 ms | 45.729 ms | 7.558 ms | 47,748 KiB |
+| 19-row copy in a 2.1 GB database | 1 | 13.445 ms | 13.445 ms | 13.445 ms | 1.164 ms | 35,148 KiB |
+
+On the primary object-heavy copy, Enter improved from 1,834.364 to 30.216 ms
+mean and from 1,850.012 to 31.188 ms maximum. Peak RSS fell from 78,204 to
+46,264 KiB. Allocation churn fell from at least 5.3 GB in the Lua callback alone
+to about 10 MB process-wide. The 7,543-row context case improved from 2,629.844
+to 44.702 ms mean, from 518,632 to 47,748 KiB peak RSS, and from about 1.3 GB to
+7.9 MB of process-wide allocation churn. Its persistence work changed from deleting and
+reinserting 1,017 rows to appending two rows.
+
+The exact append decision is shared by materialized and resumed sessions. Resumed
+planning uses scalar SQLite projections for visibility, note kind, context name,
+and effective mode rather than hydrating payload rows. Canonical controls are
+also checked between best-effort request-audit transactions, so queued audits do
+not delay a new turn. A compatibility alias accepts the schema-v8
+`descriptor_len` field in opaque `last_session_commit` receipts while always
+writing the current `transcript_record_count` name.
+
+SQLite `synchronous = FULL`, one canonical transaction per Enter, and provider
+dispatch only after the durable receipt remain unchanged. Representative final
+commits took about 5 to 10 ms. Lowering durability or dispatching optimistically
+would add correctness risk without addressing either reproduced stall.
+
+## Complete-process startup and shutdown
+
+The lifecycle benchmark launches the release-fast `smelt` executable in a real
+PTY, not an application constructor or store microbenchmark. Each run copies a
+fixture with SQLite's online backup API into fresh isolated HOME and XDG roots,
+performs normal `--resume`, waits until unique tail content is visibly rendered,
+sends Ctrl-C, and waits for clean process teardown. It measures launch to first
+frame separately from launch to loaded session, because an early frame that still
+says the session is upgrading is responsive but not yet usable. It also reports
+Ctrl-C-to-exit latency and samples process RSS on Linux.
+
+The feature-gated integration harness can be run directly against any safe copied
+fixture. The source database is opened read-only and every per-run copy is removed
+before the next run, so large fixtures do not consume `runs` times their size:
+
+```bash
+cargo test --profile release-fast --test startup \
+  interactive_lifecycle_benchmark_suite --no-run
+
+SMELT_LIFECYCLE_BENCH_TARGET=1 \
+SMELT_LIFECYCLE_BENCH_FIXTURE="$HOME/tmp/session-fixtures/<session-id>" \
+SMELT_LIFECYCLE_BENCH_READY_TEXT='<unique visible tail text>' \
+SMELT_LIFECYCLE_BENCH_RUNS=10 \
+cargo test --profile release-fast --test startup \
+  interactive_lifecycle_benchmark_suite -- --nocapture
+```
+
+Use a copied session directory, never a live session. The ready marker should be
+text in the initially visible resumed tail. `SMELT_LIFECYCLE_BENCH_FIRST_FRAME_TEXT`
+can override the default `local/test-model` marker, and
+`SMELT_LIFECYCLE_BENCH_TIMEOUT_SECS` can raise the per-phase timeout. Timing begins
+inside the test after Cargo has built the executable, so compiler work is excluded.
+
+A copied production schema-v9 fixture reproduced a one-time upgrade stall. The
+first frame appeared in about 155 ms, but the requested session did not become
+visible for 5,560.811 ms mean. Process perf spans localized 5.06 seconds to the
+schema-v10 transcript extent-profile backfill. Its 256-row batch query used a
+`LEFT JOIN` from `transcript_blocks` to `transcript_search`; SQLite chose an indexed
+range read for the blocks but a full scan of `transcript_search` for every batch.
+
+The backfill now uses record-index keyset pagination and a correlated
+`transcript_search.block_idx` scalar lookup that SQLite resolves through the
+integer primary key. All six width profiles are computed in one pass over each
+text value instead of traversing it once per width. Query-plan tests require the
+indexed keyset and primary-key lookup and reject a search-table scan. Semantic
+tests compare the shared profile pass with independent width calculations, and a
+multi-batch test covers interleaved current profiles and record-index gaps.
+
+| Complete-process workload | Runs | First frame mean | Loaded session mean | Graceful exit mean | Peak RSS mean |
+|---|---:|---:|---:|---:|---:|
+| Schema-v9 object-heavy upgrade, before | 5 | 154.815 ms | 5,560.811 ms | 42.919 ms | 83,296 KiB |
+| Schema-v9 object-heavy upgrade, after | 5 | 154.107 ms | 370.904 ms | 32.769 ms | 86,330 KiB |
+| Schema-v9 object-heavy upgrade, final harness | 10 | 157.542 ms | 298.309 ms | 17.632 ms | 89,752 KiB |
+| Schema-v10, 7,543 rows and 1.49 GB | 3 | not sampled | 228.048 ms | 73.063 ms | 84,811 KiB |
+| Schema-v10, 19 rows in a 2.17 GB database | 3 | not sampled | 182.023 ms | 50.484 ms | 73,524 KiB |
+
+The optimized backfill itself fell from 5.06 seconds to 57.2 ms: 12.6 ms to read
+and compute 4,415 profiles, 39.0 ms to update them, and 5.5 ms to rebuild extent
+chunks. Complete loaded-session startup improved about 15 times. The unchanged
+first-frame time confirms that the defect was upgrade work after initial terminal
+setup rather than process bootstrap or rendering. In the final ten-run permanent
+harness, loaded-session startup had 4.597 ms standard deviation, 305.296 ms p95
+and maximum, while shutdown had 1.039 ms standard deviation and 19.416 ms p95
+and maximum.
+
+Already-current sparse resume is bounded by the loaded tail and viewport state,
+not complete history length or database bytes: both schema-v10 fixtures became
+usable in 182 to 228 ms despite radically different row counts and database
+sizes. Graceful shutdown completed in 16 to 77 ms across realistic runs. These
+measurements did not justify startup caches, deferred migration, weaker
+persistence, or asynchronous shutdown complexity; correcting the migration query
+plan addressed the only reproduced lifecycle stall while preserving exact
+migration and durability semantics.
 
 ## Large search and resume
 

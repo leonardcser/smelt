@@ -18,10 +18,37 @@ pub fn mode_change_note(note: &str) -> String {
 pub const CONTEXT_NOTE_PREFIX: &str = "[smelt:context] ";
 
 /// Build a synthetic user-note text appended to history when app context that
-/// the model needs to know changes. The wrapper keeps the model-visible marker
-/// stable while the body carries the dynamic facts.
+/// the model needs to know changes. Each note supersedes earlier session context
+/// without rewriting the canonical history prefix.
 pub fn context_note(note: &str) -> String {
-    format!("{CONTEXT_NOTE_PREFIX}{}", note.trim())
+    format!(
+        "{CONTEXT_NOTE_PREFIX}Session context replaces earlier session context:\n{}",
+        note.trim()
+    )
+}
+
+/// Build a model-visible tombstone for session context that is no longer active.
+pub fn cleared_session_context_note() -> String {
+    format!(
+        "{CONTEXT_NOTE_PREFIX}Session context is no longer active. Ignore earlier session context."
+    )
+}
+
+/// Build a model-visible update for independently managed named context.
+pub fn named_context_note(name: &str, note: &str) -> String {
+    let name = serde_json::to_string(name).expect("serialize context note name");
+    format!(
+        "{CONTEXT_NOTE_PREFIX}Named context {name} replaces earlier context with the same name:\n{}",
+        note.trim()
+    )
+}
+
+/// Build a model-visible tombstone for named context that is no longer active.
+pub fn cleared_context_note(name: &str) -> String {
+    let name = serde_json::to_string(name).expect("serialize context note name");
+    format!(
+        "{CONTEXT_NOTE_PREFIX}Named context {name} is no longer active. Ignore earlier context with this name."
+    )
 }
 
 /// Marker prefix on synthetic user messages that announce a background process

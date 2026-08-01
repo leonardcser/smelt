@@ -116,6 +116,8 @@ pub struct DoctorReport {
     pub healthy: bool,
     pub issues: Vec<String>,
     pub stats: StorageStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<crate::SearchProjectionStatus>,
 }
 
 #[derive(Debug)]
@@ -123,6 +125,53 @@ pub struct SessionDb {
     conn: Connection,
     path: PathBuf,
     object_compression: ObjectCompression,
+}
+
+pub fn backup_session_database(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> Result<()> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let source = Connection::open_with_flags(source, flags)?;
+    backup_connection_to(&source, destination.as_ref())
+}
+
+pub(crate) fn backup_connection_to(source: &Connection, destination: &Path) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(destination)?;
+    secure_file(destination)?;
+    drop(file);
+
+    let result = (|| {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let mut destination_db = Connection::open_with_flags(destination, flags)?;
+        let backup = rusqlite::backup::Backup::new(source, &mut destination_db)?;
+        backup.run_to_completion(128, std::time::Duration::from_millis(10), None)?;
+        drop(backup);
+        let check: String = destination_db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if check != "ok" {
+            return Err(StoreError::Integrity(format!(
+                "backup quick_check failed: {check}"
+            )));
+        }
+        drop(destination_db);
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(destination)?
+            .sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result
 }
 
 impl SessionDb {
@@ -498,47 +547,12 @@ impl SessionDb {
             healthy: issues.is_empty(),
             issues,
             stats,
+            search: None,
         })
     }
 
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<()> {
-        let destination = destination.as_ref();
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = options.open(destination)?;
-        secure_file(destination)?;
-        drop(file);
-
-        let result = (|| {
-            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-            let mut destination_db = Connection::open_with_flags(destination, flags)?;
-            let backup = rusqlite::backup::Backup::new(&self.conn, &mut destination_db)?;
-            backup.run_to_completion(128, std::time::Duration::from_millis(10), None)?;
-            drop(backup);
-            let check: String =
-                destination_db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-            if check != "ok" {
-                return Err(StoreError::Integrity(format!(
-                    "backup quick_check failed: {check}"
-                )));
-            }
-            drop(destination_db);
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(destination)?
-                .sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(destination);
-        }
-        result
+        backup_connection_to(&self.conn, destination.as_ref())
     }
 
     pub(crate) fn close_hygiene(&self) -> Result<bool> {
@@ -1265,59 +1279,6 @@ impl SessionDb {
         Ok(full)
     }
 
-    pub(crate) fn load_full_session_prefix(
-        &self,
-        history_len: usize,
-    ) -> Result<Option<FullSession>> {
-        let tx = self.conn.unchecked_transaction()?;
-        let Some(mut full) = load_full_session_from(&tx)? else {
-            tx.commit()?;
-            return Ok(None);
-        };
-        if history_len > full.history.len() {
-            return Err(StoreError::Integrity(format!(
-                "fork history length {history_len} exceeds source length {}",
-                full.history.len()
-            )));
-        }
-        let history_len_u64 = u64::try_from(history_len)
-            .map_err(|_| StoreError::Integrity("fork history length exceeds u64".into()))?;
-        let record_block_end = tx.query_row(
-            "SELECT COALESCE(
-                 MIN(block_idx),
-                 (SELECT COALESCE(MAX(block_idx) + 1, 0) FROM transcript_blocks)
-             )
-             FROM transcript_blocks
-             WHERE history_idx >= ?1",
-            [checked_sql_coordinate(
-                history_len_u64,
-                "fork history length",
-            )?],
-            |row| row.get::<_, i64>(0),
-        )?;
-        let record_block_end = u64::try_from(record_block_end)
-            .map_err(|_| StoreError::Integrity("negative transcript block index".into()))?;
-        full.history.truncate(history_len);
-        full.turn_metas
-            .retain(|(index, _)| *index <= history_len_u64);
-        full.metadata_snapshots
-            .retain(|(index, _)| *index <= history_len_u64);
-        full.context_snapshots
-            .retain(|(index, _)| *index <= history_len_u64);
-        full.transcript_records.retain(|record| {
-            record.block_idx < record_block_end
-                && record
-                    .history_idx
-                    .is_none_or(|index| index < history_len_u64)
-        });
-        full.session.head.history_len = history_len_u64.into();
-        full.session.head.transcript_record_count = u64::try_from(full.transcript_records.len())
-            .map_err(|_| StoreError::Integrity("record length exceeds u64".into()))?
-            .into();
-        tx.commit()?;
-        Ok(Some(full))
-    }
-
     pub(crate) fn repaired_checkpoint_metadata(
         &self,
     ) -> Result<Option<(StoredSession, SessionMetadata)>> {
@@ -1475,8 +1436,44 @@ impl SessionDb {
         history::read_history_items_range(&self.conn, range)
     }
 
+    pub fn read_history_items_tail(
+        &self,
+        end: usize,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<Vec<protocol::HistoryItem>> {
+        history::read_history_items_tail(&self.conn, end, max_items, max_bytes)
+    }
+
     pub fn legacy_attachment_references(&self, history_end: usize) -> Result<Vec<String>> {
         history::legacy_attachment_references(&self.conn, history_end)
+    }
+
+    pub fn history_any_transcript_visible_before(&self, end: usize) -> Result<bool> {
+        history::history_any_transcript_visible_before(&self.conn, end)
+    }
+
+    pub fn history_note_projection_at(
+        &self,
+        index: usize,
+    ) -> Result<Option<protocol::HistoryNoteProjection>> {
+        history::history_note_projection_at(&self.conn, index)
+    }
+
+    pub fn history_last_context_note_index_before(
+        &self,
+        end: usize,
+        name: &str,
+    ) -> Result<Option<usize>> {
+        history::history_last_context_note_index_before(&self.conn, end, name)
+    }
+
+    pub fn history_mode_before(&self, end: usize) -> Result<Option<String>> {
+        history::history_mode_before(&self.conn, end)
+    }
+
+    pub fn history_base_mode_range(&self, range: std::ops::Range<usize>) -> Result<Option<String>> {
+        history::history_base_mode_range(&self.conn, range)
     }
 
     pub fn history_item_count(&self) -> Result<usize> {
@@ -1803,7 +1800,10 @@ fn read_transcript_record_tail_for_rows(
     }
 }
 
-fn estimated_transcript_record_rows(records: &[StoredTranscriptBlock], width: u16) -> u64 {
+pub(crate) fn estimated_transcript_record_rows(
+    records: &[StoredTranscriptBlock],
+    width: u16,
+) -> u64 {
     let width = u64::from(width.max(1));
     records
         .iter()
@@ -1838,6 +1838,11 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
         StoreError::Integrity(message) | StoreError::MissingObject { reference: message } => {
             SessionCommitFailure::Integrity { message }
         }
+        StoreError::LegacyMigrationRequired { session_id } => SessionCommitFailure::Integrity {
+            message: format!(
+                "session {session_id} uses the previous storage format and requires explicit migration"
+            ),
+        },
         StoreError::OrphanedSession { found } => SessionCommitFailure::Integrity {
             message: format!(
                 "orphaned session schema version {found} has no canonical identity or session content"
@@ -1995,6 +2000,12 @@ fn prepare_canonical_update(
         record_object_hashes,
         side_tables,
     })
+}
+
+pub(crate) fn validate_lineage_session_commit(
+    command: &SessionCommit,
+) -> std::result::Result<(), SessionCommitFailure> {
+    prepare_canonical_update(command).map(|_| ())
 }
 
 fn apply_canonical_update_in_transaction(
@@ -2209,6 +2220,15 @@ pub fn submit_turn_fingerprint(
     let prepared = prepare_canonical_update(&command.session)?;
     validate_new_turn(&command.turn, command.session.history.final_len)?;
     canonical_submit_turn_fingerprint(command, &prepared.side_tables)
+        .map_err(session_commit_failure_from_store_error)
+}
+
+pub fn turn_transition_fingerprint(
+    command: &TurnTransition,
+) -> std::result::Result<String, SessionCommitFailure> {
+    let prepared = prepare_canonical_update(&command.session)?;
+    validate_turn_transition_command(command)?;
+    canonical_turn_transition_fingerprint(command, &prepared.side_tables)
         .map_err(session_commit_failure_from_store_error)
 }
 
@@ -2634,7 +2654,7 @@ fn persist_canonical_receipt(
 
 const MAX_TERMINAL_REASON_BYTES: usize = 1024;
 
-fn validate_new_turn(
+pub(crate) fn validate_new_turn(
     turn: &NewTurn,
     final_history_len: HistoryLen,
 ) -> std::result::Result<(), SessionCommitFailure> {
@@ -2787,7 +2807,7 @@ fn insert_ready_turn(
     Ok(turn_id)
 }
 
-fn validate_turn_transition_command(
+pub(crate) fn validate_turn_transition_command(
     command: &TurnTransition,
 ) -> std::result::Result<(), SessionCommitFailure> {
     validate_turn_id(command.turn_id)?;
@@ -3499,7 +3519,7 @@ fn nonnegative_sql_value(value: i64, field: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| StoreError::Integrity(format!("{field} is negative: {value}")))
 }
 
-fn file_size(path: &Path) -> Result<u64> {
+pub(crate) fn file_size(path: &Path) -> Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
@@ -3507,7 +3527,7 @@ fn file_size(path: &Path) -> Result<u64> {
     }
 }
 
-fn sqlite_companion_path(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sqlite_companion_path(path: &Path, suffix: &str) -> PathBuf {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return path.with_extension(suffix.trim_start_matches('-'));
     };
@@ -3619,7 +3639,6 @@ fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
 
     use super::*;
     use crate::{
@@ -3693,12 +3712,6 @@ mod tests {
             records: &[StoredTranscriptBlock],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
         fn repair_test_checkpoint(&mut self) -> std::result::Result<usize, SessionCommitFailure>;
-        fn apply_test_prefix_to(
-            &self,
-            destination: impl AsRef<Path>,
-            state: &TestSessionModel,
-            history_len: usize,
-        ) -> Result<()>;
     }
 
     impl SessionDbTestExt for SessionDb {
@@ -3799,33 +3812,6 @@ mod tests {
                 test_full_replacement_command(stored.head, stored.identity, metadata, &full)?;
             self.apply_session_commit(&command)?;
             Ok(1)
-        }
-
-        fn apply_test_prefix_to(
-            &self,
-            destination: impl AsRef<Path>,
-            state: &TestSessionModel,
-            history_len: usize,
-        ) -> Result<()> {
-            let full = self.load_full_session_prefix(history_len)?.ok_or_else(|| {
-                StoreError::Integrity("source session metadata is missing".into())
-            })?;
-            let mut destination = SessionDb::open(destination)?;
-            let command = test_full_replacement_command(
-                StoreHead::default(),
-                test_identity_from_model(state),
-                test_metadata_from_model(state)?,
-                &full,
-            )
-            .map_err(|failure| {
-                StoreError::Integrity(format!("invalid prefix fixture: {failure:?}"))
-            })?;
-            destination
-                .apply_session_commit(&command)
-                .map_err(|failure| {
-                    StoreError::Integrity(format!("prefix commit failed: {failure:?}"))
-                })?;
-            Ok(())
         }
     }
 
@@ -7007,71 +6993,6 @@ mod tests {
             ]
         );
         assert_eq!(db.test_session_model().unwrap().unwrap().history_len, 3);
-    }
-
-    #[test]
-    fn copy_prefix_to_forks_store_without_copied_tail() {
-        let source_dir = tempfile::tempdir().unwrap();
-        let dest_dir = tempfile::tempdir().unwrap();
-        let mut db = SessionDb::open(source_dir.path().join("session.db")).unwrap();
-        let history = vec![
-            protocol::HistoryItem::user(protocol::Content::text("one")),
-            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
-                Some(protocol::Content::text("two")),
-                None,
-                Vec::new(),
-            )),
-            protocol::HistoryItem::user(protocol::Content::text("three")),
-        ];
-        db.apply_test_fixture(&TestSessionFixture {
-            state: test_session_state("source", history.len()),
-            history_start_idx: 0,
-            history_len: history.len(),
-            history: history.clone(),
-            turn_metas: vec![
-                (0, serde_json::json!({"turn":"first"})),
-                (2, serde_json::json!({"turn":"fork-boundary"})),
-            ],
-            metadata_snapshots: vec![(2, serde_json::json!({"slug":"prefix"}))],
-            context_snapshots: Vec::new(),
-        })
-        .unwrap();
-        let transcript_records = vec![
-            transcript_user_record_with_history(0, 0, "one", "one"),
-            transcript_record_with_history(1, 1, "two", "two"),
-            transcript_user_record_with_history(2, 2, "three", "three"),
-        ];
-        db.apply_test_transcript_records(&transcript_records)
-            .unwrap();
-
-        let mut fork_state = test_session_state("fork", 2);
-        fork_state.parent_id = Some("source".into());
-        db.apply_test_prefix_to(dest_dir.path().join("session.db"), &fork_state, 2)
-            .unwrap();
-
-        let fork = SessionDb::open_read_only(dest_dir.path().join("session.db")).unwrap();
-        assert_eq!(fork.test_session_model().unwrap().unwrap().id, "fork");
-        assert_eq!(fork.history_item_count().unwrap(), 2);
-        assert_eq!(
-            fork.read_history_items_range(0..3).unwrap(),
-            history[..2].to_vec()
-        );
-        assert_eq!(fork.transcript_record_count().unwrap(), 2);
-        assert_eq!(
-            fork.load_full_session().unwrap().unwrap().turn_metas,
-            vec![
-                (0, serde_json::json!({"turn":"first"})),
-                (2, serde_json::json!({"turn":"fork-boundary"})),
-            ]
-        );
-        assert_eq!(
-            fork.search_transcript_candidates("three").unwrap(),
-            Vec::<TranscriptSearchCandidate>::new()
-        );
-        assert_eq!(
-            fork.read_all_transcript_records().unwrap(),
-            transcript_records[..2].to_vec()
-        );
     }
 
     #[test]

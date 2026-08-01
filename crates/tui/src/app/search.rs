@@ -1,6 +1,10 @@
-use crate::app::transcript::{TranscriptProjectionHint, TranscriptSearchBound};
+use crate::app::transcript::{
+    TranscriptProjectionHint, TranscriptSearchAnchor, TranscriptSearchBound,
+};
 use crate::app::transcript_search::{
-    previous_search_position, TranscriptSearchIndex, TranscriptSearchSession, TranscriptSearchStore,
+    previous_search_position, SqliteTranscriptCandidateBlocks, TranscriptSearchContext,
+    TranscriptSearchIndex, TranscriptSearchSession, TranscriptSearchStore, TranscriptSearchWorker,
+    TranscriptSearchWorkerRequest, TranscriptSearchWorkerResult,
 };
 use crate::app::TuiApp;
 use crate::smelt_edit::{
@@ -98,11 +102,92 @@ impl SearchSession {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug)]
+struct TranscriptSearchPreviewAnchor {
+    anchor: TranscriptSearchAnchor,
+    width: u16,
+    target_screen_row: RowIndex,
+    origin_block_idx: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SearchPreviewAnchor {
+    target: WinId,
+    target_buf: BufId,
+    origin: DocPosition,
+    scroll_top: RowIndex,
+    transcript: Option<TranscriptSearchPreviewAnchor>,
+}
+
+#[derive(Clone, Debug)]
+struct LiveSearchState {
+    generation: u64,
+    target: WinId,
+    target_buf: BufId,
+    direction: SearchDirection,
+    context: TranscriptSearchContext,
+    query: String,
+    awaiting_worker: bool,
+    confirmed: bool,
+    original: SearchPreviewAnchor,
+}
+
 pub(crate) struct SearchState {
     pub(crate) session: Option<SearchSession>,
     pub(super) transcript_index: Option<TranscriptSearchIndex>,
     pub(super) transcript_store: Option<TranscriptSearchStore>,
+    live: Option<LiveSearchState>,
+    worker: Option<TranscriptSearchWorker>,
+    next_generation: u64,
+    #[cfg(test)]
+    worker_delay: std::time::Duration,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            session: None,
+            transcript_index: None,
+            transcript_store: None,
+            live: None,
+            worker: None,
+            next_generation: 1,
+            #[cfg(test)]
+            worker_delay: std::time::Duration::ZERO,
+        }
+    }
+}
+
+impl SearchState {
+    fn advance_generation(&mut self) -> u64 {
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("transcript search generation overflow");
+        generation
+    }
+
+    fn cancel_worker(&mut self) -> u64 {
+        let generation = self.advance_generation();
+        if let Some(worker) = &self.worker {
+            worker.cancel(generation);
+        }
+        generation
+    }
+
+    fn request_worker(
+        &mut self,
+        event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
+        request: TranscriptSearchWorkerRequest,
+    ) {
+        let worker = self
+            .worker
+            .get_or_insert_with(|| TranscriptSearchWorker::spawn(event_tx));
+        #[cfg(test)]
+        worker.set_delay(self.worker_delay);
+        worker.request(request);
+    }
 }
 
 impl TuiApp {
@@ -121,6 +206,328 @@ impl TuiApp {
         if let Some(win) = self.ui.win_mut(session.target) {
             win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
         }
+    }
+
+    fn transcript_search_context(&self) -> TranscriptSearchContext {
+        TranscriptSearchContext {
+            session_id: self.conversation.session().id.clone(),
+        }
+    }
+
+    fn capture_search_preview_anchor(&mut self, target: WinId) -> Option<SearchPreviewAnchor> {
+        let target_buf = self.ui.win(target)?.buf;
+        let origin = self.search_origin(target)?;
+        let scroll_top = self.ui.win(target)?.scroll_top();
+        let transcript = if self.transcript_document_is_attached_to(target) {
+            let width = self.transcript_width() as u16;
+            let anchor = self
+                .conversation
+                .transcript_search_anchor_at_row(&self.lua, width, origin.row);
+            let origin_block_idx = match anchor {
+                TranscriptSearchAnchor::Content { block_id, .. } => Some(block_id.get()),
+                TranscriptSearchAnchor::EstimatedRow(_) => self
+                    .conversation
+                    .transcript_search_block_at_row(&self.lua, width, origin.row, true)
+                    .map(|block_id| block_id.get()),
+            };
+            Some(TranscriptSearchPreviewAnchor {
+                anchor,
+                width,
+                target_screen_row: origin.row.saturating_sub(scroll_top),
+                origin_block_idx,
+            })
+        } else {
+            None
+        };
+        Some(SearchPreviewAnchor {
+            target,
+            target_buf,
+            origin,
+            scroll_top,
+            transcript,
+        })
+    }
+
+    fn restore_search_preview_anchor(&mut self, original: SearchPreviewAnchor) {
+        if self
+            .ui
+            .win(original.target)
+            .is_none_or(|window| window.buf != original.target_buf)
+        {
+            return;
+        }
+        if let Some(transcript) = original.transcript {
+            let window_scroll_before = self.transcript_scroll_top();
+            let hint = TranscriptProjectionHint::SearchProjectedRow {
+                width: transcript.width,
+                anchor: transcript.anchor,
+                start_byte_col: original.origin.byte_col,
+                row: original.origin.row,
+            };
+            self.record_transcript_scroll_intent_with_hint(
+                "search_restore",
+                crate::app::transcript_scroll_trace::TranscriptScrollIntent::SearchJump {
+                    anchor: transcript.anchor,
+                    target_screen_row: transcript.target_screen_row,
+                    match_start_byte_col: original.origin.byte_col,
+                    match_end_byte_col: original.origin.byte_col,
+                },
+                window_scroll_before,
+                hint,
+            );
+            return;
+        }
+        self.reveal_position(
+            original.target,
+            original.origin,
+            crate::app::reveal::RevealOptions::default(),
+        );
+        if let Some(window) = self.ui.win_mut(original.target) {
+            window.pin_scroll(original.scroll_top);
+        }
+    }
+
+    pub(crate) fn begin_live_search(&mut self, target: WinId, direction: SearchDirection) {
+        let Some(original) = self.capture_search_preview_anchor(target) else {
+            return;
+        };
+        self.clear_search();
+        let context = self.transcript_search_context();
+        let search = self.overlays.search_state_mut();
+        let generation = search.cancel_worker();
+        search.live = Some(LiveSearchState {
+            generation,
+            target,
+            target_buf: original.target_buf,
+            direction,
+            context,
+            query: String::new(),
+            awaiting_worker: false,
+            confirmed: false,
+            original,
+        });
+    }
+
+    pub(crate) fn update_live_search(
+        &mut self,
+        target: WinId,
+        direction: SearchDirection,
+        query: String,
+    ) {
+        let current_context = self.transcript_search_context();
+        let original = {
+            let Some(live) = self.overlays.search_state().live.as_ref() else {
+                return;
+            };
+            if live.target != target
+                || live.direction != direction
+                || self.ui.win(target).map(|window| window.buf) != Some(live.target_buf)
+                || live.context != current_context
+                || live.query == query
+            {
+                return;
+            }
+            live.original
+        };
+
+        let generation = {
+            let search = self.overlays.search_state_mut();
+            let generation = search.cancel_worker();
+            let live = search.live.as_mut().expect("live search exists");
+            live.generation = generation;
+            live.query.clone_from(&query);
+            live.awaiting_worker = false;
+            generation
+        };
+
+        if query.is_empty() || query.contains('\n') {
+            self.clear_search();
+            self.restore_search_preview_anchor(original);
+            return;
+        }
+        if !self.transcript_document_is_attached_to(target) {
+            self.submit_search(target, direction, query);
+            return;
+        }
+
+        smelt_perf::perf::record_value(
+            "search:transcript:projection_requested",
+            u64::from(self.conversation.request_search_projection()),
+        );
+        if !self.conversation.transcript_records_persisted() {
+            let block_indices = self.dirty_transcript_candidate_blocks(&query);
+            self.apply_live_transcript_candidates(
+                generation,
+                current_context,
+                query,
+                direction,
+                SqliteTranscriptCandidateBlocks {
+                    available: !block_indices.is_empty(),
+                    block_indices,
+                },
+            );
+            return;
+        }
+
+        let request = TranscriptSearchWorkerRequest {
+            generation,
+            context: current_context,
+            session_dir: self
+                .conversation
+                .transcript()
+                .session_dir()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| self.conversation.current_session_dir()),
+            query,
+            origin_block_idx: original
+                .transcript
+                .and_then(|anchor| anchor.origin_block_idx),
+            direction,
+        };
+        let event_tx = self.platform.app_event_sender();
+        let search = self.overlays.search_state_mut();
+        if let Some(live) = search.live.as_mut() {
+            live.awaiting_worker = true;
+        }
+        search.request_worker(event_tx, request);
+    }
+
+    fn apply_live_transcript_candidates(
+        &mut self,
+        generation: u64,
+        context: TranscriptSearchContext,
+        query: String,
+        direction: SearchDirection,
+        mut candidates: SqliteTranscriptCandidateBlocks,
+    ) {
+        let Some(live) = self.overlays.search_state().live.clone() else {
+            return;
+        };
+        if live.generation != generation
+            || live.context != context
+            || live.query != query
+            || live.direction != direction
+            || context != self.transcript_search_context()
+            || self
+                .ui
+                .win(live.target)
+                .is_none_or(|window| window.buf != live.target_buf)
+            || !self.transcript_document_is_attached_to(live.target)
+        {
+            return;
+        }
+
+        candidates
+            .block_indices
+            .extend(self.dirty_transcript_candidate_blocks(&query));
+        candidates.block_indices.sort_unstable();
+        candidates.block_indices.dedup();
+        candidates.available |= !candidates.block_indices.is_empty();
+        if let Some(mut transcript_session) = self.new_transcript_search_session_with_candidates(
+            &query,
+            live.original.origin,
+            direction,
+            candidates,
+            live.original
+                .transcript
+                .and_then(|anchor| anchor.origin_block_idx),
+        ) {
+            let current = self.advance_transcript_search(
+                &mut transcript_session,
+                &query,
+                live.original.origin,
+                direction,
+                None,
+            );
+            self.overlays.install_search_session(SearchSession {
+                target: live.target,
+                target_buf: live.target_buf,
+                query,
+                direction,
+                backend: SearchBackend::Transcript(transcript_session),
+            });
+            if let Some(matched) = current {
+                self.jump_to_transcript_search_match(matched);
+            } else {
+                self.restore_search_preview_anchor(live.original);
+            }
+        } else {
+            self.clear_search();
+            self.restore_search_preview_anchor(live.original);
+        }
+
+        let search = self.overlays.search_state_mut();
+        if let Some(active) = search
+            .live
+            .as_mut()
+            .filter(|active| active.generation == generation)
+        {
+            active.awaiting_worker = false;
+            if active.confirmed {
+                search.live = None;
+            }
+        }
+    }
+
+    pub(crate) fn handle_transcript_search_worker_result(
+        &mut self,
+        result: TranscriptSearchWorkerResult,
+    ) {
+        self.apply_live_transcript_candidates(
+            result.generation,
+            result.context,
+            result.query,
+            result.direction,
+            result.candidates,
+        );
+    }
+
+    pub(crate) fn confirm_live_search(
+        &mut self,
+        target: WinId,
+        direction: SearchDirection,
+        query: String,
+    ) {
+        if query.is_empty() || query.contains('\n') {
+            self.cancel_live_search(true);
+            return;
+        }
+        let search = self.overlays.search_state_mut();
+        let Some(live) = search.live.as_mut() else {
+            self.submit_search(target, direction, query);
+            return;
+        };
+        if live.target != target || live.direction != direction || live.query != query {
+            self.submit_search(target, direction, query);
+            return;
+        }
+        live.confirmed = true;
+        if !live.awaiting_worker {
+            search.live = None;
+        }
+    }
+
+    pub(crate) fn cancel_live_search(&mut self, restore_original: bool) {
+        let live = {
+            let search = self.overlays.search_state_mut();
+            let live = search.live.take();
+            search.cancel_worker();
+            live
+        };
+        self.clear_search();
+        if restore_original {
+            if let Some(live) = live {
+                self.restore_search_preview_anchor(live.original);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_transcript_search_worker_delay_for_harness(
+        &mut self,
+        delay: std::time::Duration,
+    ) {
+        self.overlays.search_state_mut().worker_delay = delay;
     }
 
     pub(crate) fn handle_search_key_for_target(&mut self, target: WinId, k: KeyEvent) -> bool {
