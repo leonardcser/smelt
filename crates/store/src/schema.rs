@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 pub(crate) const CANONICAL_CONTENT_TABLES: &[&str] = &[
     "session_state",
@@ -182,9 +182,10 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if current == 10 {
         migrate_to_v11(conn)?;
+        current = 11;
     }
-    if (1..=10).contains(&current) {
-        migrate_to_v11(conn)?;
+    if current == 11 {
+        migrate_to_v12(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -573,12 +574,6 @@ fn migrate_to_v9(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_to_v11(conn: &Connection) -> Result<()> {
-    // Legacy rows remain canonical until an explicit lineage conversion succeeds.
-    conn.execute_batch(LINEAGE_SCHEMA)?;
-    Ok(())
-}
-
 fn migrate_to_v10(conn: &Connection) -> Result<()> {
     for (column, definition) in [
         (
@@ -638,6 +633,12 @@ fn migrate_to_v11(conn: &Connection) -> Result<()> {
              ADD COLUMN checkpoint_events_json TEXT",
         )?;
     }
+    Ok(())
+}
+
+fn migrate_to_v12(conn: &Connection) -> Result<()> {
+    // Legacy rows remain canonical until an explicit lineage conversion succeeds.
+    conn.execute_batch(LINEAGE_SCHEMA)?;
     Ok(())
 }
 
@@ -1253,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn v10_to_v11_migration_adds_checkpoint_event_history() {
+    fn v10_to_v12_migration_adds_checkpoint_event_history() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy_schema_v10()).unwrap();
         conn.execute(
@@ -1263,7 +1264,7 @@ mod tests {
         .unwrap();
         set_user_version(&conn, 10).unwrap();
 
-        migrate(&mut conn, "test-v11").unwrap();
+        migrate(&mut conn, "test-v12").unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(column_exists(&conn, "session_state", "checkpoint_events_json").unwrap());
@@ -1280,7 +1281,22 @@ mod tests {
     }
 
     #[test]
-    fn v9_to_v11_migration_backfills_extent_profiles_and_chunks() {
+    fn v11_to_v12_migration_adds_lineage_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        assert!(!table_exists(&conn, "lineage_branches").unwrap());
+        assert!(column_exists(&conn, "session_state", "checkpoint_events_json").unwrap());
+        set_user_version(&conn, 11).unwrap();
+
+        migrate(&mut conn, "test-v12").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(table_exists(&conn, "lineage_branches").unwrap());
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v9_to_v12_migration_backfills_extent_profiles_and_chunks() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy_schema_v9()).unwrap();
         assert!(!column_exists(&conn, "transcript_blocks", "extent_profile_version").unwrap());
@@ -1307,7 +1323,7 @@ mod tests {
         }
         set_user_version(&conn, 9).unwrap();
 
-        migrate(&mut conn, "test-v11").unwrap();
+        migrate(&mut conn, "test-v12").unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
@@ -1344,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v11_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v12_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -1555,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v11_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v12_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1625,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v11_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v12_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1665,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_to_v11_migration_preserves_canonical_session_state() {
+    fn v5_to_v12_migration_preserves_canonical_session_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "foreign_keys", false).unwrap();
@@ -1680,7 +1696,7 @@ mod tests {
         .unwrap();
         set_user_version(&conn, 5).unwrap();
 
-        migrate(&mut conn, "test-v11").unwrap();
+        migrate(&mut conn, "test-v12").unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
@@ -1703,7 +1719,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_to_v11_migration_caches_transcript_record_count_without_rebuilding() {
+    fn v6_to_v12_migration_caches_transcript_record_count_without_rebuilding() {
         let mut conn = Connection::open_in_memory().unwrap();
         let v6_schema = schema_v7()
             .replace(
@@ -1789,7 +1805,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v7_to_v11_migration_adds_empty_canonical_turn_state() {
+    fn v7_to_v12_migration_adds_empty_canonical_turn_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&schema_v7()).unwrap();
         conn.execute(
@@ -1853,7 +1869,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v8_to_v11_migration_renames_transcript_storage_vocabulary() {
+    fn v8_to_v12_migration_renames_transcript_storage_vocabulary() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy_schema_v8()).unwrap();
         conn.execute(
@@ -2027,7 +2043,7 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
     }
 
     #[test]
-    fn v10_to_v11_migration_preserves_legacy_rows_and_adds_empty_lineage_schema() {
+    fn v10_to_v12_migration_preserves_legacy_rows_and_adds_empty_lineage_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         conn.execute(
@@ -2039,9 +2055,9 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
         .unwrap();
         set_user_version(&conn, 10).unwrap();
 
-        migrate(&mut conn, "test-v11").unwrap();
+        migrate(&mut conn, "test-v12").unwrap();
 
-        assert_eq!(user_version(&conn).unwrap(), 11);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
             conn.query_row(
                 "SELECT id || ':' || title FROM session_state WHERE singleton = 1",

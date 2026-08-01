@@ -2599,7 +2599,7 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
         .map(|i| format!("pub fn generated_{i:03}() -> usize {{ {i} }}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.start_tool(
+    let invocation_id = app.start_tool(
         "tall-write-correctness".into(),
         "write_file".into(),
         protocol::StyledLines::from_plain("write generated/tall.rs"),
@@ -2609,7 +2609,7 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
         ]),
     );
     app.finish_tool(
-        "tall-write-correctness",
+        invocation_id,
         smelt_core::transcript_model::ToolStatus::Ok,
         None,
         Some(std::time::Duration::from_millis(50)),

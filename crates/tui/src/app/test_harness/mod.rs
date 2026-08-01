@@ -474,13 +474,11 @@ impl TestAppBuilder {
             self.lua_runtime_override,
             Some(cwd.clone()),
         );
-        // Match production's pre-frontend phase so candidate reloads inherit
-        // early.lua builtin opt-outs and CLI declarations as launch inputs.
-        lua.load_bundled_early();
-        lua.load_early_init();
         if let Some(path) = self.init_lua {
             lua.set_init_lua_path(path);
         }
+        // Match production's pre-frontend phase so candidate reloads inherit
+        // early.lua builtin opt-outs and CLI declarations as launch inputs.
         lua.load_bundled_early();
         if self.model_available {
             lua.lua()

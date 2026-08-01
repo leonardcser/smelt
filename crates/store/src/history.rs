@@ -2461,6 +2461,7 @@ mod tests {
                     metadata: Some(json!({ "payload": "x".repeat(32 * 1024) })),
                 },
                 elapsed_ms: None,
+                called_at_ms: None,
             }],
         ));
         let newest = vec![

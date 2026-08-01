@@ -1815,6 +1815,7 @@ mod tests {
             fast_mode: Some(false),
             accounting_json: None,
             checkpoint_json: None,
+            checkpoint_events_json: None,
             context_tokens: None,
             context_tokens_history_len: None,
             display_context_tokens: None,
@@ -2090,6 +2091,7 @@ mod tests {
                     metadata: Some(serde_json::json!({"payload": "x".repeat(16 * 1024)})),
                 },
                 elapsed_ms: None,
+                called_at_ms: None,
             }],
         ));
         let mut command = initial_commit(&session_id);

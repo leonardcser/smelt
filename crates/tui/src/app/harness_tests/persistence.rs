@@ -1658,11 +1658,7 @@ fn store_backed_usage_records_canonical_history_coordinate() {
     });
     resumed.save_session_and_flush();
 
-    let reader = smelt_store::SessionReader::open_existing(resumed.session_dir()).unwrap();
-    let stored = reader
-        .stored_session()
-        .unwrap()
-        .expect("stored session metadata");
+    let stored = lineage_reader(&session_id).snapshot().unwrap();
     assert_eq!(stored.head.history_len.get(), 2);
     assert_eq!(stored.metadata.context_tokens, Some(200));
     assert_eq!(stored.metadata.context_tokens_history_len, Some(2));
@@ -2461,9 +2457,10 @@ fn sparse_resume_compaction_skips_unoriginated_compacted_prefix() {
     );
     resumed.save_session_and_flush();
 
-    let durable_marker = smelt_store::SessionReader::open_existing(resumed.session_dir())
-        .unwrap()
-        .read_all_transcript_records()
+    let reader = lineage_reader(&session_id);
+    let state = reader.snapshot().unwrap();
+    let durable_marker = reader
+        .transcript_range(0, state.transcript_len)
         .unwrap()
         .into_iter()
         .find(|record| record.kind == "compacted")

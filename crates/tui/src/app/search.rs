@@ -223,13 +223,14 @@ impl TuiApp {
             let anchor = self
                 .conversation
                 .transcript_search_anchor_at_row(&self.lua, width, origin.row);
-            let origin_block_idx = match anchor {
-                TranscriptSearchAnchor::Content { block_id, .. } => Some(block_id.get()),
-                TranscriptSearchAnchor::EstimatedRow(_) => self
-                    .conversation
-                    .transcript_search_block_at_row(&self.lua, width, origin.row, true)
-                    .map(|block_id| block_id.get()),
-            };
+            let origin_block_idx = anchor
+                .block_id()
+                .map(|block_id| block_id.get())
+                .or_else(|| {
+                    self.conversation
+                        .transcript_search_block_at_row(&self.lua, width, origin.row, true)
+                        .map(|block_id| block_id.get())
+                });
             Some(TranscriptSearchPreviewAnchor {
                 anchor,
                 width,

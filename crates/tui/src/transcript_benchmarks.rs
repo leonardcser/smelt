@@ -1902,7 +1902,7 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
         .join("\n");
     let bytes = content.len();
     let tool_record = 80;
-    app.start_tool(
+    let invocation_id = app.start_tool(
         "tall-write-file".into(),
         "write_file".into(),
         protocol::StyledLines::from_plain("write generated/large.rs"),
@@ -1912,7 +1912,7 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
         ]),
     );
     app.finish_tool(
-        "tall-write-file",
+        invocation_id,
         smelt_core::transcript_model::ToolStatus::Ok,
         None,
         Some(std::time::Duration::from_millis(250)),

@@ -1682,6 +1682,13 @@ pub(crate) enum TranscriptSearchAnchor {
 }
 
 impl TranscriptSearchAnchor {
+    pub(crate) fn block_id(self) -> Option<BlockId> {
+        match self {
+            Self::Content(anchor) => Some(anchor.block_id),
+            Self::EstimatedRow(_) => None,
+        }
+    }
+
     pub(crate) fn position_key(self, byte_col: usize) -> TranscriptSearchPositionKey {
         match self {
             Self::Content(anchor) => TranscriptSearchPositionKey {
