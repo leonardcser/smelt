@@ -6,16 +6,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
-use crate::access::{
-    ensure_private_directory, ensure_private_directory_all, reject_symlink,
-    rename_without_replacement, sync_directory, SessionReader,
-};
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
+use crate::filesystem::{
+    ensure_private_directory, ensure_private_directory_all, reject_symlink,
+    rename_without_replacement, sync_directory,
+};
 use crate::history::StoredTranscriptBlock;
 use crate::lineage::{self, BranchId, LineageId, LineageSessionSnapshot};
 use crate::meta::{SessionIdentity, SessionMetadata};
 use crate::session_commit::{SaveReceipt, SessionCommit, SessionCommitFailure, StoreHead};
+
+mod maintenance;
+use maintenance::*;
+mod storage;
+use storage::*;
 
 const LINEAGE_DB_FILENAME: &str = "lineage.db";
 const LINEAGES_DIRECTORY: &str = "lineages";
@@ -72,9 +77,7 @@ impl LineageLease {
         Self::acquire_named(root, lineage.as_str())
     }
 
-    fn acquire_locator(root: &Path, branch: &BranchId) -> Result<Self> {
-        // COMPAT(session-lineage-v1): share the previous per-session root lock so
-        // migration and lineage lifecycle operations cannot overlap an old writer.
+    fn acquire_branch(root: &Path, branch: &BranchId) -> Result<Self> {
         Self::acquire_named(root, branch.as_str())
     }
 
@@ -115,7 +118,7 @@ pub struct OwnedLineageWriter {
     startup_recovery: Option<crate::session_commit::StartupRecoveryReceipt>,
     connection_invalidated: bool,
     _lease: LineageLease,
-    locator_lease: Option<LineageLease>,
+    branch_lease: Option<LineageLease>,
 }
 
 impl OwnedLineageWriter {
@@ -130,16 +133,11 @@ impl OwnedLineageWriter {
     fn open_inner(root: &Path, session_id: String, create: bool) -> Result<Self> {
         let branch = BranchId::new(session_id)?;
         validate_storage_root(root)?;
-        let locator_lease = LineageLease::acquire_locator(root, &branch)?;
+        let branch_lease = LineageLease::acquire_branch(root, &branch)?;
         let located = locate_lineage(root, &branch)?;
         let is_new = located.is_none();
         let lineage = match (located, create) {
             (Some(lineage), _) => lineage,
-            (None, true) if legacy_database_path(root, &branch).is_file() => {
-                return Err(StoreError::LegacyMigrationRequired {
-                    session_id: branch.as_str().to_owned(),
-                });
-            }
             (None, true) => create_lineage_database(root)?,
             (None, false) => {
                 return Err(StoreError::Integrity(format!(
@@ -154,7 +152,7 @@ impl OwnedLineageWriter {
         if !lineage_exists(&conn, &lineage)? {
             lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
         }
-        crate::schema::migrate_lineage(&mut conn, lineage.as_str())?;
+        crate::schema::initialize_lineage_schema(&mut conn)?;
         let startup_recovery = lineage::recover_lineage_nonterminal_turns(
             &mut conn,
             &lineage,
@@ -169,7 +167,7 @@ impl OwnedLineageWriter {
             startup_recovery,
             connection_invalidated: false,
             _lease: lease,
-            locator_lease: is_new.then_some(locator_lease),
+            branch_lease: is_new.then_some(branch_lease),
         })
     }
 
@@ -192,7 +190,7 @@ impl OwnedLineageWriter {
             command,
             ObjectCompression::default(),
         )?;
-        self.locator_lease = None;
+        self.branch_lease = None;
         Ok(receipt)
     }
 
@@ -234,7 +232,7 @@ impl OwnedLineageWriter {
                 "persist:submit_turn:index_rows",
                 transcript_record_rows,
             );
-            self.locator_lease = None;
+            self.branch_lease = None;
         }
         result
     }
@@ -447,17 +445,6 @@ impl OwnedLineageWriter {
 
     pub fn database_path(&self) -> PathBuf {
         lineage_database_path(&self.root, &self.lineage)
-    }
-
-    pub fn is_staged(&self) -> bool {
-        false
-    }
-
-    pub fn publish(&mut self) -> Result<PathBuf> {
-        self.database_path()
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| StoreError::Integrity("lineage database has no parent".into()))
     }
 
     pub fn invalidate_connection(&mut self) {
@@ -819,6 +806,30 @@ impl LineageSessionReader {
         )
     }
 
+    pub fn transcript_extent_chunks(&self) -> Result<Vec<crate::TranscriptExtentChunk>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_extent_chunks(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+        )
+    }
+
+    pub fn transcript_estimated_rows(
+        &self,
+        range: crate::TranscriptRecordRange,
+        width: u16,
+    ) -> Result<u64> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_estimated_rows(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            range,
+            width,
+        )
+    }
+
     pub fn transcript_record_slice_with_total(
         &self,
         range: crate::TranscriptRecordRange,
@@ -864,7 +875,8 @@ impl LineageSessionReader {
                 crate::TranscriptRecordRange::from(start..total_count),
                 total_count,
             )?;
-            if crate::db::estimated_transcript_record_rows(&slice.records, width) >= target_rows
+            if crate::history::estimated_transcript_record_rows(&slice.records, width)
+                >= target_rows
                 || count == total_count
             {
                 smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes);
@@ -881,6 +893,23 @@ impl LineageSessionReader {
         direction: crate::TranscriptSearchDirection,
         limit: usize,
     ) -> Result<Vec<crate::TranscriptSearchCandidate>> {
+        self.search_transcript_candidate_page_with_cancellation(
+            query,
+            origin_block_idx,
+            direction,
+            limit,
+            || false,
+        )
+    }
+
+    pub fn search_transcript_candidate_page_with_cancellation(
+        &self,
+        query: &str,
+        origin_block_idx: Option<u64>,
+        direction: crate::TranscriptSearchDirection,
+        limit: usize,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Vec<crate::TranscriptSearchCandidate>> {
         crate::lineage_search::search_transcript_candidate_page(
             &self.conn,
             &self.path,
@@ -890,6 +919,7 @@ impl LineageSessionReader {
             origin_block_idx,
             direction,
             limit,
+            &cancelled,
         )
     }
 
@@ -915,7 +945,7 @@ impl LineageSessionReader {
     }
 
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<()> {
-        crate::db::backup_connection_to(&self.conn, destination.as_ref())
+        crate::diagnostics::backup_connection_to(&self.conn, destination.as_ref())
     }
 
     pub fn query_request_attempts(
@@ -1051,227 +1081,6 @@ pub fn verify_lineage_backup(
     lineage_doctor_report(&conn, path, &lineage, None)
 }
 
-fn lineage_turns(
-    conn: &Connection,
-    lineage: &LineageId,
-    branch: &BranchId,
-) -> Result<Vec<crate::StoredTurn>> {
-    let mut statement = conn.prepare(
-        "SELECT turn_id, submitted_history_idx, submitted_history_hash,
-                submitted_sequence, turn_kind, turn_state, continuation_of,
-                created_at_ms, started_at_ms, finished_at_ms, terminal_reason
-         FROM lineage_turns
-         WHERE lineage_id = ?1 AND session_id = ?2
-         ORDER BY turn_id",
-    )?;
-    let rows = statement.query_map((lineage.as_str(), branch.as_str()), |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-            row.get::<_, i64>(7)?,
-            row.get::<_, Option<i64>>(8)?,
-            row.get::<_, Option<i64>>(9)?,
-            row.get::<_, Option<String>>(10)?,
-        ))
-    })?;
-    let mut turns = Vec::new();
-    for row in rows {
-        let (
-            turn_id,
-            history_idx,
-            history_hash,
-            revision,
-            kind,
-            state,
-            continuation_of,
-            created_at_ms,
-            started_at_ms,
-            finished_at_ms,
-            terminal_reason,
-        ) = row?;
-        let turn_id = positive_u64(turn_id, "turn ID")?;
-        turns.push(crate::StoredTurn {
-            turn_id: crate::TurnId::new(turn_id),
-            submitted_history_idx: crate::HistoryIndex::new(nonnegative_u64(
-                history_idx,
-                "submitted history index",
-            )?),
-            submitted_history_hash: history_hash,
-            submitted_revision: crate::Revision::new(positive_u64(
-                revision,
-                "submitted branch sequence",
-            )?),
-            kind: crate::TurnKind::from_db(&kind).ok_or_else(|| {
-                StoreError::Integrity(format!("invalid lineage turn kind {kind:?}"))
-            })?,
-            state: crate::TurnState::from_db(&state).ok_or_else(|| {
-                StoreError::Integrity(format!("invalid lineage turn state {state:?}"))
-            })?,
-            continuation_of: continuation_of
-                .map(|value| positive_u64(value, "continuation turn ID").map(crate::TurnId::new))
-                .transpose()?,
-            created_at_ms: nonnegative_u64(created_at_ms, "turn created_at_ms")?,
-            started_at_ms: started_at_ms
-                .map(|value| nonnegative_u64(value, "turn started_at_ms"))
-                .transpose()?,
-            finished_at_ms: finished_at_ms
-                .map(|value| nonnegative_u64(value, "turn finished_at_ms"))
-                .transpose()?,
-            terminal_reason,
-        });
-    }
-    Ok(turns)
-}
-
-fn lineage_storage_stats(
-    conn: &Connection,
-    path: &Path,
-    branch: Option<&BranchId>,
-) -> Result<crate::StorageStats> {
-    let history_rows = count_query(
-        conn,
-        "SELECT COUNT(*) FROM lineage_payload_object_refs WHERE payload_kind = 'history'",
-        [],
-        "history payload rows",
-    )?;
-    let transcript_record_rows = count_query(
-        conn,
-        "SELECT COUNT(*) FROM lineage_payload_object_refs WHERE payload_kind = 'transcript'",
-        [],
-        "transcript payload rows",
-    )?;
-    let (object_rows, object_raw_bytes, object_stored_bytes): (i64, i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(raw_size), 0), COALESCE(SUM(stored_size), 0)
-             FROM objects",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    let request_rows = match branch {
-        Some(branch) => count_query(
-            conn,
-            "SELECT COUNT(*) FROM lineage_request_attempts WHERE session_id = ?1",
-            [branch.as_str()],
-            "branch request rows",
-        )?,
-        None => count_query(
-            conn,
-            "SELECT COUNT(*) FROM lineage_request_attempts",
-            [],
-            "lineage request rows",
-        )?,
-    };
-    Ok(crate::StorageStats {
-        database_bytes: crate::db::file_size(path)?,
-        wal_bytes: crate::db::file_size(&crate::db::sqlite_companion_path(path, "-wal"))?,
-        shm_bytes: crate::db::file_size(&crate::db::sqlite_companion_path(path, "-shm"))?,
-        history_rows,
-        transcript_record_rows,
-        object_rows: nonnegative_u64(object_rows, "object rows")?,
-        object_raw_bytes: nonnegative_u64(object_raw_bytes, "object raw bytes")?,
-        object_stored_bytes: nonnegative_u64(object_stored_bytes, "object stored bytes")?,
-        request_rows,
-    })
-}
-
-fn lineage_doctor_report(
-    conn: &Connection,
-    path: &Path,
-    lineage: &LineageId,
-    branch: Option<&BranchId>,
-) -> Result<crate::DoctorReport> {
-    let schema_version = crate::schema::user_version(conn)?;
-    let mut issues = Vec::new();
-    if let Err(error) = crate::schema::validate_lineage_schema(conn) {
-        issues.push(format!("schema: {error}"));
-    }
-    let mut quick_check = conn.prepare("PRAGMA quick_check")?;
-    for result in quick_check
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-    {
-        if result != "ok" {
-            issues.push(format!("quick_check: {result}"));
-        }
-    }
-    let mut foreign_key_check = conn.prepare("PRAGMA foreign_key_check")?;
-    for (table, rowid, parent, constraint) in foreign_key_check
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-    {
-        issues.push(format!(
-            "foreign_key_check: table={table} rowid={rowid:?} parent={parent} constraint={constraint}"
-        ));
-    }
-    let mut branches = conn.prepare(
-        "SELECT session_id FROM lineage_branches
-         WHERE lineage_id = ?1 AND deleted_at IS NULL
-         ORDER BY session_id",
-    )?;
-    let branches = branches
-        .query_map([lineage.as_str()], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if branches.is_empty() {
-        issues.push("lineage has no live branches".into());
-    }
-    for branch_id in branches {
-        let result = (|| {
-            let branch_id = BranchId::new(branch_id)?;
-            let snapshot = lineage::lineage_session_snapshot(conn, lineage, &branch_id)?;
-            lineage::validate_sequence(conn, lineage, &snapshot.history_root)?;
-            lineage::validate_sequence(conn, lineage, &snapshot.transcript_root)?;
-            Ok::<(), StoreError>(())
-        })();
-        if let Err(error) = result {
-            issues.push(format!("canonical branch: {error}"));
-        }
-    }
-    let stats = lineage_storage_stats(conn, path, branch)?;
-    let search = branch
-        .map(|branch| crate::lineage_search::search_projection_status(conn, path, lineage, branch))
-        .transpose()?;
-    Ok(crate::DoctorReport {
-        schema_version,
-        healthy: issues.is_empty(),
-        issues,
-        stats,
-        search,
-    })
-}
-
-fn count_query<P: rusqlite::Params>(
-    conn: &Connection,
-    sql: &str,
-    params: P,
-    field: &str,
-) -> Result<u64> {
-    let value = conn.query_row(sql, params, |row| row.get::<_, i64>(0))?;
-    nonnegative_u64(value, field)
-}
-
-fn nonnegative_u64(value: i64, field: &str) -> Result<u64> {
-    u64::try_from(value).map_err(|_| StoreError::Integrity(format!("{field} is negative")))
-}
-
-fn positive_u64(value: i64, field: &str) -> Result<u64> {
-    let value = nonnegative_u64(value, field)?;
-    if value == 0 {
-        return Err(StoreError::Integrity(format!("{field} must be positive")));
-    }
-    Ok(value)
-}
-
 fn public_snapshot(
     lineage: &LineageId,
     snapshot: LineageSessionSnapshot,
@@ -1288,506 +1097,6 @@ fn public_snapshot(
         transcript_len: snapshot.transcript_root.item_count(),
         side_tables: snapshot.side_tables,
     })
-}
-
-fn validate_storage_root(root: &Path) -> Result<()> {
-    if root.exists() {
-        ensure_private_directory(root)?;
-    }
-    Ok(())
-}
-
-struct StagedLineageDirectory {
-    path: PathBuf,
-    published: bool,
-}
-
-impl StagedLineageDirectory {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            published: false,
-        }
-    }
-
-    fn mark_published(&mut self) {
-        self.published = true;
-    }
-}
-
-impl Drop for StagedLineageDirectory {
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-}
-
-fn legacy_database_path(root: &Path, branch: &BranchId) -> PathBuf {
-    root.join(branch.as_str()).join("session.db")
-}
-
-pub fn migrate_legacy_session(
-    root: impl AsRef<Path>,
-    session_id: impl Into<String>,
-) -> Result<String> {
-    let root = root.as_ref();
-    validate_storage_root(root)?;
-    let branch = BranchId::new(session_id.into())?;
-    let _locator_lease = LineageLease::acquire_locator(root, &branch)?;
-    if let Some(lineage) = locate_lineage(root, &branch)? {
-        return Ok(lineage.as_str().to_owned());
-    }
-    if !legacy_database_path(root, &branch).is_file() {
-        return Err(StoreError::Integrity(format!(
-            "session {} has no previous-format database to migrate",
-            branch.as_str()
-        )));
-    }
-    migrate_legacy_session_locked(root, &branch).map(|lineage| lineage.as_str().to_owned())
-}
-
-// COMPAT(session-lineage-v1): read the immediately preceding per-session format
-// only when an explicit migration command requests conversion.
-fn migrate_legacy_session_locked(root: &Path, branch: &BranchId) -> Result<LineageId> {
-    let legacy_dir = root.join(branch.as_str());
-    let reader = SessionReader::open_existing(&legacy_dir)?;
-    let full = reader.load_full_session()?.ok_or_else(|| {
-        StoreError::Integrity(format!(
-            "legacy session {} has no canonical state",
-            branch.as_str()
-        ))
-    })?;
-    if full.session.identity.id != branch.as_str() {
-        return Err(StoreError::Integrity(format!(
-            "legacy session identity {} does not match {}",
-            full.session.identity.id,
-            branch.as_str()
-        )));
-    }
-    let turns = reader.turns()?;
-    let lineage_hash = crate::object::sha256_hex(
-        format!("smelt-legacy-lineage-v1\0{}", branch.as_str()).as_bytes(),
-    );
-    let lineage = LineageId::from_hex(lineage_hash[..32].to_owned())?;
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    ensure_private_directory_all(&lineages)?;
-    let directory = lineages.join(lineage.as_str());
-    let staging = lineages.join(format!(".staging-{}", lineage.as_str()));
-    let _lease = LineageLease::acquire(root, &lineage)?;
-    if directory.exists() {
-        return Err(StoreError::Integrity(format!(
-            "lineage {} is published without live branch {}; run `smelt session doctor {}` before retrying migration",
-            lineage.as_str(),
-            branch.as_str(),
-            branch.as_str()
-        )));
-    }
-    if staging.exists() {
-        ensure_private_directory(&staging)?;
-        fs::remove_dir_all(&staging)?;
-    }
-    fs::create_dir(&staging)?;
-    ensure_private_directory(&staging)?;
-    let mut staged = StagedLineageDirectory::new(staging.clone());
-    let path = staging.join(LINEAGE_DB_FILENAME);
-    let mut conn = open_write_connection(&path, &lineage)?;
-    crate::schema::migrate_lineage(&mut conn, lineage.as_str())?;
-    if !lineage_exists(&conn, &lineage)? {
-        lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
-    }
-    if branch_exists(&conn, &lineage, branch)? {
-        return Err(StoreError::Integrity(format!(
-            "new migration staging database already contains branch {}",
-            branch.as_str()
-        )));
-    }
-
-    conn.execute(
-        "ATTACH DATABASE ?1 AS legacy_import",
-        [legacy_database_path(root, branch)
-            .to_string_lossy()
-            .as_ref()],
-    )?;
-    let mut transaction = conn.transaction()?;
-    let history_len = u64::try_from(full.history.len())
-        .map_err(|_| StoreError::Integrity("legacy history length exceeds u64".into()))?;
-    let transcript_len = u64::try_from(full.transcript_records.len())
-        .map_err(|_| StoreError::Integrity("legacy transcript length exceeds u64".into()))?;
-    let mut metadata = full.session.metadata.clone();
-    if let Some(checkpoint) = metadata.checkpoint_json.as_mut() {
-        let is_past_history = checkpoint
-            .get("first_live_index")
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|first_live_index| first_live_index > history_len);
-        if is_past_history {
-            if let Some(object) = checkpoint.as_object_mut() {
-                object.insert("first_live_index".into(), serde_json::json!(0));
-            }
-        }
-    }
-    let side_tables = crate::session_commit::SideTableSuffixes {
-        start: crate::session_commit::HistoryIndex::ZERO,
-        turn_metas: full
-            .turn_metas
-            .iter()
-            .map(|(index, value)| {
-                (
-                    crate::session_commit::HistoryIndex::new(*index),
-                    value.clone(),
-                )
-            })
-            .collect(),
-        metadata_snapshots: full
-            .metadata_snapshots
-            .iter()
-            .map(|(index, value)| {
-                (
-                    crate::session_commit::HistoryIndex::new(*index),
-                    value.clone(),
-                )
-            })
-            .collect(),
-        context_snapshots: full
-            .context_snapshots
-            .iter()
-            .map(|(index, value)| {
-                (
-                    crate::session_commit::HistoryIndex::new(*index),
-                    value.clone(),
-                )
-            })
-            .collect(),
-    };
-    let command = SessionCommit {
-        session_id: branch.as_str().to_owned(),
-        expected: StoreHead::default(),
-        identity: full.session.identity.clone(),
-        metadata,
-        history: crate::session_commit::HistorySuffix {
-            start: crate::session_commit::HistoryIndex::ZERO,
-            final_len: crate::session_commit::HistoryLen::new(history_len),
-            items: full.history,
-        },
-        side_tables,
-        transcript_records: Some(crate::session_commit::TranscriptRecordSuffix {
-            start: crate::session_commit::TranscriptRecordIndex::ZERO,
-            records: full.transcript_records,
-        }),
-    };
-    lineage::apply_lineage_session_commit(
-        &mut transaction,
-        &lineage,
-        branch,
-        &command,
-        ObjectCompression::default(),
-    )
-    .map_err(|failure| {
-        StoreError::Integrity(format!("legacy lineage import failed: {failure:?}"))
-    })?;
-    transaction.execute_batch(
-        "INSERT OR IGNORE INTO objects SELECT * FROM legacy_import.objects;
-         INSERT INTO request_attempts SELECT * FROM legacy_import.request_attempts;
-         INSERT INTO request_object_refs SELECT * FROM legacy_import.request_object_refs;
-         INSERT INTO request_stats SELECT * FROM legacy_import.request_stats;",
-    )?;
-    transaction.execute(
-        "INSERT INTO lineage_request_attempts (lineage_id, session_id, request_attempt_id)
-         SELECT ?1, ?2, id FROM legacy_import.request_attempts",
-        (lineage.as_str(), branch.as_str()),
-    )?;
-    let imported = lineage::lineage_session_snapshot(&transaction, &lineage, branch)?;
-    let legacy_sequence = full.session.head.revision.get().max(1);
-    if legacy_sequence != 1 {
-        transaction.execute(
-            "INSERT INTO lineage_branch_revisions (
-                 lineage_id, session_id, branch_sequence, revision_id
-             ) VALUES (?1, ?2, ?3, ?4)",
-            (
-                lineage.as_str(),
-                branch.as_str(),
-                i64::try_from(legacy_sequence).map_err(|_| {
-                    StoreError::Integrity("legacy revision exceeds SQLite integer range".into())
-                })?,
-                imported.revision_id.as_str(),
-            ),
-        )?;
-        transaction.execute(
-            "UPDATE lineage_branches SET head_sequence = ?1
-             WHERE lineage_id = ?2 AND session_id = ?3",
-            (
-                i64::try_from(legacy_sequence).map_err(|_| {
-                    StoreError::Integrity("legacy revision exceeds SQLite integer range".into())
-                })?,
-                lineage.as_str(),
-                branch.as_str(),
-            ),
-        )?;
-    }
-    let mut next_turn_id = 1_u64;
-    for turn in turns {
-        next_turn_id = next_turn_id.max(turn.turn_id.get().saturating_add(1));
-        transaction.execute(
-            "INSERT INTO lineage_turns (
-                 lineage_id, session_id, turn_id, submitted_history_idx,
-                 submitted_history_hash, submitted_revision_id, submitted_sequence,
-                 turn_kind, turn_state, continuation_of, created_at_ms,
-                 started_at_ms, finished_at_ms, terminal_reason
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            rusqlite::params![
-                lineage.as_str(),
-                branch.as_str(),
-                i64::try_from(turn.turn_id.get()).map_err(|_| {
-                    StoreError::Integrity("legacy turn ID exceeds SQLite integer range".into())
-                })?,
-                i64::try_from(turn.submitted_history_idx.get()).map_err(|_| {
-                    StoreError::Integrity(
-                        "legacy submitted history index exceeds SQLite integer range".into(),
-                    )
-                })?,
-                turn.submitted_history_hash,
-                imported.revision_id.as_str(),
-                i64::try_from(turn.submitted_revision.get().max(1)).map_err(|_| {
-                    StoreError::Integrity(
-                        "legacy submitted revision exceeds SQLite integer range".into(),
-                    )
-                })?,
-                turn.kind.as_str(),
-                turn.state.as_str(),
-                turn.continuation_of
-                    .map(crate::session_commit::TurnId::get)
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| {
-                        StoreError::Integrity(
-                            "legacy continuation ID exceeds SQLite integer range".into(),
-                        )
-                    })?,
-                i64::try_from(turn.created_at_ms).map_err(|_| {
-                    StoreError::Integrity("legacy turn timestamp exceeds SQLite range".into())
-                })?,
-                turn.started_at_ms
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| {
-                        StoreError::Integrity(
-                            "legacy turn start timestamp exceeds SQLite range".into(),
-                        )
-                    })?,
-                turn.finished_at_ms
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| {
-                        StoreError::Integrity(
-                            "legacy turn finish timestamp exceeds SQLite range".into(),
-                        )
-                    })?,
-                turn.terminal_reason,
-            ],
-        )?;
-    }
-    transaction.execute(
-        "UPDATE lineage_branches SET next_turn_id = ?1
-         WHERE lineage_id = ?2 AND session_id = ?3",
-        (
-            i64::try_from(next_turn_id).map_err(|_| {
-                StoreError::Integrity("legacy next turn ID exceeds SQLite range".into())
-            })?,
-            lineage.as_str(),
-            branch.as_str(),
-        ),
-    )?;
-    let migrated = lineage::lineage_session_snapshot(&transaction, &lineage, branch)?;
-    let expected = StoreHead {
-        revision: crate::session_commit::Revision::new(legacy_sequence),
-        history_len: crate::session_commit::HistoryLen::new(history_len),
-        transcript_record_count: crate::session_commit::TranscriptRecordCount::new(transcript_len),
-    };
-    if migrated.head != expected {
-        return Err(StoreError::Integrity(format!(
-            "legacy lineage import head mismatch: expected {expected:?}, got {:?}",
-            migrated.head
-        )));
-    }
-    transaction.commit()?;
-    conn.execute_batch("DETACH DATABASE legacy_import")?;
-    conn.close().map_err(|(_, error)| StoreError::from(error))?;
-    sync_directory(&staging)?;
-    rename_without_replacement(&staging, &directory)?;
-    sync_directory(&lineages)?;
-    staged.mark_published();
-    Ok(lineage)
-}
-
-fn create_lineage_database(root: &Path) -> Result<LineageId> {
-    ensure_private_directory_all(root)?;
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    ensure_private_directory_all(&lineages)?;
-    loop {
-        let lineage = LineageId::random()?;
-        let directory = lineages.join(lineage.as_str());
-        let staging = lineages.join(format!(".staging-{}", lineage.as_str()));
-        match fs::create_dir(&staging) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(StoreError::Io(error)),
-        }
-        let prepare = (|| {
-            ensure_private_directory(&staging)?;
-            let path = staging.join(LINEAGE_DB_FILENAME);
-            let mut conn = open_write_connection(&path, &lineage)?;
-            crate::schema::migrate_lineage(&mut conn, lineage.as_str())?;
-            lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
-            conn.close().map_err(|(_, error)| StoreError::from(error))?;
-            sync_directory(&staging)
-        })();
-        if let Err(error) = prepare {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-        match rename_without_replacement(&staging, &directory) {
-            Ok(()) => {
-                sync_directory(&lineages)?;
-                return Ok(lineage);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_dir_all(&staging);
-            }
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(StoreError::Io(error));
-            }
-        }
-    }
-}
-
-fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<LineageId>> {
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    if lineages.exists() {
-        ensure_private_directory(&lineages)?;
-    }
-    let entries = match fs::read_dir(&lineages) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(StoreError::Io(error)),
-    };
-    let mut found = None;
-    for entry in entries {
-        let entry = entry?;
-        if entry.file_type()?.is_symlink() || !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(lineage) = LineageId::from_hex(name) else {
-            continue;
-        };
-        let path = entry.path().join(LINEAGE_DB_FILENAME);
-        reject_symlink(&path)?;
-        if !path.is_file() {
-            continue;
-        }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        let present = conn
-            .query_row(
-                "SELECT 1 FROM lineage_branches
-                 WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
-                (lineage.as_str(), branch.as_str()),
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if present {
-            if found.is_some() {
-                return Err(StoreError::Integrity(format!(
-                    "session {} belongs to multiple lineages",
-                    branch.as_str()
-                )));
-            }
-            found = Some(lineage);
-        }
-    }
-    Ok(found)
-}
-
-fn lineage_database_path(root: &Path, lineage: &LineageId) -> PathBuf {
-    root.join(LINEAGES_DIRECTORY)
-        .join(lineage.as_str())
-        .join(LINEAGE_DB_FILENAME)
-}
-
-fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<Connection> {
-    reject_symlink(path)?;
-    let new_database = !path.exists();
-    if let Some(parent) = path.parent() {
-        ensure_private_directory_all(parent)?;
-    }
-    let conn = Connection::open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    conn.busy_timeout(LINEAGE_BUSY_TIMEOUT)?;
-    if new_database {
-        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
-    }
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    let actual: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    if !actual.eq_ignore_ascii_case("wal") {
-        return Err(StoreError::Integrity(format!(
-            "lineage {} did not enter WAL mode",
-            lineage.as_str()
-        )));
-    }
-    Ok(conn)
-}
-
-fn branch_exists(conn: &Connection, lineage: &LineageId, branch: &BranchId) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM lineage_branches
-             WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
-            (lineage.as_str(), branch.as_str()),
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
-fn lineage_exists(conn: &Connection, lineage: &LineageId) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM lineage_identity WHERE lineage_id = ?1",
-            [lineage.as_str()],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
-fn unix_timestamp_millis() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .map_err(|error| {
-            StoreError::Integrity(format!("system clock precedes Unix epoch: {error}"))
-        })
-}
-
-fn unix_timestamp_seconds() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|error| {
-            StoreError::Integrity(format!("system clock precedes Unix epoch: {error}"))
-        })
 }
 
 #[cfg(test)]
@@ -1877,7 +1186,7 @@ mod tests {
     fn transcript_record(index: u64, indexed_text: String) -> StoredTranscriptBlock {
         StoredTranscriptBlock {
             block_idx: index.saturating_mul(2),
-            history_idx: Some(index),
+            history_idx: Some(0),
             kind: "assistant".into(),
             tool_call_id: None,
             tool_name: None,
@@ -2026,6 +1335,141 @@ mod tests {
     }
 
     #[test]
+    fn transcript_extent_profiles_follow_suffix_replacement_and_fork_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('4');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let initial = writer.commit_session(&initial_commit(&id)).unwrap();
+        let records = (0..130)
+            .map(|index| {
+                transcript_record(
+                    index,
+                    format!(
+                        "record {index}\n{}",
+                        "wrapped text ".repeat(index as usize % 17)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut append = initial_commit(&id);
+        append.expected = initial.current;
+        append.history = HistorySuffix {
+            start: HistoryIndex::new(1),
+            final_len: HistoryLen::new(1),
+            items: Vec::new(),
+        };
+        append.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: records.clone(),
+        });
+        let appended = writer.commit_session(&append).unwrap();
+
+        let replacement = (70..83)
+            .map(|index| transcript_record(index, format!("replacement {index}\nline two")))
+            .collect::<Vec<_>>();
+        let mut split = append;
+        split.expected = appended.current;
+        split.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::new(70),
+            records: replacement.clone(),
+        });
+        let replaced = writer.commit_session(&split).unwrap();
+
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        let chunks = reader.transcript_extent_chunks().unwrap();
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.record_count)
+                .collect::<Vec<_>>(),
+            vec![64, 19]
+        );
+        let mut expected = records[..70].to_vec();
+        expected.extend(replacement);
+        assert_eq!(
+            reader
+                .transcript_estimated_rows(crate::TranscriptRecordRange::from(0..83), 37)
+                .unwrap(),
+            crate::history::transcript_extent_profile(&expected).estimated_rows(37)
+        );
+
+        let fork_id = session_id('6');
+        writer.fork_current(&fork_id, 20).unwrap();
+        let fork = LineageSessionReader::open_existing(root.path(), &fork_id).unwrap();
+        assert_eq!(fork.transcript_extent_chunks().unwrap(), chunks);
+        drop(fork);
+        let retained_extent_rows = row_count(&writer.conn, "lineage_transcript_extent_chunks");
+        let lineage = LineageId::from_hex(writer.lineage_id().to_owned()).unwrap();
+        let branch = BranchId::new(id.clone()).unwrap();
+        let prior_root = lineage::lineage_session_snapshot(&writer.conn, &lineage, &branch)
+            .unwrap()
+            .transcript_root;
+
+        let source_only = transcript_record(83, "source-only suffix".into());
+        split.expected = replaced.current;
+        split.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::new(83),
+            records: vec![source_only.clone()],
+        });
+        writer.commit_session(&split).unwrap();
+        assert!(row_count(&writer.conn, "lineage_transcript_extent_chunks") > retained_extent_rows);
+
+        let current_root = lineage::lineage_session_snapshot(&writer.conn, &lineage, &branch)
+            .unwrap()
+            .transcript_root;
+        writer
+            .conn
+            .execute(
+                "UPDATE lineage_transcript_extent_chunks
+                 SET rows_20 = rows_20 + 1
+                 WHERE lineage_id = ?1 AND transcript_root_id = ?2 AND chunk_index = 1",
+                (lineage.as_str(), current_root.id().as_str()),
+            )
+            .unwrap();
+        let source_only = vec![serde_json::to_vec(&source_only).unwrap()];
+        assert!(matches!(
+            lineage::install_transcript_extent_chunks(
+                &writer.conn,
+                &lineage,
+                &prior_root,
+                &current_root,
+                83,
+                &source_only,
+            ),
+            Err(StoreError::Integrity(message)) if message.contains("conflicts with immutable root")
+        ));
+        writer
+            .conn
+            .execute(
+                "UPDATE lineage_transcript_extent_chunks
+                 SET rows_20 = rows_20 - 1
+                 WHERE lineage_id = ?1 AND transcript_root_id = ?2 AND chunk_index = 1",
+                (lineage.as_str(), current_root.id().as_str()),
+            )
+            .unwrap();
+
+        writer.delete_branch_by_id(&fork_id, 21).unwrap();
+        writer.rewind_to_sequence(3, 22).unwrap();
+        let mut extent_rows = row_count(&writer.conn, "lineage_transcript_extent_chunks");
+        let mut reclaimed_extent = false;
+        let mut complete = false;
+        for _ in 0..512 {
+            let reclamation = writer.reclaim_step(1).unwrap();
+            let remaining = row_count(&writer.conn, "lineage_transcript_extent_chunks");
+            assert!(extent_rows.saturating_sub(remaining) <= 1);
+            reclaimed_extent |= remaining < extent_rows;
+            extent_rows = remaining;
+            complete = reclamation.complete;
+            if complete {
+                break;
+            }
+        }
+        assert!(complete);
+        assert!(reclaimed_extent);
+        assert_eq!(extent_rows, retained_extent_rows);
+    }
+
+    #[test]
     fn lineage_sparse_transcript_slices_defer_nested_object_hydration() {
         let root = tempfile::tempdir().unwrap();
         let session_id = session_id('5');
@@ -2171,11 +1615,11 @@ mod tests {
             vec![
                 crate::TranscriptSearchCandidate {
                     block_idx: 4,
-                    history_idx: Some(2),
+                    history_idx: Some(0),
                 },
                 crate::TranscriptSearchCandidate {
                     block_idx: 514,
-                    history_idx: Some(257),
+                    history_idx: Some(0),
                 },
             ]
         );
@@ -2191,11 +1635,11 @@ mod tests {
             vec![
                 crate::TranscriptSearchCandidate {
                     block_idx: 514,
-                    history_idx: Some(257),
+                    history_idx: Some(0),
                 },
                 crate::TranscriptSearchCandidate {
                     block_idx: 598,
-                    history_idx: Some(299),
+                    history_idx: Some(0),
                 },
             ]
         );
@@ -2604,6 +2048,7 @@ mod tests {
         let projector = writer.spawn_search_projector().unwrap();
         projector.request();
         let source = LineageSessionReader::open_existing(root.path(), &source_id).unwrap();
+        assert_eq!(source.transcript_extent_chunks().unwrap().len(), 16);
         let source_status = wait_for_search_projection(&source);
         assert_eq!(source_status.total_segments, 1);
         assert_eq!(source_status.ready_segments, 1);
@@ -2672,7 +2117,7 @@ mod tests {
                 .unwrap(),
             vec![crate::TranscriptSearchCandidate {
                 block_idx: 2048,
-                history_idx: Some(1024),
+                history_idx: Some(0),
             }]
         );
         assert_eq!(
@@ -2686,7 +2131,7 @@ mod tests {
                 .unwrap(),
             vec![crate::TranscriptSearchCandidate {
                 block_idx: 2048,
-                history_idx: Some(1024),
+                history_idx: Some(0),
             }]
         );
         assert_eq!(
@@ -2700,7 +2145,7 @@ mod tests {
                 .unwrap(),
             vec![crate::TranscriptSearchCandidate {
                 block_idx: 4096,
-                history_idx: Some(2048),
+                history_idx: Some(0),
             }]
         );
         assert!(source
@@ -2769,7 +2214,7 @@ mod tests {
                 .unwrap(),
             vec![crate::TranscriptSearchCandidate {
                 block_idx: 4096,
-                history_idx: Some(2048),
+                history_idx: Some(0),
             }]
         );
     }
@@ -2888,12 +2333,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_id = session_id('7');
         let mut writer = OwnedLineageWriter::open(root.path(), &session_id).unwrap();
-        writer.commit_session(&initial_commit(&session_id)).unwrap();
+        let mut commit = initial_commit(&session_id);
+        commit.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: vec![transcript_record(0, "doctor extent".into())],
+        });
+        writer.commit_session(&commit).unwrap();
         writer
             .append_request_attempt(&request_entry(1), RequestAuditPayloadMode::Full)
             .unwrap();
         writer.vacuum().unwrap();
         let lineage_id = writer.lineage_id().to_owned();
+        let database_path = writer.database_path();
         writer.release().unwrap();
 
         let reader = LineageSessionReader::open_existing(root.path(), &session_id).unwrap();
@@ -2910,6 +2361,22 @@ mod tests {
         assert!(backup_report.healthy, "{:?}", backup_report.issues);
         assert_eq!(backup_report.stats.history_rows, 1);
         assert_eq!(backup_report.stats.request_rows, 1);
+
+        let corrupt = Connection::open(database_path).unwrap();
+        corrupt
+            .execute("DELETE FROM lineage_transcript_extent_chunks", [])
+            .unwrap();
+        drop(corrupt);
+        let report = reader.doctor_report().unwrap();
+        assert!(!report.healthy);
+        assert!(
+            report.issues.iter().any(|issue| {
+                issue.contains("canonical branch")
+                    && issue.contains("extent profiles cover 0 of 1 records")
+            }),
+            "{:?}",
+            report.issues
+        );
     }
 
     #[test]
@@ -3002,152 +2469,45 @@ mod tests {
     }
 
     #[test]
-    fn legacy_session_migration_preserves_head_and_canonical_content() {
+    fn degraded_direct_search_yields_promptly_when_its_generation_is_cancelled() {
         let root = tempfile::tempdir().unwrap();
         let id = session_id('e');
-        let mut legacy = crate::OwnedSessionWriter::open(root.path(), &id).unwrap();
-        let first = legacy.commit_session(&initial_commit(&id)).unwrap();
-        legacy.publish().unwrap();
-        let mut append = initial_commit(&id);
-        append.expected = first.current;
-        append.metadata = metadata(2, "legacy append");
-        append.history = HistorySuffix {
-            start: HistoryIndex::new(1),
-            final_len: HistoryLen::new(2),
-            items: vec![protocol::HistoryItem::system("legacy second")],
-        };
-        let second = legacy.commit_session(&append).unwrap();
-        legacy
-            .append_request_attempt(&request_entry(7), RequestAuditPayloadMode::Full)
-            .unwrap();
-        legacy.release().unwrap();
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: (0..512)
+                .map(|index| {
+                    let mut record =
+                        transcript_record(index, format!("ordinary {index} {}", "x".repeat(2048)));
+                    record.history_idx = None;
+                    record
+                })
+                .collect(),
+        });
+        writer.commit_session(&command).unwrap();
 
-        assert!(matches!(
-            OwnedLineageWriter::open(root.path(), &id),
-            Err(StoreError::LegacyMigrationRequired { .. })
-        ));
-        let lineage_id = migrate_legacy_session(root.path(), &id).unwrap();
-        let lineage = OwnedLineageWriter::open_existing(root.path(), &id).unwrap();
-        assert_eq!(lineage.lineage_id(), lineage_id);
-        assert_eq!(lineage.store_head().unwrap(), second.current);
-        assert_eq!(lineage.snapshot().unwrap().metadata, append.metadata);
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
         assert_eq!(
-            lineage.history_range(0, 2).unwrap(),
-            vec![
-                protocol::HistoryItem::system("first"),
-                protocol::HistoryItem::system("legacy second")
-            ]
+            reader.search_projection_status().unwrap().state,
+            crate::SearchProjectionState::Missing
         );
-        assert!(legacy_database_path(root.path(), &BranchId::new(&id).unwrap()).is_file());
-        lineage.release().unwrap();
-        let migrated_requests = LineageSessionReader::open_existing(root.path(), &id)
-            .unwrap()
-            .query_request_attempts(&RequestAuditQuery::default())
-            .unwrap();
-        assert_eq!(migrated_requests.len(), 1);
-        assert_eq!(migrated_requests[0].request_id.as_deref(), Some("7"));
-
-        let reopened = OwnedLineageWriter::open_existing(root.path(), &id).unwrap();
-        assert_eq!(reopened.store_head().unwrap(), second.current);
-    }
-
-    #[test]
-    fn interrupted_legacy_migration_staging_is_discarded_before_retry() {
-        let root = tempfile::tempdir().unwrap();
-        let id = session_id('e');
-        let mut legacy = crate::OwnedSessionWriter::open(root.path(), &id).unwrap();
-        legacy.commit_session(&initial_commit(&id)).unwrap();
-        legacy.publish().unwrap();
-        legacy.release().unwrap();
-
-        let lineage_hash =
-            crate::object::sha256_hex(format!("smelt-legacy-lineage-v1\0{id}").as_bytes());
-        let lineage = LineageId::from_hex(lineage_hash[..32].to_owned()).unwrap();
-        let lineages = root.path().join(LINEAGES_DIRECTORY);
-        ensure_private_directory_all(&lineages).unwrap();
-        let staging = lineages.join(format!(".staging-{}", lineage.as_str()));
-        ensure_private_directory(&staging).unwrap();
-        fs::write(staging.join(LINEAGE_DB_FILENAME), b"interrupted migration").unwrap();
-
-        assert_eq!(
-            migrate_legacy_session(root.path(), &id).unwrap(),
-            lineage.as_str()
+        let cancellation_checks = std::cell::Cell::new(0_usize);
+        let result = reader.search_transcript_candidate_page_with_cancellation(
+            "missing needle",
+            None,
+            crate::TranscriptSearchDirection::Forward,
+            64,
+            || {
+                let next = cancellation_checks.get() + 1;
+                cancellation_checks.set(next);
+                next >= 12
+            },
         );
-        assert!(!staging.exists());
-        let migrated = LineageSessionReader::open_existing(root.path(), &id).unwrap();
-        assert_eq!(migrated.history_range(0, 1).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn failed_legacy_migration_is_not_published_and_retries_cleanly() {
-        let root = tempfile::tempdir().unwrap();
-        let id = session_id('f');
-        let mut legacy = crate::OwnedSessionWriter::open(root.path(), &id).unwrap();
-        legacy.commit_session(&initial_commit(&id)).unwrap();
-        legacy
-            .append_request_attempt(&request_entry(9), RequestAuditPayloadMode::Full)
-            .unwrap();
-        legacy.publish().unwrap();
-        legacy.release().unwrap();
-
-        let legacy_path = legacy_database_path(root.path(), &BranchId::new(&id).unwrap());
-        let db = crate::SessionDb::open(&legacy_path).unwrap();
-        let original_hash: String = db
-            .connection()
-            .query_row(
-                "SELECT object_hash FROM request_object_refs LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let missing_hash = "0".repeat(64);
-        db.connection()
-            .execute_batch("PRAGMA foreign_keys = OFF")
-            .unwrap();
-        db.connection()
-            .execute(
-                "UPDATE request_object_refs SET object_hash = ?1",
-                [&missing_hash],
-            )
-            .unwrap();
-        drop(db);
-
-        assert!(migrate_legacy_session(root.path(), &id).is_err());
+        assert!(matches!(result, Err(StoreError::Cancelled)));
         assert!(
-            LineageSessionReader::try_open_existing(root.path(), &id)
-                .unwrap()
-                .is_none(),
-            "a failed import must not publish a visible lineage branch"
-        );
-        assert_eq!(
-            fs::read_dir(root.path().join(LINEAGES_DIRECTORY))
-                .unwrap()
-                .count(),
-            0,
-            "failed staging data is removed"
-        );
-
-        let db = crate::SessionDb::open(&legacy_path).unwrap();
-        db.connection()
-            .execute_batch("PRAGMA foreign_keys = OFF")
-            .unwrap();
-        db.connection()
-            .execute(
-                "UPDATE request_object_refs SET object_hash = ?1",
-                [&original_hash],
-            )
-            .unwrap();
-        drop(db);
-
-        migrate_legacy_session(root.path(), &id).unwrap();
-        let migrated = LineageSessionReader::open_existing(root.path(), &id).unwrap();
-        assert_eq!(migrated.history_range(0, 1).unwrap().len(), 1);
-        assert_eq!(
-            migrated
-                .query_request_attempts(&RequestAuditQuery::default())
-                .unwrap()
-                .len(),
-            1
+            cancellation_checks.get() <= 12,
+            "degraded search continued polling after cancellation"
         );
     }
 

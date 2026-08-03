@@ -1,18 +1,18 @@
 #![no_main]
 
-//! File-backed state-machine fuzzing for canonical session persistence. Commands
-//! run through the public writer, reader, and maintenance APIs. An independent
-//! in-memory model checks canonical history, side tables, transcript records, revisions,
-//! idempotency, rollback, reopen, backup, repair, and garbage collection.
+//! File-backed state-machine fuzzing for canonical lineage persistence. Commands
+//! run through the public writer and reader APIs. An independent in-memory model
+//! checks canonical history, side tables, transcript records, revisions,
+//! idempotency, rollback, reopen, backup, reclamation, and vacuuming.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use protocol::{AssistantStep, Content, HistoryItem};
 use smelt_store::{
-    FullSession, HistoryIndex, HistoryLen, HistorySuffix, OwnedSessionWriter, Revision,
-    SaveReceipt, SessionCommit, SessionCommitFailure, SessionCostUsd, SessionIdentity,
-    SessionMaintenance, SessionMetadata, SessionReader, SideTableSuffixes, StoreHead,
-    StoredSession, StoredTranscriptBlock, TranscriptRecordIndex, TranscriptRecordSuffix,
+    HistoryIndex, HistoryLen, HistorySuffix, LineageSessionReader, LineageSessionState,
+    OwnedLineageWriter, Revision, SaveReceipt, SessionCommit, SessionCommitFailure, SessionCostUsd,
+    SessionIdentity, SessionMetadata, SideTableSuffixes, StoreHead, StoredTranscriptBlock,
+    TranscriptRecordIndex, TranscriptRecordSuffix,
 };
 use std::path::Path;
 
@@ -80,7 +80,7 @@ struct Model {
 
 #[derive(Debug, PartialEq)]
 struct StoreObservation {
-    snapshot: Option<FullSession>,
+    snapshot: Option<LineageSessionState>,
     transcript_records: Vec<StoredTranscriptBlock>,
     history_rows: u64,
     transcript_record_rows: u64,
@@ -92,12 +92,11 @@ fuzz_target!(|input: Input| run(input));
 
 fn run(input: Input) {
     let temp = tempfile::tempdir().expect("create store fuzz tempdir");
-    let session_root = temp.path().join("primary");
-    std::fs::create_dir(&session_root).expect("create primary session root");
-    let session_dir = session_root.join(SESSION_ID);
-    let mut writer = Some(open_writer(&session_root));
+    let sessions_root = temp.path().join("primary");
+    std::fs::create_dir(&sessions_root).expect("create primary sessions root");
+    let mut writer = Some(open_writer(&sessions_root));
     let mut model = Model::default();
-    assert_store(&session_dir, &model);
+    assert_store(&sessions_root, &model);
 
     for op in input.ops.into_iter().take(MAX_OPS) {
         match op {
@@ -114,43 +113,41 @@ fn run(input: Input) {
                 state,
                 side_seed,
             ),
-            Op::RepeatLast => {
-                repeat_last(writer.as_mut().expect("writer open"), &model, &session_dir)
-            }
-            Op::RejectStale => {
-                reject_stale(writer.as_mut().expect("writer open"), &model, &session_dir)
-            }
+            Op::RepeatLast => repeat_last(
+                writer.as_mut().expect("writer open"),
+                &model,
+                &sessions_root,
+            ),
+            Op::RejectStale => reject_stale(
+                writer.as_mut().expect("writer open"),
+                &model,
+                &sessions_root,
+            ),
             Op::RejectInvalid { kind } => reject_invalid(
                 writer.as_mut().expect("writer open"),
                 &model,
-                &session_dir,
+                &sessions_root,
                 kind,
             ),
-            Op::Reopen => reopen(&session_root, &mut writer),
-            Op::Backup => backup(temp.path(), &session_dir, &mut model),
-            Op::Maintain { kind } => {
-                maintain(&session_root, &session_dir, &mut writer, &model, kind)
-            }
+            Op::Reopen => reopen(&sessions_root, &mut writer),
+            Op::Backup => backup(temp.path(), &sessions_root, &mut model),
+            Op::Maintain { kind } => maintain(&mut writer, &model, kind),
         }
-        assert_store(&session_dir, &model);
+        assert_store(&sessions_root, &model);
     }
 
     writer.take().expect("writer open").release().unwrap();
-    assert_store(&session_dir, &model);
+    assert_store(&sessions_root, &model);
     if model.identity.is_some() {
-        assert!(
-            SessionReader::open_existing(&session_dir)
-                .unwrap()
-                .writer_owner()
-                .unwrap()
-                .is_none(),
-            "clean release left writer ownership behind"
-        );
+        OwnedLineageWriter::open_existing(&sessions_root, SESSION_ID)
+            .expect("clean release should relinquish lineage ownership")
+            .release()
+            .unwrap();
     }
 }
 
 fn commit(
-    writer: &mut OwnedSessionWriter,
+    writer: &mut OwnedLineageWriter,
     model: &mut Model,
     keep: u8,
     items: Vec<Entry>,
@@ -193,10 +190,6 @@ fn commit(
         receipt.current.transcript_record_count.get(),
         transcript_records.len() as u64
     );
-    if writer.is_staged() {
-        writer.publish().unwrap();
-    }
-
     model.head = receipt.current;
     model.identity = Some(command.identity.clone());
     model.metadata = Some(command.metadata.clone());
@@ -208,22 +201,22 @@ fn commit(
     model.last_commit = Some((command, receipt));
 }
 
-fn repeat_last(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Path) {
+fn repeat_last(writer: &mut OwnedLineageWriter, model: &Model, sessions_root: &Path) {
     let Some((command, receipt)) = &model.last_commit else {
         return;
     };
-    let before = observe_store(session_dir);
+    let before = observe_store(sessions_root);
     let repeated = writer.commit_session(command).unwrap();
     assert_eq!(&repeated, receipt, "idempotent commit changed its receipt");
     assert_eq!(
-        observe_store(session_dir),
+        observe_store(sessions_root),
         before,
         "idempotent commit changed persisted state"
     );
 }
 
-fn reject_stale(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Path) {
-    let before = observe_store(session_dir);
+fn reject_stale(writer: &mut OwnedLineageWriter, model: &Model, sessions_root: &Path) {
+    let before = observe_store(sessions_root);
     let mut command = current_command(model);
     command.expected.revision = Revision::new(model.head.revision.get().saturating_add(1));
     let error = writer.commit_session(&command).unwrap_err();
@@ -235,14 +228,14 @@ fn reject_stale(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Pa
         }
     );
     assert_eq!(
-        observe_store(session_dir),
+        observe_store(sessions_root),
         before,
         "stale commit did not roll back exactly"
     );
 }
 
-fn reject_invalid(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Path, kind: u8) {
-    let before = observe_store(session_dir);
+fn reject_invalid(writer: &mut OwnedLineageWriter, model: &Model, sessions_root: &Path, kind: u8) {
+    let before = observe_store(sessions_root);
     let mut command = current_command(model);
     let expected = match kind % 4 {
         0 => {
@@ -282,86 +275,65 @@ fn reject_invalid(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &
         (expected, actual) => panic!("expected {expected} rejection, got {actual:?}"),
     }
     assert_eq!(
-        observe_store(session_dir),
+        observe_store(sessions_root),
         before,
         "invalid commit did not roll back exactly"
     );
 }
 
-fn reopen(session_root: &Path, writer: &mut Option<OwnedSessionWriter>) {
+fn reopen(sessions_root: &Path, writer: &mut Option<OwnedLineageWriter>) {
     writer.take().expect("writer open").release().unwrap();
-    *writer = Some(open_writer(session_root));
+    *writer = Some(open_writer(sessions_root));
 }
 
-fn backup(root: &Path, session_dir: &Path, model: &mut Model) {
+fn backup(root: &Path, sessions_root: &Path, model: &mut Model) {
     if model.identity.is_none() {
         return;
     }
     model.backup_id = model.backup_id.saturating_add(1);
     let path = root.join(format!("backup-{}.db", model.backup_id));
-    let reader = SessionReader::open_existing(session_dir).unwrap();
+    let reader = LineageSessionReader::open_existing(sessions_root, SESSION_ID).unwrap();
     reader.backup_to(&path).unwrap();
-    let backup = SessionReader::open_database(&path).unwrap();
-    assert_reader(&backup, model);
+    let report = smelt_store::verify_lineage_backup(&path, reader.lineage_id()).unwrap();
+    assert!(report.healthy, "backup doctor issues: {:?}", report.issues);
 }
 
 fn maintain(
-    session_root: &Path,
-    session_dir: &Path,
-    writer: &mut Option<OwnedSessionWriter>,
+    writer: &mut Option<OwnedLineageWriter>,
     model: &Model,
     kind: u8,
 ) {
     if model.identity.is_none() {
         return;
     }
-    writer.take().expect("writer open").release().unwrap();
-    let mut maintenance = SessionMaintenance::open(session_root, SESSION_ID).unwrap();
-    let garbage_collected = match kind % 4 {
+    let active = writer.as_mut().expect("writer open");
+    match kind % 2 {
         0 => {
-            maintenance.garbage_collect_objects().unwrap();
-            true
-        }
-        1 => {
-            maintenance.rebuild_search_index().unwrap();
-            false
-        }
-        2 => {
-            assert_eq!(maintenance.repair_transcript_history_links().unwrap(), 0);
-            assert_eq!(maintenance.repair_checkpoint().unwrap(), 0);
-            false
+            for _ in 0..256 {
+                if active.reclaim_step(16).unwrap().complete {
+                    break;
+                }
+            }
         }
         _ => {
-            maintenance.vacuum().unwrap();
-            false
+            active.vacuum().unwrap();
         }
-    };
-    maintenance.release().unwrap();
-    if garbage_collected {
-        assert_eq!(
-            SessionReader::open_existing(session_dir)
-                .unwrap()
-                .storage_stats()
-                .unwrap()
-                .object_rows,
-            attachment_object_count(&model.history),
-            "garbage collection did not leave exactly the reachable attachments"
-        );
     }
-    *writer = Some(open_writer(session_root));
 }
 
-fn assert_store(session_dir: &Path, model: &Model) {
-    if model.identity.is_none() {
-        assert!(!session_dir.exists(), "empty model published a session");
-        return;
+fn assert_store(sessions_root: &Path, model: &Model) {
+    let reader = LineageSessionReader::try_open_existing(sessions_root, SESSION_ID).unwrap();
+    match (reader, model.identity.is_some()) {
+        (None, false) => {}
+        (Some(reader), true) => assert_reader(&reader, model),
+        (None, true) => panic!("modeled session has no canonical lineage branch"),
+        (Some(_), false) => panic!("empty model published a lineage branch"),
     }
-    let reader = SessionReader::open_existing(session_dir).unwrap();
-    assert_reader(&reader, model);
 }
 
-fn observe_store(session_dir: &Path) -> StoreObservation {
-    if !session_dir.exists() {
+fn observe_store(sessions_root: &Path) -> StoreObservation {
+    let Some(reader) = LineageSessionReader::try_open_existing(sessions_root, SESSION_ID).unwrap()
+    else {
         return StoreObservation {
             snapshot: None,
             transcript_records: Vec::new(),
@@ -370,12 +342,12 @@ fn observe_store(session_dir: &Path) -> StoreObservation {
             object_rows: 0,
             request_rows: 0,
         };
-    }
-    let reader = SessionReader::open_existing(session_dir).unwrap();
+    };
     let stats = reader.storage_stats().unwrap();
+    let snapshot = reader.snapshot().unwrap();
     StoreObservation {
-        snapshot: reader.load_full_session().unwrap(),
-        transcript_records: reader.read_all_transcript_records().unwrap(),
+        transcript_records: reader.transcript_range(0, snapshot.transcript_len).unwrap(),
+        snapshot: Some(snapshot),
         history_rows: stats.history_rows,
         transcript_record_rows: stats.transcript_record_rows,
         object_rows: stats.object_rows,
@@ -383,53 +355,30 @@ fn observe_store(session_dir: &Path) -> StoreObservation {
     }
 }
 
-fn assert_reader(reader: &SessionReader, model: &Model) {
-    reader.quick_check().unwrap();
+fn assert_reader(reader: &LineageSessionReader, model: &Model) {
     let doctor = reader.doctor_report().unwrap();
     assert!(doctor.healthy, "store doctor issues: {:?}", doctor.issues);
-    assert!(
-        reader.degraded_warnings().unwrap().is_empty(),
-        "store has missing object references"
-    );
 
-    let expected_session = match (&model.identity, &model.metadata) {
-        (Some(identity), Some(metadata)) => Some(StoredSession {
-            identity: identity.clone(),
-            metadata: metadata.clone(),
-            head: model.head,
-        }),
-        (None, None) => None,
-        _ => panic!("modeled session identity and metadata diverged"),
-    };
+    let snapshot = reader.snapshot().unwrap();
+    assert_eq!(snapshot.identity, model.identity.clone().unwrap());
+    assert_eq!(snapshot.metadata, model.metadata.clone().unwrap());
+    assert_eq!(snapshot.head, model.head);
     assert_eq!(
-        reader.stored_session().unwrap(),
-        expected_session,
-        "stored session diverged from model"
-    );
-    let snapshot = reader.load_full_session().unwrap();
-    match (&snapshot, &model.identity) {
-        (None, None) => {}
-        (Some(snapshot), Some(_)) => {
-            assert_eq!(snapshot.session, expected_session.unwrap());
-            assert_eq!(snapshot.history, model.history);
-            assert_eq!(snapshot.turn_metas, model.turn_metas);
-            assert_eq!(snapshot.metadata_snapshots, model.metadata_snapshots);
-            assert_eq!(snapshot.context_snapshots, model.context_snapshots);
-            assert_eq!(snapshot.transcript_records, model.transcript_records);
-        }
-        _ => panic!("snapshot presence diverged from model"),
-    }
-    assert_eq!(reader.history_item_count().unwrap(), model.history.len());
-    assert_eq!(
-        reader.transcript_record_count().unwrap(),
-        model.transcript_records.len()
+        snapshot.side_tables,
+        typed_side_tables(&(
+            model.turn_metas.clone(),
+            model.metadata_snapshots.clone(),
+            model.context_snapshots.clone(),
+        ))
     );
     assert_eq!(
-        reader.transcript_record_dense_extent().unwrap(),
-        model.transcript_records.len()
+        reader
+            .history_range(0, snapshot.head.history_len.get())
+            .unwrap(),
+        model.history
     );
     assert_eq!(
-        reader.read_all_transcript_records().unwrap(),
+        reader.transcript_range(0, snapshot.transcript_len).unwrap(),
         model.transcript_records
     );
     assert!(
@@ -462,8 +411,8 @@ fn current_command(model: &Model) -> SessionCommit {
     }
 }
 
-fn open_writer(session_root: &Path) -> OwnedSessionWriter {
-    OwnedSessionWriter::open(session_root, SESSION_ID).unwrap()
+fn open_writer(sessions_root: &Path) -> OwnedLineageWriter {
+    OwnedLineageWriter::open(sessions_root, SESSION_ID).unwrap()
 }
 
 fn history_item(entry: Entry) -> HistoryItem {

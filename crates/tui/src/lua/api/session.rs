@@ -49,12 +49,6 @@ fn session_entries_to_lua(
                     row.set("size_bytes", size)?;
                 }
             }
-            smelt_core::session::SessionListStatus::Upgradeable { reason } => {
-                row.set("available", true)?;
-                row.set("upgrade_required", true)?;
-                row.set("error_kind", "upgrade_required")?;
-                row.set("error", reason)?;
-            }
             smelt_core::session::SessionListStatus::Unavailable(error) => {
                 row.set("available", false)?;
                 row.set("error_kind", error.code())?;
@@ -854,7 +848,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "List persisted sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`. Rows for older supported schemas have `upgrade_required = true` and remain loadable without being rewritten by listing.",
+        "List canonical lineage sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let current_id =
@@ -933,7 +927,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "load",
-        "Switch the UI to the persisted session with `id`. Older supported schemas are upgraded transactionally before loading; migration runs off the UI thread. Replays the bounded persisted tail and resets transient state.",
+        "Switch the UI to canonical lineage session `id`. Replays the bounded persisted tail and resets transient state.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
             crate::lua::with_session_host(|host| host.load_session_by_id(&id));

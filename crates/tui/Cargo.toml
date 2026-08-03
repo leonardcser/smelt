@@ -34,6 +34,7 @@ scoped-tls-hkt = "0.1.5"
 
 [dev-dependencies]
 insta = { workspace = true }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 seahash = "4"
 smelt-test-support = { workspace = true }
 

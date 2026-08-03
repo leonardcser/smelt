@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use smelt_buffer::text;
 
 use crate::error::{Result, StoreError};
 use crate::history::{StoredTranscriptBlock, TranscriptSearchCandidate, TranscriptSearchDirection};
@@ -21,6 +22,7 @@ const SEARCH_DOCUMENT_BYTES: usize = 32 * 1024;
 const SEARCH_DOCUMENT_OVERLAP_BYTES: usize = 1024;
 const SEARCH_QUERY_ANCHOR_BYTES: usize = 512;
 const SEARCH_QUERY_ANCHOR_GRAMS: usize = 8;
+const DIRECT_SCAN_BATCH_RECORDS: usize = 64;
 const SEARCH_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 const SEARCH_SCHEMA: &str = r#"
 CREATE TABLE search_meta (
@@ -162,7 +164,10 @@ impl LineageSearchProjector {
         let worker_wake = Arc::clone(&wake);
         let worker_error = Arc::clone(&error);
         let thread = thread::Builder::new()
-            .name(format!("smelt-search-{}", &branch.as_str()[..8]))
+            .name(format!(
+                "smelt-search-{}",
+                text::slice(branch.as_str(), 0..8)
+            ))
             .spawn(move || {
                 let mut handled = 0_u64;
                 loop {
@@ -281,11 +286,27 @@ struct SearchSourceSegment {
     leaves: Vec<TranscriptSearchLeaf>,
 }
 
-fn search_source_segments(leaves: Vec<TranscriptSearchLeaf>) -> Result<Vec<SearchSourceSegment>> {
+fn never_cancelled() -> bool {
+    false
+}
+
+fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if cancelled() {
+        Err(StoreError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn search_source_segments(
+    leaves: Vec<TranscriptSearchLeaf>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<SearchSourceSegment>> {
     let mut segments = Vec::new();
     let mut current = Vec::new();
     let mut current_bytes = 0_u64;
     for leaf in leaves {
+        check_cancelled(cancelled)?;
         let combined_bytes = current_bytes.checked_add(leaf.byte_count).ok_or_else(|| {
             StoreError::Integrity("derived search source byte count overflow".into())
         })?;
@@ -342,17 +363,21 @@ fn search_source_records(
     canonical: &Connection,
     lineage: &LineageId,
     source: &SearchSourceSegment,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<StoredTranscriptBlock>> {
     let capacity = usize::try_from(source.item_count)
         .map_err(|_| StoreError::Integrity("derived search source is too large".into()))?;
     let mut records = Vec::with_capacity(capacity);
     for leaf in &source.leaves {
+        check_cancelled(cancelled)?;
         records.extend(lineage::lineage_transcript_search_leaf_records(
             canonical,
             lineage,
             &leaf.node_id,
+            cancelled,
         )?);
     }
+    check_cancelled(cancelled)?;
     if records.len() != capacity {
         return Err(StoreError::Integrity(format!(
             "derived search source {} reconstructed {} records for declared count {}",
@@ -369,6 +394,7 @@ fn search_source_records_at(
     lineage: &LineageId,
     source: &SearchSourceSegment,
     ordinals: &[usize],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<HashMap<usize, StoredTranscriptBlock>> {
     let mut ordinals = ordinals.to_vec();
     ordinals.sort_unstable();
@@ -387,6 +413,7 @@ fn search_source_records_at(
     let mut next_ordinal = 0;
     let mut leaf_start = 0_u64;
     for leaf in &source.leaves {
+        check_cancelled(cancelled)?;
         let leaf_end = leaf_start.checked_add(leaf.item_count).ok_or_else(|| {
             StoreError::Integrity("derived search leaf item count overflow".into())
         })?;
@@ -407,6 +434,7 @@ fn search_source_records_at(
                 lineage,
                 &leaf.node_id,
                 &local_ordinals,
+                cancelled,
             )? {
                 let local_ordinal = u64::try_from(local_ordinal)
                     .map_err(|_| StoreError::Integrity("search record ordinal overflow".into()))?;
@@ -436,8 +464,16 @@ fn project_current_branch(
     cancelled: impl Fn() -> bool,
 ) -> Result<()> {
     let canonical = open_canonical_reader(canonical_path)?;
-    let (_, leaves) = lineage::lineage_transcript_search_leaves(&canonical, lineage, branch)?;
-    let sources = search_source_segments(leaves)?;
+    let (_, leaves) = match lineage::lineage_transcript_search_leaves_with_cancellation(
+        &canonical, lineage, branch, &cancelled,
+    ) {
+        Err(StoreError::Cancelled) => return Ok(()),
+        result => result?,
+    };
+    let sources = match search_source_segments(leaves, &cancelled) {
+        Err(StoreError::Cancelled) => return Ok(()),
+        result => result?,
+    };
     if cancelled() {
         return Ok(());
     }
@@ -460,7 +496,10 @@ fn project_current_branch(
                 search = open_search_writer(&search_path, lineage)?;
             }
         }
-        let records = search_source_records(&canonical, lineage, &source)?;
+        let records = match search_source_records(&canonical, lineage, &source, &cancelled) {
+            Err(StoreError::Cancelled) => return Ok(()),
+            result => result?,
+        };
         if cancelled() {
             return Ok(());
         }
@@ -489,7 +528,7 @@ fn reachable_search_source_ids(
     for branch_id in branch_ids {
         let branch = BranchId::new(branch_id)?;
         let (_, leaves) = lineage::lineage_transcript_search_leaves(canonical, lineage, &branch)?;
-        for source in search_source_segments(leaves)? {
+        for source in search_source_segments(leaves, &never_cancelled)? {
             reachable.insert(source.id);
         }
     }
@@ -540,7 +579,7 @@ pub(crate) fn reclaim_one_obsolete_search_segment(
             });
         };
         let source_records = match search_segment_source(&search, &target)
-            .and_then(|source| search_source_records(canonical, lineage, &source))
+            .and_then(|source| search_source_records(canonical, lineage, &source, &never_cancelled))
         {
             Ok(records) => records,
             Err(_) => {
@@ -592,20 +631,20 @@ pub(crate) fn reclaim_one_obsolete_search_segment(
                 if record_end != text.len()
                     || core_start >= core_end
                     || core_end > text.len()
-                    || !text.is_char_boundary(core_start)
-                    || !text.is_char_boundary(core_end)
+                    || text::snap(text, core_start) != core_start
+                    || text::snap(text, core_end) != core_end
                 {
                     return Err(StoreError::Integrity(
                         "derived search document has invalid source boundaries".into(),
                     ));
                 }
-                let extended_end = floor_char_boundary(
+                let extended_end = text::snap(
                     text,
                     core_end
                         .saturating_add(SEARCH_DOCUMENT_OVERLAP_BYTES)
                         .min(text.len()),
                 );
-                delete_fts.execute(params![doc_id, &text[core_start..extended_end]])?;
+                delete_fts.execute(params![doc_id, text::slice(text, core_start..extended_end)])?;
             }
         }
         let deleted_segments = tx.execute(
@@ -932,22 +971,22 @@ fn build_search_segment(
                 let desired_end = core_start
                     .saturating_add(SEARCH_DOCUMENT_BYTES)
                     .min(text.len());
-                let mut core_end = floor_char_boundary(text, desired_end);
+                let mut core_end = text::snap(text, desired_end);
                 if core_end <= core_start {
-                    core_end = next_char_boundary(text, desired_end).min(text.len());
+                    core_end = text::next_char_boundary(text, desired_end);
                 }
                 if core_end <= core_start {
                     return Err(StoreError::Integrity(
                         "search document boundary did not make progress".into(),
                     ));
                 }
-                let extended_end = floor_char_boundary(
+                let extended_end = text::snap(
                     text,
                     core_end
                         .saturating_add(SEARCH_DOCUMENT_OVERLAP_BYTES)
                         .min(text.len()),
                 );
-                let indexed = &text[core_start..extended_end];
+                let indexed = text::slice(text, core_start..extended_end);
                 let doc_id = u64::try_from(next_doc_id)
                     .map_err(|_| StoreError::Integrity("search document ID is negative".into()))?;
                 insert_doc.execute(params![
@@ -1195,6 +1234,22 @@ fn open_search_reader(path: &Path, lineage: &LineageId) -> Result<Option<Connect
     Ok(Some(conn))
 }
 
+struct CandidateSearch<'a> {
+    canonical: &'a Connection,
+    lineage: &'a LineageId,
+    query: &'a str,
+    origin_block_idx: Option<u64>,
+    direction: TranscriptSearchDirection,
+    limit: usize,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl CandidateSearch<'_> {
+    fn check_cancelled(&self) -> Result<()> {
+        check_cancelled(self.cancelled)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_transcript_candidate_page(
     canonical: &Connection,
@@ -1205,28 +1260,41 @@ pub(crate) fn search_transcript_candidate_page(
     origin_block_idx: Option<u64>,
     direction: TranscriptSearchDirection,
     limit: usize,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
     let _perf = smelt_perf::perf::begin("store:lineage:derived_search_candidates");
     if query.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let (_, leaves) = lineage::lineage_transcript_search_leaves(canonical, lineage, branch)?;
-    let sources = search_source_segments(leaves)?;
+    let request = CandidateSearch {
+        canonical,
+        lineage,
+        query,
+        origin_block_idx,
+        direction,
+        limit,
+        cancelled,
+    };
+    request.check_cancelled()?;
+    let (_, leaves) = lineage::lineage_transcript_search_leaves_with_cancellation(
+        canonical, lineage, branch, cancelled,
+    )?;
+    request.check_cancelled()?;
+    let sources = search_source_segments(leaves, cancelled)?;
     let search_path = search_database_path(canonical_path)?;
     let search = open_search_reader(&search_path, lineage).ok().flatten();
-    let mut plans = sources
-        .into_iter()
-        .map(|source| {
-            let segment = search.as_ref().and_then(|search| {
-                search_segment_row(search, &source.id)
-                    .ok()
-                    .flatten()
-                    .filter(|segment| search_segment_matches_source(segment, &source))
-            });
-            (source, segment)
-        })
-        .collect::<Vec<_>>();
-    plans.sort_by(|(_, left), (_, right)| match direction {
+    let mut plans = Vec::with_capacity(sources.len());
+    for source in sources {
+        request.check_cancelled()?;
+        let segment = search.as_ref().and_then(|search| {
+            search_segment_row(search, &source.id)
+                .ok()
+                .flatten()
+                .filter(|segment| search_segment_matches_source(segment, &source))
+        });
+        plans.push((source, segment));
+    }
+    plans.sort_by(|(_, left), (_, right)| match request.direction {
         TranscriptSearchDirection::Forward => left
             .as_ref()
             .and_then(|segment| segment.min_block_idx)
@@ -1249,28 +1317,11 @@ pub(crate) fn search_transcript_candidate_page(
             ),
     });
 
+    request.check_cancelled()?;
     let output = if query.chars().count() >= 3 {
-        search_long_candidate_page(
-            canonical,
-            lineage,
-            search.as_ref(),
-            plans,
-            query,
-            origin_block_idx,
-            direction,
-            limit,
-        )?
+        search_long_candidate_page(&request, search.as_ref(), plans)?
     } else {
-        search_short_candidate_page(
-            canonical,
-            lineage,
-            search.as_ref(),
-            plans,
-            query,
-            origin_block_idx,
-            direction,
-            limit,
-        )?
+        search_short_candidate_page(&request, search.as_ref(), plans)?
     };
     smelt_perf::perf::record_value(
         "store:lineage:derived_search_candidates_loaded",
@@ -1279,16 +1330,10 @@ pub(crate) fn search_transcript_candidate_page(
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn search_long_candidate_page(
-    canonical: &Connection,
-    lineage: &LineageId,
+    request: &CandidateSearch<'_>,
     search: Option<&Connection>,
     plans: Vec<(SearchSourceSegment, Option<SearchSegmentRow>)>,
-    query: &str,
-    origin_block_idx: Option<u64>,
-    direction: TranscriptSearchDirection,
-    limit: usize,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
     let mut projected = Vec::new();
     let mut direct = Vec::new();
@@ -1301,46 +1346,25 @@ fn search_long_candidate_page(
 
     let mut output = Vec::new();
     if let Some(search) = search {
-        match search_ready_fts_sources(
-            canonical,
-            lineage,
-            search,
-            &projected,
-            query,
-            origin_block_idx,
-            direction,
-            limit,
-        ) {
+        match search_ready_fts_sources(request, search, &projected) {
             Ok(candidates) => output = candidates,
+            Err(StoreError::Cancelled) => return Err(StoreError::Cancelled),
             Err(_) => direct.extend(projected.into_iter().map(|(source, _)| source)),
         }
     }
     for source in direct {
-        output.extend(direct_search_segment(
-            canonical,
-            lineage,
-            &source,
-            query,
-            origin_block_idx,
-            direction,
-            limit,
-        )?);
-        trim_candidate_page(&mut output, direction, limit);
+        request.check_cancelled()?;
+        output.extend(direct_search_segment(request, &source)?);
+        trim_candidate_page(&mut output, request.direction, request.limit);
     }
-    trim_candidate_page(&mut output, direction, limit);
+    trim_candidate_page(&mut output, request.direction, request.limit);
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn search_short_candidate_page(
-    canonical: &Connection,
-    lineage: &LineageId,
+    request: &CandidateSearch<'_>,
     search: Option<&Connection>,
     plans: Vec<(SearchSourceSegment, Option<SearchSegmentRow>)>,
-    query: &str,
-    origin_block_idx: Option<u64>,
-    direction: TranscriptSearchDirection,
-    limit: usize,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
     let mut projected = Vec::new();
     let mut direct = Vec::new();
@@ -1353,66 +1377,50 @@ fn search_short_candidate_page(
 
     let mut output = Vec::new();
     if let Some(search) = search {
-        match search_ready_short_sources(
-            canonical,
-            lineage,
-            search,
-            &projected,
-            query,
-            origin_block_idx,
-            direction,
-            limit,
-        ) {
+        match search_ready_short_sources(request, search, &projected) {
             Ok(candidates) => output = candidates,
+            Err(StoreError::Cancelled) => return Err(StoreError::Cancelled),
             Err(_) => direct.extend(projected.into_iter().map(|(source, _)| source)),
         }
     }
     for source in direct {
-        output.extend(direct_search_segment(
-            canonical,
-            lineage,
-            &source,
-            query,
-            origin_block_idx,
-            direction,
-            limit,
-        )?);
-        trim_candidate_page(&mut output, direction, limit);
+        request.check_cancelled()?;
+        output.extend(direct_search_segment(request, &source)?);
+        trim_candidate_page(&mut output, request.direction, request.limit);
     }
-    trim_candidate_page(&mut output, direction, limit);
+    trim_candidate_page(&mut output, request.direction, request.limit);
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn search_ready_short_sources(
-    canonical: &Connection,
-    lineage: &LineageId,
+    request: &CandidateSearch<'_>,
     search: &Connection,
     sources: &[(SearchSourceSegment, SearchSegmentRow)],
-    query: &str,
-    origin_block_idx: Option<u64>,
-    direction: TranscriptSearchDirection,
-    limit: usize,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
     const SEGMENT_BATCH: usize = 500;
 
-    let scalars = query.chars().map(|ch| ch as u32).collect::<Vec<_>>();
+    let scalars = request
+        .query
+        .chars()
+        .map(|ch| ch as u32)
+        .collect::<Vec<_>>();
     if scalars.is_empty() || scalars.len() > 2 {
         return Ok(Vec::new());
     }
     let kind = scalars.len() as u8;
     let hash = hash_scalars(kind, &scalars);
-    let order = match direction {
+    let order = match request.direction {
         TranscriptSearchDirection::Forward => "ASC",
         TranscriptSearchDirection::Backward => "DESC",
     };
-    let bound_column = match direction {
+    let bound_column = match request.direction {
         TranscriptSearchDirection::Forward => "s.min_block_idx",
         TranscriptSearchDirection::Backward => "s.max_block_idx",
     };
     let mut output: Vec<TranscriptSearchCandidate> = Vec::new();
     let mut seen = HashSet::new();
     for batch in sources.chunks(SEGMENT_BATCH) {
+        request.check_cancelled()?;
         let placeholders = (0..batch.len())
             .map(|index| format!("?{}", index + 3))
             .collect::<Vec<_>>()
@@ -1442,11 +1450,12 @@ fn search_ready_short_sources(
         let mut statement = search.prepare(&sql)?;
         let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
         while let Some(row) = rows.next()? {
+            request.check_cancelled()?;
             let segment_id = row_nonnegative_u64(row, 0)?;
             let min_block_idx = row_optional_nonnegative_u64(row, 2)?;
             let max_block_idx = row_optional_nonnegative_u64(row, 3)?;
-            if output.len() == limit {
-                let outside_page = match direction {
+            if output.len() == request.limit {
+                let outside_page = match request.direction {
                     TranscriptSearchDirection::Forward => min_block_idx
                         .is_some_and(|min| min > output.last().expect("search page").block_idx),
                     TranscriptSearchDirection::Backward => max_block_idx
@@ -1465,10 +1474,13 @@ fn search_ready_short_sources(
             let ids = unpack_doc_ids(&row.get::<_, Vec<u8>>(1)?)?
                 .into_iter()
                 .collect::<HashSet<_>>();
-            let origin_filter = origin_block_idx.map_or_else(String::new, |_| match direction {
-                TranscriptSearchDirection::Forward => "AND block_idx >= ?2".into(),
-                TranscriptSearchDirection::Backward => "AND block_idx <= ?2".into(),
-            });
+            let origin_filter =
+                request
+                    .origin_block_idx
+                    .map_or_else(String::new, |_| match request.direction {
+                        TranscriptSearchDirection::Forward => "AND block_idx >= ?2".into(),
+                        TranscriptSearchDirection::Backward => "AND block_idx <= ?2".into(),
+                    });
             let docs_sql = format!(
                 "SELECT doc_id, record_ordinal, block_idx, core_start, core_end, record_end
                  FROM search_docs
@@ -1477,7 +1489,7 @@ fn search_ready_short_sources(
             );
             let mut docs_statement = search.prepare(&docs_sql)?;
             let segment_id_sql = sql_i64(segment_id, "search segment ID")?;
-            let mut docs = match origin_block_idx {
+            let mut docs = match request.origin_block_idx {
                 Some(origin) => docs_statement.query(params![
                     segment_id_sql,
                     sql_i64(origin, "search origin block index")?
@@ -1486,6 +1498,7 @@ fn search_ready_short_sources(
             };
             let mut candidate_docs = Vec::new();
             while let Some(doc_row) = docs.next()? {
+                request.check_cancelled()?;
                 let doc = decode_search_doc(doc_row)?;
                 if ids.contains(&doc.doc_id) {
                     candidate_docs.push(doc);
@@ -1495,47 +1508,48 @@ fn search_ready_short_sources(
                 .iter()
                 .map(|doc| doc.record_ordinal)
                 .collect::<Vec<_>>();
-            let records = search_source_records_at(canonical, lineage, source, &record_ordinals)?;
+            let records = search_source_records_at(
+                request.canonical,
+                request.lineage,
+                source,
+                &record_ordinals,
+                request.cancelled,
+            )?;
             let mut source_matches = 0_usize;
             for doc in candidate_docs {
+                request.check_cancelled()?;
                 let record = records.get(&doc.record_ordinal).ok_or_else(|| {
                     StoreError::Integrity(
                         "derived short posting references a missing record".into(),
                     )
                 })?;
                 validate_search_doc(&doc, record, segment)?;
-                if record.indexed_text.contains(query) && seen.insert(record.block_idx) {
+                if record.indexed_text.contains(request.query) && seen.insert(record.block_idx) {
                     output.push(TranscriptSearchCandidate {
                         block_idx: record.block_idx,
                         history_idx: record.history_idx,
                     });
                     source_matches += 1;
-                    if source_matches >= limit {
+                    if source_matches >= request.limit {
                         break;
                     }
                 }
             }
-            trim_candidate_page(&mut output, direction, limit);
+            trim_candidate_page(&mut output, request.direction, request.limit);
         }
     }
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn search_ready_fts_sources(
-    canonical: &Connection,
-    lineage: &LineageId,
+    request: &CandidateSearch<'_>,
     search: &Connection,
     sources: &[(SearchSourceSegment, SearchSegmentRow)],
-    query: &str,
-    origin_block_idx: Option<u64>,
-    direction: TranscriptSearchDirection,
-    limit: usize,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
     const SEGMENT_BATCH: usize = 500;
 
-    let expression = fts_anchor_expression(query);
-    let order = match direction {
+    let expression = fts_anchor_expression(request.query);
+    let order = match request.direction {
         TranscriptSearchDirection::Forward => "ASC",
         TranscriptSearchDirection::Backward => "DESC",
     };
@@ -1543,19 +1557,23 @@ fn search_ready_fts_sources(
     let mut records_by_segment = HashMap::new();
     let mut seen = HashSet::new();
     for batch in sources.chunks(SEGMENT_BATCH) {
+        request.check_cancelled()?;
         let placeholders = (0..batch.len())
             .map(|index| format!("?{}", index + 2))
             .collect::<Vec<_>>()
             .join(",");
         let origin_parameter = batch.len() + 2;
-        let origin_filter = origin_block_idx.map_or_else(String::new, |_| match direction {
-            TranscriptSearchDirection::Forward => {
-                format!("AND d.block_idx >= ?{origin_parameter}")
-            }
-            TranscriptSearchDirection::Backward => {
-                format!("AND d.block_idx <= ?{origin_parameter}")
-            }
-        });
+        let origin_filter =
+            request
+                .origin_block_idx
+                .map_or_else(String::new, |_| match request.direction {
+                    TranscriptSearchDirection::Forward => {
+                        format!("AND d.block_idx >= ?{origin_parameter}")
+                    }
+                    TranscriptSearchDirection::Backward => {
+                        format!("AND d.block_idx <= ?{origin_parameter}")
+                    }
+                });
         let sql = format!(
             "SELECT d.segment_id, d.doc_id, d.record_ordinal, d.block_idx,
                     d.core_start, d.core_end, d.record_end
@@ -1574,7 +1592,7 @@ fn search_ready_fts_sources(
                 "search segment ID",
             )?));
         }
-        if let Some(origin) = origin_block_idx {
+        if let Some(origin) = request.origin_block_idx {
             parameters.push(rusqlite::types::Value::Integer(sql_i64(
                 origin,
                 "search origin block index",
@@ -1590,6 +1608,7 @@ fn search_ready_fts_sources(
         let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
         let mut batch_matches = 0_usize;
         while let Some(row) = rows.next()? {
+            request.check_cancelled()?;
             let segment_id = row_nonnegative_u64(row, 0)?;
             let Some(&source_index) = source_by_segment.get(&segment_id) else {
                 return Err(StoreError::Integrity(
@@ -1600,7 +1619,12 @@ fn search_ready_fts_sources(
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 records_by_segment.entry(segment_id)
             {
-                entry.insert(search_source_records(canonical, lineage, source)?);
+                entry.insert(search_source_records(
+                    request.canonical,
+                    request.lineage,
+                    source,
+                    request.cancelled,
+                )?);
             }
             let doc = SearchDoc {
                 doc_id: row_nonnegative_u64(row, 1)?,
@@ -1619,18 +1643,18 @@ fn search_ready_fts_sources(
                     )
                 })?;
             validate_search_doc(&doc, record, segment)?;
-            if record.indexed_text.contains(query) && seen.insert(record.block_idx) {
+            if record.indexed_text.contains(request.query) && seen.insert(record.block_idx) {
                 output.push(TranscriptSearchCandidate {
                     block_idx: record.block_idx,
                     history_idx: record.history_idx,
                 });
                 batch_matches += 1;
-                if batch_matches >= limit {
+                if batch_matches >= request.limit {
                     break;
                 }
             }
         }
-        trim_candidate_page(&mut output, direction, limit);
+        trim_candidate_page(&mut output, request.direction, request.limit);
     }
     Ok(output)
 }
@@ -1657,8 +1681,8 @@ fn validate_search_doc(
         || doc.core_start >= doc.core_end
         || doc.core_end > doc.record_end
         || doc.record_end != record.indexed_text.len()
-        || !record.indexed_text.is_char_boundary(doc.core_start)
-        || !record.indexed_text.is_char_boundary(doc.core_end)
+        || text::snap(&record.indexed_text, doc.core_start) != doc.core_start
+        || text::snap(&record.indexed_text, doc.core_end) != doc.core_end
         || segment
             .first_doc_id
             .zip(segment.last_doc_id)
@@ -1672,32 +1696,70 @@ fn validate_search_doc(
 }
 
 fn direct_search_segment(
-    canonical: &Connection,
-    lineage: &LineageId,
+    request: &CandidateSearch<'_>,
     source: &SearchSourceSegment,
-    query: &str,
-    origin_block_idx: Option<u64>,
-    direction: TranscriptSearchDirection,
-    limit: usize,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
-    let records = search_source_records(canonical, lineage, source)?;
-    let mut candidates = records
-        .iter()
-        .filter(|record| {
-            origin_allows(record.block_idx, origin_block_idx, direction)
-                && record.indexed_text.contains(query)
-        })
-        .map(|record| TranscriptSearchCandidate {
-            block_idx: record.block_idx,
-            history_idx: record.history_idx,
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_unstable_by_key(|candidate| candidate.block_idx);
-    if matches!(direction, TranscriptSearchDirection::Backward) && candidates.len() > limit {
-        candidates.drain(..candidates.len() - limit);
-    } else {
-        candidates.truncate(limit);
+    let item_count = usize::try_from(source.item_count)
+        .map_err(|_| StoreError::Integrity("derived search source is too large".into()))?;
+    let mut candidates = Vec::new();
+    let mut scan_batch = |ordinals: Vec<usize>| -> Result<bool> {
+        request.check_cancelled()?;
+        let mut records = search_source_records_at(
+            request.canonical,
+            request.lineage,
+            source,
+            &ordinals,
+            request.cancelled,
+        )?;
+        for ordinal in ordinals {
+            request.check_cancelled()?;
+            let record = records.remove(&ordinal).ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "derived search source {} omitted record {ordinal}",
+                    source.id
+                ))
+            })?;
+            if origin_allows(
+                record.block_idx,
+                request.origin_block_idx,
+                request.direction,
+            ) && record.indexed_text.contains(request.query)
+            {
+                candidates.push(TranscriptSearchCandidate {
+                    block_idx: record.block_idx,
+                    history_idx: record.history_idx,
+                });
+                if candidates.len() == request.limit {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    };
+
+    match request.direction {
+        TranscriptSearchDirection::Forward => {
+            for start in (0..item_count).step_by(DIRECT_SCAN_BATCH_RECORDS) {
+                let end = start
+                    .saturating_add(DIRECT_SCAN_BATCH_RECORDS)
+                    .min(item_count);
+                if !scan_batch((start..end).collect())? {
+                    break;
+                }
+            }
+        }
+        TranscriptSearchDirection::Backward => {
+            let mut end = item_count;
+            while end > 0 {
+                let start = end.saturating_sub(DIRECT_SCAN_BATCH_RECORDS);
+                if !scan_batch((start..end).rev().collect())? {
+                    break;
+                }
+                end = start;
+            }
+        }
     }
+    candidates.sort_unstable_by_key(|candidate| candidate.block_idx);
     Ok(candidates)
 }
 
@@ -1730,7 +1792,7 @@ pub(crate) fn search_projection_status(
     branch: &BranchId,
 ) -> Result<SearchProjectionStatus> {
     let (_, leaves) = lineage::lineage_transcript_search_leaves(canonical, lineage, branch)?;
-    let sources = search_source_segments(leaves)?;
+    let sources = search_source_segments(leaves, &never_cancelled)?;
     let search_path = search_database_path(canonical_path)?;
     let database_bytes = sqlite_physical_bytes(&search_path);
     if !search_path.is_file() {
@@ -1933,8 +1995,8 @@ fn fts_anchor_expression(query: &str) -> String {
 }
 
 fn query_anchor_grams(query: &str) -> Vec<[u32; 3]> {
-    let anchor_end = floor_char_boundary(query, SEARCH_QUERY_ANCHOR_BYTES.min(query.len()));
-    let chars = query[..anchor_end]
+    let anchor_end = text::snap(query, SEARCH_QUERY_ANCHOR_BYTES.min(query.len()));
+    let chars = text::slice(query, 0..anchor_end)
         .chars()
         .map(|ch| ch as u32)
         .collect::<Vec<_>>();
@@ -1956,22 +2018,6 @@ fn query_anchor_grams(query: &str) -> Vec<[u32; 3]> {
         }
     }
     grams
-}
-
-fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
-    offset = offset.min(text.len());
-    while !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
-}
-
-fn next_char_boundary(text: &str, mut offset: usize) -> usize {
-    offset = offset.min(text.len());
-    while offset < text.len() && !text.is_char_boundary(offset) {
-        offset += 1;
-    }
-    offset
 }
 
 fn sql_i64(value: impl TryInto<i64>, field: &str) -> Result<i64> {
@@ -2044,8 +2090,10 @@ mod tests {
     fn anchor_grams_include_both_ends_of_the_bounded_prefix() {
         let query = "abcdefghijklmnopqrstuvwxyz".repeat(40);
         let grams = query_anchor_grams(&query);
-        let anchor_end = floor_char_boundary(&query, SEARCH_QUERY_ANCHOR_BYTES);
-        let chars = query[..anchor_end].chars().collect::<Vec<_>>();
+        let anchor_end = text::snap(&query, SEARCH_QUERY_ANCHOR_BYTES);
+        let chars = text::slice(&query, 0..anchor_end)
+            .chars()
+            .collect::<Vec<_>>();
         assert!(grams.contains(&[chars[0] as u32, chars[1] as u32, chars[2] as u32,]));
         assert!(grams.contains(&[
             chars[chars.len() - 3] as u32,
@@ -2064,13 +2112,14 @@ mod tests {
         };
 
         let at_byte_limit = vec![leaf(0, SEARCH_SEGMENT_BYTES - 1), leaf(1, 1)];
-        let byte_limit_group = search_source_segments(at_byte_limit.clone()).unwrap();
+        let byte_limit_group =
+            search_source_segments(at_byte_limit.clone(), &never_cancelled).unwrap();
         assert_eq!(byte_limit_group.len(), 1);
         assert_eq!(byte_limit_group[0].byte_count, SEARCH_SEGMENT_BYTES);
 
         let mut over_byte_limit = at_byte_limit;
         over_byte_limit.push(leaf(2, 1));
-        let over_byte_limit = search_source_segments(over_byte_limit).unwrap();
+        let over_byte_limit = search_source_segments(over_byte_limit, &never_cancelled).unwrap();
         assert_eq!(over_byte_limit.len(), 2);
         assert_eq!(over_byte_limit[0].id, byte_limit_group[0].id);
         assert_eq!(over_byte_limit[0].leaves.len(), 2);
@@ -2079,13 +2128,14 @@ mod tests {
         let at_leaf_limit = (0..SEARCH_SEGMENT_MAX_LEAVES)
             .map(|index| leaf(index as u64, 1))
             .collect::<Vec<_>>();
-        let leaf_limit_group = search_source_segments(at_leaf_limit.clone()).unwrap();
+        let leaf_limit_group =
+            search_source_segments(at_leaf_limit.clone(), &never_cancelled).unwrap();
         assert_eq!(leaf_limit_group.len(), 1);
         assert_eq!(leaf_limit_group[0].leaves.len(), SEARCH_SEGMENT_MAX_LEAVES);
 
         let mut over_leaf_limit = at_leaf_limit;
         over_leaf_limit.push(leaf(SEARCH_SEGMENT_MAX_LEAVES as u64, 1));
-        let over_leaf_limit = search_source_segments(over_leaf_limit).unwrap();
+        let over_leaf_limit = search_source_segments(over_leaf_limit, &never_cancelled).unwrap();
         assert_eq!(over_leaf_limit.len(), 2);
         assert_eq!(over_leaf_limit[0].id, leaf_limit_group[0].id);
         assert_eq!(over_leaf_limit[0].leaves.len(), SEARCH_SEGMENT_MAX_LEAVES);

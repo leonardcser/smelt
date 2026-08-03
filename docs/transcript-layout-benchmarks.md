@@ -170,9 +170,10 @@ TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 10 \
   --save-request-only --save-request-operations submit_enter \
   --save-request-history 1024 --save-request-heterogeneous
 
-# Replay a copied session.db fixture through normal resume and Enter paths.
+# Replay a copied lineage sessions root through normal resume and Enter paths.
 TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 20 \
-  --save-request-fixture ~/tmp/session-fixtures/<session-id> \
+  --save-request-fixture ~/tmp/session-fixtures/sessions \
+  --save-request-session-id <session-id> \
   --save-request-operations submit_enter
 
 # Byte and memory scaling with 2,000 history items of at least 8 KiB each.
@@ -182,13 +183,12 @@ TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 1 --skip-nav \
   --save-request-item-bytes 8192
 ```
 
-A fixture path may name either a session directory or its `session.db`. The
-parent directory name must be the session ID. The harness uses SQLite's online
-backup API so the snapshot includes committed WAL state, writes it into an
-isolated test home, resumes it through the normal application path, and mutates
-only that snapshot. Backup and resume setup are reported separately and are
-outside the measured Enter interval. Never benchmark by opening a live session
-database read-write.
+The fixture path must be a complete copied sessions root containing `lineages/`;
+`--save-request-session-id` selects the branch to resume. The harness copies the
+complete root into an isolated test home, resumes through the normal application
+path, and mutates only that copy. Copy and resume setup are reported separately
+and are outside the measured Enter interval. Never benchmark against a live
+sessions root.
 
 The suite reports:
 
@@ -284,72 +284,37 @@ PTY, not an application constructor or store microbenchmark. Each run copies a
 fixture with SQLite's online backup API into fresh isolated HOME and XDG roots,
 performs normal `--resume`, waits until unique tail content is visibly rendered,
 sends Ctrl-C, and waits for clean process teardown. It measures launch to first
-frame separately from launch to loaded session, because an early frame that still
-says the session is upgrading is responsive but not yet usable. It also reports
+frame separately from launch to loaded session, because an early frame can be
+responsive before the requested transcript is usable. It also reports
 Ctrl-C-to-exit latency and samples process RSS on Linux.
 
-The feature-gated integration harness can be run directly against any safe copied
-fixture. The source database is opened read-only and every per-run copy is removed
-before the next run, so large fixtures do not consume `runs` times their size:
+The feature-gated integration harness can run against any safe copied lineage
+sessions root. Every per-run copy is removed before the next run, so large fixtures
+do not consume `runs` times their size:
 
 ```bash
 cargo test --profile release-fast --test startup \
   interactive_lifecycle_benchmark_suite --no-run
 
 SMELT_LIFECYCLE_BENCH_TARGET=1 \
-SMELT_LIFECYCLE_BENCH_FIXTURE="$HOME/tmp/session-fixtures/<session-id>" \
+SMELT_LIFECYCLE_BENCH_FIXTURE="$HOME/tmp/session-fixtures/sessions" \
+SMELT_LIFECYCLE_BENCH_SESSION_ID='<session-id>' \
 SMELT_LIFECYCLE_BENCH_READY_TEXT='<unique visible tail text>' \
 SMELT_LIFECYCLE_BENCH_RUNS=10 \
 cargo test --profile release-fast --test startup \
   interactive_lifecycle_benchmark_suite -- --nocapture
 ```
 
-Use a copied session directory, never a live session. The ready marker should be
-text in the initially visible resumed tail. `SMELT_LIFECYCLE_BENCH_FIRST_FRAME_TEXT`
+Use a copied sessions root, never live state. The ready marker should be text in
+the initially visible resumed tail. `SMELT_LIFECYCLE_BENCH_FIRST_FRAME_TEXT`
 can override the default `local/test-model` marker, and
 `SMELT_LIFECYCLE_BENCH_TIMEOUT_SECS` can raise the per-phase timeout. Timing begins
 inside the test after Cargo has built the executable, so compiler work is excluded.
 
-A copied production schema-v9 fixture reproduced a one-time upgrade stall. The
-first frame appeared in about 155 ms, but the requested session did not become
-visible for 5,560.811 ms mean. Process perf spans localized 5.06 seconds to the
-schema-v10 transcript extent-profile backfill. Its 256-row batch query used a
-`LEFT JOIN` from `transcript_blocks` to `transcript_search`; SQLite chose an indexed
-range read for the blocks but a full scan of `transcript_search` for every batch.
-
-The backfill now uses record-index keyset pagination and a correlated
-`transcript_search.block_idx` scalar lookup that SQLite resolves through the
-integer primary key. All six width profiles are computed in one pass over each
-text value instead of traversing it once per width. Query-plan tests require the
-indexed keyset and primary-key lookup and reject a search-table scan. Semantic
-tests compare the shared profile pass with independent width calculations, and a
-multi-batch test covers interleaved current profiles and record-index gaps.
-
-| Complete-process workload | Runs | First frame mean | Loaded session mean | Graceful exit mean | Peak RSS mean |
-|---|---:|---:|---:|---:|---:|
-| Schema-v9 object-heavy upgrade, before | 5 | 154.815 ms | 5,560.811 ms | 42.919 ms | 83,296 KiB |
-| Schema-v9 object-heavy upgrade, after | 5 | 154.107 ms | 370.904 ms | 32.769 ms | 86,330 KiB |
-| Schema-v9 object-heavy upgrade, final harness | 10 | 157.542 ms | 298.309 ms | 17.632 ms | 89,752 KiB |
-| Schema-v10, 7,543 rows and 1.49 GB | 3 | not sampled | 228.048 ms | 73.063 ms | 84,811 KiB |
-| Schema-v10, 19 rows in a 2.17 GB database | 3 | not sampled | 182.023 ms | 50.484 ms | 73,524 KiB |
-
-The optimized backfill itself fell from 5.06 seconds to 57.2 ms: 12.6 ms to read
-and compute 4,415 profiles, 39.0 ms to update them, and 5.5 ms to rebuild extent
-chunks. Complete loaded-session startup improved about 15 times. The unchanged
-first-frame time confirms that the defect was upgrade work after initial terminal
-setup rather than process bootstrap or rendering. In the final ten-run permanent
-harness, loaded-session startup had 4.597 ms standard deviation, 305.296 ms p95
-and maximum, while shutdown had 1.039 ms standard deviation and 19.416 ms p95
-and maximum.
-
-Already-current sparse resume is bounded by the loaded tail and viewport state,
-not complete history length or database bytes: both schema-v10 fixtures became
-usable in 182 to 228 ms despite radically different row counts and database
-sizes. Graceful shutdown completed in 16 to 77 ms across realistic runs. These
-measurements did not justify startup caches, deferred migration, weaker
-persistence, or asynchronous shutdown complexity; correcting the migration query
-plan addressed the only reproduced lifecycle stall while preserving exact
-migration and durability semantics.
+Sparse lineage resume is bounded by the loaded tail and viewport state, not
+complete history length or database bytes. Keep fixture-copy time separate from
+launch, visible-ready, and graceful-exit measurements so setup cost cannot hide an
+interaction-path regression.
 
 ## Large search and resume
 

@@ -1,4 +1,3 @@
-mod session_maintenance;
 mod setup;
 mod startup;
 mod upgrade;
@@ -197,11 +196,7 @@ enum SessionCommand {
     Doctor(SessionDoctorArgs),
     /// Copy a transactionally consistent session database to a new file
     Backup(SessionBackupArgs),
-    /// Upgrade one or all supported session databases to the latest schema
-    Migrate(SessionMigrateArgs),
-    /// Move identity-less session artifacts into quarantine without deleting them
-    QuarantineOrphans(SessionQuarantineOrphansArgs),
-    /// Delete objects unreachable from history and request audits
+    /// Delete unreachable canonical rows and objects
     Gc(SessionTargetArgs),
     /// Compact free database pages under exclusive ownership
     Vacuum(SessionTargetArgs),
@@ -215,38 +210,6 @@ struct SessionDoctorArgs {
     /// Inspect every visible session
     #[arg(long, conflicts_with = "session")]
     all: bool,
-    /// Print machine-readable JSON
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Clone, clap::Args)]
-struct SessionMigrateArgs {
-    /// Session id or unique prefix to migrate
-    #[arg(required_unless_present = "all")]
-    session: Option<String>,
-    /// Migrate every session directory, continuing after individual failures
-    #[arg(long, conflicts_with = "session")]
-    all: bool,
-    /// Inspect and report planned migrations without changing databases
-    #[arg(long)]
-    dry_run: bool,
-    /// Print machine-readable JSON
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Clone, clap::Args)]
-struct SessionQuarantineOrphansArgs {
-    /// Session id or unique prefix to inspect and quarantine if orphaned
-    #[arg(required_unless_present = "all")]
-    session: Option<String>,
-    /// Inspect every session directory and quarantine every orphan
-    #[arg(long, conflicts_with = "session")]
-    all: bool,
-    /// Report orphaned directories without moving them
-    #[arg(long)]
-    dry_run: bool,
     /// Print machine-readable JSON
     #[arg(long)]
     json: bool,
@@ -572,7 +535,7 @@ where
 fn backup_manifest_path(database: &std::path::Path) -> PathBuf {
     let mut name = database
         .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("session.db"))
+        .unwrap_or_else(|| std::ffi::OsStr::new("lineage.db"))
         .to_os_string();
     name.push(".manifest.json");
     database.with_file_name(name)
@@ -684,23 +647,10 @@ fn doctor_session(reference: &str) -> SessionDoctorOutput {
         let sessions_root = dir.parent().ok_or_else(|| {
             smelt_store::StoreError::Integrity("session has no storage root".into())
         })?;
-        let (report, canonical_revision, turns) =
-            match smelt_store::LineageSessionReader::try_open_existing(sessions_root, &session_id)?
-            {
-                Some(reader) => {
-                    let report = reader.doctor_report()?;
-                    let canonical_revision = reader.snapshot()?.head.revision.get();
-                    (report, canonical_revision, reader.turns()?)
-                }
-                None => {
-                    // COMPAT(session-lineage-v1): doctor remains read-only for
-                    // previous-format sessions until explicit migration.
-                    let reader = smelt_store::SessionReader::open_existing(&dir)?;
-                    let report = reader.doctor_report()?;
-                    let canonical_revision = reader.store_head()?.revision.get();
-                    (report, canonical_revision, reader.turns()?)
-                }
-            };
+        let reader = smelt_store::LineageSessionReader::open_existing(sessions_root, &session_id)?;
+        let report = reader.doctor_report()?;
+        let canonical_revision = reader.snapshot()?.head.revision.get();
+        let turns = reader.turns()?;
         let nonterminal_turns = turns
             .into_iter()
             .filter(|turn| {
@@ -874,46 +824,17 @@ fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
 fn with_lineage_writer<T>(
     reference: &str,
     action: impl FnOnce(&mut smelt_store::OwnedLineageWriter) -> Result<T, String>,
-) -> Result<Option<T>, String> {
+) -> Result<T, String> {
     let (session_id, dir) = resolve_session_target(reference)?;
     let root = dir
         .parent()
         .ok_or_else(|| "session directory has no parent".to_string())?;
-    let Some(reader) = smelt_store::LineageSessionReader::try_open_existing(root, &session_id)
-        .map_err(|err| format!("failed to locate lineage session: {err}"))?
-    else {
-        return Ok(None);
-    };
-    drop(reader);
     let mut writer = smelt_store::OwnedLineageWriter::open_existing(root, session_id)
         .map_err(|err| format!("failed to acquire lineage maintenance ownership: {err}"))?;
     let result = action(&mut writer);
     let release = writer
         .release()
         .map_err(|err| format!("failed to release lineage maintenance ownership: {err}"));
-    match (result, release) {
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-        (Ok(value), Ok(())) => Ok(Some(value)),
-    }
-}
-
-// COMPAT(session-lineage-v1): maintenance commands delegate here only when the
-// selected session has not been explicitly migrated to lineage storage.
-fn with_session_maintenance<T>(
-    reference: &str,
-    action: impl FnOnce(&mut smelt_store::SessionMaintenance) -> Result<T, String>,
-) -> Result<T, String> {
-    let (session_id, dir) = resolve_session_target(reference)?;
-    let root = dir
-        .parent()
-        .ok_or_else(|| "session directory has no parent".to_string())?;
-    let mut maintenance = smelt_store::SessionMaintenance::open(root, session_id)
-        .map_err(|err| format!("failed to acquire session maintenance ownership: {err}"))?;
-    let result = action(&mut maintenance);
-    let release = maintenance
-        .release()
-        .map_err(|err| format!("failed to release session maintenance ownership: {err}"));
     match (result, release) {
         (Err(err), _) => Err(err),
         (Ok(_), Err(err)) => Err(err),
@@ -937,47 +858,18 @@ fn run_session_command(args: SessionArgs) {
                     .parent()
                     .ok_or_else(|| "session directory has no storage root".to_string())?;
                 let backup_result = (|| {
-                    let backup = match smelt_store::LineageSessionReader::try_open_existing(
+                    let reader = smelt_store::LineageSessionReader::open_existing(
                         sessions_root,
                         &session_id,
                     )
-                    .map_err(|err| format!("failed to locate lineage session: {err}"))?
-                    {
-                        Some(reader) => {
-                            let lineage_id = reader.lineage_id().to_owned();
-                            reader
-                                .backup_to(&args.output)
-                                .map_err(|err| format!("failed to back up lineage: {err}"))?;
-                            let report =
-                                smelt_store::verify_lineage_backup(&args.output, &lineage_id)
-                                    .map_err(|err| {
-                                        format!("failed to verify lineage backup: {err}")
-                                    })?;
-                            (2, Some(lineage_id), report.schema_version, report.stats)
-                        }
-                        None => {
-                            // COMPAT(session-lineage-v1): explicit backups remain
-                            // available for previous-format sessions.
-                            let reader = smelt_store::SessionReader::open_existing(&dir)
-                                .map_err(|err| format!("failed to open session: {err}"))?;
-                            reader
-                                .backup_to(&args.output)
-                                .map_err(|err| format!("failed to back up session: {err}"))?;
-                            let backup = smelt_store::SessionReader::open_database(&args.output)
-                                .map_err(|err| format!("failed to verify backup: {err}"))?;
-                            (
-                                1,
-                                None,
-                                backup.schema_version().map_err(|err| {
-                                    format!("failed to inspect backup schema: {err}")
-                                })?,
-                                backup.storage_stats().map_err(|err| {
-                                    format!("failed to inspect backup sizes: {err}")
-                                })?,
-                            )
-                        }
-                    };
-                    Ok::<_, String>(backup)
+                    .map_err(|err| format!("failed to open lineage session: {err}"))?;
+                    let lineage_id = reader.lineage_id().to_owned();
+                    reader
+                        .backup_to(&args.output)
+                        .map_err(|err| format!("failed to back up lineage: {err}"))?;
+                    let report = smelt_store::verify_lineage_backup(&args.output, &lineage_id)
+                        .map_err(|err| format!("failed to verify lineage backup: {err}"))?;
+                    Ok::<_, String>((2, Some(lineage_id), report.schema_version, report.stats))
                 })();
                 let (format_version, lineage_id, schema_version, stats) = match backup_result {
                     Ok(backup) => backup,
@@ -1014,99 +906,51 @@ fn run_session_command(args: SessionArgs) {
             }
             result
         }
-        SessionCommand::Migrate(args) => session_maintenance::run_migrate(
-            args.session.as_deref(),
-            args.all,
-            args.dry_run,
-            args.json,
-        )
-        .and_then(|successful| {
-            if successful {
-                Ok(())
-            } else {
-                Err("one or more sessions could not be migrated".into())
-            }
-        }),
-        SessionCommand::QuarantineOrphans(args) => session_maintenance::run_quarantine_orphans(
-            args.session.as_deref(),
-            args.all,
-            args.dry_run,
-            args.json,
-        )
-        .and_then(|successful| {
-            if successful {
-                Ok(())
-            } else {
-                Err("one or more orphaned session directories could not be quarantined".into())
-            }
-        }),
-        SessionCommand::Gc(args) => {
-            match with_lineage_writer(&args.session, |writer| {
-                const RECLAMATION_ROWS_PER_TRANSACTION: usize = 256;
-                let mut branch_heads_cleared = 0usize;
-                let mut canonical_rows_deleted = 0usize;
-                let mut objects_deleted = 0usize;
-                let mut search_segments_deleted = 0usize;
-                let mut transactions = 0usize;
-                loop {
-                    let step = writer
-                        .reclaim_step(RECLAMATION_ROWS_PER_TRANSACTION)
-                        .map_err(|err| format!("failed to reclaim lineage data: {err}"))?;
-                    transactions = transactions.saturating_add(1);
-                    branch_heads_cleared =
-                        branch_heads_cleared.saturating_add(step.branch_heads_cleared);
-                    canonical_rows_deleted =
-                        canonical_rows_deleted.saturating_add(step.canonical_rows_deleted);
-                    objects_deleted = objects_deleted.saturating_add(step.objects_deleted);
-                    search_segments_deleted =
-                        search_segments_deleted.saturating_add(step.search_segments_deleted);
-                    if step.complete {
-                        break;
-                    }
-                    if step.work_rows() == 0 {
-                        return Err("lineage reclamation made no bounded progress".into());
-                    }
+        SessionCommand::Gc(args) => with_lineage_writer(&args.session, |writer| {
+            const RECLAMATION_ROWS_PER_TRANSACTION: usize = 256;
+            let mut branch_heads_cleared = 0usize;
+            let mut canonical_rows_deleted = 0usize;
+            let mut objects_deleted = 0usize;
+            let mut search_segments_deleted = 0usize;
+            let mut transactions = 0usize;
+            loop {
+                let step = writer
+                    .reclaim_step(RECLAMATION_ROWS_PER_TRANSACTION)
+                    .map_err(|err| format!("failed to reclaim lineage data: {err}"))?;
+                transactions = transactions.saturating_add(1);
+                branch_heads_cleared =
+                    branch_heads_cleared.saturating_add(step.branch_heads_cleared);
+                canonical_rows_deleted =
+                    canonical_rows_deleted.saturating_add(step.canonical_rows_deleted);
+                objects_deleted = objects_deleted.saturating_add(step.objects_deleted);
+                search_segments_deleted =
+                    search_segments_deleted.saturating_add(step.search_segments_deleted);
+                if step.complete {
+                    break;
                 }
-                let vacuum = writer
-                    .vacuum()
-                    .map_err(|err| format!("failed to vacuum reclaimed lineage pages: {err}"))?;
-                println!("cleared_branch_heads: {branch_heads_cleared}");
-                println!("deleted_canonical_rows: {canonical_rows_deleted}");
-                println!("deleted_objects: {objects_deleted}");
-                println!("deleted_search_segments: {search_segments_deleted}");
-                println!("free_pages_before: {}", vacuum.free_pages_before);
-                println!("free_pages_after: {}", vacuum.free_pages_after);
-                println!("pages_reclaimed: {}", vacuum.pages_reclaimed);
-                println!("transactions: {transactions}");
-                Ok(())
-            }) {
-                Ok(Some(())) => Ok(()),
-                Ok(None) => with_session_maintenance(&args.session, |maintenance| {
-                    let deleted = maintenance
-                        .garbage_collect_objects()
-                        .map_err(|err| format!("failed to collect session objects: {err}"))?;
-                    println!("deleted_objects: {deleted}");
-                    Ok(())
-                }),
-                Err(error) => Err(error),
+                if step.work_rows() == 0 {
+                    return Err("lineage reclamation made no bounded progress".into());
+                }
             }
-        }
-        SessionCommand::Vacuum(args) => {
-            match with_lineage_writer(&args.session, |writer| {
-                writer
-                    .vacuum()
-                    .map(|_| ())
-                    .map_err(|err| format!("failed to vacuum lineage: {err}"))
-            }) {
-                Ok(Some(())) => Ok(()),
-                Ok(None) => with_session_maintenance(&args.session, |maintenance| {
-                    maintenance
-                        .vacuum()
-                        .map_err(|err| format!("failed to vacuum session: {err}"))
-                }),
-                Err(error) => Err(error),
-            }
-        }
+            let vacuum = writer
+                .vacuum()
+                .map_err(|err| format!("failed to vacuum reclaimed lineage pages: {err}"))?;
+            println!("cleared_branch_heads: {branch_heads_cleared}");
+            println!("deleted_canonical_rows: {canonical_rows_deleted}");
+            println!("deleted_objects: {objects_deleted}");
+            println!("deleted_search_segments: {search_segments_deleted}");
+            println!("free_pages_before: {}", vacuum.free_pages_before);
+            println!("free_pages_after: {}", vacuum.free_pages_after);
+            println!("pages_reclaimed: {}", vacuum.pages_reclaimed);
+            println!("transactions: {transactions}");
+            Ok(())
+        }),
+        SessionCommand::Vacuum(args) => with_lineage_writer(&args.session, |writer| {
+            writer
+                .vacuum()
+                .map(|_| ())
+                .map_err(|err| format!("failed to vacuum lineage: {err}"))
+        }),
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
@@ -1156,12 +1000,6 @@ fn restore_canonical_session_cwd_for_launch(
     id_or_prefix: &str,
 ) -> Option<PathBuf> {
     let sessions = smelt_core::session::SessionStorage::from_env(env);
-    let resolved = sessions
-        .resolve_session_dir_for_read_result(id_or_prefix)
-        .ok()?;
-    if resolved.kind != smelt_core::session::SessionDirKind::Lineage {
-        return None;
-    }
     let (header, _) = sessions.load_store_header_result(id_or_prefix).ok()??;
     let requested = header.meta.cwd.as_deref()?.trim();
     if requested.is_empty() {
@@ -1804,99 +1642,5 @@ fn redirect_stderr() {
             }
             // `file` drops here but fd 2 now shares the same open file description.
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn migrate_args(argv: &[&str]) -> SessionMigrateArgs {
-        let args = Args::try_parse_from(argv).expect("migration arguments should parse");
-        let Some(Commands::Session(session)) = args.command else {
-            panic!("expected session command");
-        };
-        let SessionCommand::Migrate(args) = session.command else {
-            panic!("expected migrate command");
-        };
-        args
-    }
-
-    fn quarantine_orphans_args(argv: &[&str]) -> SessionQuarantineOrphansArgs {
-        let args = Args::try_parse_from(argv).expect("orphan quarantine arguments should parse");
-        let Some(Commands::Session(session)) = args.command else {
-            panic!("expected session command");
-        };
-        let SessionCommand::QuarantineOrphans(args) = session.command else {
-            panic!("expected quarantine-orphans command");
-        };
-        args
-    }
-
-    #[test]
-    fn migration_cli_accepts_one_session_or_all() {
-        let single = migrate_args(&["smelt", "session", "migrate", "abc123", "--dry-run"]);
-        assert_eq!(single.session.as_deref(), Some("abc123"));
-        assert!(!single.all);
-        assert!(single.dry_run);
-
-        let all = migrate_args(&[
-            "smelt",
-            "session",
-            "migrate",
-            "--all",
-            "--dry-run",
-            "--json",
-        ]);
-        assert_eq!(all.session, None);
-        assert!(all.all);
-        assert!(all.dry_run);
-        assert!(all.json);
-    }
-
-    #[test]
-    fn migration_cli_rejects_missing_or_ambiguous_targets() {
-        assert!(Args::try_parse_from(["smelt", "session", "migrate"]).is_err());
-        assert!(Args::try_parse_from(["smelt", "session", "migrate", "abc123", "--all"]).is_err());
-    }
-
-    #[test]
-    fn quarantine_orphans_cli_accepts_one_session_or_all() {
-        let single = quarantine_orphans_args(&[
-            "smelt",
-            "session",
-            "quarantine-orphans",
-            "abc123",
-            "--dry-run",
-        ]);
-        assert_eq!(single.session.as_deref(), Some("abc123"));
-        assert!(!single.all);
-        assert!(single.dry_run);
-
-        let all = quarantine_orphans_args(&[
-            "smelt",
-            "session",
-            "quarantine-orphans",
-            "--all",
-            "--dry-run",
-            "--json",
-        ]);
-        assert_eq!(all.session, None);
-        assert!(all.all);
-        assert!(all.dry_run);
-        assert!(all.json);
-    }
-
-    #[test]
-    fn quarantine_orphans_cli_rejects_missing_or_ambiguous_targets() {
-        assert!(Args::try_parse_from(["smelt", "session", "quarantine-orphans"]).is_err());
-        assert!(Args::try_parse_from([
-            "smelt",
-            "session",
-            "quarantine-orphans",
-            "abc123",
-            "--all",
-        ])
-        .is_err());
     }
 }

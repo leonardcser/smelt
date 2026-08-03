@@ -32,12 +32,6 @@ pub enum SessionStoreError {
     ReadOnlyOwnerConflict {
         owner: String,
     },
-    MigrationRequired {
-        id: String,
-    },
-    Orphaned {
-        found: i32,
-    },
     Busy {
         operation: String,
         attempts: u32,
@@ -80,8 +74,6 @@ impl SessionStoreError {
             Self::CatalogUnavailable { kind, .. } => kind,
             Self::SymlinkNotAllowed { .. } => "symlink_not_allowed",
             Self::ReadOnlyOwnerConflict { .. } => "read_only_owner_conflict",
-            Self::MigrationRequired { .. } => "migration_required",
-            Self::Orphaned { .. } => "orphaned",
             Self::Busy { .. } => "busy",
             Self::Io { .. } => "io",
             Self::UnsupportedSchema { .. } => "unsupported_schema",
@@ -119,14 +111,6 @@ impl fmt::Display for SessionStoreError {
             Self::ReadOnlyOwnerConflict { owner } => {
                 write!(f, "session is owned by another writer: {owner}")
             }
-            Self::MigrationRequired { id } => write!(
-                f,
-                "session {id} uses the previous storage format; run `smelt session migrate {id}`"
-            ),
-            Self::Orphaned { found } => write!(
-                f,
-                "orphaned session schema version {found} has no canonical identity or session content"
-            ),
             Self::Busy {
                 operation,
                 attempts,
@@ -227,10 +211,9 @@ pub fn store_error(
         smelt_store::StoreError::OwnershipLost => SessionStoreError::ReadOnlyOwnerConflict {
             owner: "writer ownership was lost".into(),
         },
-        smelt_store::StoreError::LegacyMigrationRequired { session_id } => {
-            SessionStoreError::MigrationRequired { id: session_id }
-        }
-        smelt_store::StoreError::OrphanedSession { found } => SessionStoreError::Orphaned { found },
+        smelt_store::StoreError::Cancelled => SessionStoreError::Corrupt {
+            context: format!("{operation} {}: operation cancelled", path.display()),
+        },
         smelt_store::StoreError::MissingObject { reference } => {
             SessionStoreError::MissingObject { reference }
         }
@@ -247,30 +230,6 @@ pub fn store_error(
             }
         }
     }
-}
-
-// COMPAT(session-lineage-v1): validates the previous per-session database for
-// explicit read-only compatibility and migration paths.
-pub fn ensure_session_db_read_only(dir_path: &Path) -> SessionStoreResult<()> {
-    let state_root = crate::config::state_dir();
-    ensure_session_db_read_only_in(&state_root, dir_path)
-}
-
-pub(crate) fn ensure_session_db_read_only_in(
-    state_root: &Path,
-    dir_path: &Path,
-) -> SessionStoreResult<()> {
-    reject_symlink_in(state_root, dir_path, "open")?;
-    let db_path = dir_path.join("session.db");
-    reject_symlink_in(state_root, &db_path, "open")?;
-    if !db_path.is_file() {
-        return Err(SessionStoreError::MissingDatabase {
-            id: session_dir_id(dir_path),
-        });
-    }
-    smelt_store::SessionReader::open_existing(dir_path)
-        .map(|_| ())
-        .map_err(|err| store_error("open", &db_path, err))
 }
 
 pub(crate) fn reject_symlink(path: &Path, operation: &'static str) -> SessionStoreResult<()> {
@@ -324,38 +283,27 @@ pub(crate) fn reject_symlink_in(
     })
 }
 
-fn session_dir_id(dir_path: &Path) -> String {
-    dir_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("<unknown>")
-        .to_string()
-}
-
 pub fn export_history_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), String> {
-    match reader_for_export(id_or_prefix).map_err(|err| err.to_string())? {
-        ExportReader::Lineage(reader) => reader.export_history_jsonl(out),
-        ExportReader::Legacy(reader) => reader.export_history_jsonl(out),
-    }
-    .map_err(|err| err.to_string())
+    reader_for_export(id_or_prefix)
+        .and_then(|reader| {
+            reader.export_history_jsonl(out).map_err(|error| {
+                store_error("export lineage history", reader.database_path(), error)
+            })
+        })
+        .map_err(|error| error.to_string())
 }
 
 pub fn export_requests_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), String> {
-    match reader_for_export(id_or_prefix).map_err(|err| err.to_string())? {
-        ExportReader::Lineage(reader) => reader.export_requests_jsonl(out),
-        ExportReader::Legacy(reader) => reader.export_requests_jsonl(out),
-    }
-    .map_err(|err| err.to_string())
+    reader_for_export(id_or_prefix)
+        .and_then(|reader| {
+            reader.export_requests_jsonl(out).map_err(|error| {
+                store_error("export lineage requests", reader.database_path(), error)
+            })
+        })
+        .map_err(|error| error.to_string())
 }
 
-enum ExportReader {
-    Lineage(smelt_store::LineageSessionReader),
-    // COMPAT(session-lineage-v1): exports remain available before explicit
-    // migration without mutating the previous-format session.
-    Legacy(smelt_store::SessionReader),
-}
-
-fn reader_for_export(id_or_prefix: &str) -> SessionStoreResult<ExportReader> {
+fn reader_for_export(id_or_prefix: &str) -> SessionStoreResult<smelt_store::LineageSessionReader> {
     let id = crate::session::resolve_prefix(id_or_prefix)?;
     let dir = crate::session::session_dir(&id);
     let sessions_root = dir.parent().ok_or_else(|| SessionStoreError::Io {
@@ -363,15 +311,6 @@ fn reader_for_export(id_or_prefix: &str) -> SessionStoreResult<ExportReader> {
         path: dir.display().to_string(),
         message: "session directory has no parent".into(),
     })?;
-    if let Some(reader) =
-        smelt_store::LineageSessionReader::try_open_existing(sessions_root, id.as_str())
-            .map_err(|err| store_error("open lineage export database", sessions_root, err))?
-    {
-        return Ok(ExportReader::Lineage(reader));
-    }
-    ensure_session_db_read_only(&dir)?;
-    let db_path = dir.join("session.db");
-    smelt_store::SessionReader::open_existing(&dir)
-        .map(ExportReader::Legacy)
-        .map_err(|err| store_error("open export database", &db_path, err))
+    smelt_store::LineageSessionReader::open_existing(sessions_root, id.as_str())
+        .map_err(|error| store_error("open lineage export database", sessions_root, error))
 }

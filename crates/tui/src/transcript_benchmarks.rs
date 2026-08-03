@@ -2244,7 +2244,7 @@ impl HotPathCounters {
             record_inserted: perf_value_max(snapshot, "store:transcript:record_db_rows_inserted"),
             record_deleted: perf_value_max(snapshot, "store:transcript:record_db_rows_deleted"),
             read_range_rows: perf_value_max(snapshot, "store:history:read_range_rows"),
-            cached_read_write_db: perf_value_max(snapshot, "store:db:cached_read_write"),
+            cached_read_write_db: perf_value_max(snapshot, "store:lineage:cached_read_write"),
             invariant_history_rows: perf_value_max(
                 snapshot,
                 "store:session:invariant_history_rows",
@@ -2354,6 +2354,14 @@ fn hot_path_fixture_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("SMELT_TRANSCRIPT_HOT_PATH_FIXTURE")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+fn hot_path_fixture_session_id() -> String {
+    let session_id = std::env::var("SMELT_TRANSCRIPT_HOT_PATH_SESSION_ID")
+        .expect("SMELT_TRANSCRIPT_HOT_PATH_SESSION_ID is required with a fixture");
+    smelt_core::session_id::SessionId::parse(&session_id)
+        .expect("SMELT_TRANSCRIPT_HOT_PATH_SESSION_ID must be a session ID");
+    session_id
 }
 
 fn hot_path_session_id(_label: &str) -> String {
@@ -2473,55 +2481,52 @@ fn saved_hot_path_app(
 }
 
 fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
-    let fixture_dir = if fixture.is_dir() {
-        fixture
-    } else {
-        fixture
-            .parent()
-            .expect("hot-path fixture database has no parent directory")
-    };
-    let source_db = if fixture.is_dir() {
-        fixture.join("session.db")
-    } else {
-        fixture.to_path_buf()
-    };
     assert!(
-        source_db.is_file(),
-        "hot-path fixture database does not exist: {}",
-        source_db.display()
+        fixture.is_dir(),
+        "hot-path fixture sessions root does not exist: {}",
+        fixture.display()
     );
-    let session_id = fixture_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("hot-path fixture directory requires a UTF-8 session ID");
-    smelt_core::session_id::SessionId::parse(session_id)
-        .expect("hot-path fixture directory name must be a session ID");
-
+    let session_id = hot_path_fixture_session_id();
     let mut app = TestApp::builder().build();
-    let destination_dir = app.session_dir_for_id(session_id);
-    std::fs::create_dir_all(&destination_dir).expect("create copied fixture session directory");
-    let destination_db = destination_dir.join("session.db");
+    let destination_root = app
+        .session_dir_for_id(&session_id)
+        .parent()
+        .expect("session path has no sessions root")
+        .to_path_buf();
     let started = std::time::Instant::now();
-    smelt_store::backup_session_database(&source_db, &destination_db).unwrap_or_else(|error| {
-        panic!("snapshot hot-path fixture {}: {error}", source_db.display())
-    });
-    let copied_bytes = destination_db
-        .metadata()
-        .expect("read copied fixture metadata")
-        .len();
+    let copied_bytes = copy_fixture_tree(fixture, &destination_root);
     eprintln!(
         "TRANSCRIPT_HOT_PATH_FIXTURE_COPY session_id={} bytes={} ms={:.3}",
         session_id,
         copied_bytes,
         elapsed_ms(started.elapsed())
     );
-    app.resume_session(session_id);
+    app.resume_session(&session_id);
     assert_eq!(app.app.conversation.session().id, session_id);
     assert!(
         !app.app.conversation.is_read_only(),
         "copied hot-path fixture opened read-only"
     );
     app
+}
+
+fn copy_fixture_tree(source: &std::path::Path, destination: &std::path::Path) -> u64 {
+    std::fs::create_dir_all(destination).expect("create fixture destination");
+    let mut copied_bytes = 0_u64;
+    for entry in std::fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let file_type = entry.file_type().expect("read fixture entry type");
+        assert!(!file_type.is_symlink(), "fixture must not contain symlinks");
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copied_bytes = copied_bytes.saturating_add(copy_fixture_tree(&entry.path(), &target));
+        } else if file_type.is_file() {
+            copied_bytes = copied_bytes.saturating_add(
+                std::fs::copy(entry.path(), target).expect("copy fixture database file"),
+            );
+        }
+    }
+    copied_bytes
 }
 
 fn assert_no_full_store_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
@@ -2650,10 +2655,18 @@ fn read_provider_history_source(
             );
             let mut history = prefix;
             if end_index > first_live_index {
-                let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))
-                    .expect("open provider history database");
-                let mut rows = db
-                    .read_history_items_range(first_live_index..end_index)
+                let sessions_root = session_dir
+                    .parent()
+                    .expect("session path has no sessions root");
+                let session_id = session_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("session path has no UTF-8 session ID");
+                let reader =
+                    smelt_store::LineageSessionReader::open_existing(sessions_root, session_id)
+                        .expect("open provider history lineage");
+                let mut rows = reader
+                    .history_range(first_live_index as u64, end_index as u64)
                     .expect("read provider history rows");
                 smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
                 history.append(&mut rows);
@@ -2863,7 +2876,7 @@ fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
                 .flatten()
                 .and_then(|origin| match origin {
                     smelt_core::BlockOrigin::History(history_idx) => Some((block_idx, history_idx)),
-                    smelt_core::BlockOrigin::CheckpointMarker => None,
+                    smelt_core::BlockOrigin::Checkpoint { .. } => None,
                 })
         })
         .expect("rewind benchmark history requires a user block");

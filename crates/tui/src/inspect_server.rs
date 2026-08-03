@@ -4,7 +4,9 @@
 //! API backed by `smelt_core::session` and `smelt_store`.
 
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -606,8 +608,8 @@ fn session_requests_json(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> std::result::Result<Option<String>, String> {
-    let dir = match session_dir(sessions, id) {
-        Ok(dir) => dir,
+    let id = match sessions.resolve_prefix(id) {
+        Ok(id) => id,
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
@@ -616,25 +618,12 @@ fn session_requests_json(
         order: smelt_store::RequestAuditOrder::OldestFirst,
         ..Default::default()
     };
-    let attempts = if let Some(reader) =
-        smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id)
-            .map_err(|err| err.to_string())?
-    {
-        reader
-            .query_request_attempts(&query)
-            .map_err(|err| err.to_string())?
-    } else {
-        // COMPAT(session-lineage-v1): inspection remains read-only for
-        // previous-format sessions until explicit migration.
-        sessions
-            .ensure_session_db_read_only(&dir)
+    let reader =
+        smelt_store::LineageSessionReader::open_existing(sessions.sessions_dir(), id.as_str())
             .map_err(|err| err.to_string())?;
-        let db_path = dir.join("session.db");
-        smelt_store::SessionReader::open_database(&db_path)
-            .map_err(|err| err.to_string())?
-            .query_request_attempts(&query)
-            .map_err(|err| err.to_string())?
-    };
+    let attempts = reader
+        .query_request_attempts(&query)
+        .map_err(|err| err.to_string())?;
     let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
     serde_json::to_string(&values)
         .map(Some)
@@ -672,30 +661,17 @@ fn request_payload_json(
     id: &str,
     attempt_id: i64,
 ) -> std::result::Result<Option<String>, String> {
-    let dir = match session_dir(sessions, id) {
-        Ok(dir) => dir,
+    let id = match sessions.resolve_prefix(id) {
+        Ok(id) => id,
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
-    let payloads = if let Some(reader) =
-        smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id)
-            .map_err(|err| err.to_string())?
-    {
-        reader
-            .request_payloads(attempt_id)
-            .map_err(|err| err.to_string())?
-    } else {
-        // COMPAT(session-lineage-v1): payload inspection remains read-only for
-        // previous-format sessions until explicit migration.
-        sessions
-            .ensure_session_db_read_only(&dir)
+    let reader =
+        smelt_store::LineageSessionReader::open_existing(sessions.sessions_dir(), id.as_str())
             .map_err(|err| err.to_string())?;
-        let db_path = dir.join("session.db");
-        smelt_store::SessionReader::open_database(&db_path)
-            .map_err(|err| err.to_string())?
-            .request_payloads(attempt_id)
-            .map_err(|err| err.to_string())?
-    };
+    let payloads = reader
+        .request_payloads(attempt_id)
+        .map_err(|err| err.to_string())?;
     let Some(payloads) = payloads else {
         return Ok(None);
     };
@@ -772,15 +748,6 @@ fn remove_null_json_fields(value: &mut serde_json::Value) {
     }
 }
 
-fn session_dir(
-    sessions: &smelt_core::session::SessionStorage,
-    id: &str,
-) -> Result<PathBuf, smelt_core::session::SessionStoreError> {
-    sessions
-        .resolve_prefix(id)
-        .map(|id| sessions.session_dir(&id))
-}
-
 pub fn is_safe_session_ref(id: &str) -> bool {
     smelt_core::session_id::SessionPrefix::parse(id).is_ok()
 }
@@ -795,8 +762,7 @@ fn list_session_items(
         .into_iter()
         .filter_map(|entry| match entry.status {
             smelt_core::session::SessionListStatus::Available(meta) => Some(*meta),
-            smelt_core::session::SessionListStatus::Upgradeable { .. }
-            | smelt_core::session::SessionListStatus::Unavailable(_) => None,
+            smelt_core::session::SessionListStatus::Unavailable(_) => None,
         })
         .map(|meta| {
             let (project, path_group) = project_labels(meta.cwd.as_deref());
@@ -853,19 +819,9 @@ fn request_stats_for_session(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> RequestStats {
-    let Ok(session_dir) = session_dir(sessions, id) else {
-        return RequestStats::default();
-    };
     match smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id) {
         Ok(Some(reader)) => reader.request_audit_stats().unwrap_or_default(),
-        Ok(None) => {
-            // COMPAT(session-lineage-v1): inspector maintenance remains able to
-            // summarize the immediately preceding format during migration.
-            smelt_store::SessionReader::open_database(session_dir.join("session.db"))
-                .and_then(|db| db.request_audit_stats())
-                .unwrap_or_default()
-        }
-        Err(_) => RequestStats::default(),
+        Ok(None) | Err(_) => RequestStats::default(),
     }
 }
 
@@ -1092,10 +1048,11 @@ mod tests {
             200,
         );
         let attempt_id = append_request_audit(&state.sessions, NEWER_SESSION_ID);
+        let session_prefix = &NEWER_SESSION_ID[..12];
 
         let (head, body) = fetch(
             &state.sessions,
-            &format!("/api/sessions/{NEWER_SESSION_ID}/requests"),
+            &format!("/api/sessions/{session_prefix}/requests"),
         )
         .await;
         assert_status(&head, "200 OK");
@@ -1110,7 +1067,7 @@ mod tests {
 
         let (head, body) = fetch(
             &state.sessions,
-            &format!("/api/sessions/{NEWER_SESSION_ID}/requests/{attempt_id}"),
+            &format!("/api/sessions/{session_prefix}/requests/{attempt_id}"),
         )
         .await;
         assert_status(&head, "200 OK");

@@ -70,7 +70,7 @@ fn usage_error(message: &str) -> ! {
 
 fn print_usage() {
     eprintln!("usage: cargo xtask bench-lineage-search --state-dir PATH [--session ID] [--runs N]");
-    eprintln!("The state directory must contain explicitly migrated lineage sessions.");
+    eprintln!("The state directory must contain canonical lineage sessions.");
 }
 
 fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {

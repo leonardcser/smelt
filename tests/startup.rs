@@ -343,32 +343,15 @@ end)
             transcript_marker,
         )));
     let sessions_root = state_home.join("smelt/sessions");
-    let mut writer = smelt_store::OwnedSessionWriter::open(&sessions_root, session_id)
-        .expect("create previous-format fixture");
+    let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, session_id)
+        .expect("create lineage fixture");
     writer
         .commit_session(
             &smelt_core::session::initial_store_commit_from_session(&session)
-                .expect("build previous-format fixture"),
+                .expect("build lineage fixture"),
         )
-        .expect("commit previous-format fixture");
-    writer.publish().expect("publish previous-format fixture");
-    writer.release().expect("release previous-format fixture");
-
-    let migration = Command::new(env!("CARGO_BIN_EXE_smelt"))
-        .args(["session", "migrate", session_id, "--json"])
-        .current_dir(&initial_cwd)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("XDG_STATE_HOME", &state_home)
-        .env("XDG_CACHE_HOME", &cache_home)
-        .env("XDG_DATA_HOME", &data_home)
-        .output()
-        .expect("migrate startup fixture");
-    assert!(
-        migration.status.success(),
-        "fixture migration failed: {}",
-        String::from_utf8_lossy(&migration.stderr)
-    );
+        .expect("commit lineage fixture");
+    writer.release().expect("release lineage fixture");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
     command
@@ -573,7 +556,6 @@ end)
 
 #[derive(Clone, Copy)]
 struct LifecycleSample {
-    migration: Option<Duration>,
     first_frame: Option<Duration>,
     ready: Duration,
     shutdown: Duration,
@@ -664,6 +646,24 @@ fn print_duration_summary(name: &str, samples: impl Iterator<Item = Duration>) {
     );
 }
 
+fn copy_fixture_directory(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("create benchmark fixture destination");
+    for entry in std::fs::read_dir(source).expect("read benchmark fixture directory") {
+        let entry = entry.expect("read benchmark fixture entry");
+        let file_type = entry.file_type().expect("read benchmark fixture file type");
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_fixture_directory(&entry.path(), &target);
+        } else {
+            assert!(
+                file_type.is_file(),
+                "benchmark fixtures cannot contain symlinks"
+            );
+            std::fs::copy(entry.path(), target).expect("copy benchmark fixture file");
+        }
+    }
+}
+
 struct LifecycleBenchmark<'a> {
     binary: &'a Path,
     fixture: Option<&'a Path>,
@@ -680,34 +680,9 @@ impl LifecycleBenchmark<'_> {
         for name in ["home", "config", "cache", "data"] {
             std::fs::create_dir_all(root.join(name)).expect("create benchmark runtime directory");
         }
-        let migration = if let (Some(fixture), Some(session_id)) = (self.fixture, self.session_id) {
-            let session_dir = state_home.join("smelt/sessions").join(session_id);
-            std::fs::create_dir_all(&session_dir).expect("create benchmark session directory");
-            smelt_store::backup_session_database(
-                fixture.join("session.db"),
-                session_dir.join("session.db"),
-            )
-            .expect("copy benchmark fixture with SQLite backup");
-            let started = Instant::now();
-            let output = Command::new(self.binary)
-                .args(["session", "migrate", session_id, "--json"])
-                .current_dir(root)
-                .env("HOME", root.join("home"))
-                .env("XDG_CONFIG_HOME", root.join("config"))
-                .env("XDG_STATE_HOME", &state_home)
-                .env("XDG_CACHE_HOME", root.join("cache"))
-                .env("XDG_DATA_HOME", root.join("data"))
-                .output()
-                .expect("run explicit benchmark migration");
-            assert!(
-                output.status.success(),
-                "explicit benchmark migration failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Some(started.elapsed())
-        } else {
-            None
-        };
+        if let Some(fixture) = self.fixture {
+            copy_fixture_directory(fixture, &state_home.join("smelt/sessions"));
+        }
 
         let mut command = Command::new(self.binary);
         command.args([
@@ -803,7 +778,6 @@ impl LifecycleBenchmark<'_> {
         }
 
         LifecycleSample {
-            migration,
             first_frame,
             ready,
             shutdown: quit_started.elapsed(),
@@ -820,15 +794,23 @@ fn interactive_lifecycle_benchmark_suite() {
     let target = std::path::PathBuf::from(target);
     assert!(target.is_file(), "benchmark target must be a smelt binary");
     let fixture = std::env::var_os("SMELT_LIFECYCLE_BENCH_FIXTURE").map(std::path::PathBuf::from);
-    let fixture_database_before = fixture
-        .as_ref()
-        .map(|fixture| std::fs::read(fixture.join("session.db")).expect("read benchmark fixture"));
-    let session_id = fixture.as_ref().map(|fixture| {
-        fixture
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("fixture directory must have a UTF-8 session id")
+    let session_id = fixture.as_ref().map(|_| {
+        std::env::var("SMELT_LIFECYCLE_BENCH_SESSION_ID")
+            .expect("SMELT_LIFECYCLE_BENCH_SESSION_ID must identify a lineage fixture branch")
     });
+    let fixture_database =
+        fixture
+            .as_ref()
+            .zip(session_id.as_deref())
+            .map(|(fixture, session_id)| {
+                smelt_store::LineageSessionReader::open_existing(fixture, session_id)
+                    .expect("open benchmark lineage fixture")
+                    .database_path()
+                    .to_path_buf()
+            });
+    let fixture_database_before = fixture_database
+        .as_ref()
+        .map(|database| std::fs::read(database).expect("read benchmark fixture"));
     let ready_marker = std::env::var("SMELT_LIFECYCLE_BENCH_READY_TEXT")
         .expect("SMELT_LIFECYCLE_BENCH_READY_TEXT must identify loaded transcript content");
     assert!(
@@ -869,7 +851,7 @@ smelt.provider.register("local", {
     let benchmark = LifecycleBenchmark {
         binary: &target,
         fixture: fixture.as_deref(),
-        session_id,
+        session_id: session_id.as_deref(),
         config: &config,
         first_frame_marker: first_frame_marker.as_bytes(),
         ready_marker: ready_marker.as_bytes(),
@@ -885,12 +867,8 @@ smelt.provider.register("local", {
             .first_frame
             .map(|duration| format!("{:.3}", duration.as_secs_f64() * 1_000.0))
             .unwrap_or_else(|| "na".to_string());
-        let migration_ms = sample
-            .migration
-            .map(|duration| format!("{:.3}", duration.as_secs_f64() * 1_000.0))
-            .unwrap_or_else(|| "na".to_string());
         println!(
-            "LIFECYCLE_BENCH_RUN run={run} migration_ms={migration_ms} first_frame_ms={first_frame_ms} ready_ms={:.3} shutdown_ms={:.3} peak_rss_kib={}",
+            "LIFECYCLE_BENCH_RUN run={run} first_frame_ms={first_frame_ms} ready_ms={:.3} shutdown_ms={:.3} peak_rss_kib={}",
             sample.ready.as_secs_f64() * 1_000.0,
             sample.shutdown.as_secs_f64() * 1_000.0,
             sample.peak_rss_kib,
@@ -898,10 +876,6 @@ smelt.provider.register("local", {
         samples.push(sample);
     }
 
-    let migrations = samples.iter().filter_map(|sample| sample.migration);
-    if migrations.clone().next().is_some() {
-        print_duration_summary("migration", migrations);
-    }
     let first_frames = samples.iter().filter_map(|sample| sample.first_frame);
     if first_frames.clone().next().is_some() {
         print_duration_summary("first_frame", first_frames);
@@ -916,9 +890,9 @@ smelt.provider.register("local", {
             .map(|sample| sample.peak_rss_kib as f64)
             .collect(),
     );
-    if let (Some(fixture), Some(before)) = (&fixture, fixture_database_before) {
+    if let (Some(database), Some(before)) = (&fixture_database, fixture_database_before) {
         assert_eq!(
-            std::fs::read(fixture.join("session.db")).expect("reread benchmark fixture"),
+            std::fs::read(database).expect("reread benchmark fixture"),
             before,
             "lifecycle benchmark must not mutate its source fixture"
         );

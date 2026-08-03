@@ -55,14 +55,26 @@ impl TranscriptScrollProbeState {
 }
 
 struct SparseTranscriptFixture {
+    root: std::path::PathBuf,
     session_dir: std::path::PathBuf,
 }
 
 impl SparseTranscriptFixture {
-    fn new(session_dir: std::path::PathBuf) -> Self {
-        let _ = std::fs::remove_dir_all(&session_dir);
-        std::fs::create_dir_all(&session_dir).expect("create transcript fixture dir");
-        Self { session_dir }
+    fn new(root: std::path::PathBuf) -> Self {
+        let _ = std::fs::remove_dir_all(&root);
+        let session_id = "f".repeat(64);
+        let session_dir = root.join(&session_id);
+        let mut session = smelt_core::session::Session::new(1, root.clone());
+        session.id = session_id.clone();
+        let initial = smelt_core::session::initial_store_commit_from_session(&session)
+            .expect("build initial transcript fixture");
+        let mut writer = smelt_store::OwnedLineageWriter::open(&root, &session_id)
+            .expect("open transcript fixture writer");
+        writer
+            .commit_session(&initial)
+            .expect("commit initial transcript fixture");
+        writer.release().expect("release transcript fixture writer");
+        Self { root, session_dir }
     }
 
     fn path(&self) -> &std::path::Path {
@@ -72,7 +84,7 @@ impl SparseTranscriptFixture {
 
 impl Drop for SparseTranscriptFixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.session_dir);
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

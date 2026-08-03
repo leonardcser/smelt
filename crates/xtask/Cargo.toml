@@ -10,7 +10,4 @@ smelt-tui = { workspace = true }
 smelt-protocol = { workspace = true }
 smelt-store = { workspace = true }
 serde_json = { workspace = true }
-smelt-perf.workspace = true
-libc.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
-fm-index = "0.3.1"

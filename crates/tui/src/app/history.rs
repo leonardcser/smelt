@@ -559,6 +559,25 @@ fn push_assistant_blocks(
 mod tests {
     use super::*;
 
+    const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn seed_transcript(
+        root: &std::path::Path,
+        records: Vec<smelt_store::StoredTranscriptBlock>,
+    ) -> std::path::PathBuf {
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.id = SESSION_ID.into();
+        let mut command = session::initial_store_commit_from_session(&session).unwrap();
+        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+            start: smelt_store::TranscriptRecordIndex::ZERO,
+            records,
+        });
+        let mut writer = smelt_store::OwnedLineageWriter::open(root, SESSION_ID).unwrap();
+        writer.commit_session(&command).unwrap();
+        writer.release().unwrap();
+        root.join(SESSION_ID)
+    }
+
     #[test]
     fn rebuild_uses_json_args_summary_for_resumed_mcp_tool_calls() {
         let lua = crate::lua::LuaRuntime::new();
@@ -715,17 +734,15 @@ mod tests {
     }
 
     #[test]
-    fn display_only_sqlite_load_reads_bounded_tail_records() {
+    fn display_only_lineage_load_reads_bounded_tail_records() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..200)
             .map(|idx| test_record_record(idx, &format!("block {idx}")))
             .collect::<Vec<_>>();
-        db.apply_transcript_record_fixture(&records).unwrap();
-        drop(db);
+        let session_dir = seed_transcript(dir.path(), records);
 
-        let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 10, 1)
-            .expect("tail transcript");
+        let loaded =
+            load_transcript_tail_from_sqlite_dir(session_dir, 10, 1).expect("tail transcript");
         let record_window = loaded.record_window.expect("record window");
         assert_eq!(record_window.start.get(), 160);
         assert_eq!(record_window.end().get(), 200);
@@ -749,18 +766,16 @@ mod tests {
     }
 
     #[test]
-    fn display_only_sqlite_load_counts_non_dense_record_rows() {
+    fn display_only_lineage_load_counts_non_dense_record_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = vec![
             test_record_record(70, "visible old tail"),
             test_record_record(235, "visible newest tail"),
         ];
-        db.apply_transcript_record_fixture(&records).unwrap();
-        drop(db);
+        let session_dir = seed_transcript(dir.path(), records);
 
-        let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 80, 12)
-            .expect("tail transcript");
+        let loaded =
+            load_transcript_tail_from_sqlite_dir(session_dir, 80, 12).expect("tail transcript");
         let record_window = loaded.record_window.expect("record window");
         assert_eq!(record_window.start.get(), 0);
         assert_eq!(record_window.end().get(), 2);
@@ -1458,18 +1473,10 @@ impl TuiApp {
             .dir_for(self.conversation.session());
         let session_id = &self.conversation.session().id;
         let store_head = session_dir.parent().and_then(|root| {
-            match smelt_store::LineageSessionReader::try_open_existing(root, session_id) {
-                Ok(Some(reader)) => reader.snapshot().map(|state| state.head).ok(),
-                Ok(None) => {
-                    // COMPAT(session-lineage-v1): full-session documents from the
-                    // immediately preceding format can still be installed by tests
-                    // and explicit compatibility flows during the migration window.
-                    smelt_store::SessionReader::open_existing(&session_dir)
-                        .and_then(|reader| reader.store_head())
-                        .ok()
-                }
-                Err(_) => None,
-            }
+            smelt_store::LineageSessionReader::open_existing(root, session_id)
+                .and_then(|reader| reader.snapshot())
+                .map(|state| state.head)
+                .ok()
         });
         self.conversation
             .install_loaded_full_session(transcript, store_head);
@@ -2067,27 +2074,13 @@ impl TuiApp {
             let sessions_root = session_dir
                 .parent()
                 .ok_or_else(|| "session directory has no storage root".to_string())?;
-            let mut rows = match smelt_store::LineageSessionReader::try_open_existing(
+            let mut rows = smelt_store::LineageSessionReader::open_existing(
                 sessions_root,
                 &self.conversation.session().id,
             )
             .map_err(|err| format!("open canonical model history: {err}"))?
-            {
-                Some(reader) => reader
-                    .history_range(first_live_index as u64, end_index as u64)
-                    .map_err(|err| format!("read canonical model history rows: {err}"))?,
-                None => {
-                    // COMPAT(session-lineage-v1): retain read-only support for the
-                    // immediately preceding format in explicit compatibility tests.
-                    let db_path = session_dir.join("session.db");
-                    smelt_store::SessionReader::open_database(&db_path)
-                        .map_err(|err| {
-                            format!("open previous-format model history {db_path:?}: {err}")
-                        })?
-                        .read_history_items_range(first_live_index..end_index)
-                        .map_err(|err| format!("read previous-format model history rows: {err}"))?
-                }
-            };
+            .history_range(first_live_index as u64, end_index as u64)
+            .map_err(|err| format!("read canonical model history rows: {err}"))?;
             smelt_perf::perf::record_value(
                 "tui:model_history:messages_store_rows",
                 rows.len() as u64,

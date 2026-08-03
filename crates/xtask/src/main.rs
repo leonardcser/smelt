@@ -2,7 +2,6 @@
 
 mod bench_file_search;
 mod bench_lineage_search;
-mod bench_search_prototype;
 mod bench_store_compression;
 mod bench_support;
 mod bench_transcript_layout;
@@ -17,7 +16,6 @@ fn main() {
     match cmd.as_deref() {
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-lineage-search") => bench_lineage_search::run(args.collect()),
-        Some("bench-search-prototype") => bench_search_prototype::run(args.collect()),
         Some("bench-store-compression") => bench_store_compression::run(args.collect()),
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
         Some("gen-file-icons") => gen_file_icons::run(args.collect()),
@@ -45,9 +43,6 @@ fn print_usage() {
     );
     eprintln!(
         "  bench-lineage-search --state-dir PATH [--session ID] benchmark production derived search"
-    );
-    eprintln!(
-        "  bench-search-prototype --output-dir PATH [--fixture PATH] compare compact transcript search indexes"
     );
     eprintln!(
         "  bench-store-compression STATE_DIR [--max-samples N] [--max-bytes N] sample store compression"

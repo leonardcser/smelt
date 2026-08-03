@@ -250,8 +250,6 @@ pub struct TranscriptRecordSuffix {
 pub struct StoreHead {
     pub revision: Revision,
     pub history_len: HistoryLen,
-    // COMPAT(last-session-commit-descriptor-len): v9 renamed this persisted receipt field.
-    #[serde(alias = "descriptor_len")]
     pub transcript_record_count: TranscriptRecordCount,
 }
 
@@ -387,28 +385,6 @@ mod tests {
 
         assert_eq!(history_len.get(), record_len.get());
         assert_eq!(history_len.as_usize(), Some(7));
-    }
-
-    #[test]
-    fn store_head_reads_legacy_descriptor_len_and_writes_canonical_name() {
-        let head: StoreHead = serde_json::from_value(serde_json::json!({
-            "revision": 10,
-            "history_len": 20,
-            "descriptor_len": 30,
-        }))
-        .expect("deserialize legacy store head");
-
-        assert_eq!(head.revision, Revision::new(10));
-        assert_eq!(head.history_len, HistoryLen::new(20));
-        assert_eq!(head.transcript_record_count, TranscriptRecordCount::new(30));
-        assert_eq!(
-            serde_json::to_value(head).expect("serialize current store head"),
-            serde_json::json!({
-                "revision": 10,
-                "history_len": 20,
-                "transcript_record_count": 30,
-            })
-        );
     }
 
     #[test]

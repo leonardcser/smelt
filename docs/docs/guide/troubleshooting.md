@@ -80,49 +80,11 @@ Language servers start lazily. Results can be temporarily incomplete while a
 server indexes a large workspace. See the
 [LSP plugin setup](plugins.md#agent-semantic-code-tools-lsp).
 
-## A session requires a schema upgrade
+## An old session is not listed
 
-Explicitly resume the session to upgrade it automatically, or inspect the planned
-migration without changing data:
-
-```bash
-smelt session migrate <SESSION> --dry-run
-smelt session migrate --all --dry-run --json
-```
-
-After reviewing the output, migrate one session or every session sequentially:
-
-```bash
-smelt session migrate <SESSION>
-smelt session migrate --all
-```
-
-Close any smelt process using a session before migrating it. The command reports
-active writers as `busy`; close them normally and retry. Future schemas and
-corrupt or unrecognized databases are not modified. Identity-less databases with
-no canonical session content are reported as `orphaned`, while identity-less
-databases that still contain canonical content remain `corrupt`. A bulk run keeps
-checking later sessions after any unresolved entry, then exits unsuccessfully.
-Merely starting smelt, listing sessions, or opening a picker preview never
-triggers bulk migration.
-
-Review orphan candidates without moving them:
-
-```bash
-smelt session quarantine-orphans --all --dry-run --json
-```
-
-After reviewing the report, move one or every proven orphan into the private
-`.quarantine` namespace:
-
-```bash
-smelt session quarantine-orphans <SESSION>
-smelt session quarantine-orphans --all
-```
-
-Quarantine preserves the complete directory, including request audits, and never
-silently deletes it. Busy sessions and identity-less databases with canonical
-history, transcript, turns, or metadata are not moved.
+smelt reads only canonical lineage storage. Pre-lineage session directories are
+not imported, upgraded, or modified. Preserve any old state directory separately
+if you still need its data.
 
 ## A saved session looks damaged
 
@@ -139,11 +101,10 @@ Create a verified database backup before maintenance:
 smelt session backup <SESSION> ./session-backup.db
 ```
 
-`session.db` is canonical. `meta.json` and `content.txt` are disposable views and
-can be rebuilt with `smelt session rebuild-derived`. Close every smelt process
-using the session before `rebuild-derived`, `gc`, or `vacuum`; those commands
-require exclusive ownership and fail instead of racing a live writer. See
-[Session maintenance](../reference/cli.md#session-maintenance).
+The selected session belongs to a canonical lineage shared by its forks. Close
+every smelt process using any branch in that lineage before `gc` or `vacuum`;
+those commands require exclusive ownership and fail instead of racing a live
+writer. See [Session maintenance](../reference/cli.md#session-maintenance).
 
 ## Headless tools are denied
 

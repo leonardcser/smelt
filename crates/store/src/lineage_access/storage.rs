@@ -1,0 +1,183 @@
+use super::*;
+
+pub(super) fn validate_storage_root(root: &Path) -> Result<()> {
+    if root.exists() {
+        ensure_private_directory(root)?;
+    }
+    Ok(())
+}
+
+pub(super) fn create_lineage_database(root: &Path) -> Result<LineageId> {
+    ensure_private_directory_all(root)?;
+    let lineages = root.join(LINEAGES_DIRECTORY);
+    ensure_private_directory_all(&lineages)?;
+    loop {
+        let lineage = LineageId::random()?;
+        let directory = lineages.join(lineage.as_str());
+        let staging = lineages.join(format!(".staging-{}", lineage.as_str()));
+        match fs::create_dir(&staging) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(StoreError::Io(error)),
+        }
+        let prepare = (|| {
+            ensure_private_directory(&staging)?;
+            let path = staging.join(LINEAGE_DB_FILENAME);
+            let mut conn = open_write_connection(&path, &lineage)?;
+            crate::schema::initialize_lineage_schema(&mut conn)?;
+            lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
+            conn.close().map_err(|(_, error)| StoreError::from(error))?;
+            sync_directory(&staging)
+        })();
+        if let Err(error) = prepare {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        match rename_without_replacement(&staging, &directory) {
+            Ok(()) => {
+                sync_directory(&lineages)?;
+                return Ok(lineage);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_dir_all(&staging);
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(StoreError::Io(error));
+            }
+        }
+    }
+}
+
+pub(super) fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<LineageId>> {
+    let lineages = root.join(LINEAGES_DIRECTORY);
+    if lineages.exists() {
+        ensure_private_directory(&lineages)?;
+    }
+    let entries = match fs::read_dir(&lineages) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(StoreError::Io(error)),
+    };
+    let mut found = None;
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(lineage) = LineageId::from_hex(name) else {
+            continue;
+        };
+        let path = entry.path().join(LINEAGE_DB_FILENAME);
+        reject_symlink(&path)?;
+        if !path.is_file() {
+            continue;
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let present = conn
+            .query_row(
+                "SELECT 1 FROM lineage_branches
+                 WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
+                (lineage.as_str(), branch.as_str()),
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if present {
+            if found.is_some() {
+                return Err(StoreError::Integrity(format!(
+                    "session {} belongs to multiple lineages",
+                    branch.as_str()
+                )));
+            }
+            found = Some(lineage);
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn lineage_database_path(root: &Path, lineage: &LineageId) -> PathBuf {
+    root.join(LINEAGES_DIRECTORY)
+        .join(lineage.as_str())
+        .join(LINEAGE_DB_FILENAME)
+}
+
+pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<Connection> {
+    reject_symlink(path)?;
+    let new_database = !path.exists();
+    if let Some(parent) = path.parent() {
+        ensure_private_directory_all(parent)?;
+    }
+    let conn = Connection::open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    conn.busy_timeout(LINEAGE_BUSY_TIMEOUT)?;
+    if new_database {
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    }
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let actual: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !actual.eq_ignore_ascii_case("wal") {
+        return Err(StoreError::Integrity(format!(
+            "lineage {} did not enter WAL mode",
+            lineage.as_str()
+        )));
+    }
+    Ok(conn)
+}
+
+pub(super) fn branch_exists(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM lineage_branches
+             WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
+            (lineage.as_str(), branch.as_str()),
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+pub(super) fn lineage_exists(conn: &Connection, lineage: &LineageId) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM lineage_identity WHERE lineage_id = ?1",
+            [lineage.as_str()],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+pub(super) fn unix_timestamp_millis() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|error| {
+            StoreError::Integrity(format!("system clock precedes Unix epoch: {error}"))
+        })
+}
+
+pub(super) fn unix_timestamp_seconds() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| {
+            StoreError::Integrity(format!("system clock precedes Unix epoch: {error}"))
+        })
+}

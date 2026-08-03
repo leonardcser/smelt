@@ -37,12 +37,7 @@ pub(super) struct TranscriptSearchIndex {
 
 pub(super) struct TranscriptSearchStore {
     session_dir: std::path::PathBuf,
-    reader: TranscriptSearchReader,
-}
-
-enum TranscriptSearchReader {
-    Legacy(smelt_store::SessionReader),
-    Lineage(smelt_store::LineageSessionReader),
+    reader: smelt_store::LineageSessionReader,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,7 +139,10 @@ impl Drop for TranscriptSearchWorker {
         state.shutdown = true;
         state.pending = None;
         self.shared.changed.notify_one();
-        let _ = self.thread.take();
+        drop(state);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -183,8 +181,13 @@ fn transcript_search_worker_loop(
             continue;
         }
 
-        let candidates = persistent_transcript_candidate_blocks(&request).unwrap_or_default();
-        if shared.latest_generation.load(Ordering::Acquire) != request.generation {
+        let cancelled = || shared.latest_generation.load(Ordering::Acquire) != request.generation;
+        let candidates = match persistent_transcript_candidate_blocks(&request, &cancelled) {
+            Ok(candidates) => candidates,
+            Err(smelt_store::StoreError::Cancelled) => continue,
+            Err(_) => SqliteTranscriptCandidateBlocks::default(),
+        };
+        if cancelled() {
             continue;
         }
         if event_tx
@@ -206,6 +209,7 @@ fn transcript_search_worker_loop(
 
 fn persistent_transcript_candidate_blocks(
     request: &TranscriptSearchWorkerRequest,
+    cancelled: &dyn Fn() -> bool,
 ) -> smelt_store::Result<SqliteTranscriptCandidateBlocks> {
     let store = TranscriptSearchStore::open(request.session_dir.clone())?;
     let store_direction = match request.direction {
@@ -218,6 +222,7 @@ fn persistent_transcript_candidate_blocks(
         request.origin_block_idx,
         store_direction,
         limit,
+        cancelled,
     )?;
     if request.origin_block_idx.is_some() && page.len() < limit {
         let wrapped = store.search_candidate_page(
@@ -225,6 +230,7 @@ fn persistent_transcript_candidate_blocks(
             None,
             store_direction,
             limit - page.len(),
+            cancelled,
         )?;
         for candidate in wrapped {
             if !page
@@ -246,7 +252,7 @@ fn persistent_transcript_candidate_blocks(
 
 impl TranscriptSearchStore {
     fn open(session_dir: std::path::PathBuf) -> smelt_store::Result<Self> {
-        let lineage = session_dir
+        let (sessions_root, session_id) = session_dir
             .parent()
             .zip(session_dir.file_name().and_then(|name| name.to_str()))
             .filter(|(_, session_id)| {
@@ -255,21 +261,14 @@ impl TranscriptSearchStore {
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
-            .map(|(sessions_root, session_id)| {
-                smelt_store::LineageSessionReader::try_open_existing(sessions_root, session_id)
-            })
-            .transpose()?
-            .flatten();
-        let reader = match lineage {
-            Some(reader) => TranscriptSearchReader::Lineage(reader),
-            None => {
-                // COMPAT(session-lineage-v1): retain read-only search for the
-                // immediately preceding format in explicit compatibility tests.
-                TranscriptSearchReader::Legacy(smelt_store::SessionReader::open_database(
-                    session_dir.join("session.db"),
-                )?)
-            }
-        };
+            .ok_or_else(|| {
+                smelt_store::StoreError::Integrity("invalid lineage session directory".into())
+            })?;
+        let reader =
+            smelt_store::LineageSessionReader::try_open_existing(sessions_root, session_id)?
+                .ok_or_else(|| {
+                    smelt_store::StoreError::Integrity("lineage session does not exist".into())
+                })?;
         Ok(Self {
             session_dir,
             reader,
@@ -282,28 +281,24 @@ impl TranscriptSearchStore {
         origin_block_idx: Option<u64>,
         direction: smelt_store::TranscriptSearchDirection,
         limit: usize,
+        cancelled: &dyn Fn() -> bool,
     ) -> smelt_store::Result<Vec<smelt_store::TranscriptSearchCandidate>> {
-        match &self.reader {
-            TranscriptSearchReader::Legacy(reader) => {
-                reader.search_transcript_candidate_page(query, origin_block_idx, direction, limit)
-            }
-            TranscriptSearchReader::Lineage(reader) => {
-                reader.search_transcript_candidate_page(query, origin_block_idx, direction, limit)
-            }
-        }
+        self.reader
+            .search_transcript_candidate_page_with_cancellation(
+                query,
+                origin_block_idx,
+                direction,
+                limit,
+                cancelled,
+            )
     }
 
     fn record_count(&self) -> smelt_store::Result<usize> {
-        match &self.reader {
-            TranscriptSearchReader::Legacy(reader) => reader.transcript_record_count(),
-            TranscriptSearchReader::Lineage(reader) => {
-                usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
-                    smelt_store::StoreError::Integrity(
-                        "lineage transcript length exceeds platform limits".into(),
-                    )
-                })
-            }
-        }
+        usize::try_from(self.reader.snapshot()?.transcript_len).map_err(|_| {
+            smelt_store::StoreError::Integrity(
+                "lineage transcript length exceeds platform limits".into(),
+            )
+        })
     }
 }
 
@@ -579,11 +574,17 @@ impl TuiApp {
         let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
-                .search_candidate_page(query, origin_block, store_direction, limit)
+                .search_candidate_page(query, origin_block, store_direction, limit, &|| false)
                 .ok()?;
             if origin_block.is_some() && page.len() < limit {
                 let wrapped = db
-                    .search_candidate_page(query, None, store_direction, limit - page.len())
+                    .search_candidate_page(
+                        query,
+                        None,
+                        store_direction,
+                        limit - page.len(),
+                        &|| false,
+                    )
                     .ok()?;
                 for candidate in wrapped {
                     if !page
@@ -1287,6 +1288,32 @@ fn unique_trigrams(text: &str) -> Vec<u32> {
 mod tests {
     use super::*;
     use smelt_core::transcript_model::BlockId;
+
+    #[test]
+    fn dropping_search_worker_cancels_and_joins_in_flight_work() {
+        let session_dir = tempfile::tempdir().unwrap();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = TranscriptSearchWorker::spawn(event_tx);
+        worker.set_delay(std::time::Duration::from_secs(30));
+        worker.request(TranscriptSearchWorkerRequest {
+            generation: 1,
+            context: TranscriptSearchContext {
+                session_id: "1".repeat(64),
+            },
+            session_dir: session_dir.path().to_path_buf(),
+            query: "needle".into(),
+            origin_block_idx: None,
+            direction: SearchDirection::Forward,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let started = std::time::Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "search worker did not cooperatively stop during drop"
+        );
+    }
 
     fn test_index(texts: &[&str]) -> TranscriptSearchIndex {
         let mut entries = Vec::new();

@@ -79,11 +79,11 @@ session.id = nil
 ---@type fun(): table
 session.info = nil
 
---- List persisted sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`. Rows for older supported schemas have `upgrade_required = true` and remain loadable without being rewritten by listing.
+--- List canonical lineage sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.
 ---@type fun(opts: table?): table
 session.list = nil
 
---- Switch the UI to the persisted session with `id`. Older supported schemas are upgraded transactionally before loading; migration runs off the UI thread. Replays the bounded persisted tail and resets transient state.
+--- Switch the UI to canonical lineage session `id`. Replays the bounded persisted tail and resets transient state.
 ---@type fun(id: string): nil
 session.load = nil
 

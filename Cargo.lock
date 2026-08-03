@@ -1085,17 +1085,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fm-index"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "919bc722dc3c11b2fa742bbeb99f2519fce4031b99304eb6fa2bee087fc69641"
-dependencies = [
- "num-traits",
- "serde",
- "vers-vecs",
-]
-
-[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1346,6 +1335,18 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
+dependencies = [
+ "hashbrown 0.17.1",
+]
 
 [[package]]
 name = "heck"
@@ -2780,6 +2781,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsqlite-vfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2788,8 +2799,10 @@ dependencies = [
  "bitflags",
  "fallible-iterator",
  "fallible-streaming-iterator",
+ "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -3344,6 +3357,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.11.0",
+ "smelt-buffer",
  "smelt-perf",
  "smelt-protocol",
  "smelt-provider",
@@ -3410,6 +3424,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "smelt-buffer",
  "smelt-perf",
  "smelt-protocol",
  "tempfile",
@@ -3451,6 +3466,7 @@ dependencies = [
  "libc",
  "mlua",
  "notify",
+ "rusqlite",
  "scoped-tls-hkt",
  "seahash",
  "serde",
@@ -3478,6 +3494,18 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+dependencies = [
+ "cc",
+ "js-sys",
+ "rsqlite-vfs",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3965,15 +3993,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "vers-vecs"
-version = "1.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc0435d0e97f854c537ab74e86072e1389c73251eba2cf46069edadd72d0e860"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "version_check"
@@ -4490,12 +4509,9 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "xtask"
 version = "0.5.0-alpha.8"
 dependencies = [
- "fm-index",
- "libc",
  "rusqlite",
  "serde_json",
  "smelt-core",
- "smelt-perf",
  "smelt-protocol",
  "smelt-store",
  "smelt-tui",

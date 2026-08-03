@@ -166,10 +166,9 @@ smelt --resume              # open the session picker
 smelt --resume <SESSION_ID> # resume a specific session
 ```
 
-Or use `/resume` from within the TUI. Explicitly opening a session written with a
-supported older schema upgrades that session transactionally before loading it.
-Listing sessions and viewing picker previews remain read-only; smelt does not
-migrate every session at startup.
+Or use `/resume` from within the TUI. Resuming, listing, and picker previews read
+canonical lineage storage. Pre-lineage session directories are ignored rather
+than imported or modified.
 
 Use `/fork` to branch the current conversation into a new session, or `/rewind`
 (also `Esc Esc` when idle) to roll back to an earlier turn. `/session` shows the
@@ -188,11 +187,10 @@ smelt inspect
 smelt inspect --session <SESSION_ID>
 ```
 
-For schema upgrades, database health checks, transactionally consistent backups,
-or storage maintenance, use
-`smelt session migrate|quarantine-orphans|doctor|backup|rebuild-derived|gc|vacuum`. See the
+For database health checks, transactionally consistent backups, or storage
+maintenance, use `smelt session doctor|backup|gc|vacuum`. See the
 [CLI session-maintenance reference](../reference/cli.md#session-maintenance)
-before running mutating maintenance against a session.
+before running mutating maintenance against a lineage.
 
 ## Managed Worktrees
 

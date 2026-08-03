@@ -744,13 +744,13 @@ fn project_session(
         "session:catalog:project_requested_revision",
         minimum_revision,
     );
-    let mut projected = load_projection(&handle.state_root, &handle.sessions_root, id);
+    let mut projected = load_projection(&handle.sessions_root, id);
     if projected
         .as_ref()
         .is_ok_and(|session| session.source_revision < minimum_revision)
     {
         smelt_perf::perf::record_value("session:catalog:post_publication_retry", 1);
-        projected = load_projection(&handle.state_root, &handle.sessions_root, id);
+        projected = load_projection(&handle.sessions_root, id);
     }
 
     let _lock = CatalogReconcileLock::acquire(&handle.lock_path)
@@ -850,7 +850,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
             if tombstones.contains(&id) {
                 seen_tombstones.insert(id.clone());
             }
-            match load_projection(&handle.state_root, &handle.sessions_root, &id) {
+            match load_projection(&handle.sessions_root, &id) {
                 Ok(session) => {
                     available += 1;
                     let revision = session.source_revision;
@@ -885,7 +885,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
         if tombstones.contains(&id) {
             seen_tombstones.insert(id.clone());
         }
-        match load_projection(&handle.state_root, &handle.sessions_root, &id) {
+        match load_projection(&handle.sessions_root, &id) {
             Ok(session) => {
                 available += 1;
                 let revision = session.source_revision;
@@ -964,165 +964,30 @@ struct ProjectionError {
     summary: String,
 }
 
-fn load_projection(
-    state_root: &Path,
-    root: &Path,
-    id: &str,
-) -> Result<CatalogSession, ProjectionError> {
-    let session_dir = root.join(id);
-    let db_path = session_dir.join("session.db");
-    let lineage =
-        smelt_store::LineageSessionReader::try_open_existing(root, id).map_err(|error| {
-            ProjectionError {
-                kind: "corrupt".into(),
-                summary: format!("locate lineage session {id} for catalog projection: {error}"),
-            }
-        })?;
-    if let Some(reader) = lineage {
-        let state = reader.snapshot().map_err(|error| ProjectionError {
+fn load_projection(root: &Path, id: &str) -> Result<CatalogSession, ProjectionError> {
+    let reader = smelt_store::LineageSessionReader::open_existing(root, id).map_err(|error| {
+        ProjectionError {
             kind: "corrupt".into(),
-            summary: format!("read lineage session {id} for catalog projection: {error}"),
-        })?;
-        if state.identity.id != id {
-            return Err(ProjectionError {
-                kind: "corrupt".into(),
-                summary: format!(
-                    "persisted lineage branch id {} does not match requested session {id}",
-                    state.identity.id
-                ),
-            });
+            summary: format!("open lineage session {id} for catalog projection: {error}"),
         }
-        let metadata = state.metadata;
-        return Ok(CatalogSession {
-            id: state.identity.id,
-            lineage_id: Some(state.lineage_id),
-            title: metadata.title,
-            slug: metadata.slug,
-            first_user_message: metadata.first_user_message,
-            cwd: metadata.cwd,
-            mode: metadata.mode,
-            reasoning_effort: metadata.reasoning_effort,
-            model: metadata.model,
-            fast_mode: metadata.fast_mode,
-            parent_id: state.identity.parent_id,
-            context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
-            history_len: Some(state.head.history_len.get()),
-            text_bytes: Some(state.history_text_bytes),
-            created_at: state.identity.created_at,
-            updated_at: metadata.updated_at,
-            source_revision: state.head.revision.get(),
-            availability: CatalogAvailability::Available,
-            error_kind: None,
-            error_summary: None,
-            last_seen_scan: 0,
-        });
-    }
-    if let Err(error) =
-        crate::session_store::reject_symlink_in(state_root, &session_dir, "project catalog")
-    {
-        return Err(projection_error(error));
-    }
-    if let Err(error) =
-        crate::session_store::reject_symlink_in(state_root, &db_path, "project catalog")
-    {
-        return Err(projection_error(error));
-    }
-    if !db_path.is_file() {
-        return Err(ProjectionError {
-            kind: "missing_database".into(),
-            summary: format!("session {id} has no sqlite database"),
-        });
-    }
-    let inspection = smelt_store::inspect_session_schema(root, id).map_err(|error| {
-        projection_error(crate::session_store::store_error(
-            "inspect schema for catalog projection",
-            &db_path,
-            error,
-        ))
     })?;
-    let (status, reader) = inspection.into_parts();
-    let reader = match status {
-        smelt_store::SessionSchemaStatus::Current { .. } => {
-            let Some(reader) = reader else {
-                return Err(ProjectionError {
-                    kind: "corrupt".into(),
-                    summary: format!("current session {id} has no validated reader"),
-                });
-            };
-            reader
-        }
-        smelt_store::SessionSchemaStatus::Upgradeable { found, target } => {
-            return Err(ProjectionError {
-                kind: "upgrade_required".into(),
-                summary: format!(
-                    "session schema version {found} will be upgraded to {target} when opened"
-                ),
-            });
-        }
-        smelt_store::SessionSchemaStatus::Future { found, supported } => {
-            return Err(ProjectionError {
-                kind: "unsupported_schema".into(),
-                summary: format!(
-                    "unsupported session schema version {found}; this build supports {supported}"
-                ),
-            });
-        }
-        smelt_store::SessionSchemaStatus::Unrecognized { found, supported } => {
-            return Err(ProjectionError {
-                kind: "corrupt".into(),
-                summary: format!(
-                    "unrecognized session schema version {found}; supported migrations start at 1 and target {supported}"
-                ),
-            });
-        }
-        smelt_store::SessionSchemaStatus::Orphaned { found } => {
-            return Err(ProjectionError {
-                kind: "orphaned".into(),
-                summary: format!(
-                    "orphaned session schema version {found} has no canonical identity or session content"
-                ),
-            });
-        }
-        smelt_store::SessionSchemaStatus::Corrupt { reason, .. } => {
-            return Err(ProjectionError {
-                kind: "corrupt".into(),
-                summary: reason,
-            });
-        }
-    };
-    let stored = reader.stored_session().map_err(|error| {
-        projection_error(crate::session_store::store_error(
-            "read for catalog projection",
-            &db_path,
-            error,
-        ))
+    let state = reader.snapshot().map_err(|error| ProjectionError {
+        kind: "corrupt".into(),
+        summary: format!("read lineage session {id} for catalog projection: {error}"),
     })?;
-    let Some(stored) = stored else {
-        return Err(ProjectionError {
-            kind: "corrupt".into(),
-            summary: format!("session {id} has no canonical metadata"),
-        });
-    };
-    if stored.identity.id != id {
+    if state.identity.id != id {
         return Err(ProjectionError {
             kind: "corrupt".into(),
             summary: format!(
-                "persisted session id {} does not match directory {id}",
-                stored.identity.id
+                "persisted lineage branch id {} does not match requested session {id}",
+                state.identity.id
             ),
         });
     }
-    let text_bytes = reader.history_text_bytes().map_err(|error| {
-        projection_error(crate::session_store::store_error(
-            "read history size for catalog projection",
-            &db_path,
-            error,
-        ))
-    })?;
-    let metadata = stored.metadata;
+    let metadata = state.metadata;
     Ok(CatalogSession {
-        id: stored.identity.id,
-        lineage_id: None,
+        id: state.identity.id,
+        lineage_id: Some(state.lineage_id),
         title: metadata.title,
         slug: metadata.slug,
         first_user_message: metadata.first_user_message,
@@ -1131,25 +996,18 @@ fn load_projection(
         reasoning_effort: metadata.reasoning_effort,
         model: metadata.model,
         fast_mode: metadata.fast_mode,
-        parent_id: stored.identity.parent_id,
+        parent_id: state.identity.parent_id,
         context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
-        history_len: Some(stored.head.history_len.get()),
-        text_bytes: Some(text_bytes),
-        created_at: stored.identity.created_at,
+        history_len: Some(state.head.history_len.get()),
+        text_bytes: Some(state.history_text_bytes),
+        created_at: state.identity.created_at,
         updated_at: metadata.updated_at,
-        source_revision: stored.head.revision.get(),
+        source_revision: state.head.revision.get(),
         availability: CatalogAvailability::Available,
         error_kind: None,
         error_summary: None,
         last_seen_scan: 0,
     })
-}
-
-fn projection_error(error: crate::session_store::SessionStoreError) -> ProjectionError {
-    ProjectionError {
-        kind: error.code().to_string(),
-        summary: error.to_string(),
-    }
 }
 
 #[derive(Default)]
@@ -1187,67 +1045,6 @@ mod tests {
         session.title = Some(title.into());
         session.updated_at_ms = 1_700_000_000_000;
         session
-    }
-
-    #[test]
-    fn projection_classifies_old_supported_schema_without_migrating_it() {
-        let temp = tempfile::tempdir().unwrap();
-        let sessions_root = temp.path().join("sessions");
-        let session_dir = sessions_root.join(SESSION_ID);
-        fs::create_dir_all(&session_dir).unwrap();
-        let session = canonical_session("old schema");
-        let command = crate::session::initial_store_commit_from_session(&session).unwrap();
-        let db_path = session_dir.join("session.db");
-        let mut db = smelt_store::SessionDb::open(&db_path).unwrap();
-        db.apply_session_commit(&command).unwrap();
-        db.connection()
-            .execute_batch("PRAGMA user_version = 9")
-            .unwrap();
-        drop(db);
-
-        let error = load_projection(temp.path(), &sessions_root, SESSION_ID).unwrap_err();
-
-        assert_eq!(error.kind, "upgrade_required");
-        assert!(error.summary.contains("version 9"));
-        assert_eq!(
-            smelt_store::session_schema_status(&sessions_root, SESSION_ID).unwrap(),
-            smelt_store::SessionSchemaStatus::Upgradeable {
-                found: 9,
-                target: smelt_store::SCHEMA_VERSION,
-            }
-        );
-    }
-
-    #[test]
-    fn projection_classifies_request_audit_only_database_as_orphaned() {
-        let temp = tempfile::tempdir().unwrap();
-        let sessions_root = temp.path().join("sessions");
-        let session_dir = sessions_root.join(SESSION_ID);
-        fs::create_dir_all(&session_dir).unwrap();
-        let command =
-            crate::session::initial_store_commit_from_session(&canonical_session("orphan"))
-                .unwrap();
-        let db_path = session_dir.join("session.db");
-        let mut db = smelt_store::SessionDb::open(&db_path).unwrap();
-        db.apply_session_commit(&command).unwrap();
-        db.connection()
-            .execute_batch(
-                "DELETE FROM session_state;
-                 INSERT INTO request_attempts (started_at) VALUES (1)",
-            )
-            .unwrap();
-        drop(db);
-
-        let error = load_projection(temp.path(), &sessions_root, SESSION_ID).unwrap_err();
-
-        assert_eq!(error.kind, "orphaned");
-        assert!(error.summary.contains("no canonical identity"));
-        assert_eq!(
-            smelt_store::session_schema_status(&sessions_root, SESSION_ID).unwrap(),
-            smelt_store::SessionSchemaStatus::Orphaned {
-                found: smelt_store::SCHEMA_VERSION,
-            }
-        );
     }
 
     fn test_worker(root: &Path) -> (ServiceHandle, thread::JoinHandle<()>) {
@@ -1475,10 +1272,11 @@ mod tests {
         let session = canonical_session("current");
         crate::session::create_private_dir_all(&crate::session::sessions_dir()).unwrap();
         let command = crate::session::initial_store_commit_from_session(&session).unwrap();
-        let dir = crate::session::sessions_dir().join(SESSION_ID);
-        let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
-        let receipt = db.apply_session_commit(&command).unwrap();
-        drop(db);
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(crate::session::sessions_dir(), SESSION_ID)
+                .unwrap();
+        let receipt = writer.commit_session(&command).unwrap();
+        writer.release().unwrap();
 
         let catalog_path = crate::config::state_dir().join("catalog.db");
         let mut catalog = Catalog::open(&catalog_path).unwrap();

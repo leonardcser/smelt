@@ -205,12 +205,13 @@ The exact tape is then rebased so the resolved semantic anchor occupies the glob
 
 Extent metadata is presentation-aware but not a serialized render tree. The persistence contract is:
 
-- Canonical width buckets and profile version are defined by the store format.
-- Profiles are computed once while transcript records are written, when bounded searchable/display text is already available.
-- Fixed-size chunk aggregates are rebuilt transactionally with transcript suffix replacement.
-- Rewinding or replacing a suffix deletes and rebuilds only affected chunks.
+- Canonical width buckets are defined by the lineage store format.
+- Profiles are computed while transcript records are written, when bounded searchable and display text is already available.
+- Every immutable transcript root has one complete set of fixed-size chunk aggregates.
+- Suffix publication copies unchanged full chunks from the prior root and recomputes only the affected boundary chunk and suffix.
+- Forks reuse the same immutable root and profile rows. Rewinds select a prior root, while unreachable profiles participate in bounded reclamation.
 - Resume reads compact chunk rows and the active record page. It does not deserialize or render the full transcript.
-- Legacy rows are upgraded once from bounded indexed text and existing compact previews. Missing or corrupt profiles use a conservative record fallback, never an unbounded full-transcript render.
+- Missing or malformed profile coverage is a canonical integrity error surfaced by storage diagnostics.
 - Renderer-specific exact observations remain cache data unless they have a compatible profile version and layout fingerprint.
 
 The profile is deliberately an estimate. Accuracy is enforced statistically against exact production rendering, not assumed from a formula. The accepted error bounds are:
@@ -315,7 +316,7 @@ This is a direct replacement, not a compatibility layer.
 9. Move resize, search, reveal, cursor, selection, and copy to semantic anchors.
 10. Make the window adapter consume one coherent frame.
 11. Delete byte-per-width totals, iterative local-delta rebasing, active-projection recreation, and parallel viewport fields that can drift apart.
-12. Validate functional, accuracy, migration, performance, and memory gates.
+12. Validate functional, accuracy, performance, and memory gates.
 
 ## Validation gates
 
@@ -332,7 +333,7 @@ This is a direct replacement, not a compatibility layer.
 - UTF-8 and wide-character coverage.
 - Heterogeneous total extent and prefix-fraction accuracy at every canonical width and interpolated widths.
 - Scrollbar click and drag source-position accuracy before and after local hydration.
-- Legacy profile migration and suffix-rewind chunk repair.
+- Sparse profile refinement and root-based rewind behavior.
 
 ### Engineering
 

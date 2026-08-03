@@ -13,16 +13,14 @@ fn sparse_display_only_search_app() -> TestApp {
     app.set_terminal_size(80, 16);
     let session_id = app.session_snapshot().id.clone();
     let session_dir = app.core_probe().sessions.dir_for_id(&session_id);
-    std::fs::create_dir_all(&session_dir).unwrap();
+    let sessions_root = session_dir.parent().expect("sessions root");
     let mut session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     session.id = session_id.clone();
     session.history = (0..200)
         .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
         .collect();
-    let commit = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
-    let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-    let receipt = db.apply_session_commit(&commit).unwrap();
+    let mut commit = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
     let records = (0..200)
         .map(|idx| {
             let content = match idx {
@@ -33,8 +31,25 @@ fn sparse_display_only_search_app() -> TestApp {
             test_block_record(idx, &content)
         })
         .collect::<Vec<_>>();
-    db.apply_transcript_record_fixture(&records).unwrap();
-    drop(db);
+    commit.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+        start: smelt_store::TranscriptRecordIndex::ZERO,
+        records,
+    });
+    let mut writer = smelt_store::OwnedLineageWriter::open(sessions_root, &session_id).unwrap();
+    let receipt = writer.commit_session(&commit).unwrap();
+    let projector = writer.spawn_search_projector().unwrap();
+    projector.request();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !projector.is_idle() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "search fixture projection did not complete"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(projector.latest_error(), None);
+    projector.stop();
+    writer.release().unwrap();
 
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)
         .expect("display-only transcript tail");
@@ -284,6 +299,10 @@ fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
         .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
     app.type_char('/');
 
+    // Keep lazy worker startup and empty-query anchor restoration outside the
+    // steady-state generation handoff samples.
+    app.type_char('x');
+    app.render_silent();
     let mut samples = Vec::new();
     for character in "tail".chars() {
         let started = std::time::Instant::now();
@@ -297,6 +316,8 @@ fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
         app.render_silent();
         samples.push(started.elapsed());
     }
+    app.press(KeyCode::Backspace);
+    app.render_silent();
     for character in "early needle".chars() {
         let started = std::time::Instant::now();
         app.type_char(character);
@@ -304,7 +325,8 @@ fn transcript_search_rapid_typing_cancels_stale_worker_generations() {
         samples.push(started.elapsed());
     }
     samples.sort_unstable();
-    let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+    let p95_index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+    let p95 = samples[p95_index];
     eprintln!("TRANSCRIPT_LIVE_SEARCH_FRAME_P95_US {}", p95.as_micros());
     assert!(
         p95 <= std::time::Duration::from_millis(16),

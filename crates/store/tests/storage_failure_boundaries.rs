@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 const PROBE_ROLE: &str = "SMELT_STORAGE_PROBE_ROLE";
 const PROBE_DB: &str = "SMELT_STORAGE_PROBE_DB";
+const PROBE_ROOT: &str = "SMELT_STORAGE_PROBE_ROOT";
 const PROBE_READY: &str = "SMELT_STORAGE_PROBE_READY";
 const PROBE_GO: &str = "SMELT_STORAGE_PROBE_GO";
 const PROBE_RESULT: &str = "SMELT_STORAGE_PROBE_RESULT";
@@ -17,6 +18,7 @@ fn storage_subprocess_probe() {
         return;
     };
     let db_path = required_path(PROBE_DB);
+    let root = required_path(PROBE_ROOT);
     let ready = required_path(PROBE_READY);
     let go = required_path(PROBE_GO);
 
@@ -24,9 +26,7 @@ fn storage_subprocess_probe() {
         "claim" => {
             touch(&ready);
             wait_for(&go);
-            let session_dir = db_path.parent().expect("database parent");
-            let root = session_dir.parent().expect("sessions root");
-            match smelt_store::OwnedSessionWriter::open(root, SESSION_ID) {
+            match smelt_store::OwnedLineageWriter::open_existing(&root, SESSION_ID) {
                 Ok(_writer) => {
                     std::fs::write(required_path(PROBE_RESULT), "owned")
                         .expect("write claim result");
@@ -43,36 +43,18 @@ fn storage_subprocess_probe() {
             }
         }
         "crash-owner" => {
-            let session_dir = db_path.parent().expect("database parent");
-            let root = session_dir.parent().expect("sessions root");
-            let _writer = smelt_store::OwnedSessionWriter::open(root, SESSION_ID)
-                .expect("claim session writer");
+            let _writer = smelt_store::OwnedLineageWriter::open_existing(&root, SESSION_ID)
+                .expect("claim lineage writer");
             touch(&ready);
             std::process::abort();
         }
         "closed-owner" => {
-            let session_dir = db_path.parent().expect("database parent");
-            let root = session_dir.parent().expect("sessions root");
-            let mut writer = smelt_store::OwnedSessionWriter::open(root, SESSION_ID)
-                .expect("claim session writer");
+            let mut writer = smelt_store::OwnedLineageWriter::open_existing(&root, SESSION_ID)
+                .expect("claim lineage writer");
             writer.invalidate_connection();
             touch(&ready);
             wait_for(&go);
             writer.reopen_connection().expect("reopen owned database");
-        }
-        "legacy-lock" => {
-            let session_dir = db_path.parent().expect("database parent");
-            let legacy_path = session_dir.join("session.lock");
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(legacy_path)
-                .expect("open legacy lock");
-            file.try_lock().expect("acquire legacy lock");
-            touch(&ready);
-            wait_for(&go);
         }
         "lock" => {
             let conn = rusqlite::Connection::open(&db_path).expect("open lock database");
@@ -99,9 +81,9 @@ fn storage_subprocess_probe() {
     }
 }
 
-fn create_published_session(root: &Path) -> PathBuf {
+fn create_lineage_session(root: &Path) -> PathBuf {
     let mut writer =
-        smelt_store::OwnedSessionWriter::open(root, SESSION_ID).expect("create staged database");
+        smelt_store::OwnedLineageWriter::open(root, SESSION_ID).expect("create lineage database");
     let command = smelt_store::SessionCommit {
         session_id: SESSION_ID.into(),
         expected: smelt_store::StoreHead::default(),
@@ -137,15 +119,15 @@ fn create_published_session(root: &Path) -> PathBuf {
         transcript_records: None,
     };
     writer.commit_session(&command).expect("commit session");
-    let session_dir = writer.publish().expect("publish session");
-    writer.release().expect("release database owner");
-    session_dir.join("session.db")
+    let db_path = writer.database_path();
+    writer.release().expect("release lineage owner");
+    db_path
 }
 
 #[test]
 fn simultaneous_process_claims_have_one_lifetime_owner() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = create_published_session(dir.path());
+    let db_path = create_lineage_session(dir.path());
 
     let first_ready = dir.path().join("first.ready");
     let second_ready = dir.path().join("second.ready");
@@ -189,7 +171,7 @@ fn simultaneous_process_claims_have_one_lifetime_owner() {
 #[test]
 fn process_crash_releases_lifetime_ownership() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = create_published_session(dir.path());
+    let db_path = create_lineage_session(dir.path());
 
     let ready = dir.path().join("crash-owner.ready");
     let unused_go = dir.path().join("unused.go");
@@ -198,26 +180,21 @@ fn process_crash_releases_lifetime_ownership() {
     let status = owner.wait().expect("wait for crashing owner");
     assert!(!status.success(), "crash owner unexpectedly exited cleanly");
 
-    let replacement = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID)
+    smelt_store::OwnedLineageWriter::open_existing(dir.path(), SESSION_ID)
         .expect("operating system releases the crashed process lock");
-    assert_eq!(replacement.owner().pid, std::process::id());
 }
 
 #[test]
 fn root_lease_remains_exclusive_while_sqlite_is_closed() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = create_published_session(dir.path());
+    let db_path = create_lineage_session(dir.path());
     let ready = dir.path().join("closed-owner.ready");
     let release = dir.path().join("closed-owner.release");
     let mut owner = spawn_probe("closed-owner", &db_path, &ready, &release, None, None);
     wait_for(&ready);
 
     assert!(matches!(
-        smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID),
-        Err(smelt_store::StoreError::OwnershipConflict { .. })
-    ));
-    assert!(matches!(
-        smelt_store::SessionMaintenance::delete_session(dir.path(), SESSION_ID),
+        smelt_store::OwnedLineageWriter::open_existing(dir.path(), SESSION_ID),
         Err(smelt_store::StoreError::OwnershipConflict { .. })
     ));
 
@@ -226,52 +203,9 @@ fn root_lease_remains_exclusive_while_sqlite_is_closed() {
 }
 
 #[test]
-fn legacy_lock_holder_blocks_root_lease_migration() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = create_published_session(dir.path());
-    let connection = rusqlite::Connection::open(&db_path).expect("open database");
-    connection
-        .execute_batch(
-            "ALTER TABLE session_state
-                 RENAME COLUMN transcript_record_count TO descriptor_len;
-             ALTER TABLE transcript_blocks RENAME COLUMN record_idx TO descriptor_idx;
-             ALTER TABLE transcript_blocks RENAME COLUMN block_json TO descriptor_json;
-             PRAGMA user_version = 8;",
-        )
-        .expect("restore the historical v8 schema");
-    drop(connection);
-    let ready = dir.path().join("legacy-lock.ready");
-    let release = dir.path().join("legacy-lock.release");
-    let mut legacy = spawn_probe("legacy-lock", &db_path, &ready, &release, None, None);
-    wait_for(&ready);
-
-    assert!(matches!(
-        smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID),
-        Err(smelt_store::StoreError::OwnershipConflict { .. })
-    ));
-    assert!(matches!(
-        smelt_store::migrate_session_schema(dir.path(), SESSION_ID),
-        Err(smelt_store::StoreError::OwnershipConflict { .. })
-    ));
-
-    touch(&release);
-    assert_success(legacy.wait().expect("wait for legacy lock"));
-    let replacement = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID)
-        .expect("migrate after legacy owner exits");
-    assert_eq!(
-        smelt_store::SessionReader::open_database(&db_path)
-            .expect("read migrated database")
-            .schema_version()
-            .unwrap(),
-        smelt_store::SCHEMA_VERSION
-    );
-    replacement.release().unwrap();
-}
-
-#[test]
 fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = create_published_session(dir.path());
+    let db_path = create_lineage_session(dir.path());
     let db = rusqlite::Connection::open(&db_path).expect("open database");
     db.busy_timeout(Duration::from_secs(5))
         .expect("set busy timeout");
@@ -338,7 +272,7 @@ fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
 #[test]
 fn process_crash_rolls_back_an_open_canonical_transaction() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = create_published_session(dir.path());
+    let db_path = create_lineage_session(dir.path());
 
     let ready = dir.path().join("crash.ready");
     let unused_go = dir.path().join("unused.go");
@@ -354,10 +288,19 @@ fn process_crash_rolls_back_an_open_canonical_transaction() {
     let status = child.wait().expect("wait for crashing child");
     assert!(!status.success(), "crash probe unexpectedly exited cleanly");
 
-    let db = smelt_store::SessionReader::open_database(&db_path).expect("reopen after crash");
-    assert_eq!(db.meta("crash_probe").expect("read crash row"), None);
-    db.quick_check()
-        .expect("database remains valid after crash");
+    let db = rusqlite::Connection::open(&db_path).expect("reopen after crash");
+    let crash_probe_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM store_meta WHERE key = 'crash_probe')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read crash row");
+    assert!(!crash_probe_exists);
+    let quick_check: String = db
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .expect("check database after crash");
+    assert_eq!(quick_check, "ok");
 }
 
 fn spawn_probe(
@@ -369,12 +312,18 @@ fn spawn_probe(
     release: Option<&Path>,
 ) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    let root = db_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("lineage database below storage root");
     command
         .arg("--exact")
         .arg("storage_subprocess_probe")
         .arg("--nocapture")
         .env(PROBE_ROLE, role)
         .env(PROBE_DB, db_path)
+        .env(PROBE_ROOT, root)
         .env(PROBE_READY, ready)
         .env(PROBE_GO, go);
     if let Some(result) = result {

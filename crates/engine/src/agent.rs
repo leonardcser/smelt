@@ -313,31 +313,15 @@ fn load_model_history(
                 let root = session_dir.parent().ok_or_else(|| {
                     format!("session directory has no storage root: {session_dir:?}")
                 })?;
-                let mut rows =
-                    match smelt_store::LineageSessionReader::try_open_existing(root, session_id)
-                        .map_err(|err| format!("locate model history lineage: {err}"))?
-                    {
-                        Some(reader) => reader
-                            .history_range(
-                                u64::try_from(first_live_index).map_err(|_| {
-                                    "model history start index exceeds u64".to_string()
-                                })?,
-                                u64::try_from(end_index).map_err(|_| {
-                                    "model history end index exceeds u64".to_string()
-                                })?,
-                            )
-                            .map_err(|err| format!("read lineage model history rows: {err}"))?,
-                        None => {
-                            // COMPAT(session-lineage-v1): provider dispatch can
-                            // read an explicitly unmigrated previous-format session.
-                            let db_path = session_dir.join("session.db");
-                            let db = smelt_store::SessionReader::open_database(&db_path).map_err(
-                                |err| format!("open model history database {db_path:?}: {err}"),
-                            )?;
-                            db.read_history_items_range(first_live_index..end_index)
-                                .map_err(|err| format!("read model history rows: {err}"))?
-                        }
-                    };
+                let mut rows = smelt_store::LineageSessionReader::open_existing(root, session_id)
+                    .map_err(|err| format!("open model history lineage: {err}"))?
+                    .history_range(
+                        u64::try_from(first_live_index)
+                            .map_err(|_| "model history start index exceeds u64".to_string())?,
+                        u64::try_from(end_index)
+                            .map_err(|_| "model history end index exceeds u64".to_string())?,
+                    )
+                    .map_err(|err| format!("read lineage model history rows: {err}"))?;
                 smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
                 history.append(&mut rows);
             }
@@ -2554,7 +2538,7 @@ impl<'a> Turn<'a> {
             } = result;
 
             if log::Level::Debug.enabled() {
-                let mut preview = content[..content.floor_char_boundary(500)].to_string();
+                let mut preview = smelt_buffer::text::slice(&content, 0..500).to_owned();
                 if self.request_config.redact_secrets {
                     preview = crate::redact::redact(&preview);
                 }
@@ -3375,25 +3359,14 @@ mod tests {
     }
 
     #[test]
-    fn model_history_read_completes_after_concurrent_writer_commits() {
+    fn model_history_read_completes_while_writer_remains_owned() {
         let root = tempfile::tempdir().unwrap();
         let session_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let session_dir = root.path().join(session_id);
-        std::fs::create_dir(&session_dir).unwrap();
-        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let item = HistoryItem::user(protocol::Content::text("persisted"));
         let command = test_store_commit(session_id, vec![item.clone()]);
-        db.apply_session_commit(&command).unwrap();
-        db.connection()
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 UPDATE store_meta SET updated_at = updated_at WHERE key = 'schema_version';",
-            )
-            .unwrap();
-        let writer = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            db.connection().execute_batch("COMMIT").unwrap();
-        });
+        let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), session_id).unwrap();
+        writer.commit_session(&command).unwrap();
 
         let history = load_model_history(
             protocol::ModelHistorySource::store(Vec::new(), 0, 1),
@@ -3401,7 +3374,7 @@ mod tests {
             session_id,
         )
         .unwrap();
-        writer.join().unwrap();
+        writer.release().unwrap();
 
         assert_eq!(history.items, vec![item]);
     }

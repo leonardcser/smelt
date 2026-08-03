@@ -95,14 +95,6 @@ local function make_render(now_ms)
         marks = { { col = 0, opts = { end_col = #meta + #prefix, dim = true } } },
       }
     end
-    if entry.upgrade_required then
-      local meta = string.rep(" ", LEADING + SIZE_COL + GAP + TIME_COL + GAP)
-      return {
-        text = meta .. prefix .. "Upgrade required - " .. entry.id:sub(1, 8),
-        marks = { { col = 0, opts = { end_col = #meta + #prefix, dim = true } } },
-      }
-    end
-
     local size_str = format_size(entry.size_bytes)
     local ts = (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms
     local meta = string.format(
@@ -200,7 +192,7 @@ smelt.cmd.register("resume", function()
       if texts ~= nil then return end
       local ids = {}
       for _, e in ipairs(entries) do
-        if e.available ~= false and not e.upgrade_required then table.insert(ids, e.id) end
+        if e.available ~= false then table.insert(ids, e.id) end
       end
       local raw = smelt.session.texts(ids)
       local lowered = {}
@@ -209,8 +201,7 @@ smelt.cmd.register("resume", function()
     end
 
     local function entry_matches(entry)
-      if entry.available ~= false and not entry.upgrade_required
-          and workspace_only and entry.cwd ~= current_cwd then return false end
+      if entry.available ~= false and workspace_only and entry.cwd ~= current_cwd then return false end
       if query == "" then return true end
       if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
         return true
@@ -308,18 +299,6 @@ smelt.cmd.register("resume", function()
           "  " .. (e.error or "No storage details are available."),
           "",
           "  Press Alt-D to remove this session.",
-        })
-        preview_leaf:scroll(0)
-        return
-      end
-      if e.upgrade_required then
-        active_preview_key = nil
-        preview_buf:lines({
-          "  Session upgrade required",
-          "",
-          "  " .. (e.error or "This session uses an older supported schema."),
-          "",
-          "  Press Enter to upgrade and resume it.",
         })
         preview_leaf:scroll(0)
         return

@@ -924,15 +924,6 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        if let Ok(resolved) = self.core.sessions.resolve_session_dir_for_read_result(id) {
-            if resolved.kind == smelt_core::session::SessionDirKind::Store {
-                self.notify_error_sticky(format!(
-                    "session {} uses the previous storage format; run `smelt session migrate {}` and retry",
-                    resolved.id, resolved.id
-                ));
-                return;
-            }
-        }
         self.load_current_session_by_id(id);
     }
 

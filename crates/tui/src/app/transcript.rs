@@ -250,13 +250,8 @@ fn compact_record_rows(
     smelt_core::transcript_model::compact_block_rows(start.get(), rows).ok()
 }
 
-enum TranscriptStoreReader {
-    Legacy(smelt_store::SessionReader),
-    Lineage(smelt_store::LineageSessionReader),
-}
-
 struct SqliteTranscriptStore {
-    reader: TranscriptStoreReader,
+    reader: smelt_store::LineageSessionReader,
     #[cfg(test)]
     extent_read_count: std::cell::Cell<usize>,
 }
@@ -264,30 +259,13 @@ struct SqliteTranscriptStore {
 impl SqliteTranscriptStore {
     fn open_read_only(session_dir: impl AsRef<std::path::Path>) -> smelt_store::Result<Self> {
         let session_dir = session_dir.as_ref();
-        let lineage = session_dir
+        let (root, session_id) = session_dir
             .parent()
             .zip(session_dir.file_name().and_then(|name| name.to_str()))
-            .filter(|(_, session_id)| {
-                session_id.len() == 64
-                    && session_id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-            .map(|(root, session_id)| {
-                smelt_store::LineageSessionReader::try_open_existing(root, session_id)
-            })
-            .transpose()?
-            .flatten();
-        let reader = match lineage {
-            Some(reader) => TranscriptStoreReader::Lineage(reader),
-            None => {
-                // COMPAT(session-lineage-v1): retain read-only transcript access
-                // for the immediately preceding format in explicit compatibility tests.
-                TranscriptStoreReader::Legacy(smelt_store::SessionReader::open_database(
-                    session_dir.join("session.db"),
-                )?)
-            }
-        };
+            .ok_or_else(|| {
+                smelt_store::StoreError::Integrity("invalid lineage session directory".into())
+            })?;
+        let reader = smelt_store::LineageSessionReader::open_existing(root, session_id)?;
         Ok(Self {
             reader,
             #[cfg(test)]
@@ -300,19 +278,13 @@ impl SqliteTranscriptStore {
         width: u16,
         target_rows: u16,
     ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
-        match &self.reader {
-            TranscriptStoreReader::Legacy(db) => {
-                db.read_transcript_record_tail_for_rows(width, target_rows)
-            }
-            TranscriptStoreReader::Lineage(reader) => {
-                let total = usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
-                    smelt_store::StoreError::Integrity(
-                        "lineage transcript length exceeds platform limits".into(),
-                    )
-                })?;
-                reader.transcript_tail_for_rows_with_total(total, width, target_rows)
-            }
-        }
+        let total = usize::try_from(self.reader.snapshot()?.transcript_len).map_err(|_| {
+            smelt_store::StoreError::Integrity(
+                "lineage transcript length exceeds platform limits".into(),
+            )
+        })?;
+        self.reader
+            .transcript_tail_for_rows_with_total(total, width, target_rows)
     }
 
     fn read_record_slice(
@@ -320,45 +292,33 @@ impl SqliteTranscriptStore {
         range: smelt_store::TranscriptRecordRange,
         total_count: usize,
     ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
-        match &self.reader {
-            TranscriptStoreReader::Legacy(db) => {
-                db.read_transcript_record_slice_with_total(range, total_count)
-            }
-            TranscriptStoreReader::Lineage(reader) => {
-                reader.transcript_record_slice_with_total(range, total_count)
-            }
-        }
+        self.reader
+            .transcript_record_slice_with_total(range, total_count)
     }
 
     fn record_index_for_block_idx(&self, block_idx: u64) -> smelt_store::Result<Option<usize>> {
-        match &self.reader {
-            TranscriptStoreReader::Legacy(reader) => Ok(reader
-                .transcript_record_index_for_block_idx(block_idx)?
-                .map(|index| index.get())),
-            TranscriptStoreReader::Lineage(reader) => {
-                const CHUNK_RECORDS: u64 = 256;
+        const CHUNK_RECORDS: u64 = 256;
 
-                let transcript_len = reader.snapshot()?.transcript_len;
-                let mut start = 0;
-                while start < transcript_len {
-                    let end = start.saturating_add(CHUNK_RECORDS).min(transcript_len);
-                    if let Some(offset) = reader
-                        .transcript_object_backed_range(start, end)?
-                        .iter()
-                        .position(|record| record.block_idx == block_idx)
-                    {
-                        let index = usize::try_from(start).map_err(|_| {
-                            smelt_store::StoreError::Integrity(
-                                "lineage transcript offset exceeds platform limits".into(),
-                            )
-                        })?;
-                        return Ok(Some(index.saturating_add(offset)));
-                    }
-                    start = end;
-                }
-                Ok(None)
+        let transcript_len = self.reader.snapshot()?.transcript_len;
+        let mut start = 0;
+        while start < transcript_len {
+            let end = start.saturating_add(CHUNK_RECORDS).min(transcript_len);
+            if let Some(offset) = self
+                .reader
+                .transcript_object_backed_range(start, end)?
+                .iter()
+                .position(|record| record.block_idx == block_idx)
+            {
+                let index = usize::try_from(start).map_err(|_| {
+                    smelt_store::StoreError::Integrity(
+                        "lineage transcript offset exceeds platform limits".into(),
+                    )
+                })?;
+                return Ok(Some(index.saturating_add(offset)));
             }
+            start = end;
         }
+        Ok(None)
     }
 
     fn read_hydration_records(
@@ -379,26 +339,8 @@ impl SqliteTranscriptStore {
         #[cfg(test)]
         self.extent_read_count
             .set(self.extent_read_count.get().saturating_add(1));
-        match &self.reader {
-            TranscriptStoreReader::Legacy(db) => {
-                db.transcript_record_estimated_rows(range.into(), width)
-            }
-            TranscriptStoreReader::Lineage(reader) => {
-                let records =
-                    reader.transcript_object_backed_range(range.start as u64, range.end as u64)?;
-                let width = u64::from(width.max(1));
-                Ok(records.into_iter().fold(0_u64, |rows, record| {
-                    rows.saturating_add(
-                        record
-                            .estimated_text_bytes
-                            .saturating_add(width - 1)
-                            .saturating_div(width)
-                            .max(1)
-                            .saturating_add(1),
-                    )
-                }))
-            }
-        }
+        self.reader
+            .transcript_estimated_rows(range.into(), width.max(1))
     }
 
     fn record_before_kind(
@@ -406,43 +348,28 @@ impl SqliteTranscriptStore {
         kind: &str,
         before_or_at: usize,
     ) -> smelt_store::Result<Option<(usize, smelt_store::StoredTranscriptBlock)>> {
-        match &self.reader {
-            TranscriptStoreReader::Legacy(db) => {
-                let Some(record) =
-                    db.read_transcript_record_before_kind_at_index(kind, before_or_at as u64)?
-                else {
-                    return Ok(None);
-                };
-                let Some(index) = db.transcript_record_index_for_block_idx(record.block_idx)?
-                else {
-                    return Ok(None);
-                };
-                Ok(Some((index.get(), record)))
+        const CHUNK: usize = 256;
+        let total = usize::try_from(self.reader.snapshot()?.transcript_len).map_err(|_| {
+            smelt_store::StoreError::Integrity(
+                "lineage transcript length exceeds platform limits".into(),
+            )
+        })?;
+        let mut end = before_or_at.saturating_add(1).min(total);
+        while end > 0 {
+            let start = end.saturating_sub(CHUNK);
+            if let Some((offset, record)) = self
+                .reader
+                .transcript_object_backed_range(start as u64, end as u64)?
+                .into_iter()
+                .enumerate()
+                .rev()
+                .find(|(_, record)| record.kind == kind)
+            {
+                return Ok(Some((start.saturating_add(offset), record)));
             }
-            TranscriptStoreReader::Lineage(reader) => {
-                const CHUNK: usize = 256;
-                let total = usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
-                    smelt_store::StoreError::Integrity(
-                        "lineage transcript length exceeds platform limits".into(),
-                    )
-                })?;
-                let mut end = before_or_at.saturating_add(1).min(total);
-                while end > 0 {
-                    let start = end.saturating_sub(CHUNK);
-                    if let Some((offset, record)) = reader
-                        .transcript_object_backed_range(start as u64, end as u64)?
-                        .into_iter()
-                        .enumerate()
-                        .rev()
-                        .find(|(_, record)| record.kind == kind)
-                    {
-                        return Ok(Some((start.saturating_add(offset), record)));
-                    }
-                    end = start;
-                }
-                Ok(None)
-            }
+            end = start;
         }
+        Ok(None)
     }
 
     fn record_after_kind(
@@ -450,52 +377,34 @@ impl SqliteTranscriptStore {
         kind: &str,
         after_or_at: usize,
     ) -> smelt_store::Result<Option<(usize, smelt_store::StoredTranscriptBlock)>> {
-        match &self.reader {
-            TranscriptStoreReader::Legacy(db) => {
-                let Some(record) =
-                    db.read_transcript_record_after_kind_at_index(kind, after_or_at as u64)?
-                else {
-                    return Ok(None);
-                };
-                let Some(index) = db.transcript_record_index_for_block_idx(record.block_idx)?
-                else {
-                    return Ok(None);
-                };
-                Ok(Some((index.get(), record)))
+        const CHUNK: usize = 256;
+        let total = usize::try_from(self.reader.snapshot()?.transcript_len).map_err(|_| {
+            smelt_store::StoreError::Integrity(
+                "lineage transcript length exceeds platform limits".into(),
+            )
+        })?;
+        let mut start = after_or_at.min(total);
+        while start < total {
+            let end = start.saturating_add(CHUNK).min(total);
+            if let Some((offset, record)) = self
+                .reader
+                .transcript_object_backed_range(start as u64, end as u64)?
+                .into_iter()
+                .enumerate()
+                .find(|(_, record)| record.kind == kind)
+            {
+                return Ok(Some((start.saturating_add(offset), record)));
             }
-            TranscriptStoreReader::Lineage(reader) => {
-                const CHUNK: usize = 256;
-                let total = usize::try_from(reader.snapshot()?.transcript_len).map_err(|_| {
-                    smelt_store::StoreError::Integrity(
-                        "lineage transcript length exceeds platform limits".into(),
-                    )
-                })?;
-                let mut start = after_or_at.min(total);
-                while start < total {
-                    let end = start.saturating_add(CHUNK).min(total);
-                    if let Some((offset, record)) = reader
-                        .transcript_object_backed_range(start as u64, end as u64)?
-                        .into_iter()
-                        .enumerate()
-                        .find(|(_, record)| record.kind == kind)
-                    {
-                        return Ok(Some((start.saturating_add(offset), record)));
-                    }
-                    start = end;
-                }
-                Ok(None)
-            }
+            start = end;
         }
+        Ok(None)
     }
 
     fn extent_chunks(&self) -> smelt_store::Result<Vec<smelt_store::TranscriptExtentChunk>> {
         #[cfg(test)]
         self.extent_read_count
             .set(self.extent_read_count.get().saturating_add(1));
-        match &self.reader {
-            TranscriptStoreReader::Legacy(db) => db.transcript_extent_chunks(),
-            TranscriptStoreReader::Lineage(_) => Ok(Vec::new()),
-        }
+        self.reader.transcript_extent_chunks()
     }
 
     #[cfg(test)]
@@ -6616,6 +6525,39 @@ impl Default for TranscriptDocument {
 }
 
 #[cfg(test)]
+const TEST_LINEAGE_SESSION_ID: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[cfg(test)]
+fn create_test_lineage_session(root: &std::path::Path) -> std::path::PathBuf {
+    let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+    session.id = TEST_LINEAGE_SESSION_ID.into();
+    let command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
+    let mut writer = smelt_store::OwnedLineageWriter::open(root, TEST_LINEAGE_SESSION_ID).unwrap();
+    writer.commit_session(&command).unwrap();
+    writer.release().unwrap();
+    root.join(TEST_LINEAGE_SESSION_ID)
+}
+
+#[cfg(test)]
+fn seed_test_transcript_rows(
+    root: &std::path::Path,
+    records: Vec<smelt_store::StoredTranscriptBlock>,
+) -> std::path::PathBuf {
+    let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+    session.id = TEST_LINEAGE_SESSION_ID.into();
+    let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
+    command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+        start: smelt_store::TranscriptRecordIndex::ZERO,
+        records,
+    });
+    let mut writer = smelt_store::OwnedLineageWriter::open(root, TEST_LINEAGE_SESSION_ID).unwrap();
+    writer.commit_session(&command).unwrap();
+    writer.release().unwrap();
+    root.join(TEST_LINEAGE_SESSION_ID)
+}
+
+#[cfg(test)]
 mod document_tests {
     use super::*;
     use crate::app::transcript_scroll_trace::{
@@ -6685,11 +6627,12 @@ mod document_tests {
     fn sqlite_hydration_reads_only_requested_record_ranges() {
         let records = transcript_records(4);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..4,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         document.set_memory_budget(TranscriptMemoryBudget {
             hydrated_blocks: usize::MAX,
@@ -6719,7 +6662,8 @@ mod document_tests {
         let mut source = fixed_transcript(3);
         let records = source.history.block_records();
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         source.history.clear_record_dirty();
         let first_id = source.history.order[0];
         let stored = source
@@ -6727,7 +6671,7 @@ mod document_tests {
             .stored_ref_for_materialized(first_id, 0)
             .unwrap();
         let mut document = TranscriptDocument::from_transcript(source);
-        document.set_session_dir(dir.path().to_path_buf());
+        document.set_session_dir(session_dir);
 
         assert_eq!(document.records.total_count(), None);
         assert_eq!(document.compacted_record_len, 0);
@@ -6744,7 +6688,8 @@ mod document_tests {
         let mut rebuilt = fixed_transcript(3);
         let records = rebuilt.history.block_records();
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         rebuilt.history.clear_record_dirty();
         let first_id = rebuilt.history.order[0];
         let stored = rebuilt
@@ -6754,7 +6699,7 @@ mod document_tests {
         assert!(rebuilt.history.dematerialize_live(first_id, stored) > 0);
 
         let mut document = TranscriptDocument::new();
-        document.set_session_dir(dir.path().to_path_buf());
+        document.set_session_dir(session_dir);
         document.replace_transcript(rebuilt);
 
         assert!(document.ensure_hydrated_ids(&[first_id]));
@@ -6767,11 +6712,12 @@ mod document_tests {
     fn hydrated_lru_evicts_by_bytes_and_rehydrates_exactly() {
         let records = transcript_records(3);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..3,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir),
         ));
         let ids = document.history().order.clone();
         let one_block_budget = block_retained_bytes(&records[0].block);
@@ -6801,11 +6747,12 @@ mod document_tests {
         let theme = Theme::default();
         let records = transcript_records(1);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..1,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         document.set_memory_budget(TranscriptMemoryBudget {
             hydrated_blocks: 1,
@@ -6858,11 +6805,12 @@ mod document_tests {
         let lua = LuaRuntime::new();
         let records = varied_transcript_records(40);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..records.len(),
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         document.set_memory_budget(TranscriptMemoryBudget {
             hydrated_blocks: 1,
@@ -6896,9 +6844,10 @@ mod document_tests {
     fn randomized_bounded_cache_matches_non_evicting_transcript_behavior() {
         let records = transcript_records(32);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            || sparse_loaded_transcript(&records, 0..records.len(), Some(dir.path().to_path_buf()));
+            || sparse_loaded_transcript(&records, 0..records.len(), Some(session_dir.clone()));
         let mut bounded = TranscriptDocument::from_loaded_transcript(loaded());
         let mut non_evicting = TranscriptDocument::from_loaded_transcript(loaded());
         bounded.set_memory_budget(TranscriptMemoryBudget {
@@ -7018,11 +6967,12 @@ mod document_tests {
     fn pinned_oversize_hydration_records_debt_and_converges_after_unpin() {
         let records = transcript_records(1);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..1,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         document.set_memory_budget(TranscriptMemoryBudget {
             hydrated_blocks: 1,
@@ -7719,11 +7669,12 @@ mod document_tests {
         let viewport_rows = 6;
         let records = transcript_records(100);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             60..80,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let mut buf = Buffer::new(crate::smelt_edit::BufId(414), Default::default());
         let loaded_start = document.approximate_sparse_prefix_row_offset(width);
@@ -7802,11 +7753,12 @@ mod document_tests {
         let viewport_rows = 6;
         let records = transcript_records(100);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             20..40,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let mut buf = Buffer::new(crate::smelt_edit::BufId(415), Default::default());
         let (_, loaded_end) = document
@@ -8082,11 +8034,12 @@ mod document_tests {
             source.push(Block::Text { content });
         }
         let records = source.history.block_records();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             2000..2040,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let coarse_rows = 2000 * document.approximate_average_record_rows(20);
 
@@ -8550,16 +8503,17 @@ mod document_tests {
         let width = 24;
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
-        let expected = smelt_store::SessionReader::open_database(dir.path().join("session.db"))
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
+        let expected = SqliteTranscriptStore::open_read_only(&session_dir)
             .unwrap()
-            .transcript_record_estimated_rows((0..220).into(), width)
+            .estimated_record_rows(width, 0..220)
             .unwrap() as RowIndex;
 
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             220..235,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir),
         ));
 
         assert_eq!(
@@ -8573,11 +8527,12 @@ mod document_tests {
         let width = 80;
         let records = transcript_records(8);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             0..3,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         document.extent_index.observe_exact_loaded_record_rows(
             &document.records.sparse,
@@ -8591,9 +8546,9 @@ mod document_tests {
             records: records_with_ids(&records[5..8], 5),
         };
         assert!(document.merge_record_window(window));
-        let db = smelt_store::SessionReader::open_database(dir.path().join("session.db")).unwrap();
-        let persisted_prefix = db
-            .transcript_record_estimated_rows((0..5).into(), width)
+        let persisted_prefix = SqliteTranscriptStore::open_read_only(&session_dir)
+            .unwrap()
+            .estimated_record_rows(width, 0..5)
             .unwrap() as RowIndex;
         assert_eq!(
             document.extent_index.exact_local_rows_for_record(1, width),
@@ -8667,9 +8622,10 @@ mod document_tests {
         let viewport_rows = 12;
         let records = varied_transcript_records(400);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut buf = Buffer::new(crate::smelt_edit::BufId(403), Default::default());
@@ -8738,9 +8694,10 @@ mod document_tests {
         let viewport_rows = 12;
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut buf = Buffer::new(crate::smelt_edit::BufId(404), Default::default());
@@ -8925,9 +8882,10 @@ mod document_tests {
         let viewport_rows = 12;
         let records = varied_transcript_records(400);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut win = transcript_window();
@@ -8975,9 +8933,10 @@ mod document_tests {
         let viewport_rows = 12;
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut win = transcript_window();
@@ -9034,9 +8993,10 @@ mod document_tests {
         let viewport_rows = 12;
         let records = varied_transcript_records(400);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut win = transcript_window();
@@ -9130,9 +9090,10 @@ mod document_tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut sparse_document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut sparse_buf = Buffer::new(crate::smelt_edit::BufId(3), Default::default());
@@ -9171,9 +9132,9 @@ mod document_tests {
         let source = extent_accuracy_transcript(600);
         let records = source.history.block_records();
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
-        let store =
-            smelt_store::SessionReader::open_database(dir.path().join("session.db")).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
+        let store = SqliteTranscriptStore::open_read_only(&session_dir).unwrap();
 
         for width in [24, 47, 80, 137] {
             let mut full_document =
@@ -9181,12 +9142,9 @@ mod document_tests {
             let exact_total = full_document.build_rows(&lua, width, &theme).len() as RowIndex;
             let exact_layout = full_document.materialize_exact_loaded_block_layout(&lua, width);
 
-            let loaded = LoadedTranscript::tail_from_sqlite_dir(
-                dir.path().to_path_buf(),
-                width,
-                viewport_rows,
-            )
-            .expect("tail transcript");
+            let loaded =
+                LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
+                    .expect("tail transcript");
             let mut sparse_document = TranscriptDocument::from_loaded_transcript(loaded);
             let estimated_total = sparse_document.approximate_scrollbar_total_rows(&lua, width);
             let total_error = estimated_total.abs_diff(exact_total);
@@ -9212,9 +9170,8 @@ mod document_tests {
                     TranscriptDocument::from_transcript(extent_accuracy_transcript(record_index));
                 let exact_prefix =
                     prefix_document.build_rows(&lua, width, &theme).len() as RowIndex;
-                let estimated_prefix = store
-                    .transcript_record_estimated_rows((0..record_index).into(), width)
-                    .unwrap() as RowIndex;
+                let estimated_prefix =
+                    store.estimated_record_rows(width, 0..record_index).unwrap() as RowIndex;
                 let exact_fraction = exact_prefix.saturating_mul(10_000) / exact_total.max(1);
                 let estimated_fraction =
                     estimated_prefix.saturating_mul(10_000) / estimated_total.max(1);
@@ -9282,9 +9239,10 @@ mod document_tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let loaded =
-            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+            LoadedTranscript::tail_from_sqlite_dir(session_dir.clone(), width, viewport_rows)
                 .expect("tail transcript");
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let mut win = transcript_window();
@@ -9384,11 +9342,12 @@ mod document_tests {
             }
         }
         let records = source.history.block_records();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         assert!(document.records.sparse.merge(&LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(0),
@@ -9446,11 +9405,12 @@ mod document_tests {
             }
         }
         let records = source.history.block_records();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             160..200,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let block_id = BlockId::new(record_index as u64);
 
@@ -9558,11 +9518,12 @@ mod document_tests {
             }
         }
         let records = source.history.block_records();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             80..100,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let block_id = BlockId::new(record_index as u64);
         let mut buf = Buffer::new(crate::smelt_edit::BufId(912), Default::default());
@@ -9788,11 +9749,12 @@ mod document_tests {
         let theme = Theme::default();
         let dir = tempfile::tempdir().unwrap();
         let records = transcript_records(900);
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             860..900,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let active_before = document.records.active_range.clone();
         let loaded_before = document.loaded_record_count();
@@ -9838,11 +9800,12 @@ mod document_tests {
         let theme = Theme::default();
         let dir = tempfile::tempdir().unwrap();
         let records = transcript_records(100);
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
 
         let _plan = document.plan_projection_measured(
@@ -9896,11 +9859,12 @@ mod document_tests {
         let viewport_rows = 10;
         let records = transcript_records(100);
         let dir = tempfile::tempdir().unwrap();
-        crate::persist::write_transcript_record_suffix(dir.path(), 0, &records).unwrap();
+        let session_dir = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&session_dir, 0, &records).unwrap();
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
             68..100,
-            Some(dir.path().to_path_buf()),
+            Some(session_dir.clone()),
         ));
         let mut buf = Buffer::new(crate::smelt_edit::BufId(416), Default::default());
 
@@ -10986,6 +10950,7 @@ impl TuiApp {
 
 #[cfg(test)]
 mod tests {
+    use super::{seed_test_transcript_rows, TEST_LINEAGE_SESSION_ID};
     use crate::app::search::SearchDirection;
     use crate::app::test_harness::TestApp;
     use crate::content::transcript_buf::{FoldAction, FoldActivation};
@@ -11171,14 +11136,17 @@ mod tests {
     #[test]
     fn transcript_document_loads_record_window_from_store() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..4).map(test_record_record).collect::<Vec<_>>();
-        db.apply_transcript_record_fixture(&records).unwrap();
-        let tail = db.read_transcript_record_tail_slice(1).unwrap();
-        drop(db);
+        let session_dir = seed_test_transcript_rows(dir.path(), records);
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
+                .unwrap();
+        let tail = reader
+            .transcript_record_slice_with_total((3..4).into(), 4)
+            .unwrap();
 
-        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
-            .expect("loaded tail");
+        let loaded =
+            super::LoadedTranscript::from_record_slice(tail, session_dir).expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
 
         let window = document
@@ -11193,14 +11161,17 @@ mod tests {
     #[test]
     fn transcript_document_merges_record_windows_without_discarding_tail() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..6).map(test_record_record).collect::<Vec<_>>();
-        db.apply_transcript_record_fixture(&records).unwrap();
-        let tail = db.read_transcript_record_tail_slice(2).unwrap();
-        drop(db);
+        let session_dir = seed_test_transcript_rows(dir.path(), records);
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
+                .unwrap();
+        let tail = reader
+            .transcript_record_slice_with_total((4..6).into(), 6)
+            .unwrap();
 
-        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
-            .expect("loaded tail");
+        let loaded =
+            super::LoadedTranscript::from_record_slice(tail, session_dir).expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
         assert_eq!(document.record_total_count(), Some(6));
         assert_eq!(document.loaded_record_count(), 2);
@@ -11379,12 +11350,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.apply_transcript_record_fixture(&record_rows).unwrap();
-        drop(db);
+        let session_dir = seed_test_transcript_rows(dir.path(), record_rows);
         source.history.clear_record_dirty();
         let mut document = super::TranscriptDocument::from_transcript(source);
-        document.set_session_dir(dir.path().to_path_buf());
+        document.set_session_dir(session_dir);
         document.schedule_durable_compaction(records.len(), None);
         while document.drain_compaction_slice() {}
 
@@ -11405,15 +11374,18 @@ mod tests {
     #[test]
     fn approximate_row_seek_uses_prefix_index() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..300).map(test_record_record).collect::<Vec<_>>();
         records[0].estimated_text_bytes = 1_000;
-        db.apply_transcript_record_fixture(&records).unwrap();
-        let tail = db.read_transcript_record_tail_slice(2).unwrap();
-        drop(db);
+        let session_dir = seed_test_transcript_rows(dir.path(), records);
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
+                .unwrap();
+        let tail = reader
+            .transcript_record_slice_with_total((298..300).into(), 300)
+            .unwrap();
 
-        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
-            .expect("loaded tail");
+        let loaded =
+            super::LoadedTranscript::from_record_slice(tail, session_dir).expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
 
         let range = document
@@ -11433,14 +11405,17 @@ mod tests {
     #[test]
     fn scrollbar_total_ignores_exact_loaded_height_refinements_for_sparse_sessions() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..16).map(test_record_record).collect::<Vec<_>>();
-        db.apply_transcript_record_fixture(&records).unwrap();
-        let tail = db.read_transcript_record_tail_slice(4).unwrap();
-        drop(db);
+        let session_dir = seed_test_transcript_rows(dir.path(), records);
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
+                .unwrap();
+        let tail = reader
+            .transcript_record_slice_with_total((12..16).into(), 16)
+            .unwrap();
 
-        let loaded = super::LoadedTranscript::from_record_slice(tail, dir.path().to_path_buf())
-            .expect("loaded tail");
+        let loaded =
+            super::LoadedTranscript::from_record_slice(tail, session_dir).expect("loaded tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
         let before = document.scrollbar_total_rows(10, 1_000);
 

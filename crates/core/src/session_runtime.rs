@@ -1,28 +1,18 @@
-use crate::session::{
-    ContextCheckpoint, Session, SessionHeader, SessionStoreLocation, SessionStoreRef,
-};
+use crate::session::{ContextCheckpoint, Session, SessionHeader, SessionStoreRef};
 use protocol::{history_item_message_count, HistoryItem};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS: usize = 256;
 
-enum LiveStoreReader {
-    // COMPAT(session-lineage-v1): read-only live sessions can represent an
-    // explicitly unmigrated previous-format session.
-    Legacy(smelt_store::SessionReader),
-    Lineage(smelt_store::LineageSessionReader),
-}
+struct LiveStoreReader(smelt_store::LineageSessionReader);
 
 impl LiveStoreReader {
     fn read_history_items_range(
         &self,
         range: Range<usize>,
     ) -> smelt_store::Result<Vec<HistoryItem>> {
-        match self {
-            Self::Legacy(reader) => reader.read_history_items_range(range),
-            Self::Lineage(reader) => reader.history_range(range.start as u64, range.end as u64),
-        }
+        self.0.history_range(range.start as u64, range.end as u64)
     }
 
     fn read_history_items_tail(
@@ -31,19 +21,13 @@ impl LiveStoreReader {
         max_items: usize,
         max_bytes: Option<usize>,
     ) -> smelt_store::Result<Vec<HistoryItem>> {
-        match self {
-            Self::Legacy(reader) => reader.read_history_items_tail(end, max_items, max_bytes),
-            Self::Lineage(reader) => reader.history_tail(end, max_items, max_bytes),
-        }
+        self.0.history_tail(end, max_items, max_bytes)
     }
 
     fn history_note_projection_at(
         &self,
         index: usize,
     ) -> smelt_store::Result<Option<protocol::HistoryNoteProjection>> {
-        if let Self::Legacy(reader) = self {
-            return reader.history_note_projection_at(index);
-        }
         Ok(self
             .read_history_items_range(index..index.saturating_add(1))?
             .into_iter()
@@ -61,9 +45,6 @@ impl LiveStoreReader {
         end: usize,
         name: &str,
     ) -> smelt_store::Result<Option<usize>> {
-        if let Self::Legacy(reader) = self {
-            return reader.history_last_context_note_index_before(end, name);
-        }
         let mut cursor = end;
         while cursor > 0 {
             let start = cursor.saturating_sub(HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS);
@@ -79,15 +60,10 @@ impl LiveStoreReader {
     }
 
     fn history_any_transcript_visible_before(&self, end: usize) -> smelt_store::Result<bool> {
-        match self {
-            Self::Legacy(reader) => return reader.history_any_transcript_visible_before(end),
-            Self::Lineage(reader) => {
-                let state = reader.snapshot()?;
-                let history_len = state.head.history_len.as_usize().unwrap_or(usize::MAX);
-                if end >= history_len {
-                    return Ok(state.transcript_len > 0);
-                }
-            }
+        let state = self.0.snapshot()?;
+        let history_len = state.head.history_len.as_usize().unwrap_or(usize::MAX);
+        if end >= history_len {
+            return Ok(state.transcript_len > 0);
         }
         let mut start = 0;
         while start < end {
@@ -107,9 +83,6 @@ impl LiveStoreReader {
     }
 
     fn history_mode_before(&self, end: usize) -> smelt_store::Result<Option<String>> {
-        if let Self::Legacy(reader) = self {
-            return reader.history_mode_before(end);
-        }
         let mut cursor = end;
         while cursor > 0 {
             let start = cursor.saturating_sub(HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS);
@@ -128,9 +101,6 @@ impl LiveStoreReader {
     }
 
     fn history_base_mode_range(&self, range: Range<usize>) -> smelt_store::Result<Option<String>> {
-        if let Self::Legacy(reader) = self {
-            return reader.history_base_mode_range(range);
-        }
         let mut start = range.start;
         while start < range.end {
             let next = start
@@ -510,49 +480,20 @@ impl LiveSession {
     }
 
     fn open_store(&self) -> Result<LiveStoreReader, String> {
-        let location = self.store.as_ref().map(|store| &store.location);
-        match location {
-            Some(SessionStoreLocation::Lineage { root, session_id }) => {
-                smelt_store::LineageSessionReader::open_existing(root, session_id)
-                    .map(LiveStoreReader::Lineage)
-                    .map_err(|error| {
-                        format!(
-                            "open lineage session {session_id} in {}: {error}",
-                            root.display()
-                        )
-                    })
-            }
-            Some(SessionStoreLocation::LegacyDatabase(db_path)) => {
-                smelt_store::SessionReader::open_database(db_path)
-                    .map(LiveStoreReader::Legacy)
-                    .map_err(|error| {
-                        format!("open session database {}: {error}", db_path.display())
-                    })
-            }
-            None => {
-                if let Some(root) = self.session_dir.parent() {
-                    match smelt_store::LineageSessionReader::try_open_existing(root, self.id()) {
-                        Ok(Some(reader)) => return Ok(LiveStoreReader::Lineage(reader)),
-                        Ok(None) => {}
-                        Err(error) => {
-                            return Err(format!(
-                                "locate lineage session {} in {}: {error}",
-                                self.id(),
-                                root.display()
-                            ));
-                        }
-                    }
-                }
-                // COMPAT(session-lineage-v1): store-less callers historically
-                // inferred an unmigrated database from the session directory.
-                let db_path = self.session_dir.join("session.db");
-                smelt_store::SessionReader::open_database(&db_path)
-                    .map(LiveStoreReader::Legacy)
-                    .map_err(|error| {
-                        format!("open session database {}: {error}", db_path.display())
-                    })
-            }
-        }
+        let (root, session_id) = self
+            .store
+            .as_ref()
+            .map(|store| (store.root.as_path(), store.session_id.as_str()))
+            .or_else(|| self.session_dir.parent().map(|root| (root, self.id())))
+            .ok_or_else(|| format!("session {} has no storage root", self.id()))?;
+        smelt_store::LineageSessionReader::open_existing(root, session_id)
+            .map(LiveStoreReader)
+            .map_err(|error| {
+                format!(
+                    "open lineage session {session_id} in {}: {error}",
+                    root.display()
+                )
+            })
     }
 }
 
@@ -626,12 +567,9 @@ mod tests {
     use super::*;
     use protocol::HistoryAppendPlan;
 
-    fn seed_store(
-        db: &mut smelt_store::SessionDb,
-        id: &str,
-        mode: Option<&str>,
-        history: Vec<HistoryItem>,
-    ) {
+    const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn seed_store(root: &std::path::Path, id: &str, mode: Option<&str>, history: Vec<HistoryItem>) {
         let command = smelt_store::SessionCommit {
             session_id: id.into(),
             expected: smelt_store::StoreHead::default(),
@@ -666,8 +604,12 @@ mod tests {
             side_tables: smelt_store::SideTableSuffixes::default(),
             transcript_records: None,
         };
-        db.apply_session_commit(&command)
-            .expect("seed session store");
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(root, id).expect("open lineage session store");
+        writer
+            .commit_session(&command)
+            .expect("seed lineage session store");
+        writer.release().expect("release lineage session store");
     }
 
     fn apply_planned_append(
@@ -693,17 +635,15 @@ mod tests {
     #[test]
     fn store_backed_live_session_reads_persisted_range_and_live_suffix() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("session.db");
-        let mut db = smelt_store::SessionDb::open(&db_path).expect("open db");
         let persisted = vec![
             HistoryItem::user(protocol::Content::text("one")),
             HistoryItem::user(protocol::Content::text("two")),
         ];
-        seed_store(&mut db, "live", None, persisted);
+        seed_store(dir.path(), SESSION_ID, None, persisted);
 
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
-                id: "live".into(),
+                id: SESSION_ID.into(),
                 title: None,
                 slug: None,
                 first_user_message: None,
@@ -728,7 +668,11 @@ mod tests {
         };
         let mut live = LiveSession::from_store(
             header,
-            SessionStoreRef::legacy(dir.path().to_path_buf(), db_path),
+            SessionStoreRef::new(
+                dir.path().join(SESSION_ID),
+                dir.path().to_path_buf(),
+                SESSION_ID.into(),
+            ),
         );
         live.append_history(HistoryItem::user(protocol::Content::text("three")));
 
@@ -790,8 +734,6 @@ mod tests {
     #[test]
     fn store_backed_live_session_scans_mode_and_visibility_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("session.db");
-        let mut db = smelt_store::SessionDb::open(&db_path).expect("open db");
         let history = vec![
             HistoryItem::user(protocol::Content::text("hello")),
             HistoryItem::Note(protocol::HistoryNote::mode_change_for_transition(
@@ -799,10 +741,10 @@ mod tests {
             )),
             HistoryItem::user(protocol::Content::text("after mode")),
         ];
-        seed_store(&mut db, "live-scan", Some("normal"), history);
+        seed_store(dir.path(), SESSION_ID, Some("normal"), history);
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
-                id: "live-scan".into(),
+                id: SESSION_ID.into(),
                 title: None,
                 slug: None,
                 first_user_message: None,
@@ -827,7 +769,11 @@ mod tests {
         };
         let live = LiveSession::from_store(
             header,
-            SessionStoreRef::legacy(dir.path().to_path_buf(), db_path),
+            SessionStoreRef::new(
+                dir.path().join(SESSION_ID),
+                dir.path().to_path_buf(),
+                SESSION_ID.into(),
+            ),
         );
 
         assert!(live.any_transcript_visible_before(2).unwrap());
@@ -838,18 +784,16 @@ mod tests {
     #[test]
     fn store_backed_history_append_plans_exact_semantic_event() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("session.db");
-        let mut db = smelt_store::SessionDb::open(&db_path).expect("open db");
         let mut history = vec![HistoryItem::note(protocol::HistoryNote::context(
             "old context",
         ))];
         history.extend(
             (0..130).map(|index| HistoryItem::user(protocol::Content::text(index.to_string()))),
         );
-        seed_store(&mut db, "append-plan", Some("normal"), history.clone());
+        seed_store(dir.path(), SESSION_ID, Some("normal"), history.clone());
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
-                id: "append-plan".into(),
+                id: SESSION_ID.into(),
                 title: None,
                 slug: None,
                 first_user_message: None,
@@ -874,7 +818,11 @@ mod tests {
         };
         let mut live = LiveSession::from_store(
             header,
-            SessionStoreRef::legacy(dir.path().to_path_buf(), db_path),
+            SessionStoreRef::new(
+                dir.path().join(SESSION_ID),
+                dir.path().to_path_buf(),
+                SESSION_ID.into(),
+            ),
         );
 
         let duplicate_context = protocol::HistoryAppend::set_context(

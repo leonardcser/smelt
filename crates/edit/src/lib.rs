@@ -332,7 +332,6 @@ struct LuaGenerationNames {
 struct DragAutoscroll {
     owner: WinId,
     row: u16,
-    column: u16,
     edge: Option<DragAutoscrollEdge>,
 }
 
@@ -563,7 +562,7 @@ impl Ui {
         count
     }
 
-    fn update_drag_autoscroll_pointer(&mut self, target: HitTarget, row: u16, column: u16) {
+    fn update_drag_autoscroll_pointer(&mut self, target: HitTarget, row: u16) {
         let HitTarget::Window(owner) = target else {
             self.drag_autoscroll = None;
             self.drag_autoscroll_since = None;
@@ -576,12 +575,7 @@ impl Ui {
         {
             self.drag_autoscroll_since = None;
         }
-        self.drag_autoscroll = Some(DragAutoscroll {
-            owner,
-            row,
-            column,
-            edge,
-        });
+        self.drag_autoscroll = Some(DragAutoscroll { owner, row, edge });
     }
 
     fn drag_autoscroll_edge_for(&self, owner: WinId, row: u16) -> Option<DragAutoscrollEdge> {
@@ -624,13 +618,13 @@ impl Ui {
                     _ => return None,
                 };
                 self.set_capture(target);
-                self.update_drag_autoscroll_pointer(target, me.row, me.column);
+                self.update_drag_autoscroll_pointer(target, me.row);
                 let count = self.record_click(me.row, me.column, now);
                 Some((target, count))
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.capture {
                 Some(target @ (HitTarget::Window(_) | HitTarget::Paint(_))) => {
-                    self.update_drag_autoscroll_pointer(target, me.row, me.column);
+                    self.update_drag_autoscroll_pointer(target, me.row);
                     Some((target, 0))
                 }
                 _ => None,
@@ -2241,7 +2235,6 @@ impl Ui {
         if win.viewport?.rect.height == 0 || !win.drag_active() {
             return None;
         }
-        let _column = drag.column;
         let edge = self
             .drag_autoscroll_edge_for(drag.owner, drag.row)
             .or(drag.edge)?;
@@ -6979,7 +6972,7 @@ mod tests {
     }
 
     fn park_drag_pointer_at(ui: &mut Ui, win: WinId, row: u16) {
-        ui.update_drag_autoscroll_pointer(HitTarget::Window(win), row, 0);
+        ui.update_drag_autoscroll_pointer(HitTarget::Window(win), row);
     }
 
     #[test]

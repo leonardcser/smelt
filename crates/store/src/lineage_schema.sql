@@ -1,3 +1,91 @@
+CREATE TABLE IF NOT EXISTS store_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (updated_at >= 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS objects (
+    hash TEXT PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
+    codec TEXT NOT NULL CHECK (codec IN ('none', 'zstd')),
+    raw_size INTEGER NOT NULL CHECK (raw_size >= 0),
+    stored_size INTEGER NOT NULL CHECK (stored_size >= 0 AND stored_size = length(bytes)),
+    bytes BLOB NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS request_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT,
+    turn_id TEXT,
+    ask_id TEXT,
+    started_at INTEGER NOT NULL CHECK (started_at >= 0),
+    completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= 0),
+    provider TEXT,
+    model TEXT,
+    history_len INTEGER CHECK (history_len IS NULL OR history_len >= 0),
+    error_summary TEXT,
+    background INTEGER NOT NULL DEFAULT 0 CHECK (background IN (0, 1)),
+    raw_body_size INTEGER NOT NULL DEFAULT 0 CHECK (raw_body_size >= 0),
+    kind TEXT,
+    api_base TEXT,
+    url TEXT,
+    http_status INTEGER CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
+    prompt_cache_key TEXT,
+    stream INTEGER NOT NULL DEFAULT 0 CHECK (stream IN (0, 1)),
+    attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+    response_summary TEXT
+) STRICT;
+CREATE INDEX IF NOT EXISTS request_attempts_started_at_idx
+    ON request_attempts(started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS request_attempts_request_id_idx ON request_attempts(request_id);
+CREATE INDEX IF NOT EXISTS request_attempts_turn_ask_idx ON request_attempts(turn_id, ask_id, id);
+CREATE INDEX IF NOT EXISTS request_attempts_provider_model_idx
+    ON request_attempts(provider, model, started_at DESC);
+CREATE INDEX IF NOT EXISTS request_attempts_error_idx
+    ON request_attempts(error_summary, started_at DESC);
+CREATE INDEX IF NOT EXISTS request_attempts_background_idx
+    ON request_attempts(background, started_at DESC);
+CREATE INDEX IF NOT EXISTS request_attempts_body_size_idx
+    ON request_attempts(raw_body_size DESC);
+CREATE INDEX IF NOT EXISTS request_attempts_url_idx ON request_attempts(url);
+
+CREATE TABLE IF NOT EXISTS request_object_refs (
+    request_attempt_id INTEGER NOT NULL
+        REFERENCES request_attempts(id) ON DELETE CASCADE CHECK (request_attempt_id > 0),
+    object_hash TEXT NOT NULL REFERENCES objects(hash) ON DELETE RESTRICT,
+    role TEXT NOT NULL CHECK (role IN (
+        'body_json', 'body_manifest', 'body_top', 'body_item', 'body_parent', 'response', 'error'
+    )),
+    PRIMARY KEY (request_attempt_id, object_hash, role)
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS request_object_refs_body_root_idx
+    ON request_object_refs(request_attempt_id)
+    WHERE role IN ('body_json', 'body_manifest');
+CREATE UNIQUE INDEX IF NOT EXISTS request_object_refs_response_idx
+    ON request_object_refs(request_attempt_id)
+    WHERE role = 'response';
+CREATE UNIQUE INDEX IF NOT EXISTS request_object_refs_error_idx
+    ON request_object_refs(request_attempt_id)
+    WHERE role = 'error';
+CREATE INDEX IF NOT EXISTS request_object_refs_object_idx
+    ON request_object_refs(object_hash, request_attempt_id);
+
+CREATE TABLE IF NOT EXISTS request_stats (
+    request_attempt_id INTEGER PRIMARY KEY
+        REFERENCES request_attempts(id) ON DELETE CASCADE CHECK (request_attempt_id > 0),
+    input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    cached_input_tokens INTEGER CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+    reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+    total_cost_micros INTEGER CHECK (total_cost_micros IS NULL OR total_cost_micros >= 0),
+    stats_json TEXT,
+    context_tokens INTEGER CHECK (context_tokens IS NULL OR context_tokens >= 0),
+    cache_write_tokens INTEGER CHECK (cache_write_tokens IS NULL OR cache_write_tokens >= 0),
+    tokens_per_sec REAL CHECK (tokens_per_sec IS NULL OR tokens_per_sec >= 0)
+) STRICT;
+CREATE INDEX IF NOT EXISTS request_stats_input_tokens_idx ON request_stats(input_tokens DESC);
+CREATE INDEX IF NOT EXISTS request_stats_output_tokens_idx ON request_stats(output_tokens DESC);
+CREATE INDEX IF NOT EXISTS request_stats_total_cost_idx ON request_stats(total_cost_micros DESC);
+
 CREATE TABLE IF NOT EXISTS lineage_identity (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     lineage_id TEXT NOT NULL UNIQUE
@@ -138,6 +226,22 @@ CREATE TABLE IF NOT EXISTS lineage_sequence_roots (
         REFERENCES lineage_sequence_nodes(lineage_id, node_id)
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS lineage_transcript_extent_chunks (
+    lineage_id TEXT NOT NULL,
+    transcript_root_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    record_count INTEGER NOT NULL CHECK (record_count BETWEEN 1 AND 64),
+    rows_20 INTEGER NOT NULL CHECK (rows_20 >= record_count),
+    rows_40 INTEGER NOT NULL CHECK (rows_40 >= record_count AND rows_40 <= rows_20),
+    rows_80 INTEGER NOT NULL CHECK (rows_80 >= record_count AND rows_80 <= rows_40),
+    rows_120 INTEGER NOT NULL CHECK (rows_120 >= record_count AND rows_120 <= rows_80),
+    rows_160 INTEGER NOT NULL CHECK (rows_160 >= record_count AND rows_160 <= rows_120),
+    rows_240 INTEGER NOT NULL CHECK (rows_240 >= record_count AND rows_240 <= rows_160),
+    PRIMARY KEY (lineage_id, transcript_root_id, chunk_index),
+    FOREIGN KEY (lineage_id, transcript_root_id)
+        REFERENCES lineage_sequence_roots(lineage_id, root_id)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS lineage_revisions (
     lineage_id TEXT NOT NULL,
     revision_id TEXT NOT NULL
@@ -145,7 +249,7 @@ CREATE TABLE IF NOT EXISTS lineage_revisions (
     created_by_session_id TEXT NOT NULL,
     parent_revision_id TEXT,
     operation_kind TEXT NOT NULL
-        CHECK (operation_kind IN ('initial', 'append', 'split', 'rewind', 'import')),
+        CHECK (operation_kind IN ('initial', 'append', 'split', 'rewind')),
     history_root_id TEXT NOT NULL,
     transcript_root_id TEXT NOT NULL,
     state_payload_id TEXT NOT NULL,
@@ -227,7 +331,7 @@ CREATE TABLE IF NOT EXISTS lineage_commit_receipts (
     fingerprint TEXT NOT NULL
         CHECK (length(fingerprint) = 64 AND fingerprint NOT GLOB '*[^0-9a-f]*'),
     operation_kind TEXT NOT NULL
-        CHECK (operation_kind IN ('create', 'append', 'split', 'rewind', 'fork', 'import')),
+        CHECK (operation_kind IN ('create', 'append', 'split', 'rewind', 'fork')),
     prior_revision_id TEXT,
     result_revision_id TEXT NOT NULL,
     history_start_idx INTEGER CHECK (history_start_idx IS NULL OR history_start_idx >= 0),
@@ -241,10 +345,10 @@ CREATE TABLE IF NOT EXISTS lineage_commit_receipts (
     PRIMARY KEY (lineage_id, session_id, fingerprint),
     CHECK (
         ((operation_kind IN ('create', 'fork') AND prior_revision_id IS NULL)
-            OR (operation_kind IN ('append', 'split', 'rewind', 'import')
+            OR (operation_kind IN ('append', 'split', 'rewind')
                 AND prior_revision_id IS NOT NULL))
         AND
-        ((operation_kind IN ('append', 'import')
+        ((operation_kind = 'append'
             AND history_start_idx IS NOT NULL AND history_item_count IS NOT NULL
             AND transcript_start_idx IS NOT NULL
             AND transcript_record_count IS NOT NULL)

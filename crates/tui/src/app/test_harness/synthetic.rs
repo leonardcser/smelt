@@ -570,10 +570,12 @@ impl TestApp {
 
     /// Seed one canonical database-backed session and publish its catalog overlay.
     pub fn seed_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
-        let dir = self.session_dir_for_id(&meta.id);
-        std::fs::create_dir_all(&dir).expect("create session fixture dir");
-        let mut db = smelt_store::SessionDb::open(dir.join("session.db"))
-            .expect("create session fixture database");
+        let session_dir = self.session_dir_for_id(&meta.id);
+        let mut writer = smelt_store::OwnedLineageWriter::open(
+            session_dir.parent().expect("session root"),
+            &meta.id,
+        )
+        .expect("create session fixture database");
         let history = if let Some(text_bytes) = meta.text_bytes.filter(|bytes| *bytes > 0) {
             let mut remaining = usize::try_from(text_bytes).expect("fixture text size fits usize");
             let mut history = Vec::new();
@@ -660,24 +662,10 @@ impl TestApp {
             side_tables: smelt_store::SideTableSuffixes::default(),
             transcript_records: None,
         };
-        let receipt = db
-            .apply_session_commit(&command)
+        let receipt = writer
+            .commit_session(&command)
             .expect("write canonical session fixture");
+        writer.release().expect("release session fixture database");
         self.publish_session_catalog_commit(&command, &receipt);
-    }
-
-    /// Mark a canonical fixture as requiring a supported schema upgrade.
-    pub fn seed_upgradeable_session(&self, id: &str, version: i32) {
-        let db = smelt_store::SessionDb::open(self.session_dir_for_id(id).join("session.db"))
-            .expect("open upgradeable session fixture");
-        db.connection()
-            .pragma_update(None, "user_version", version)
-            .expect("downgrade fixture schema version");
-    }
-
-    /// Seed a session directory with no readable canonical database.
-    pub fn seed_unavailable_session(&self, id: &str) {
-        std::fs::create_dir_all(self.session_dir_for_id(id))
-            .expect("create unavailable session fixture");
     }
 }

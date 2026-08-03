@@ -1590,9 +1590,9 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.info` :: `fun(): table`
   Return current session metadata as a table.
 - `smelt.session.list` :: `fun(opts: table?): table`
-  List persisted sessions other than the current one from the read-only derived catalog.
+  List canonical lineage sessions other than the current one from the read-only derived catalog.
 - `smelt.session.load` :: `fun(id: string): nil`
-  Switch the UI to the persisted session with `id`.
+  Switch the UI to canonical lineage session `id`.
 - `smelt.session.model_messages` :: `fun(): table`
   Return the model-visible message list for the next request.
 - `smelt.session.render_preview_into` :: `fun(id: string, opts: table): table?`

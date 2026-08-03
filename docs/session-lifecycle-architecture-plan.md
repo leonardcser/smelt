@@ -30,9 +30,9 @@ The recommended end state is:
    query candidates, or persistent-tree height. No common operation may
    materialize, copy, rewrite, or rescan a complete growing session.
 
-This is a greenfield storage design. Existing formats need a deliberate migration
-or export path, but their table layout is not a constraint on the final model.
-There must not be a permanent dual-write or dual-read compatibility architecture.
+This is a greenfield storage design. smelt recognizes only canonical lineage
+storage and does not read, import, migrate, or mutate pre-lineage session
+formats. There is one canonical write path and one canonical read model.
 
 ## Why this plan exists
 
@@ -142,7 +142,7 @@ match in one whole-block experiment.
 - Graceful and persistence-blocked exit.
 - Canonical storage growth, derived search growth, peak RSS, and write
   amplification for those operations.
-- Explicit migration from the current per-session schema.
+- A strict format boundary that ignores pre-lineage session storage.
 
 ### Out of scope
 
@@ -174,7 +174,7 @@ A fork could store a parent session ID, revision, and local suffix. Common forks
 would be immediate.
 
 This creates cross-database canonical dependencies. Deleting, moving, exporting,
-repairing, backing up, or migrating one session would require a dependency graph
+repairing, backing up, or evolving one session would require a dependency graph
 across directories. A deep fork chain would also require path flattening or many
 open databases. The fast path is attractive, but lifecycle and recovery become
 more complicated than the operation being optimized.
@@ -182,8 +182,8 @@ more complicated than the operation being optimized.
 ### Option C: Put every session in one global canonical database
 
 A global revision DAG makes fork and sharing straightforward. It also makes one
-corruption, migration, writer lock, disk-full event, or maintenance operation a
-root-wide failure domain. It discards the useful isolation of per-session storage.
+corruption, schema fault, writer lock, disk-full event, or maintenance operation a
+root-wide failure domain. It discards the useful isolation of lineage storage.
 The existing rebuildable global catalog is useful; a global canonical write domain
 is not required.
 
@@ -191,8 +191,8 @@ is not required.
 
 An original session creates a lineage. Every fork of any branch remains in that
 lineage database. Branches share immutable roots and objects transactionally,
-while unrelated lineages retain independent files, leases, migrations, backups,
-and failure domains.
+while unrelated lineages retain independent files, leases, backups, and failure
+domains.
 
 This is the recommended option. It provides the sharing properties of a global
 revision graph without making unrelated sessions one canonical write domain.
@@ -331,7 +331,7 @@ lineage naturally deduplicates all inherited objects without introducing a globa
 object store or cross-database reference counts.
 
 Unrelated lineages do not deduplicate objects. That trade-off preserves independent
-backup, deletion, corruption, and migration domains and avoids a second global
+backup, deletion, corruption, and ownership domains and avoids a second global
 canonical store.
 
 ### Reachability and reclamation
@@ -346,8 +346,8 @@ interaction barrier:
    and nested objects from those roots.
 3. Delete unreachable receipts, transitions, turns, revisions, sequence rows,
    payload references, and objects in dependency order and row-bounded
-   transactions. Previous-format history references and branch-lifetime request
-   audit references remain object roots while they exist.
+   transactions. Branch-lifetime request audit references remain object roots
+   while they exist.
 4. Let SQLite reuse free pages immediately.
 5. Run incremental vacuum only as bounded maintenance, never during Enter, fork,
    rewind, resume, branch switch, or exit.
@@ -519,8 +519,8 @@ Requirements:
 - A missing `search.db` does not delay resume.
 - In-process switching closes or parks the prior branch through the same
   generation-targeted flush protocol. It does not materialize its complete state.
-- Schema discovery is read-only. Any format conversion requiring a data scan is an
-  explicit migration operation, not surprise resume work.
+- Open validates the lineage schema without scanning or converting another
+  storage format.
 
 ### Send
 
@@ -848,11 +848,11 @@ claim made and verified by the derived database itself.
 
 ### Stage 3 implementation evidence
 
-Schema version 11 introduces lineage identity, branch creation metadata, immutable
-revisions, history and transcript roots, 32-way sequence nodes, lineage-owned
-payload references, durable commit receipts, and explicit recovery retention. The
-migration creates an empty lineage schema while leaving legacy session rows
-canonical until the Stage 4 conversion.
+Lineage schema version 1 defines lineage identity, branch creation metadata,
+immutable revisions, history and transcript roots, 32-way sequence nodes,
+lineage-owned payload references, durable commit receipts, and explicit recovery
+retention. It is an independent schema, not a continuation of any earlier
+per-session version track.
 
 The concrete persistent sequence uses cumulative item and byte extents, a 2 MiB
 multi-item leaf bound, right-spine append, and boundary-path split. Exact loading
@@ -891,12 +891,10 @@ revision, branch sequence and head, turn row, and durable receipt in one canonic
 transaction before provider dispatch. Request-audit ownership and cumulative runtime
 accounting remain branch-local.
 
-New lineage databases are built at a staged private path and published only after a
-complete validated commit. `smelt session migrate` is the explicit previous-format
-entry point and shares writer fencing with both storage generations. Ordinary resume
-rejects an unmigrated `session.db` instead of converting or mutating it. The retained
-read-only migration-window paths are marked `COMPAT(session-lineage-v1)` and recorded
-in `docs/compat.md`.
+New lineage databases are built at a staged private path and published only after
+a complete validated commit. Discovery considers only the canonical
+`lineages/<lineage-id>/lineage.db` layout. Pre-lineage session directories are
+ignored and no runtime or maintenance command converts them.
 
 Canonical history and transcript payloads are normalized into content-addressed
 objects. A separate nested-reference table records attachment and metadata objects
@@ -919,7 +917,7 @@ Rewind now selects or cuts immutable roots and advances the branch head without
 synchronously deleting the abandoned suffix. An end-to-end TUI regression restarts
 from the rewound roots while the old rows remain available for later bounded
 reclamation. A separate graceful-exit regression restarts from lineage storage and
-proves that no previous-format `session.db` was created.
+proves that shutdown does not create a second canonical storage layout.
 
 Launch into a canonical session resolves and validates the persisted workspace before
 generation-zero full Lua bootstrap. Project config and plugins therefore load once in
@@ -930,7 +928,7 @@ projection separate from its wider cache guard, preserves the loaded resume tail
 through repeated tail activation, and guarantees every centered reveal range
 contains the requested record.
 
-A final ten-run release-fast PTY measurement over a copied migrated session produced:
+A final ten-run release-fast PTY measurement over a copied lineage fixture produced:
 
 | User boundary | p95 |
 |---|---:|
@@ -946,13 +944,13 @@ skipped, including 1,333 TUI library tests and 193 storybook tests. The focused 
 suite passes 218 tests with one ignored, core passes 1,320 with one ignored, session
 command integration passes nine, and startup PTY integration passes six. Formatting,
 `git diff --check`, and warnings-denied workspace Clippy pass. Stage 4 therefore
-meets its lifecycle, structural-sharing, migration, durability, resume, fork, rewind,
-delete, and previous-format write exclusion gates.
+meets its lifecycle, structural-sharing, durability, resume, fork, rewind, delete,
+and single-format storage gates.
 
 ### Stage 5 implementation evidence
 
-Each lineage now owns a disposable `search.db` with independently validated format
-version 3. The canonical lineage schema remains version 11 and contains no transcript
+Each lineage owns a disposable `search.db` with independently validated format
+version 3. The canonical lineage schema is version 1 and contains no transcript
 search tables, FTS virtual tables, searchable-text copies, or search-maintenance
 triggers. A dormant per-lineage projector does no work until search is activated, and
 canonical submission only coalesces an asynchronous wake after activation. An
@@ -971,7 +969,7 @@ atomic completion marker. Boundary regressions cover exactly 2 MiB, crossing 2 M
 Queries combine ready reachable segments with exact canonical scans for missing or
 unindexed sources; the TUI adds its dirty in-memory suffix. Long-query FTS and short
 posting traversal batch all reachable segment IDs and order by explicit block index,
-including real migrated histories where compacted records cause block-index
+including real lineage histories where compacted records cause block-index
 inversions. Every candidate is verified against canonical `indexed_text`. Short
 queries hydrate only candidate canonical records rather than complete 2 MiB source
 groups. Derived failures can fall back to canonical scanning, but canonical read
@@ -993,8 +991,8 @@ duplication, adds only a target suffix segment, filters that suffix immediately 
 rewind, and retains the now-unreachable segment for later bounded reclamation. Search
 correctness does not depend on physical deletion.
 
-The production benchmark ran 20 samples per query class over four copied, explicitly
-migrated realistic fixtures. It measured 419,816,739 logical searchable bytes and
+The production benchmark ran 20 samples per query class over four copied realistic
+lineage fixtures. It measured 419,816,739 logical searchable bytes and
 94,539,776 physical derived bytes, including SQLite sidecars, for an aggregate storage
 ratio of 22.52 percent. Worst p95 by query class was:
 
@@ -1066,9 +1064,9 @@ roots, entries, nodes, nested references, payload references, and objects. The t
 normal-operation receipt deletion guards are suspended and restored inside each
 transaction, so rollback after an injected process abort restores both data and
 schema guards. Reachable shared fork data, explicit retained revisions, branch
-origins, nested attachment and metadata objects, previous-format history references,
-and request-audit references survive. Once their final reference is removed,
-unreachable objects are reclaimed. Branch-local request audit and immutable branch
+origins, nested attachment and metadata objects, and request-audit references
+survive. Once their final reference is removed, unreachable objects are reclaimed.
+Branch-local request audit and immutable branch
 origins intentionally remain for the lifetime of a branch tombstone and disappear
 with final lineage retirement.
 
@@ -1090,17 +1088,14 @@ post-rename trash tombstone. It skips an active stable lease and rejects symlink
 lineage or trash roots. Deleting a source while a fork survives keeps the shared
 lineage readable; deleting the final fork retires it.
 
-Explicit previous-format migration now discards a valid stale staging directory
-before retrying, while publication remains rename-based and atomic. Regressions cover
-interrupted staging, pre-rename and post-rename final deletion, SQLite full during
-lineage revision publication, ownership conflicts, canonical reclamation crashes,
-corrupt and incomplete derived search, corrupt and crash-interrupted catalog
-projection, schema corruption, and retry after failure. Static production-path review
-confirms one lineage mutation path and one derived search path. The previous-format
-writer remains only in migration fixtures and compatibility validation; retained
-runtime readers are read-only, marked `COMPAT(session-lineage-v1)`, and governed by
-`docs/compat.md`. No production fork copies a prefix, rewind deletes a suffix, or
-canonical lineage database maintains transcript FTS.
+Stale private staging directories are discarded before retrying, while publication
+remains rename-based and atomic. Regressions cover interrupted staging, pre-rename
+and post-rename final deletion, SQLite full during lineage revision publication,
+ownership conflicts, canonical reclamation crashes, corrupt and incomplete derived
+search, corrupt and crash-interrupted catalog projection, schema corruption, and
+retry after failure. Static production-path review confirms one lineage mutation
+path and one derived search path. No production fork copies a prefix, rewind deletes
+a suffix, or canonical lineage database maintains transcript FTS.
 
 The simplification pass made derived cleanup's one-segment contract explicit,
 centralized its disposable-failure reset behavior, and aligned test reachability with
@@ -1110,8 +1105,7 @@ boundaries pass seven tests, core ownership boundaries pass three tests, and the
 session command suite passes ten tests. The workspace gate passes 5,029 tests with
 two skipped in 83.668 seconds, plus formatting, `git diff --check`, and
 warnings-denied workspace Clippy. Stage 7 therefore meets its bounded reclamation,
-sharing safety, migration recovery, final retirement, compatibility, and single-path
-exit gates.
+sharing safety, crash recovery, final retirement, and single-path exit gates.
 
 ### Stage 8 implementation evidence
 
@@ -1122,10 +1116,9 @@ session matrix produced:
 | Workload | First-frame p95 | Visible-ready p95 | Exit p95 | Peak RSS p95 |
 |---|---:|---:|---:|---:|
 | Empty startup | 55.875 ms | 55.941 ms | 11.132 ms | 76,520 KiB |
-| Realistic migrated session | 88.799 ms | 88.829 ms | 12.528 ms | 87,120 KiB |
+| Realistic lineage session | 88.799 ms | 88.829 ms | 12.528 ms | 87,120 KiB |
 
-The realistic source fixture remained byte-identical. Explicit migration was measured
-separately from launch and completed in 8,782.980 ms p95. Compared with the Stage 4
+The realistic source fixture remained byte-identical. Compared with the Stage 4
 realistic result, first frame improved from 90.796 ms, visible ready improved from
 90.855 ms, exit improved from 13.439 ms, and peak RSS decreased from 88,012 KiB.
 Fresh common-fork and large sparse visible-fork gates also pass, retaining the 100 ms,
@@ -1133,7 +1126,7 @@ Fresh common-fork and large sparse visible-fork gates also pass, retaining the 1
 switch ceilings documented in Stage 4.
 
 A fresh optimized realistic search matrix ran 20 samples for each query class over
-four copied migrated lineages. It measured 419,816,739 canonical searchable bytes and
+four copied lineages. It measured 419,816,739 canonical searchable bytes and
 94,744,576 physical derived bytes, including SQLite sidecars, for a 22.568 percent
 aggregate ratio. The worst query-class p95 was 47.252 ms. The fresh optimized rapid-
 typing and redraw gate measured 0.471 ms p95 with an artificial 80 ms worker delay;
@@ -1156,17 +1149,12 @@ The complete quality matrix passes:
   invariance, two provider-body, three transcript-render, six transcript-scroll, and
   two permission-rule seeds.
 
-The final static architecture audit classifies every previous-format writer, reader,
-search table, and destructive-rewind occurrence. Production canonical mutation uses
-`OwnedLineageWriter`; `OwnedSessionWriter` remains only in the previous-format
-implementation, explicit migration fixtures, tests, and fuzzing. Production
-`SessionReader` and `SessionMaintenance` calls are confined to tagged read-only
-compatibility or explicitly selected migration, export, inspection, deletion, and
-maintenance commands. Legacy `transcript_search` tables and suffix-deleting rewind
-code remain inside that time-bounded previous-format implementation and its
-benchmarks and tests. The lineage schema contains none of those tables, normal fork
-inserts one branch row, root-based rewind performs no synchronous reclamation, and
-legacy object GC is never called for lineage data.
+The final static architecture audit confirms that production canonical mutation
+uses `OwnedLineageWriter` and reads use `LineageSessionReader`. The deleted
+per-session writer, reader, maintenance, search-table, and suffix-deleting rewind
+implementations have no runtime, fixture, test, benchmark, fuzz, or documentation
+surface. The lineage schema contains no canonical search tables, normal fork inserts
+one branch row, and root-based rewind performs no synchronous reclamation.
 
 Queue, actor, cache, fallback, and transition review found no second canonical writer
 or search request queue. The persistence actor has a 64-entry control lane, one
@@ -1185,10 +1173,6 @@ Only aggregate measurements are retained.
 
 Final deliberate deviations and implementation refinements are:
 
-- The immediately preceding format remains available for the compatibility window
-  recorded in `docs/compat.md`, rather than being deleted in this release. Ordinary
-  startup, mutation, fork, rewind, and canonical search do not convert or write it;
-  retained paths are tagged `COMPAT(session-lineage-v1)`.
 - Contentless FTS5 with `columnsize=0` cannot use `contentless_delete=1`. Derived
   cleanup therefore reconstructs exact terms from canonical source leaves and uses
   the FTS5 delete command while retaining the smaller selected index format.
@@ -1201,7 +1185,7 @@ Final deliberate deviations and implementation refinements are:
   found no session-size-dependent startup allocation.
 
 Stage 8 therefore passes the latency, storage, structural complexity, durability,
-coverage, compatibility, privacy, and quality gates. The terminal architecture has
+coverage, privacy, and quality gates. The terminal architecture has
 one canonical lineage mutation path, one disposable derived search path, and no
 interaction-path reclamation.
 
@@ -1345,35 +1329,16 @@ Search may degrade in completion time after projection loss, but it may not retu
 incorrect matches or incorrect absence. Canonical recovery is never coupled to
 search repair.
 
-## Migration strategy
+## Format boundary
 
-The current per-session database becomes a lineage containing one branch. Migration
-must not surprise the user during ordinary startup or session listing.
+The canonical lineage format starts at schema version 1 and has its own version
+track. It does not inherit version numbers, tables, locks, receipts, or migration
+semantics from pre-lineage storage.
 
-1. Add an explicit migration command that opens one source read-only, validates it,
-   and streams canonical history, transcript records, side tables, and objects into
-   a staged lineage database.
-2. Build immutable sequence roots in bounded batches. Do not materialize the full
-   session in Rust.
-3. Do not copy current `transcript_search`, character-mask, or FTS tables. They are
-   derived and rebuilt lazily under the new format.
-4. Validate row counts, roots, content hashes, object references, transcript
-   semantics, and branch identity before publication.
-5. Atomically publish the staged lineage and update the catalog only after complete
-   validation and root fsync.
-6. Preserve the old session directory as a backup or move it to an explicit
-   quarantine/archive location according to the approved migration UX.
-7. Resume only the new lineage after publication.
-8. Remove temporary compatibility code when the supported migration window closes,
-   with the required `COMPAT(...)` entry while it exists.
-
-A bulk command may migrate sessions sequentially with progress and cancellation.
-No automatic startup loop opens and rewrites every session.
-
-Because the format is greenfield, runtime code should not carry both physical
-models indefinitely. A short migration release may read the old format only through
-its migration module; normal mutation, fork, rewind, and search use the lineage
-model exclusively after cutover.
+Discovery scans only `sessions/lineages/<lineage-id>/lineage.db` and validates live
+branch rows before exposing a session. Other layouts are ignored without being
+opened, classified, quarantined, imported, or rewritten. There is no migration
+command and no dual-format runtime path.
 
 ## What is retained and what is rewritten
 
@@ -1486,7 +1451,7 @@ Exit gate:
 - Delete the full-prefix fork import and destination rewrite path.
 - Keep current search temporarily behind a bounded transitional test setup only if
   required during this stage; do not copy its data into forks.
-- Implement explicit old-format migration and staged publication.
+- Implement staged lineage publication and ignore non-lineage layouts.
 - Run the 100-fork storage and large-fork PTY gates.
 
 Exit gate:
@@ -1495,7 +1460,7 @@ Exit gate:
 - Rewind moves roots without suffix deletion.
 - Send and resume retain or improve their current latency and durability evidence.
 - Deleting a source branch leaves forks intact.
-- No normal runtime mutation writes the old per-session format.
+- No runtime mutation writes any second canonical format.
 
 ### Stage 5: install compact derived search
 
@@ -1537,16 +1502,14 @@ Exit gate:
 - Current and unloaded matches preview correctly.
 - Empty query, Esc, Enter, `n`, and `N` have deterministic behavior.
 
-### Stage 7: reclamation, migration hardening, and cleanup
+### Stage 7: reclamation, format hardening, and cleanup
 
 - Add bounded mark/sweep reclamation and free-page metrics.
 - Add final-branch trash publication and interrupted-cleanup recovery.
-- Test disk full, ownership loss, corrupt lineage/search/catalog databases, and
-  canceled migrations.
-- Remove old schema writers/readers outside the explicit migration module.
+- Test disk full, ownership loss, and corrupt lineage, search, and catalog databases.
+- Remove every pre-lineage schema writer, reader, command, fixture, and fuzz target.
 - Remove obsolete per-session lock, fork-copy, rewind-delete, and FTS code.
-- Reconcile canonical storage, TUI runtime, compatibility, Lua API, and benchmark
-  documentation.
+- Reconcile canonical storage, TUI runtime, Lua API, and benchmark documentation.
 - Run the simplification skill and delete abstractions that no longer enforce an
   invariant.
 
@@ -1584,20 +1547,15 @@ The following core decisions are approved:
    the original anchor.
 3. Derived search storage has a hard ceiling of 25 percent of logical searchable
    bytes and a 15 percent target.
-4. Existing sessions transition through explicit migration with progress, not an
-   automatic full scan during resume.
+4. Pre-lineage storage is unsupported and ignored; canonical lineage schema version
+   1 has an independent version track.
 5. Use 2 MiB canonical search segments, 32 KiB core documents with 1 KiB overlap,
    compact contentless trigram FTS, and compressed scalar/bigram postings. Verify
    every candidate against canonical bytes.
 
 The branch/revision field boundary is recorded in `Branches and revisions` above.
-The compatibility window is also fixed: the lineage-default release and the next
-minor release support explicit migration from the immediately preceding canonical
-format. The following minor release removes that old-format migration reader unless
-a separately approved extension names exact retained versions and a removal date.
-Compatibility code uses `COMPAT(session-lineage-v1)` and is listed in
-`docs/compat.md`; normal runtime open, mutation, fork, rewind, and search never use
-it.
+The format boundary is final: runtime open, mutation, fork, rewind, search,
+maintenance, tests, fuzzing, and benchmarks use lineage storage only.
 
 The Stage 2 prototype gate has passed with the compact FTS design and selected
 sizing documented above. Production search remains derived and disposable and is

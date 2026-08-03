@@ -1,93 +1,55 @@
 use std::io::Write;
 
-use rusqlite::{params_from_iter, types::ToSql, Connection};
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use crate::error::Result;
-use crate::history;
 use crate::request_audit;
-
-pub(crate) fn export_history_jsonl(conn: &Connection, mut out: impl Write) -> Result<()> {
-    let mut stmt = conn.prepare("SELECT json FROM history_items ORDER BY idx")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    for row in rows {
-        let mut value: Value = serde_json::from_str(&row?)?;
-        history::rehydrate_object_refs(conn, &mut value)?;
-        serde_json::to_writer(&mut out, &value)?;
-        out.write_all(b"\n")?;
-    }
-    Ok(())
-}
-
-pub(crate) fn export_requests_jsonl(conn: &Connection, out: impl Write) -> Result<()> {
-    export_requests_jsonl_for_branch(conn, None, out)
-}
 
 pub(crate) fn export_lineage_requests_jsonl(
     conn: &Connection,
     lineage_id: &str,
     session_id: &str,
-    out: impl Write,
-) -> Result<()> {
-    export_requests_jsonl_for_branch(conn, Some((lineage_id, session_id)), out)
-}
-
-fn export_requests_jsonl_for_branch(
-    conn: &Connection,
-    branch: Option<(&str, &str)>,
     mut out: impl Write,
 ) -> Result<()> {
-    let mut sql = String::from(
+    let mut stmt = conn.prepare(
         "SELECT a.id, request_id, kind, turn_id, ask_id, started_at, completed_at, provider,
                 model, history_len, error_summary, background, api_base, url, http_status,
                 prompt_cache_key, stream, attempt, s.stats_json, s.total_cost_micros,
                 s.tokens_per_sec
-         FROM request_attempts a",
-    );
-    let mut values: Vec<Box<dyn ToSql>> = Vec::new();
-    if let Some((lineage_id, session_id)) = branch {
-        sql.push_str(
-            " JOIN lineage_request_attempts lineage_request
-                ON lineage_request.request_attempt_id = a.id
-               AND lineage_request.lineage_id = ?1
-               AND lineage_request.session_id = ?2",
-        );
-        values.push(Box::new(lineage_id.to_owned()));
-        values.push(Box::new(session_id.to_owned()));
-    }
-    sql.push_str(
-        " LEFT JOIN request_stats s ON s.request_attempt_id = a.id
-          ORDER BY started_at, a.id",
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        params_from_iter(values.iter().map(|value| value.as_ref())),
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, i64>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, Option<String>>(13)?,
-                row.get::<_, Option<i64>>(14)?,
-                row.get::<_, Option<String>>(15)?,
-                row.get::<_, i64>(16)?,
-                row.get::<_, i64>(17)?,
-                row.get::<_, Option<String>>(18)?,
-                row.get::<_, Option<i64>>(19)?,
-                row.get::<_, Option<f64>>(20)?,
-            ))
-        },
+         FROM request_attempts a
+         JOIN lineage_request_attempts branch
+           ON branch.request_attempt_id = a.id
+          AND branch.lineage_id = ?1
+          AND branch.session_id = ?2
+         LEFT JOIN request_stats s ON s.request_attempt_id = a.id
+         ORDER BY started_at, a.id",
     )?;
+    let rows = stmt.query_map(params![lineage_id, session_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, Option<String>>(12)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<i64>>(14)?,
+            row.get::<_, Option<String>>(15)?,
+            row.get::<_, i64>(16)?,
+            row.get::<_, i64>(17)?,
+            row.get::<_, Option<String>>(18)?,
+            row.get::<_, Option<i64>>(19)?,
+            row.get::<_, Option<f64>>(20)?,
+        ))
+    })?;
 
     for row in rows {
         let (
@@ -141,8 +103,7 @@ fn export_requests_jsonl_for_branch(
             "attempt": attempt,
             "background": background != 0,
         });
-        let payloads = request_audit::request_payloads(conn, id)?;
-        if let Some(payloads) = payloads {
+        if let Some(payloads) = request_audit::request_payloads(conn, id)? {
             if let Some(body) = payloads.body {
                 value["body"] = body;
             }

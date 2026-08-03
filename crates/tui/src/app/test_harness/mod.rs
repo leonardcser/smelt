@@ -781,20 +781,6 @@ mod runtime_path_tests {
         )
         .unwrap()
         .is_none());
-        assert!(!first
-            .app
-            .core
-            .sessions
-            .dir_for_id(&first_id)
-            .join("session.db")
-            .exists());
-        assert!(!second
-            .app
-            .core
-            .sessions
-            .dir_for_id(&second_id)
-            .join("session.db")
-            .exists());
         assert_eq!(first.app.core.sessions.list_sessions()[0].id, first_id);
         assert_eq!(second.app.core.sessions.list_sessions()[0].id, second_id);
 

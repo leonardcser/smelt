@@ -383,13 +383,6 @@ fn insert_request_record(
     Ok(request_attempt_id)
 }
 
-pub(crate) fn request_attempts(
-    conn: &Connection,
-    query: &RequestAuditQuery,
-) -> Result<Vec<RequestAuditSummary>> {
-    request_attempts_for_branch(conn, query, None)
-}
-
 pub(crate) fn lineage_request_attempts(
     conn: &Connection,
     lineage_id: &str,
@@ -550,18 +543,6 @@ fn request_attempts_for_branch(
         .map_err(Into::into)
 }
 
-const LATEST_REQUEST_MODEL_SQL: &str = "SELECT provider, model
-     FROM request_attempts
-     ORDER BY started_at DESC, id DESC
-     LIMIT 1";
-
-const LATEST_CONTEXT_TOKENS_SQL: &str = "SELECT s.context_tokens
-     FROM request_attempts a
-     JOIN request_stats s ON s.request_attempt_id = a.id
-     WHERE s.context_tokens IS NOT NULL
-     ORDER BY a.started_at DESC, a.id DESC
-     LIMIT 1";
-
 fn request_stats_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestAuditStats> {
     let total_cost_micros: i64 = row.get(4)?;
     Ok(RequestAuditStats {
@@ -585,50 +566,6 @@ fn request_stats_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestAu
         latest_model: None,
         latest_context_tokens: None,
     })
-}
-
-pub(crate) fn request_stats(conn: &Connection) -> Result<RequestAuditStats> {
-    let mut stats = conn.query_row(
-        "SELECT COUNT(a.id),
-                COALESCE(SUM(CASE WHEN a.error_summary IS NOT NULL THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN a.stream != 0 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN EXISTS (
-                    SELECT 1 FROM request_object_refs response
-                    WHERE response.request_attempt_id = a.id AND response.role = 'response'
-                ) THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(s.total_cost_micros), 0),
-                COALESCE(SUM(CASE
-                    WHEN a.completed_at IS NOT NULL THEN MAX(a.completed_at - a.started_at, 0)
-                    ELSE 0
-                END), 0),
-                COALESCE(SUM(s.input_tokens), 0),
-                COALESCE(SUM(s.output_tokens), 0),
-                COALESCE(SUM(s.cached_input_tokens), 0),
-                COALESCE(SUM(s.cache_write_tokens), 0),
-                COALESCE(SUM(s.reasoning_tokens), 0),
-                MIN(a.started_at),
-                MAX(a.started_at),
-                MAX(s.context_tokens)
-         FROM request_attempts a
-         LEFT JOIN request_stats s ON s.request_attempt_id = a.id",
-        [],
-        request_stats_from_row,
-    )?;
-
-    if let Some((provider, model)) = conn
-        .query_row(LATEST_REQUEST_MODEL_SQL, [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .optional()?
-    {
-        stats.latest_provider_kind = provider;
-        stats.latest_model = model;
-    }
-    stats.latest_context_tokens = conn
-        .query_row(LATEST_CONTEXT_TOKENS_SQL, [], |row| row.get::<_, i64>(0))
-        .optional()?
-        .map(|value| nonnegative_u64(value) as u32);
-    Ok(stats)
 }
 
 pub(crate) fn lineage_request_stats(
@@ -1328,171 +1265,6 @@ fn manifest_limit_error(name: &str, actual: usize, limit: usize) -> StoreError {
     StoreError::Integrity(format!("{name} {actual} exceeds limit {limit}"))
 }
 
-pub(crate) fn migrate_legacy_request_refs(conn: &Connection) -> Result<()> {
-    let manifest_hashes = {
-        let mut stmt = conn.prepare(
-            "SELECT hash FROM objects_legacy
-             WHERE kind = 'request_body_manifest'
-             ORDER BY hash",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    for hash in manifest_hashes {
-        walk_body_manifest(conn, None, &hash).map_err(|err| {
-            StoreError::Integrity(format!(
-                "legacy object {hash} marked request_body_manifest is invalid: {err}"
-            ))
-        })?;
-    }
-
-    let attempts = {
-        let mut stmt = conn.prepare(
-            "SELECT id, body_hash, response_hash, error_hash
-             FROM request_attempts_legacy
-             ORDER BY id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
-
-    for (request_id, body_hash, response_hash, error_hash) in attempts {
-        let mut expected_legacy_refs = BTreeSet::new();
-        let body_manifest = if let Some(hash) = body_hash.as_deref() {
-            let kind = legacy_object_kind(conn, hash)?;
-            if kind == "request_body_manifest" {
-                let manifest = walk_body_manifest(conn, None, hash)?;
-                expected_legacy_refs.insert((hash.to_string(), "body"));
-                expected_legacy_refs.extend(
-                    manifest
-                        .refs
-                        .top_hashes
-                        .iter()
-                        .cloned()
-                        .map(|hash| (hash, "body_top")),
-                );
-                expected_legacy_refs.extend(
-                    manifest
-                        .refs
-                        .item_hashes
-                        .iter()
-                        .cloned()
-                        .map(|hash| (hash, "body_item")),
-                );
-                expected_legacy_refs.extend(
-                    manifest
-                        .refs
-                        .parent_hashes
-                        .iter()
-                        .cloned()
-                        .map(|hash| (hash, "body_parent")),
-                );
-                Some(manifest)
-            } else {
-                read_json_object_required(conn, hash).map_err(|err| {
-                    StoreError::Integrity(format!(
-                        "legacy request {request_id} body object {hash} is invalid: {err}"
-                    ))
-                })?;
-                expected_legacy_refs.insert((hash.to_string(), "body"));
-                None
-            }
-        } else {
-            None
-        };
-        if let Some(hash) = response_hash.as_deref() {
-            read_json_object_required(conn, hash)?;
-            expected_legacy_refs.insert((hash.to_string(), "response"));
-        }
-        if let Some(hash) = error_hash.as_deref() {
-            read_json_object_required(conn, hash)?;
-            expected_legacy_refs.insert((hash.to_string(), "error"));
-        }
-        validate_legacy_request_refs(conn, request_id, &expected_legacy_refs)?;
-
-        if let Some(hash) = body_hash.as_deref() {
-            let role = if body_manifest.is_some() {
-                RequestObjectRole::BodyManifest
-            } else {
-                RequestObjectRole::BodyJson
-            };
-            insert_request_ref(conn, request_id, hash, role)?;
-        }
-        if let Some(manifest) = body_manifest.as_ref() {
-            install_manifest_refs(conn, request_id, &manifest.refs)?;
-        }
-        if let Some(hash) = response_hash.as_deref() {
-            insert_request_ref(conn, request_id, hash, RequestObjectRole::Response)?;
-        }
-        if let Some(hash) = error_hash.as_deref() {
-            insert_request_ref(conn, request_id, hash, RequestObjectRole::Error)?;
-        }
-    }
-    Ok(())
-}
-
-fn legacy_object_kind(conn: &Connection, hash: &str) -> Result<String> {
-    conn.query_row(
-        "SELECT kind FROM objects_legacy WHERE hash = ?1",
-        [hash],
-        |row| row.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| StoreError::MissingObject {
-        reference: hash.to_string(),
-    })
-}
-
-fn validate_legacy_request_refs(
-    conn: &Connection,
-    request_id: i64,
-    expected: &BTreeSet<(String, &'static str)>,
-) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT object_hash, role FROM request_object_refs_legacy
-         WHERE request_attempt_id = ?1
-         ORDER BY object_hash, role",
-    )?;
-    let rows = stmt.query_map([request_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut actual = BTreeSet::new();
-    for row in rows {
-        let (hash, role) = row?;
-        actual.insert((hash, legacy_role_name(&role)?));
-    }
-    if &actual == expected {
-        return Ok(());
-    }
-
-    let missing = expected.difference(&actual).next();
-    let unexpected = actual.difference(expected).next();
-    Err(StoreError::Integrity(format!(
-        "legacy request {request_id} object references disagree with payload hashes: missing {missing:?}; unexpected {unexpected:?}"
-    )))
-}
-
-fn legacy_role_name(role: &str) -> Result<&'static str> {
-    match role {
-        "body" => Ok("body"),
-        "body_top" => Ok("body_top"),
-        "body_item" => Ok("body_item"),
-        "body_parent" => Ok("body_parent"),
-        "response" => Ok("response"),
-        "error" => Ok("error"),
-        _ => Err(StoreError::Integrity(format!(
-            "unknown legacy request object role {role:?}"
-        ))),
-    }
-}
-
 fn request_error_summary(error: &protocol::request_log::RequestError) -> String {
     if error.message.is_empty() {
         error.kind.clone()
@@ -1513,14 +1285,7 @@ fn preview(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let mut end = 0;
-    for (idx, _) in text.char_indices() {
-        if idx > max_bytes {
-            break;
-        }
-        end = idx;
-    }
-    text[..end].to_string()
+    smelt_buffer::text::slice(text, 0..max_bytes).to_string()
 }
 
 fn cost_micros(cost_usd: Option<f64>) -> Result<Option<i64>> {
@@ -1662,7 +1427,7 @@ mod tests {
     #[test]
     fn manifest_walk_rejects_missing_component_objects() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
+        crate::schema::initialize_lineage_schema(&mut conn).unwrap();
         let top_hash = object::put_object(&conn, b"{}", ObjectCompression::none())
             .unwrap()
             .hash()
@@ -1690,7 +1455,7 @@ mod tests {
     #[test]
     fn manifest_walk_rejects_reference_role_mismatch() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
+        crate::schema::initialize_lineage_schema(&mut conn).unwrap();
         let body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
         let stored = put_request_body(&conn, Some(&body), ObjectCompression::none())
             .unwrap()
@@ -1716,7 +1481,7 @@ mod tests {
     #[test]
     fn request_payloads_rejects_unexpected_body_references() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
+        crate::schema::initialize_lineage_schema(&mut conn).unwrap();
         let body_hash = object::put_object(&conn, b"{}", ObjectCompression::none())
             .unwrap()
             .hash()
@@ -1738,7 +1503,7 @@ mod tests {
     #[test]
     fn identical_bytes_can_serve_different_request_roles() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
+        crate::schema::initialize_lineage_schema(&mut conn).unwrap();
         let hash = object::put_object(&conn, b"{}", ObjectCompression::none())
             .unwrap()
             .hash()
@@ -1752,42 +1517,6 @@ mod tests {
         let payloads = request_payloads(&conn, request_id).unwrap().unwrap();
         assert_eq!(payloads.body, Some(serde_json::json!({})));
         assert_eq!(payloads.response, Some(serde_json::json!({})));
-        let orphan = object::put_object(&conn, b"orphan", ObjectCompression::none())
-            .unwrap()
-            .hash()
-            .to_string();
-        assert_eq!(object::delete_unreachable_objects(&conn).unwrap(), 1);
         assert!(object::object_meta(&conn, &hash).unwrap().is_some());
-        assert!(object::object_meta(&conn, &orphan).unwrap().is_none());
-    }
-
-    #[test]
-    fn request_stats_latest_queries_use_started_at_index() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
-
-        for sql in [LATEST_REQUEST_MODEL_SQL, LATEST_CONTEXT_TOKENS_SQL] {
-            let details = query_plan_details(&conn, sql);
-            assert!(
-                details
-                    .iter()
-                    .any(|detail| detail.contains("request_attempts_started_at_idx")),
-                "{sql}\n{details:#?}"
-            );
-            assert!(
-                details
-                    .iter()
-                    .all(|detail| !detail.contains("USE TEMP B-TREE")),
-                "{sql}\n{details:#?}"
-            );
-        }
-    }
-
-    fn query_plan_details(conn: &Connection, sql: &str) -> Vec<String> {
-        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-        stmt.query_map([], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap()
     }
 }

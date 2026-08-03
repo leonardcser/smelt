@@ -3023,7 +3023,7 @@ mod tests {
     }
 
     #[test]
-    fn store_backed_cumulative_intent_spans_sqlite_prefix_and_live_suffix() {
+    fn store_backed_cumulative_intent_spans_lineage_prefix_and_live_suffix() {
         const ID: &str = "7777777777777777777777777777777777777777777777777777777777777777";
         let root = tempfile::tempdir().expect("session root");
         let mut stored = Session::new(1, std::path::PathBuf::from("/tmp"));
@@ -3032,11 +3032,11 @@ mod tests {
             HistoryItem::user(Content::text("stored-0")),
             HistoryItem::user(Content::text("stored-1")),
         ];
-        let mut writer = smelt_store::OwnedSessionWriter::open(root.path(), ID).expect("writer");
+        let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), ID).expect("writer");
         let command = smelt_core::session::initial_store_commit_from_session(&stored)
             .expect("initial commit");
         let receipt = writer.commit_session(&command).expect("store prefix");
-        let session_dir = writer.session_dir().to_path_buf();
+        let session_dir = root.path().join(ID);
         let mut meta = meta_with_token_identity();
         meta.id = ID.into();
         meta.history_len = Some(2);
@@ -3047,7 +3047,7 @@ mod tests {
             degraded_warnings: Vec::new(),
         };
         let store_ref =
-            SessionStoreRef::legacy(session_dir.clone(), session_dir.join("session.db"));
+            SessionStoreRef::new(session_dir.clone(), root.path().to_path_buf(), ID.into());
         let mut session = stored.clone();
         session.history.clear();
         let mut document = TuiSessionDocument::new(TranscriptDocument::new());

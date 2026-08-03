@@ -7727,7 +7727,7 @@ pub(crate) mod tests {
 
     fn resume_record_content(block_idx: usize) -> String {
         let mut content = format!("# Resume benchmark response {block_idx}\n\n");
-        let paragraph = "This record-backed resume fixture stores full transcript text in SQLite without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
+        let paragraph = "This record-backed resume fixture stores full transcript text in lineage storage without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
         while content.len() < RESUME_RECORD_BLOCK_TEXT_BYTES {
             content.push_str(paragraph);
         }
@@ -7766,14 +7766,15 @@ pub(crate) mod tests {
         target_bytes: usize,
     ) -> (usize, usize, f64) {
         let setup_start = std::time::Instant::now();
-        let session_dir = sessions.dir_for(session);
-        let _ = std::fs::remove_dir_all(&session_dir);
-        std::fs::create_dir_all(&session_dir).expect("create record resume fixture dir");
-        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))
-            .expect("open record resume fixture db");
+        let mut writer = smelt_store::OwnedLineageWriter::open(
+            sessions.sessions_dir(),
+            session.id.clone(),
+        )
+        .expect("open record resume fixture lineage");
         let command = smelt_core::session::initial_store_commit_from_session(session)
             .expect("prepare record resume fixture state");
-        db.apply_session_commit(&command)
+        writer
+            .commit_session(&command)
             .expect("initialize record resume fixture state");
         let target_bytes = target_bytes.max(RESUME_RECORD_BLOCK_TEXT_BYTES);
         let mut generated_bytes = 0usize;
@@ -7786,10 +7787,29 @@ pub(crate) mod tests {
                 records.push(resume_block_record(record_count, content));
                 record_count += 1;
             }
-            let start_record_idx = record_count.saturating_sub(records.len());
-            db.apply_transcript_record_suffix_fixture(start_record_idx, &records)
+            let head = writer.store_head().expect("read record resume fixture head");
+            let mut command =
+                smelt_core::session::initial_store_commit_from_session(session)
+                    .expect("prepare record resume fixture append");
+            command.expected = head;
+            command.history.start = smelt_store::HistoryIndex::new(head.history_len.get());
+            command.history.final_len = head.history_len;
+            command.history.items.clear();
+            command.side_tables = smelt_store::SideTableSuffixes {
+                start: smelt_store::HistoryIndex::new(head.history_len.get()),
+                ..smelt_store::SideTableSuffixes::default()
+            };
+            command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+                start: smelt_store::TranscriptRecordIndex::new(
+                    head.transcript_record_count.get(),
+                ),
+                records,
+            });
+            writer
+                .commit_session(&command)
                 .expect("write record resume fixture chunk");
         }
+        writer.release().expect("release record resume fixture");
         let setup_ms = elapsed_ms(setup_start.elapsed());
         (record_count, generated_bytes, setup_ms)
     }

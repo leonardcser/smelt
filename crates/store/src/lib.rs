@@ -1,9 +1,8 @@
-mod access;
-mod blob_staging;
 mod catalog;
 mod compression;
-mod db;
+mod diagnostics;
 mod error;
+mod filesystem;
 mod history;
 mod jsonl_export;
 mod lineage;
@@ -13,14 +12,10 @@ mod meta;
 mod object;
 mod request_audit;
 mod schema;
+mod session_command;
 mod session_commit;
+mod snapshot;
 
-pub use access::{
-    cleanup_abandoned_session_artifacts, inspect_session_schema, migrate_session_schema,
-    quarantine_orphaned_session, session_schema_status, ArtifactCleanupReport,
-    LegacyAttachmentBlob, OwnedSessionWriter, SessionMaintenance, SessionOrphanQuarantine,
-    SessionReader, SessionSchemaInspection, SessionSchemaMigration, SessionSchemaStatus,
-};
 pub use catalog::{
     archive_corrupt_catalog, rebuild_catalog, Catalog, CatalogAvailability, CatalogCursor,
     CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader, CatalogReconcileLock,
@@ -30,13 +25,7 @@ pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
     DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
 };
-#[cfg(any(test, feature = "test-util"))]
-pub use db::SessionDb;
-pub use db::{
-    backup_session_database, session_commit_fingerprint, submit_turn_fingerprint,
-    turn_transition_fingerprint, DoctorReport, FullSession, SessionResumeSnapshot, StorageStats,
-    StoredSession,
-};
+pub use diagnostics::{DoctorReport, StorageStats};
 pub use error::{Result, StoreError};
 pub use history::{
     StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptExtentChunk,
@@ -45,23 +34,27 @@ pub use history::{
     TranscriptSearchDirection, TRANSCRIPT_EXTENT_CHUNK_RECORDS, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use lineage_access::{
-    cleanup_abandoned_lineage_artifacts, lineage_session_ids, migrate_legacy_session,
-    verify_lineage_backup, LineageReclamation, LineageSessionReader, LineageSessionState,
-    LineageVacuum, OwnedLineageWriter,
+    cleanup_abandoned_lineage_artifacts, lineage_session_ids, verify_lineage_backup,
+    LineageReclamation, LineageSessionReader, LineageSessionState, LineageVacuum,
+    OwnedLineageWriter,
 };
 pub use lineage_search::{
     LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
 };
-pub use meta::{SessionCostUsd, SessionIdentity, SessionMeta, SessionMetadata, WriterOwner};
+pub use meta::{SessionCostUsd, SessionIdentity, SessionMetadata};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
     RequestAuditStats, RequestAuditSummary,
 };
-pub use schema::SCHEMA_VERSION;
+pub use schema::LINEAGE_SCHEMA_VERSION;
+pub use session_command::{
+    session_commit_fingerprint, submit_turn_fingerprint, turn_transition_fingerprint,
+};
 pub use session_commit::{
     HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix, NewTurn, Revision, SaveReceipt,
     SessionCommit, SessionCommitFailure, SideTableSuffixes, StartupRecoveryReceipt, StoreHead,
     StoredTurn, SubmitTurn, SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex,
     TranscriptRecordSuffix, TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
 };
+pub use snapshot::{FullSession, SessionResumeSnapshot, StoredSession};

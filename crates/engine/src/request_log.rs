@@ -52,10 +52,10 @@ pub fn entry(
     ))
 }
 
-/// Append one request attempt to the session's SQLite request audit.
+/// Append one request attempt to the session's request audit.
 #[cfg(test)]
 pub fn append(
-    db: &mut smelt_store::SessionDb,
+    writer: &mut smelt_store::OwnedLineageWriter,
     ctx: RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
@@ -64,7 +64,9 @@ pub fn append(
     let Some((entry, payload_mode)) = entry(ctx, info, pricing, mode) else {
         return Ok(None);
     };
-    db.append_request_attempt(&entry, payload_mode).map(Some)
+    writer
+        .append_request_attempt(&entry, payload_mode)
+        .map(Some)
 }
 
 /// Static context for a logical request.
@@ -212,13 +214,7 @@ fn bounded_text(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let end = text
-        .char_indices()
-        .map(|(idx, _)| idx)
-        .take_while(|&idx| idx <= max_bytes)
-        .last()
-        .unwrap_or(0);
-    text[..end].to_string()
+    smelt_buffer::text::slice(text, 0..max_bytes).to_string()
 }
 
 fn truncate_error_body(body: &str) -> String {
@@ -226,13 +222,7 @@ fn truncate_error_body(body: &str) -> String {
     if body.len() <= LIMIT {
         return body.to_string();
     }
-    let end = body
-        .char_indices()
-        .map(|(idx, _)| idx)
-        .take_while(|&idx| idx <= LIMIT)
-        .last()
-        .unwrap_or(0);
-    let mut out = body[..end].to_string();
+    let mut out = smelt_buffer::text::slice(body, 0..LIMIT).to_string();
     out.push_str("\n… truncated …");
     out
 }
@@ -243,6 +233,49 @@ mod tests {
     use protocol::TokenUsage;
     use smelt_provider::{ChatResponse, ProviderError, ProviderKind, RequestAttemptInfo};
     use smelt_provider::{ModelPricing, PricingSource, ResolvedPricing};
+
+    const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn open_writer(root: &std::path::Path) -> smelt_store::OwnedLineageWriter {
+        let mut writer = smelt_store::OwnedLineageWriter::open(root, SESSION_ID).unwrap();
+        writer
+            .commit_session(&smelt_store::SessionCommit {
+                session_id: SESSION_ID.into(),
+                expected: smelt_store::StoreHead::default(),
+                identity: smelt_store::SessionIdentity {
+                    id: SESSION_ID.into(),
+                    created_at: 1,
+                    parent_id: None,
+                },
+                metadata: smelt_store::SessionMetadata {
+                    title: None,
+                    slug: None,
+                    first_user_message: None,
+                    cwd: None,
+                    mode: None,
+                    reasoning_effort: None,
+                    model: None,
+                    fast_mode: None,
+                    accounting_json: None,
+                    checkpoint_json: None,
+                    checkpoint_events_json: None,
+                    context_tokens: None,
+                    context_tokens_history_len: None,
+                    display_context_tokens: None,
+                    session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
+                    updated_at: 1,
+                },
+                history: smelt_store::HistorySuffix {
+                    start: smelt_store::HistoryIndex::ZERO,
+                    final_len: smelt_store::HistoryLen::ZERO,
+                    items: Vec::new(),
+                },
+                side_tables: smelt_store::SideTableSuffixes::default(),
+                transcript_records: None,
+            })
+            .unwrap();
+        writer
+    }
 
     fn zero_pricing() -> ResolvedPricing {
         ResolvedPricing {
@@ -363,7 +396,7 @@ mod tests {
     #[test]
     fn request_log_off_skips_database_write() {
         let tmp = tempfile::tempdir().unwrap();
-        let session_dir = tmp.path();
+        let mut writer = open_writer(tmp.path());
         let body = serde_json::json!({"model": "gpt-test", "messages": []});
         let resp = ChatResponse {
             content: Some("hello".into()),
@@ -396,9 +429,8 @@ mod tests {
             background: false,
         };
 
-        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let id = append(
-            &mut db,
+            &mut writer,
             ctx,
             &info,
             &zero_pricing(),
@@ -407,7 +439,10 @@ mod tests {
         .unwrap();
 
         assert!(id.is_none());
-        let attempts = db
+        writer.release().unwrap();
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(tmp.path(), SESSION_ID).unwrap();
+        let attempts = reader
             .query_request_attempts(&smelt_store::RequestAuditQuery::default())
             .unwrap();
         assert!(attempts.is_empty());
@@ -416,8 +451,7 @@ mod tests {
     #[test]
     fn request_log_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
-        let session_dir = tmp.path();
-        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let mut writer = open_writer(tmp.path());
 
         let body = serde_json::json!({"model": "gpt-test", "messages": []});
         let url = "https://api.example.com/v1/chat/completions";
@@ -452,7 +486,7 @@ mod tests {
             background: false,
         };
         append(
-            &mut db,
+            &mut writer,
             ctx,
             &info,
             &zero_pricing(),
@@ -482,7 +516,7 @@ mod tests {
             background: false,
         };
         append(
-            &mut db,
+            &mut writer,
             ctx_err,
             &info_err,
             &zero_pricing(),
@@ -490,14 +524,16 @@ mod tests {
         )
         .unwrap();
 
-        let attempts = db
+        writer.release().unwrap();
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(tmp.path(), SESSION_ID).unwrap();
+        let attempts = reader
             .query_request_attempts(&smelt_store::RequestAuditQuery {
                 order: smelt_store::RequestAuditOrder::OldestFirst,
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(attempts.len(), 2);
-        assert!(!session_dir.join("requests.jsonl").exists());
 
         let first = &attempts[0];
         assert_eq!(first.request_id.as_deref(), Some("7"));
@@ -505,7 +541,7 @@ mod tests {
         assert_eq!(first.attempt, 1);
         assert_eq!(first.usage.as_ref().unwrap().prompt_tokens, Some(10));
         assert!(first.error_summary.is_none());
-        let first_payloads = db.request_payloads(first.id).unwrap().unwrap();
+        let first_payloads = reader.request_payloads(first.id).unwrap().unwrap();
         let response: RequestResponse =
             serde_json::from_value(first_payloads.response.unwrap()).unwrap();
         assert_eq!(response.content, Some("hello".into()));
@@ -513,7 +549,7 @@ mod tests {
         let second = &attempts[1];
         assert_eq!(second.attempt, 2);
         assert!(second.response_hash.is_none());
-        let second_payloads = db.request_payloads(second.id).unwrap().unwrap();
+        let second_payloads = reader.request_payloads(second.id).unwrap().unwrap();
         let error: RequestError = serde_json::from_value(second_payloads.error.unwrap()).unwrap();
         assert_eq!(error.kind, "network");
     }

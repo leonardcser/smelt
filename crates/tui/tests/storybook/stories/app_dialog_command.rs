@@ -263,16 +263,7 @@ app_story!(resume_dialog, |ctx| {
     let fork_a = "3333333333333333333333333333333333333333333333333333333333333333";
     let fork_b = "4444444444444444444444444444444444444444444444444444444444444444";
     let nested = "5555555555555555555555555555555555555555555555555555555555555555";
-    let unavailable = "6666666666666666666666666666666666666666666666666666666666666666";
-    let upgradeable = "7777777777777777777777777777777777777777777777777777777777777777";
     let entries = [
-        (
-            upgradeable,
-            "resume an older session",
-            now_ms - 60 * 1000,
-            32_768,
-            None::<&str>,
-        ),
         (
             root_old,
             "spike: notebook preview",
@@ -332,8 +323,6 @@ app_story!(resume_dialog, |ctx| {
         };
         ctx.write_session_meta(&meta);
     }
-    ctx.mark_session_upgradeable(upgradeable, 9);
-    ctx.write_unavailable_session(unavailable);
     ctx.wait_for_session_catalog();
     ctx.run_command("resume");
     ctx.assert_snapshot();

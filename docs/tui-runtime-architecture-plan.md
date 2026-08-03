@@ -105,8 +105,8 @@ rules may not:
 
 Every phase must preserve:
 
-- `session.db` is the canonical per-session store.
-- One writer owner and stable lease exist for a writable session.
+- `lineage.db` is the canonical store for every branch in one fork lineage.
+- One fenced writer owner and stable lease exist for a writable lineage.
 - Submitted turns use one canonical transaction and return a durable receipt
   before model dispatch.
 - `catalog.db` remains the only derived persistent projection.
@@ -115,8 +115,7 @@ Every phase must preserve:
 - Transcript and renderer caches remain bounded by measured memory budgets.
 - UTF-8 mutations use `smelt_buffer::text` or attached-text APIs.
 - Ordinary callbacks do not depend on ambient Lua host scope.
-- Compatibility behavior remains tagged and documented until deliberately
-  removed.
+- Runtime persistence has no pre-lineage compatibility path.
 
 ## Implementation stages
 
@@ -331,7 +330,7 @@ has made a listed stage unnecessary while preserving stronger invariants.
   Thirteen focused tests cover metadata and HTTP failures, planning, download and
   archive failures, invalid archive shape, permissions, atomic replacement, failed
   replacement, backup failure, staging cleanup, and recovery preservation.
-- Inspect-server tests now seed canonical `session.db` stores and drive the real TCP
+- Inspect-server tests now seed canonical lineage stores and drive the real TCP
   server. Nine tests cover assets, stable list pagination and cursors, detail,
   summary, request lists, payloads, malformed limits and cursors, malformed request
   IDs, invalid paths, missing resources, corrupt storage, idempotent shutdown, and
@@ -477,8 +476,8 @@ has made a listed stage unnecessary while preserving stronger invariants.
   Storybook and fuzz/replay consumers use semantic turn, Lua, tool, permission,
   model, resume, shell-output, event, and canonical session-fixture operations.
 - External drivers inspect immutable window snapshots and focused selection and
-  paste-readiness probes. Storybook no longer constructs `SourceEvent` or
-  `SessionDb` values for ordinary scenarios and does not reach through `TestApp`
+  paste-readiness probes. Storybook no longer constructs `SourceEvent` or storage
+  internals for ordinary scenarios and does not reach through `TestApp`
   into `TuiApp`, `Core`, conversation, prompt, overlay, or platform owners.
 - The final stage gate passes all 1,482 TUI tests, including the complete storybook
   snapshot binary. All TUI targets compile and pass warnings-denied clippy with the

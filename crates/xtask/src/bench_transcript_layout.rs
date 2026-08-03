@@ -61,6 +61,7 @@ pub fn run(args: Vec<String>) {
     let mut hot_path_item_bytes: Option<String> = None;
     let mut hot_path_operations: Option<String> = None;
     let mut hot_path_fixture: Option<String> = None;
+    let mut hot_path_fixture_session_id: Option<String> = None;
     let mut hot_path_heterogeneous = false;
     let mut save_request_only = false;
     let mut tall_write_only = false;
@@ -110,6 +111,12 @@ pub fn run(args: Vec<String>) {
                 hot_path = true;
                 save_request_only = true;
                 hot_path_fixture = Some(take_required_arg(&mut iter, "--save-request-fixture"));
+            }
+            "--save-request-session-id" => {
+                hot_path = true;
+                save_request_only = true;
+                hot_path_fixture_session_id =
+                    Some(take_required_arg(&mut iter, "--save-request-session-id"));
             }
             "--save-request-heterogeneous" => {
                 hot_path = true;
@@ -171,6 +178,13 @@ pub fn run(args: Vec<String>) {
         }
     }
 
+    if hot_path_fixture.is_some() != hot_path_fixture_session_id.is_some() {
+        eprintln!(
+            "bench-transcript-layout: --save-request-fixture and --save-request-session-id must be provided together"
+        );
+        std::process::exit(2);
+    }
+
     let mut env = vec![("SMELT_TRANSCRIPT_BENCH_RUNS", runs.clone())];
     if let Some(workloads) = workloads {
         env.push(("SMELT_TRANSCRIPT_BENCH_WORKLOADS", workloads));
@@ -204,6 +218,9 @@ pub fn run(args: Vec<String>) {
     }
     if let Some(fixture) = hot_path_fixture {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH_FIXTURE", fixture));
+    }
+    if let Some(session_id) = hot_path_fixture_session_id {
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH_SESSION_ID", session_id));
     }
     if hot_path_heterogeneous {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH_HETEROGENEOUS", "1".into()));
@@ -285,7 +302,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -310,7 +327,7 @@ fn print_usage() {
     eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
     eprintln!("--save-request-only skips unrelated transcript layout and navigation suites.");
     eprintln!("--save-request-operations CSV runs only named hot-path operations.");
-    eprintln!("--save-request-fixture PATH copies and resumes a prepared real-session snapshot, then measures only Enter and its first render by default.");
+    eprintln!("--save-request-fixture PATH copies a complete lineage sessions root; pair it with --save-request-session-id ID.");
     eprintln!("--save-request-heterogeneous generates mixed text, reasoning, notes, tools, and large object-backed metadata.");
     eprintln!(
         "--save-request-history N sets its generated hot-path history length; default is 1024."

@@ -101,13 +101,13 @@ impl PersistenceCause {
             smelt_store::StoreError::OwnershipConflict { .. }
             | smelt_store::StoreError::OwnershipLost => PersistenceFailureClass::Ownership,
             smelt_store::StoreError::UnsupportedSchema { .. }
-            | smelt_store::StoreError::LegacyMigrationRequired { .. }
-            | smelt_store::StoreError::OrphanedSession { .. }
             | smelt_store::StoreError::Integrity(_)
             | smelt_store::StoreError::MissingObject { .. }
             | smelt_store::StoreError::ObjectTooLarge { .. }
             | smelt_store::StoreError::Json(_) => PersistenceFailureClass::Unsupported,
-            smelt_store::StoreError::Busy { .. } => PersistenceFailureClass::Invariant,
+            smelt_store::StoreError::Busy { .. } | smelt_store::StoreError::Cancelled => {
+                PersistenceFailureClass::Invariant
+            }
             smelt_store::StoreError::Io(_)
             | smelt_store::StoreError::Sqlite(_)
             | smelt_store::StoreError::TransactionCleanup { .. }
@@ -2598,14 +2598,6 @@ impl PersistenceActor {
                 "injected failure while publishing the committed session",
             ));
         }
-        let writer = self.writer.as_mut().expect("actor writer");
-        if writer.is_staged() {
-            let publication_perf = smelt_perf::perf::begin("persist:staged_publication");
-            writer
-                .publish()
-                .map_err(|error| PersistenceCause::from_store("publish session", error))?;
-            drop(publication_perf);
-        }
         record_save_receipt(&receipt);
         self.sessions
             .publish_session_catalog_commit(command, &receipt, schedule_projections);
@@ -2765,7 +2757,15 @@ pub(crate) fn write_transcript_record_suffix(
     start_record_idx: usize,
     records: &[smelt_core::TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
-    let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
+    let session_id = session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| smelt_store::StoreError::Integrity("invalid session fixture path".into()))?;
+    let root = session_dir
+        .parent()
+        .ok_or_else(|| smelt_store::StoreError::Integrity("session fixture has no root".into()))?;
+    let reader = smelt_store::LineageSessionReader::open_existing(root, session_id)?;
+    let state = reader.snapshot()?;
     let rows = records
         .iter()
         .enumerate()
@@ -2782,7 +2782,27 @@ pub(crate) fn write_transcript_record_suffix(
             )
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
-    db.apply_transcript_record_suffix_fixture(start_record_idx, &rows)
+    let command = smelt_store::SessionCommit {
+        session_id: session_id.to_owned(),
+        expected: state.head,
+        identity: state.identity,
+        metadata: state.metadata,
+        history: smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::new(state.head.history_len.get()),
+            final_len: state.head.history_len,
+            items: Vec::new(),
+        },
+        side_tables: smelt_store::SideTableSuffixes {
+            start: smelt_store::HistoryIndex::new(state.head.history_len.get()),
+            ..Default::default()
+        },
+        transcript_records: Some(smelt_store::TranscriptRecordSuffix {
+            start: smelt_store::TranscriptRecordIndex::new(start_record_idx as u64),
+            records: rows,
+        }),
+    };
+    smelt_store::OwnedLineageWriter::open_existing(root, session_id)?
+        .commit_session(&command)
         .map(|_| ())
         .map_err(|failure| {
             smelt_store::StoreError::Integrity(format!(

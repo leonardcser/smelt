@@ -533,11 +533,10 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
         &session_id,
     )
     .expect("open canonical preview fixture");
-    let db = smelt_store::SessionDb::open(lineage.database_path())
+    let db = rusqlite::Connection::open(lineage.database_path())
         .expect("open canonical preview fixture database");
-    db.connection()
-        .execute(
-            "UPDATE objects
+    db.execute(
+        "UPDATE objects
              SET bytes = zeroblob(length(bytes))
              WHERE hash = (
                  SELECT object_hash
@@ -546,9 +545,9 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
                  ORDER BY rowid DESC
                  LIMIT 1
              )",
-            [],
-        )
-        .expect("corrupt canonical preview fixture body");
+        [],
+    )
+    .expect("corrupt canonical preview fixture body");
     drop(db);
 
     let mut app = TestApp::builder().build_without_test_home_reset(&guard);
@@ -569,8 +568,7 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
                     smelt_core::session::SessionListStatus::Available(meta) => {
                         Some(meta.updated_at_ms)
                     }
-                    smelt_core::session::SessionListStatus::Upgradeable { .. }
-                    | smelt_core::session::SessionListStatus::Unavailable(_) => None,
+                    smelt_core::session::SessionListStatus::Unavailable(_) => None,
                 })
         })
         .expect("corrupt preview fixture catalog metadata");
@@ -4955,15 +4953,24 @@ fn resumed_transcript_app_from_records(
     width: u16,
     height: u16,
 ) -> (TestApp, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("session dir");
-    crate::persist::write_transcript_record_suffix(dir.path(), 0, &records)
+    let dir = tempfile::tempdir().expect("sessions root");
+    let session_id = "e".repeat(64);
+    let session_dir = dir.path().join(&session_id);
+    let mut session = smelt_core::session::Session::new(1, dir.path().to_path_buf());
+    session.id = session_id.clone();
+    let initial = smelt_core::session::initial_store_commit_from_session(&session)
+        .expect("build initial session fixture");
+    let mut writer = smelt_store::OwnedLineageWriter::open(dir.path(), &session_id)
+        .expect("open session fixture writer");
+    writer
+        .commit_session(&initial)
+        .expect("commit initial session fixture");
+    writer.release().expect("release session fixture writer");
+    crate::persist::write_transcript_record_suffix(&session_dir, 0, &records)
         .expect("write transcript records");
-    let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
-        dir.path().to_path_buf(),
-        width,
-        height,
-    )
-    .expect("tail transcript");
+    let loaded =
+        crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(session_dir, width, height)
+            .expect("tail transcript");
     let mut app = TestApp::builder().build();
     app.set_terminal_size(width, height);
     app.replace_transcript_document_for_harness(

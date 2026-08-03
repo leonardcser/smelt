@@ -211,21 +211,6 @@ fn decode_and_verify_object(meta: &ObjectMeta, stored_bytes: &[u8]) -> Result<Ve
     Ok(bytes)
 }
 
-pub(crate) fn delete_unreachable_objects(conn: &Connection) -> Result<usize> {
-    let deleted = conn.execute(
-        "DELETE FROM objects
-         WHERE NOT EXISTS (
-             SELECT 1 FROM history_object_refs WHERE object_hash = objects.hash
-         )
-           AND NOT EXISTS (
-             SELECT 1 FROM request_object_refs WHERE object_hash = objects.hash
-         )",
-        [],
-    )?;
-    perf::record_value("store:object:gc_rows_deleted", deleted as u64);
-    Ok(deleted)
-}
-
 pub(crate) fn checked_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::Integrity(format!("{field} overflows i64")))
 }
@@ -306,7 +291,7 @@ mod tests {
     #[test]
     fn oversized_object_metadata_is_rejected_before_payload_hydration() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
+        crate::schema::initialize_lineage_schema(&mut conn).unwrap();
         conn.execute(
             "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
              VALUES (?1, 'none', ?2, 1, x'00')",
@@ -324,7 +309,7 @@ mod tests {
     #[test]
     fn inconsistent_uncompressed_object_size_is_rejected() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn, "test").unwrap();
+        crate::schema::initialize_lineage_schema(&mut conn).unwrap();
         let hash = sha256_hex(b"payload");
         conn.execute(
             "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)

@@ -444,9 +444,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     called_at_ms: model.sequence,
                 },
             );
-            assert!(app
-                .pending_tool_invocation_ids()
-                .contains(&invocation_id));
+            assert!(app.pending_tool_invocation_ids().contains(&invocation_id));
             feed(
                 app,
                 EngineEvent::ToolOutput {
@@ -468,9 +466,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     elapsed_ms: Some(model.sequence),
                 },
             );
-            assert!(!app
-                .pending_tool_invocation_ids()
-                .contains(&invocation_id));
+            assert!(!app.pending_tool_invocation_ids().contains(&invocation_id));
         }
         Op::ToolRejected {
             name,

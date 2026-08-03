@@ -4,7 +4,6 @@ use protocol::{
     TokenUsage, ToolInvocation, ToolOutcome,
 };
 use smelt_core::transcript_model::Block;
-use std::collections::HashMap;
 
 fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
     crate::app::history::materialize_full_session(
@@ -28,6 +27,13 @@ fn session_revision(_app: &TestApp, id: &str) -> u64 {
     lineage_reader(id).snapshot().unwrap().head.revision.get()
 }
 
+fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) -> String {
+    let mut app = TestApp::builder().build_with_test_home_guard(guard);
+    app.session_append_history(HistoryItem::user(Content::text("persisted before resume")));
+    app.save_session_and_flush();
+    app.session_snapshot().id.clone()
+}
+
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
     app.overlays_probe()
         .notification()
@@ -39,75 +45,6 @@ fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
                         if owner_session_id == session_id
                 )
         })
-}
-
-fn legacy_preserve_order_hash<T: serde::Serialize>(value: &T) -> u64 {
-    let value = serde_json::to_value(value).unwrap();
-    let bytes = serde_json::to_vec(&value).unwrap();
-    seahash::hash(&bytes)
-}
-
-fn convert_lineage_session_to_legacy(session_id: &str) {
-    let session_dir = smelt_core::session::dir_for_id(session_id);
-    let sessions_root = session_dir.parent().expect("sessions root");
-    let Some(reader) =
-        smelt_store::LineageSessionReader::try_open_existing(sessions_root, session_id).unwrap()
-    else {
-        return;
-    };
-    let state = reader.snapshot().unwrap();
-    let history = reader
-        .history_range(0, state.head.history_len.get())
-        .unwrap();
-    let records = reader.transcript_range(0, state.transcript_len).unwrap();
-    drop(reader);
-    std::fs::remove_dir_all(sessions_root.join("lineages")).unwrap();
-    let mut writer = smelt_store::OwnedSessionWriter::open(sessions_root, session_id).unwrap();
-    writer
-        .commit_session(&smelt_store::SessionCommit {
-            session_id: session_id.to_owned(),
-            expected: smelt_store::StoreHead::default(),
-            identity: state.identity,
-            metadata: state.metadata,
-            history: smelt_store::HistorySuffix {
-                start: smelt_store::HistoryIndex::ZERO,
-                final_len: state.head.history_len,
-                items: history,
-            },
-            side_tables: state.side_tables,
-            transcript_records: Some(smelt_store::TranscriptRecordSuffix {
-                start: smelt_store::TranscriptRecordIndex::ZERO,
-                records,
-            }),
-        })
-        .unwrap();
-    writer.publish().unwrap();
-    writer.release().unwrap();
-}
-
-fn rewrite_tool_record_hashes_as_legacy(session_id: &str) -> usize {
-    convert_lineage_session_to_legacy(session_id);
-    let session_dir = smelt_core::session::dir_for_id(session_id);
-    let db_path = session_dir.join("session.db");
-    let mut db = smelt_store::SessionDb::open(db_path).unwrap();
-    let mut records = db.read_all_transcript_records().unwrap();
-    let mut rewritten = 0;
-
-    for record in &mut records {
-        if record.kind != "tool" {
-            continue;
-        }
-        let persisted_json: serde_json::Value = serde_json::from_str(&record.block_json).unwrap();
-        let block: Block = serde_json::from_value(persisted_json.clone()).unwrap();
-        let legacy_hash = legacy_preserve_order_hash(&persisted_json);
-        assert_eq!(legacy_hash, seahash::hash(record.block_json.as_bytes()));
-        assert_ne!(legacy_hash, block.content_hash());
-        record.content_hash = legacy_hash.to_string();
-        rewritten += 1;
-    }
-
-    db.apply_transcript_record_fixture(&records).unwrap();
-    rewritten
 }
 
 fn retry_persistence_via_lua(app: &mut TestApp) -> bool {
@@ -208,131 +145,6 @@ fn assert_model_history_tool_messages(messages: &[protocol::Message]) {
         .expect("matching tool result message restored");
     assert_eq!(tool.content.as_ref().unwrap().text_content(), "persisted\n");
     assert!(!tool.is_error);
-}
-
-fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) -> String {
-    let mut app = TestApp::builder().build_with_test_home_guard(guard);
-    app.session_append_history(HistoryItem::user(Content::text("persisted before resume")));
-    app.save_session_and_flush();
-    app.session_snapshot().id.clone()
-}
-
-#[test]
-fn explicit_resume_requires_previous_format_migration_without_modifying_storage() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    convert_lineage_session_to_legacy(&session_id);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db_path = session_dir.join("session.db");
-    let db_before = std::fs::read(&db_path).unwrap();
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    let initial_session_id = resumed.session_snapshot().id.clone();
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_snapshot().id, initial_session_id);
-    assert_eq!(std::fs::read(&db_path).unwrap(), db_before);
-    assert!(smelt_store::LineageSessionReader::try_open_existing(
-        session_dir.parent().unwrap(),
-        &session_id,
-    )
-    .unwrap()
-    .is_none());
-    let notification = resumed
-        .overlays_probe()
-        .notification()
-        .expect("explicit migration notification");
-    assert!(notification.lifetime.is_sticky());
-    assert!(notification.summary.contains(&format!(
-        "run `smelt session migrate {session_id}` and retry"
-    )));
-
-    smelt_core::session::migrate_legacy_session_result(&session_id).unwrap();
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_snapshot().id, session_id);
-    assert_eq!(resumed.app.session_history_len(), 1);
-    assert_eq!(
-        loaded_session(&resumed, &session_id).history,
-        vec![HistoryItem::user(Content::text("persisted before resume"))]
-    );
-}
-
-#[test]
-fn explicit_resume_does_not_automatically_upgrade_previous_schema() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    convert_lineage_session_to_legacy(&session_id);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db_path = session_dir.join("session.db");
-    let db = smelt_store::SessionDb::open(&db_path).unwrap();
-    db.connection()
-        .execute_batch("PRAGMA user_version = 9")
-        .unwrap();
-    drop(db);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    let initial_session_id = resumed.session_snapshot().id.clone();
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_snapshot().id, initial_session_id);
-    assert!(!resumed.working_state().busy);
-    assert_eq!(
-        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
-        smelt_store::SessionSchemaStatus::Upgradeable {
-            found: 9,
-            target: smelt_store::SCHEMA_VERSION,
-        }
-    );
-    let notification = resumed
-        .overlays_probe()
-        .notification()
-        .expect("explicit migration notification");
-    assert!(notification.summary.contains(&format!(
-        "run `smelt session migrate {session_id}` and retry"
-    )));
-
-    smelt_core::session::migrate_session_schema_result(&session_id).unwrap();
-    smelt_core::session::migrate_legacy_session_result(&session_id).unwrap();
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_snapshot().id, session_id);
-    assert_eq!(resumed.app.session_history_len(), 1);
-}
-
-#[test]
-fn explicit_resume_rejects_future_previous_format_without_modifying_or_loading_it() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    convert_lineage_session_to_legacy(&session_id);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let future_version = smelt_store::SCHEMA_VERSION + 1;
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-    db.connection()
-        .pragma_update(None, "user_version", future_version)
-        .unwrap();
-    drop(db);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    let initial_session_id = resumed.session_snapshot().id.clone();
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_snapshot().id, initial_session_id);
-    assert_eq!(
-        smelt_store::session_schema_status(session_dir.parent().unwrap(), &session_id).unwrap(),
-        smelt_store::SessionSchemaStatus::Future {
-            found: future_version,
-            supported: smelt_store::SCHEMA_VERSION,
-        }
-    );
-    let notification = resumed
-        .overlays_probe()
-        .notification()
-        .expect("explicit migration notification");
-    assert!(notification.lifetime.is_sticky());
-    assert!(notification.summary.contains(&format!(
-        "run `smelt session migrate {session_id}` and retry"
-    )));
 }
 
 #[test]
@@ -463,84 +275,6 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
             && summary_titles == ["Inspecting the report", "Planning the fix"]
             && content == "The stored tail remains mergeable."
     ));
-}
-
-#[test]
-fn resumed_turn_hydrates_legacy_multi_arg_tool_record_suffix_for_save() {
-    const RECORD_COUNT: usize = 600;
-
-    let guard = test_home_guard();
-    let session_id = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        for index in 0..RECORD_COUNT {
-            let block = if index % 2 == 0 {
-                Block::Text {
-                    content: format!("record {index}"),
-                }
-            } else {
-                Block::ToolCall {
-                    call_id: format!("call-{index}"),
-                    name: "bash".into(),
-                    summary: protocol::StyledLines::from_plain(format!("tool {index}")),
-                    args: HashMap::from([
-                        ("command".into(), serde_json::json!(format!("echo {index}"))),
-                        ("description".into(), serde_json::json!("regression")),
-                        ("timeout_ms".into(), serde_json::json!(30_000)),
-                        ("background".into(), serde_json::json!(false)),
-                        ("alpha".into(), serde_json::json!({"nested": true})),
-                        ("bravo".into(), serde_json::json!([1, 2, 3])),
-                        ("charlie".into(), serde_json::json!(null)),
-                        ("delta".into(), serde_json::json!(4)),
-                    ]),
-                }
-            };
-            app.push_transcript_block(block);
-        }
-        app.save_session_and_flush();
-        app.session_snapshot().id.clone()
-    };
-    let legacy_tool_records = rewrite_tool_record_hashes_as_legacy(&session_id);
-    assert_eq!(legacy_tool_records, RECORD_COUNT / 2);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
-
-    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
-    app.load_session_by_id(&session_id);
-    let history = app.conversation_probe().transcript().history();
-    let legacy_tool_id = history
-        .order
-        .iter()
-        .copied()
-        .find(|id| history.block_kind(*id) == Some("tool") && !history.is_materialized(*id))
-        .expect("test requires a compacted legacy tool record");
-    let loaded_content_hash = history.content_hash(legacy_tool_id);
-    let legacy_record = smelt_store::SessionReader::open_existing(app.session_dir())
-        .unwrap()
-        .read_all_transcript_records()
-        .unwrap()
-        .into_iter()
-        .find(|record| record.block_idx == legacy_tool_id.get())
-        .unwrap();
-    let block: Block = serde_json::from_str(&legacy_record.block_json).unwrap();
-    assert_ne!(
-        legacy_record.content_hash.parse::<u64>().unwrap(),
-        block.content_hash()
-    );
-    assert_eq!(loaded_content_hash, block.content_hash());
-
-    app.require_transcript_record_resave_from_for_harness(0);
-    app.start_submitted_turn("continue the session");
-
-    assert!(
-        app.agent_running(),
-        "failed to start resumed turn: {:?}",
-        app.overlays_probe().notification()
-    );
-    assert!(
-        !has_sticky_session_save_failure(&app, &session_id),
-        "resumed turn failed to save: {:?}",
-        app.overlays_probe().notification()
-    );
 }
 
 #[test]
@@ -758,18 +492,6 @@ fn history_only_process_status_session_accepts_persisted_follow_up() {
         app.session_snapshot().id.clone()
     };
 
-    convert_lineage_session_to_legacy(&session_id);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-    db.connection()
-        .execute("DELETE FROM transcript_search", [])
-        .unwrap();
-    db.connection()
-        .execute("DELETE FROM transcript_blocks", [])
-        .unwrap();
-    drop(db);
-    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
-
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
     assert!(!resumed.session_is_read_only());
@@ -917,43 +639,6 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
     );
     assert_eq!(resumed.session_message_count(), 2);
     assert_eq!(resumed.transcript_block_count(), retained_block_len);
-}
-
-#[test]
-fn graceful_exit_restarts_from_lineage_without_creating_previous_format_storage() {
-    let guard = test_home_guard();
-    let (session_id, canonical) = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        let session_id = app.session_snapshot().id.clone();
-        let session_dir = smelt_core::session::dir_for_id(&session_id);
-        let previous_format = session_dir.join("session.db");
-
-        app.session_append_history(HistoryItem::user(Content::text(
-            "persisted through graceful exit",
-        )));
-        app.finalize_graceful_shutdown()
-            .expect("graceful shutdown persists the current generation");
-
-        assert!(!previous_format.exists());
-        let canonical = lineage_reader(&session_id).snapshot().unwrap();
-        assert_eq!(canonical.head.history_len.get(), 1);
-        (session_id, canonical)
-    };
-
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let previous_format = session_dir.join("session.db");
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_message_count(), 1);
-    assert_eq!(
-        resumed.session_history_range(0..1),
-        vec![HistoryItem::user(Content::text(
-            "persisted through graceful exit"
-        ))]
-    );
-    assert_eq!(lineage_reader(&session_id).snapshot().unwrap(), canonical);
-    assert!(!previous_format.exists());
 }
 
 #[test]
@@ -1340,92 +1025,6 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
 }
 
 #[test]
-fn sparse_fork_does_not_copy_unreferenced_legacy_blobs() {
-    let guard = test_home_guard();
-    let session_id = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.session_append_history(HistoryItem::user(Content::text("fork source")));
-        app.save_session_and_flush();
-        app.session_snapshot().id.clone()
-    };
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
-    let source_dir = smelt_core::session::dir_for_id(&session_id);
-    let blob_dir = source_dir.join("blobs");
-    std::fs::create_dir_all(&blob_dir).unwrap();
-    std::fs::write(blob_dir.join("unreferenced.png"), "private attachment").unwrap();
-
-    resumed.fork_session();
-
-    let fork_id = resumed.session_snapshot().id.clone();
-    assert_ne!(fork_id, session_id);
-    assert!(!smelt_core::session::dir_for_id(&fork_id)
-        .join("blobs")
-        .exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn legacy_session_load_rejects_symlinked_attachment_before_migration() {
-    use std::os::unix::fs::symlink;
-
-    const DATA_URL: &str = "data:image/png;base64,OUTSIDE";
-    const HASH: &str = "94fc06df2866baea99e3b3ea05bc2cd733de4ed7a085dda436280f7f69ffd426";
-
-    let guard = test_home_guard();
-    let session_id = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.session_append_history(HistoryItem::user(Content::text("fork source")));
-        app.save_session_and_flush();
-        app.session_snapshot().id.clone()
-    };
-    let source_dir = smelt_core::session::dir_for_id(&session_id);
-    let stored = lineage_reader(&session_id).snapshot().unwrap();
-    let root = source_dir.parent().expect("sessions root");
-    std::fs::remove_dir_all(root.join("lineages")).unwrap();
-    let mut writer = smelt_store::OwnedSessionWriter::open(root, &session_id).unwrap();
-    writer
-        .commit_session(&smelt_store::SessionCommit {
-            session_id: session_id.clone(),
-            expected: smelt_store::StoreHead::default(),
-            identity: stored.identity,
-            metadata: stored.metadata,
-            history: smelt_store::HistorySuffix {
-                start: smelt_store::HistoryIndex::ZERO,
-                final_len: smelt_store::HistoryLen::new(1),
-                items: vec![HistoryItem::user(Content::with_images(
-                    "legacy".into(),
-                    vec![("attachment.png".into(), format!("blob:{HASH}.png"))],
-                ))],
-            },
-            side_tables: smelt_store::SideTableSuffixes::default(),
-            transcript_records: None,
-        })
-        .unwrap();
-    writer.publish().unwrap();
-    writer.release().unwrap();
-
-    let blob_dir = source_dir.join("blobs");
-    std::fs::create_dir(&blob_dir).unwrap();
-    let blob_path = blob_dir.join(format!("{HASH}.png"));
-    std::fs::write(&blob_path, DATA_URL).unwrap();
-    let external = tempfile::tempdir().unwrap();
-    let target = external.path().join("private-image");
-    std::fs::write(&target, DATA_URL).unwrap();
-    std::fs::remove_file(&blob_path).unwrap();
-    symlink(&target, &blob_path).unwrap();
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
-
-    assert!(!resumed.conversation_probe().has_live_session());
-    assert_ne!(resumed.session_snapshot().id, session_id);
-    assert!(resumed.overlays_probe().notification().is_some());
-    let sessions = smelt_core::session::list_sessions();
-    assert_eq!(sessions.len(), 1, "unexpected sessions: {sessions:#?}");
-}
-
-#[test]
 fn shutdown_flushes_record_only_transcript_blocks() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -1451,7 +1050,7 @@ fn shutdown_flushes_record_only_transcript_blocks() {
 }
 
 #[test]
-fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
+fn record_resume_interrupt_save_compacts_and_appends_again() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -1469,20 +1068,6 @@ fn sparse_record_resume_interrupt_save_compacts_and_appends_again() {
         app.save_session_and_flush();
         app.session_snapshot().id.clone()
     };
-
-    convert_lineage_session_to_legacy(&session_id);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db_path = session_dir.join("session.db");
-    let db = smelt_store::SessionDb::open(&db_path).unwrap();
-    assert_eq!(db.transcript_record_count().unwrap(), 2);
-    db.connection()
-        .execute(
-            "UPDATE transcript_blocks SET record_idx = 302 WHERE record_idx = 1",
-            [],
-        )
-        .unwrap();
-    drop(db);
-    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
@@ -1934,80 +1519,6 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
     let stored_history = resumed.session_history_range(0..resumed.session_message_count());
     assert_committed_tool_invocation(&stored_history);
     assert_model_history_tool_messages(&resumed.model_history_messages());
-}
-
-#[test]
-fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
-    let guard = test_home_guard();
-    let session_id = {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.session_append_history(HistoryItem::user(Content::text("old prompt")));
-        app.session_append_history(HistoryItem::assistant(AssistantStep::terminal(
-            Some(Content::text("recent reply")),
-            None,
-            Vec::new(),
-        )));
-        app.save_session_and_flush();
-        app.session_snapshot().id.clone()
-    };
-
-    convert_lineage_session_to_legacy(&session_id);
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let db_path = session_dir.join("session.db");
-    let db = smelt_store::SessionDb::open(&db_path).unwrap();
-    let checkpoint = serde_json::json!({
-        "kind": "compaction",
-        "summary": "retained summary",
-        "first_live_index": 177,
-        "created_at_ms": 1,
-    });
-    db.connection()
-        .execute(
-            "UPDATE session_state SET checkpoint_json = ?1 WHERE singleton = 1",
-            [checkpoint.to_string()],
-        )
-        .unwrap();
-    drop(db);
-    smelt_store::migrate_legacy_session(session_dir.parent().unwrap(), &session_id).unwrap();
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.load_session_by_id(&session_id);
-
-    assert_eq!(resumed.session_snapshot().id, session_id);
-    assert!(resumed.session_snapshot().history.is_empty());
-    let checkpoint = resumed
-        .conversation_probe()
-        .session()
-        .checkpoint
-        .as_ref()
-        .expect("checkpoint tolerated on sparse resume");
-    assert_eq!(checkpoint.first_live_index, 0);
-
-    let history = resumed.model_history();
-    assert_eq!(history.len(), 3);
-    assert!(matches!(
-        &history[0],
-        HistoryItem::User { content, .. } if content.text_content().contains("retained summary")
-    ));
-    assert!(matches!(
-        &history[1],
-        HistoryItem::User { content, .. } if content.text_content() == "old prompt"
-    ));
-    assert!(matches!(
-        &history[2],
-        HistoryItem::Assistant(step)
-            if step.content.as_ref().is_some_and(|content| content.text_content() == "recent reply")
-    ));
-
-    let persisted = smelt_store::SessionReader::open_database(&db_path)
-        .unwrap()
-        .stored_session()
-        .unwrap()
-        .unwrap()
-        .metadata
-        .checkpoint_json
-        .unwrap();
-    assert_eq!(persisted["first_live_index"].as_u64(), Some(177));
 }
 
 #[test]
