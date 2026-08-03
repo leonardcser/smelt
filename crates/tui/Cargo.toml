@@ -45,4 +45,5 @@ smelt-test-support = { workspace = true }
 # opt in explicitly.
 default = []
 harness = ["smelt-store/test-util", "dep:smelt-test-support"]
+transcript-fixture = []
 transcript-bench = ["harness"]

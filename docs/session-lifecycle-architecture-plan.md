@@ -838,7 +838,7 @@ A search segment is visible only after one atomic install records:
 - The ordered immutable source-leaf IDs and their derived group identity.
 - Logical searchable-byte extent.
 - Complete document/filter/FTS rows.
-- A completion marker and checksum.
+- An atomic completion marker.
 
 Incomplete builds are ignored. A source-hash mismatch invalidates only that derived
 segment. Missing, stale, corrupt, or incompatible `search.db` data schedules a
@@ -951,7 +951,7 @@ and single-format storage gates.
 ### Stage 5 implementation evidence
 
 Each lineage owns a disposable `search.db` with independently validated format
-version 4. The canonical lineage schema is version 1 and contains no transcript
+version 5. The canonical lineage schema is version 1 and contains no transcript
 search tables, FTS virtual tables, searchable-text copies, or search-maintenance
 triggers. A dormant per-lineage projector does no work until search is activated, and
 canonical submission only coalesces an asynchronous wake after activation. An
@@ -964,7 +964,7 @@ IDs, so forks reuse complete shared groups and appends rebuild at most the bound
 open suffix. Each installed segment packs consecutive short records into 32 KiB
 documents and splits oversized records with 1 KiB overlap. It uses contentless trigram
 FTS5 with `detail=none` and `columnsize=0`, compressed Unicode scalar and bigram
-postings, integer internal segment keys, a checksum, and an atomic completion marker.
+postings, integer internal segment keys, and an atomic completion marker.
 Boundary regressions cover exactly 2 MiB, crossing 2 MiB,
 32 leaves, and 33 leaves and prove sealed group identities remain stable.
 
@@ -972,10 +972,10 @@ Queries combine ready reachable segments with exact canonical scans for missing 
 unindexed sources; the TUI adds its dirty in-memory suffix. Long-query FTS and short
 posting traversal batch all reachable segment IDs and order by explicit block index,
 including real lineage histories where compacted records cause block-index
-inversions. Every candidate is verified against canonical `indexed_text`. Short
-queries hydrate only candidate canonical records rather than complete 2 MiB source
-groups. Derived failures can fall back to canonical scanning, but canonical read
-errors remain visible.
+inversions. Every candidate is verified against canonical `indexed_text`. Long and
+short queries hydrate only candidate document ranges rather than retaining complete
+2 MiB source groups. Derived failures can fall back to canonical scanning, but
+canonical read errors remain visible.
 
 Differential coverage includes common and Unicode one-character queries, common,
 punctuation, and Unicode two-character queries, long Unicode and three-plus-character
@@ -1006,6 +1006,20 @@ ratio of 22.52 percent. Worst p95 by query class was:
 | Punctuation two-character | 25.599 ms |
 | Common three-plus-character | 31.154 ms |
 | Proven absent | 46.857 ms |
+
+A subsequent hardening run used the production transcript renderer to generate 60,000
+records with 19,151,893 searchable bytes and sparse Unicode and punctuation markers.
+Over 20 release-fast samples per query, the worst p95 was 80.874 ms, worst query peak
+live allocation was 406,188 bytes, and the 1,728,512-byte derived database was 9.03
+percent of searchable text. The forced FTS false-positive query verified 61 canonical
+records and correctly returned no match. The matrix also proved real Unicode matches,
+backward traversal, and origin-bounded traversal. On the original dense-marker
+reproduction, changing long-query verification from retained 2 MiB source groups to
+candidate document hydration reduced worst query peak live allocation from 74,325,799
+to 1,807,278 bytes; the forced-verification query itself used 384,061 bytes. The
+hardening gate passes 4,873 workspace tests with two skipped, warnings-denied workspace
+Clippy, formatting, the optimized product build, all fuzz binary builds, and the
+feature-gated transcript benchmark build.
 
 The complete store suite passes 232 tests with one skipped. The workspace gate passes
 5,008 tests with two skipped, plus formatting, `git diff --check`, and warnings-denied
@@ -1247,8 +1261,8 @@ single-generation startup lands, the target is re-evaluated against 100 ms.
   are also reported so fixed SQLite overhead remains visible. The stretch target is
   15 percent.
 - No uncompressed or full-size duplicate searchable-text table is permitted.
-- Search storage is reported separately for FTS/postings, filters, mappings,
-  checksums, free pages, and any exact-text cache.
+- Search storage is reported separately for FTS/postings, filters, mappings, free
+  pages, and any exact-text cache.
 - Canonical write amplification for Enter, rewind, and fork is reported as SQLite
   bytes written per changed canonical byte and as rows/nodes touched.
 - Repeated forks of one prefix must grow with branch metadata and unique suffixes,

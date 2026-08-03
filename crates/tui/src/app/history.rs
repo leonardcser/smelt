@@ -233,6 +233,27 @@ pub(crate) fn build_transcript_from_session(
     transcript
 }
 
+#[cfg(feature = "transcript-fixture")]
+pub(crate) fn project_session_transcript_records(
+    session: &session::Session,
+) -> Result<Vec<smelt_store::StoredTranscriptBlock>, smelt_store::StoreError> {
+    let lua = crate::lua::LuaRuntime::new();
+    let transcript = build_transcript_from_session(&lua, session);
+    transcript
+        .history
+        .block_records_with_ids()
+        .iter()
+        .enumerate()
+        .map(|(record_idx, record)| {
+            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                record_idx,
+                record.block_id.get(),
+                &record.record,
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn load_transcript_tail_from_sqlite(
     sessions: &session::SessionStorage,
     session: &session::Session,
@@ -626,6 +647,61 @@ mod tests {
 
         let transcript = build_transcript_from_session(&lua, &session);
         assert!(transcript.history.order.is_empty());
+    }
+
+    #[cfg(feature = "transcript-fixture")]
+    #[test]
+    fn projected_fixture_rows_use_production_rendering_and_origins() {
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            HistoryItem::system("hidden system"),
+            HistoryItem::user(Content::text("visible user")),
+            HistoryItem::note(protocol::HistoryNote::context("hidden context")),
+            HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
+                Some(Content::text("visible assistant")),
+                Some("visible reasoning".into()),
+                Vec::new(),
+                vec![protocol::ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "demo_tool".into(),
+                    arguments: r#"{"path":"src/main.rs"}"#.into(),
+                    result: protocol::ToolOutcome {
+                        content: "searchable tool output".into(),
+                        is_error: false,
+                        metadata: Some(serde_json::json!({"note": "metadata"})),
+                    },
+                    elapsed_ms: Some(42),
+                    called_at_ms: Some(1234),
+                }],
+            )),
+            HistoryItem::note(protocol::HistoryNote::process_status("visible process")),
+        ];
+
+        let records = project_session_transcript_records(&session).unwrap();
+        assert_eq!(records.len(), 5);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.history_idx)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(3), Some(3), Some(3), Some(4)]
+        );
+        for text in [
+            "visible user",
+            "visible reasoning",
+            "visible assistant",
+            "searchable tool output",
+            "visible process",
+        ] {
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.indexed_text.contains(text)),
+                "projected transcript omitted {text:?}"
+            );
+        }
+        let tool = records.iter().find(|record| record.kind == "tool").unwrap();
+        assert!(tool.tool_state_json.as_deref().unwrap().contains("1234"));
     }
 
     #[test]

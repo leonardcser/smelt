@@ -1,5 +1,8 @@
 //! Dev tooling. Invoke as `cargo xtask <command>` (see `.cargo/config.toml`).
 
+#[global_allocator]
+static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
+
 mod bench_file_search;
 mod bench_lineage_search;
 mod bench_store_compression;

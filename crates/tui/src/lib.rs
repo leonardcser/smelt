@@ -38,3 +38,11 @@ pub use ::smelt_edit;
 pub use smelt_core::attachment;
 pub use smelt_core::lua::{CliFlagKind, CliFlagSpec, CliFlagValue};
 pub use smelt_core::session;
+
+/// Render a complete session through the production transcript builder for dev fixtures.
+#[cfg(feature = "transcript-fixture")]
+pub fn project_session_transcript_records(
+    session: &smelt_core::session::Session,
+) -> Result<Vec<smelt_store::StoredTranscriptBlock>, smelt_store::StoreError> {
+    app::history::project_session_transcript_records(session)
+}

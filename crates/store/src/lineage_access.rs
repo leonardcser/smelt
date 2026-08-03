@@ -1763,6 +1763,13 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
+        let segment_columns = search
+            .prepare("PRAGMA table_info(search_segments)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
         let table_names = search
             .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -1782,6 +1789,22 @@ mod tests {
             ],
             "search path={} tables={table_names:?}",
             reader.path.parent().unwrap().join("search.db").display(),
+        );
+        assert_eq!(
+            segment_columns,
+            [
+                "segment_id",
+                "source_node_id",
+                "source_item_count",
+                "source_byte_count",
+                "min_block_idx",
+                "max_block_idx",
+                "logical_text_bytes",
+                "doc_count",
+                "first_doc_id",
+                "last_doc_id",
+                "complete",
+            ]
         );
         assert!(
             table_names

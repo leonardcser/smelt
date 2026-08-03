@@ -4512,6 +4512,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "smelt-core",
+ "smelt-perf",
  "smelt-protocol",
  "smelt-store",
  "smelt-tui",

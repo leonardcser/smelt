@@ -6,8 +6,9 @@ publish = false
 
 [dependencies]
 smelt-core = { workspace = true }
-smelt-tui = { workspace = true }
+smelt-tui = { workspace = true, features = ["transcript-fixture"] }
 smelt-protocol = { workspace = true }
 smelt-store = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+smelt-perf.workspace = true

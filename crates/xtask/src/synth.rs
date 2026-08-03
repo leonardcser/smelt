@@ -5,13 +5,10 @@
 //! `smelt -r <id>` to inspect scrolling, layout, and theme performance against
 //! a long transcript without a live LLM.
 
-use std::collections::HashMap;
 use std::error::Error;
-use std::time::Duration;
 
-use protocol::{Content, HistoryItem, HistoryNote};
+use protocol::Content;
 use smelt_core::session::{self, Session};
-use smelt_core::{Block, BlockOrigin, ToolOutput, ToolState, ToolStatus, TranscriptBlockRecord};
 
 pub fn run() {
     let mut turns: usize = 5000;
@@ -121,7 +118,7 @@ fn save_session_with_transcript_records(session: &Session) -> Result<usize, Box<
     }
     drop(reader);
 
-    let records = transcript_records_for_history(&session.history)?;
+    let records = tui::project_session_transcript_records(session)?;
     let record_count = records.len();
     if records.is_empty() {
         return Ok(0);
@@ -153,158 +150,6 @@ fn save_session_with_transcript_records(session: &Session) -> Result<usize, Box<
     writer.release()?;
     session::publish_session_catalog_commit(&command, &receipt, true);
     Ok(record_count)
-}
-
-fn transcript_records_for_history(
-    history: &[HistoryItem],
-) -> smelt_store::Result<Vec<smelt_store::StoredTranscriptBlock>> {
-    let mut records = Vec::new();
-    for (history_idx, item) in history.iter().enumerate() {
-        match item {
-            HistoryItem::System { .. } | HistoryItem::Note(HistoryNote::Context { .. }) => {}
-            HistoryItem::User {
-                content,
-                display,
-                command,
-            } => {
-                let text = display
-                    .clone()
-                    .unwrap_or_else(|| content.text_content().into_owned());
-                if !text.trim().is_empty() || !content.image_labels().is_empty() {
-                    push_transcript_record(
-                        &mut records,
-                        history_idx,
-                        Block::User {
-                            text,
-                            image_labels: content.image_labels(),
-                            command: *command,
-                        },
-                        None,
-                    )?;
-                }
-            }
-            HistoryItem::Assistant(step) => {
-                if let Some(reasoning) = step
-                    .reasoning
-                    .as_ref()
-                    .filter(|text| !text.trim().is_empty())
-                {
-                    push_transcript_record(
-                        &mut records,
-                        history_idx,
-                        Block::Thinking {
-                            title: None,
-                            summary_titles: Vec::new(),
-                            content: reasoning.clone(),
-                            kind: protocol::ReasoningKind::default(),
-                        },
-                        None,
-                    )?;
-                }
-                if let Some(content) = &step.content {
-                    let text = content.text_content();
-                    if !text.trim().is_empty() {
-                        push_transcript_record(
-                            &mut records,
-                            history_idx,
-                            Block::Text {
-                                content: text.into_owned(),
-                            },
-                            None,
-                        )?;
-                    }
-                }
-                for invocation in &step.invocations {
-                    let is_error = invocation.result.is_error;
-                    push_transcript_record(
-                        &mut records,
-                        history_idx,
-                        Block::ToolCall {
-                            call_id: invocation.call_id.clone(),
-                            name: invocation.name.clone(),
-                            summary: protocol::StyledLines::from_plain(invocation.name.clone()),
-                            args: tool_arguments(&invocation.arguments),
-                        },
-                        Some(ToolState {
-                            status: if is_error {
-                                ToolStatus::Err
-                            } else {
-                                ToolStatus::Ok
-                            },
-                            elapsed: invocation.elapsed_ms.map(Duration::from_millis),
-                            called_at_ms: invocation.called_at_ms,
-                            elapsed_active: false,
-                            output: Some(Box::new(ToolOutput {
-                                content: invocation.result.content.clone(),
-                                is_error,
-                                metadata: invocation.result.metadata.clone(),
-                            })),
-                            user_message: None,
-                            preview_output: None,
-                        }),
-                    )?;
-                }
-            }
-            HistoryItem::Note(HistoryNote::ModeChange { text, mode, .. }) => {
-                push_transcript_record(
-                    &mut records,
-                    history_idx,
-                    Block::Mode {
-                        text: text.clone(),
-                        icon: mode.as_deref().unwrap_or("mode").to_string(),
-                        hl_group: "SmeltAccent".into(),
-                    },
-                    None,
-                )?;
-            }
-            HistoryItem::Note(HistoryNote::ProcessStatus { text, event }) => {
-                push_transcript_record(
-                    &mut records,
-                    history_idx,
-                    Block::ProcessStatus {
-                        text: text.clone(),
-                        event: event.clone(),
-                    },
-                    None,
-                )?;
-            }
-        }
-    }
-    Ok(records)
-}
-
-fn push_transcript_record(
-    records: &mut Vec<smelt_store::StoredTranscriptBlock>,
-    history_idx: usize,
-    block: Block,
-    tool_state: Option<ToolState>,
-) -> smelt_store::Result<()> {
-    let content_hash = block.content_hash();
-    let record = TranscriptBlockRecord {
-        block,
-        content_hash,
-        origin: Some(BlockOrigin::History(history_idx)),
-        tool_state,
-    };
-    let record_idx = records.len();
-    records.push(
-        smelt_core::transcript_model::transcript_block_row_with_block_idx(
-            record_idx,
-            record_idx as u64,
-            &record,
-        )?,
-    );
-    Ok(())
-}
-
-fn tool_arguments(arguments: &str) -> HashMap<String, serde_json::Value> {
-    serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|value| match value {
-            serde_json::Value::Object(fields) => Some(fields.into_iter().collect()),
-            _ => None,
-        })
-        .unwrap_or_default()
 }
 
 fn assistant_body(turn: usize, words: usize) -> String {
@@ -343,10 +188,13 @@ fn assistant_body(turn: usize, words: usize) -> String {
     ];
     let pick = |i: usize| LOREM[i % LOREM.len()];
 
-    let prose: String = (0..words)
+    let mut prose: String = (0..words)
         .map(|i| pick(turn.wrapping_mul(7).wrapping_add(i)))
         .collect::<Vec<_>>()
         .join(" ");
+    if turn.is_multiple_of(4096) {
+        prose.push_str(" unicode sample café 漢字 path::segment");
+    }
 
     match turn % 4 {
         0 => format!(
@@ -360,72 +208,5 @@ fn assistant_body(turn: usize, words: usize) -> String {
         }
         2 => format!("Reply {turn}.\n\n{prose}.\n\n{prose}.\n"),
         _ => format!("Reply {turn}.\n\n> {prose}\n\nSee `synth_{turn}()` for details.\n"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transcript_projection_skips_invisible_items_and_preserves_origins() {
-        let history = vec![
-            HistoryItem::system("hidden system"),
-            HistoryItem::user(Content::text("visible user")),
-            HistoryItem::note(HistoryNote::context("hidden context")),
-            HistoryItem::Assistant(protocol::AssistantStep::terminal(
-                Some(Content::text("visible assistant")),
-                Some("visible reasoning".into()),
-                Vec::new(),
-            )),
-            HistoryItem::note(HistoryNote::process_status("visible process")),
-        ];
-
-        let records = transcript_records_for_history(&history).unwrap();
-        assert_eq!(records.len(), 4);
-        assert_eq!(
-            records
-                .iter()
-                .map(|record| record.history_idx)
-                .collect::<Vec<_>>(),
-            vec![Some(1), Some(3), Some(3), Some(4)]
-        );
-        assert!(records[0].indexed_text.contains("visible user"));
-        assert!(records[1].indexed_text.contains("visible reasoning"));
-        assert!(records[2].indexed_text.contains("visible assistant"));
-        assert!(records[3].indexed_text.contains("visible process"));
-    }
-
-    #[test]
-    fn transcript_projection_indexes_tool_invocation_outputs() {
-        let history = vec![HistoryItem::Assistant(
-            protocol::AssistantStep::with_invocations(
-                Some(Content::text("tool preface")),
-                None,
-                Vec::new(),
-                vec![protocol::ToolInvocation {
-                    call_id: "call-1".into(),
-                    name: "demo_tool".into(),
-                    arguments: r#"{"path":"src/main.rs"}"#.into(),
-                    result: protocol::ToolOutcome {
-                        content: "searchable tool output".into(),
-                        is_error: false,
-                        metadata: Some(serde_json::json!({"note": "metadata"})),
-                    },
-                    elapsed_ms: Some(42),
-                    called_at_ms: Some(1234),
-                }],
-            ),
-        )];
-
-        let records = transcript_records_for_history(&history).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[1].kind, "tool");
-        assert!(records[1].indexed_text.contains("searchable tool output"));
-        assert!(records[1]
-            .tool_state_json
-            .as_deref()
-            .unwrap()
-            .contains("1234"));
     }
 }

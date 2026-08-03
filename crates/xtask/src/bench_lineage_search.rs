@@ -8,13 +8,32 @@ const DEFAULT_RUNS: usize = 20;
 const PROJECTION_TIMEOUT: Duration = Duration::from_secs(600);
 const INTERACTION_CEILING: Duration = Duration::from_millis(100);
 const STORAGE_RATIO_CEILING: f64 = 0.25;
+const QUERY_PEAK_LIVE_BYTES_CEILING: usize = 8 * 1024 * 1024;
 const TRANSCRIPT_READ_CHUNK: u64 = 256;
+const VERIFIED_RECORDS_METRIC: &str = "store:lineage:derived_search_records_verified";
 
 struct Options {
     state_dir: PathBuf,
     session: Option<String>,
     runs: usize,
     allow_debug: bool,
+}
+
+struct QueryCase {
+    label: &'static str,
+    query: &'static str,
+    origin_block_idx: Option<u64>,
+    direction: smelt_store::TranscriptSearchDirection,
+    expected_synthetic_match: bool,
+    require_synthetic_verification: bool,
+}
+
+struct QueryBenchmark {
+    worst_p95: Duration,
+    worst_peak_live_bytes_p95: usize,
+    durations_ms: BTreeMap<&'static str, f64>,
+    peak_live_bytes: BTreeMap<&'static str, usize>,
+    verified_records: BTreeMap<&'static str, u64>,
 }
 
 pub fn run(args: Vec<String>) {
@@ -84,6 +103,7 @@ fn print_usage() {
 }
 
 fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
+    smelt_perf::perf::enable();
     if cfg!(debug_assertions) && !options.allow_debug {
         return Err(
             "bench-lineage-search must run in release mode for timing thresholds; use `cargo run --release -p xtask -- bench-lineage-search ...` or pass --allow-debug"
@@ -102,9 +122,12 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut total_text_bytes = 0_u64;
     let mut total_search_bytes = 0_u64;
     let mut worst_query_p95 = Duration::ZERO;
+    let mut worst_query_peak_live_bytes_p95 = 0_usize;
     let mut reports = Vec::with_capacity(sessions.len());
     for session in &sessions {
         let reader = smelt_store::LineageSessionReader::open_existing(&options.state_dir, session)?;
+        let snapshot = reader.snapshot()?;
+        let synthetic = snapshot.metadata.slug.as_deref() == Some("synth");
         let projector = reader.spawn_search_projector()?;
         projector.request();
         let status = wait_for_projection(&reader, &projector)?;
@@ -121,18 +144,23 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
             .join("search.db");
         let physical = sqlite_physical_bytes(&search_path);
         let ratio = physical as f64 / text_bytes as f64;
-        let (query_p95, query_reports) = benchmark_queries(&reader, options.runs)?;
-        worst_query_p95 = worst_query_p95.max(query_p95);
+        let query_benchmark = benchmark_queries(&reader, options.runs, synthetic)?;
+        worst_query_p95 = worst_query_p95.max(query_benchmark.worst_p95);
+        worst_query_peak_live_bytes_p95 =
+            worst_query_peak_live_bytes_p95.max(query_benchmark.worst_peak_live_bytes_p95);
         total_text_bytes = total_text_bytes.saturating_add(text_bytes);
         total_search_bytes = total_search_bytes.saturating_add(physical);
         reports.push(serde_json::json!({
-            "transcript_records": reader.snapshot()?.transcript_len,
+            "transcript_records": snapshot.transcript_len,
             "canonical_searchable_bytes": text_bytes,
             "search_physical_bytes": physical,
             "search_storage_ratio": ratio,
             "ready_segments": status.ready_segments,
-            "query_p95_ms": query_p95.as_secs_f64() * 1000.0,
-            "queries": query_reports,
+            "query_p95_ms": query_benchmark.worst_p95.as_secs_f64() * 1000.0,
+            "query_peak_live_bytes_p95": query_benchmark.worst_peak_live_bytes_p95,
+            "queries": query_benchmark.durations_ms,
+            "query_peak_live_bytes": query_benchmark.peak_live_bytes,
+            "query_verified_records": query_benchmark.verified_records,
             "components": sqlite_components(&search_path)?,
         }));
     }
@@ -147,6 +175,7 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
             "search_physical_bytes": total_search_bytes,
             "search_storage_ratio": aggregate_ratio,
             "worst_query_p95_ms": worst_query_p95.as_secs_f64() * 1000.0,
+            "worst_query_peak_live_bytes_p95": worst_query_peak_live_bytes_p95,
             "results": reports,
         }))?
     );
@@ -163,6 +192,13 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
             "derived search query p95 {:.3} ms exceeds {:.0} ms",
             worst_query_p95.as_secs_f64() * 1000.0,
             INTERACTION_CEILING.as_secs_f64() * 1000.0
+        )
+        .into());
+    }
+    if worst_query_peak_live_bytes_p95 > QUERY_PEAK_LIVE_BYTES_CEILING {
+        return Err(format!(
+            "derived search query peak live allocation p95 {} bytes exceeds {} bytes",
+            worst_query_peak_live_bytes_p95, QUERY_PEAK_LIVE_BYTES_CEILING
         )
         .into());
     }
@@ -215,41 +251,168 @@ fn canonical_text_bytes(
 fn benchmark_queries(
     reader: &smelt_store::LineageSessionReader,
     runs: usize,
-) -> Result<(Duration, BTreeMap<&'static str, f64>), smelt_store::StoreError> {
+    synthetic: bool,
+) -> Result<QueryBenchmark, smelt_store::StoreError> {
+    let snapshot = reader.snapshot()?;
+    let origin_block_idx = if snapshot.transcript_len == 0 {
+        None
+    } else {
+        reader
+            .transcript_range(snapshot.transcript_len / 2, snapshot.transcript_len / 2 + 1)?
+            .first()
+            .map(|record| record.block_idx)
+    };
     let queries = [
-        ("one_common", "e"),
-        ("one_unicode", "é"),
-        ("two_common", "th"),
-        ("two_punctuation", "::"),
-        ("three_common", "the"),
-        ("absent", "smelt-search-absent-sentinel"),
+        QueryCase {
+            label: "one_common_forward",
+            query: "e",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: false,
+        },
+        QueryCase {
+            label: "one_unicode_forward",
+            query: "é",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: false,
+        },
+        QueryCase {
+            label: "two_common_forward",
+            query: "th",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: false,
+        },
+        QueryCase {
+            label: "two_punctuation_forward",
+            query: "::",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: false,
+        },
+        QueryCase {
+            label: "three_common_forward",
+            query: "the",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: true,
+        },
+        QueryCase {
+            label: "three_common_backward",
+            query: "the",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Backward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: true,
+        },
+        QueryCase {
+            label: "three_common_origin_forward",
+            query: "the",
+            origin_block_idx,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: true,
+            require_synthetic_verification: true,
+        },
+        QueryCase {
+            label: "forced_false_positive_absent",
+            query: "unicode sample café path::segment",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: false,
+            require_synthetic_verification: true,
+        },
+        QueryCase {
+            label: "index_miss_absent",
+            query: "smelt-search-absent-sentinel",
+            origin_block_idx: None,
+            direction: smelt_store::TranscriptSearchDirection::Forward,
+            expected_synthetic_match: false,
+            require_synthetic_verification: false,
+        },
     ];
-    let mut worst = Duration::ZERO;
-    let mut report = BTreeMap::new();
-    for (label, query) in queries {
-        let _ = reader.search_transcript_candidate_page(
-            query,
-            None,
-            smelt_store::TranscriptSearchDirection::Forward,
+    let mut benchmark = QueryBenchmark {
+        worst_p95: Duration::ZERO,
+        worst_peak_live_bytes_p95: 0,
+        durations_ms: BTreeMap::new(),
+        peak_live_bytes: BTreeMap::new(),
+        verified_records: BTreeMap::new(),
+    };
+    for query in queries {
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+        let warm = reader.search_transcript_candidate_page(
+            query.query,
+            query.origin_block_idx,
+            query.direction,
             128,
         )?;
+        let verified_records = metric_total(VERIFIED_RECORDS_METRIC);
+        if synthetic {
+            let matched = !warm.is_empty();
+            if matched != query.expected_synthetic_match {
+                return Err(smelt_store::StoreError::Integrity(format!(
+                    "synthetic benchmark query {} had an unexpected result",
+                    query.label
+                )));
+            }
+            if query.require_synthetic_verification && verified_records == 0 {
+                return Err(smelt_store::StoreError::Integrity(format!(
+                    "synthetic benchmark query {} did not verify canonical candidates",
+                    query.label
+                )));
+            }
+        }
+        benchmark
+            .verified_records
+            .insert(query.label, verified_records);
+        smelt_perf::perf::set_enabled(false);
+
         let mut durations = Vec::with_capacity(runs);
+        let mut peak_live_bytes = Vec::with_capacity(runs);
         for _ in 0..runs {
+            let measurement = smelt_perf::alloc::begin_peak_measurement();
+            let baseline = measurement.start_bytes();
             let started = Instant::now();
-            let _ = reader.search_transcript_candidate_page(
-                query,
-                None,
-                smelt_store::TranscriptSearchDirection::Forward,
+            let results = reader.search_transcript_candidate_page(
+                query.query,
+                query.origin_block_idx,
+                query.direction,
                 128,
             )?;
             durations.push(started.elapsed());
+            drop(results);
+            peak_live_bytes.push(measurement.finish().saturating_sub(baseline));
         }
         durations.sort_unstable();
-        let p95 = durations[(durations.len() * 95).div_ceil(100).saturating_sub(1)];
-        worst = worst.max(p95);
-        report.insert(label, p95.as_secs_f64() * 1000.0);
+        peak_live_bytes.sort_unstable();
+        let percentile_index = (runs * 95).div_ceil(100).saturating_sub(1);
+        let p95 = durations[percentile_index];
+        let peak_live_bytes_p95 = peak_live_bytes[percentile_index];
+        benchmark.worst_p95 = benchmark.worst_p95.max(p95);
+        benchmark.worst_peak_live_bytes_p95 =
+            benchmark.worst_peak_live_bytes_p95.max(peak_live_bytes_p95);
+        benchmark
+            .durations_ms
+            .insert(query.label, p95.as_secs_f64() * 1000.0);
+        benchmark
+            .peak_live_bytes
+            .insert(query.label, peak_live_bytes_p95);
     }
-    Ok((worst, report))
+    Ok(benchmark)
+}
+
+fn metric_total(label: &str) -> u64 {
+    smelt_perf::perf::snapshot()
+        .values
+        .into_iter()
+        .find(|row| row.label == label)
+        .map_or(0, |row| row.total)
 }
 
 fn sqlite_physical_bytes(path: &Path) -> u64 {

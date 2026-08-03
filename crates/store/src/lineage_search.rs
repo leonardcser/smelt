@@ -14,7 +14,7 @@ use crate::error::{Result, StoreError};
 use crate::history::{StoredTranscriptBlock, TranscriptSearchCandidate, TranscriptSearchDirection};
 use crate::lineage::{self, BranchId, LineageId, TranscriptSearchLeaf};
 
-pub const SEARCH_FORMAT_VERSION: i32 = 4;
+pub const SEARCH_FORMAT_VERSION: i32 = 5;
 const SEARCH_DB_FILENAME: &str = "search.db";
 const SEARCH_SEGMENT_BYTES: u64 = 2 * 1024 * 1024;
 const SEARCH_SEGMENT_MAX_LEAVES: usize = 32;
@@ -47,7 +47,6 @@ CREATE TABLE search_segments (
     doc_count INTEGER NOT NULL CHECK (doc_count >= 0),
     first_doc_id INTEGER,
     last_doc_id INTEGER,
-    checksum TEXT NOT NULL,
     complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
     CHECK ((doc_count = 0 AND first_doc_id IS NULL AND last_doc_id IS NULL)
         OR (doc_count > 0 AND first_doc_id IS NOT NULL AND last_doc_id IS NOT NULL
@@ -985,8 +984,8 @@ fn build_search_segment(
         "INSERT INTO search_segments (
              source_node_id, source_item_count, source_byte_count,
              min_block_idx, max_block_idx, logical_text_bytes, doc_count,
-             first_doc_id, last_doc_id, checksum, complete
-         ) VALUES (?1, ?2, ?3, NULL, NULL, 0, 0, NULL, NULL, '', 0)",
+             first_doc_id, last_doc_id, complete
+         ) VALUES (?1, ?2, ?3, NULL, NULL, 0, 0, NULL, NULL, 0)",
         params![
             source.id,
             sql_i64(source.item_count, "search segment item count")?,
@@ -1020,17 +1019,9 @@ fn build_search_segment(
     let first_doc_id = u64::try_from(next_doc_id)
         .map_err(|_| StoreError::Integrity("search document ID is negative".into()))?;
     let mut doc_count = 0_u64;
-    let mut logical_text_bytes = 0_u64;
-    let mut checksum = Sha256::new();
-    checksum.update(b"smelt-lineage-search-segment-v3\0");
-    checksum.update(source.id.as_bytes());
-    for (record_ordinal, record) in records.iter().enumerate() {
-        logical_text_bytes = logical_text_bytes.saturating_add(record.indexed_text.len() as u64);
-        checksum.update((record_ordinal as u64).to_le_bytes());
-        checksum.update(record.block_idx.to_le_bytes());
-        checksum.update((record.indexed_text.len() as u64).to_le_bytes());
-        checksum.update(record.indexed_text.as_bytes());
-    }
+    let logical_text_bytes = records.iter().fold(0_u64, |total, record| {
+        total.saturating_add(record.indexed_text.len() as u64)
+    });
     let mut postings: BTreeMap<(u8, u64), Vec<u64>> = BTreeMap::new();
 
     {
@@ -1065,12 +1056,6 @@ fn build_search_segment(
             for hash in bigrams {
                 postings.entry((2, hash)).or_default().push(doc_id);
             }
-            checksum.update(doc_id.to_le_bytes());
-            checksum.update((document.first_record_ordinal as u64).to_le_bytes());
-            checksum.update((document.last_record_ordinal as u64).to_le_bytes());
-            checksum.update(document.min_block_idx.to_le_bytes());
-            checksum.update(document.max_block_idx.to_le_bytes());
-            checksum.update((document.text.len() as u64).to_le_bytes());
             next_doc_id = next_doc_id
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Integrity("search document ID overflow".into()))?;
@@ -1086,10 +1071,6 @@ fn build_search_segment(
         )?;
         for ((kind, hash), doc_ids) in postings {
             let packed = pack_doc_ids(&doc_ids)?;
-            checksum.update([kind]);
-            checksum.update(hash.to_le_bytes());
-            checksum.update((packed.len() as u64).to_le_bytes());
-            checksum.update(&packed);
             insert_posting.execute(params![
                 sql_i64(segment_id, "search segment ID")?,
                 kind,
@@ -1104,7 +1085,6 @@ fn build_search_segment(
     let last_doc_id = doc_count
         .checked_sub(1)
         .map(|offset| first_doc_id.saturating_add(offset));
-    let checksum = crate::object::hex_lower(&checksum.finalize());
     let min_block_idx = records
         .iter()
         .map(|record| record.block_idx)
@@ -1125,8 +1105,7 @@ fn build_search_segment(
         "UPDATE search_segments
          SET min_block_idx = ?2, max_block_idx = ?3,
              logical_text_bytes = ?4, doc_count = ?5,
-             first_doc_id = ?6, last_doc_id = ?7,
-             checksum = ?8, complete = 1
+             first_doc_id = ?6, last_doc_id = ?7, complete = 1
          WHERE source_node_id = ?1 AND complete = 0",
         params![
             source.id,
@@ -1136,7 +1115,6 @@ fn build_search_segment(
             sql_i64(doc_count, "search document count")?,
             first_doc_id_sql,
             last_doc_id_sql,
-            checksum,
         ],
     )?;
     tx.commit()?;
@@ -1160,6 +1138,41 @@ fn search_segment_row(conn: &Connection, node_id: &str) -> Result<Option<SearchS
     )
     .optional()
     .map_err(StoreError::from)
+}
+
+fn search_segment_rows(
+    conn: &Connection,
+    sources: &[SearchSourceSegment],
+) -> Result<HashMap<String, SearchSegmentRow>> {
+    const SEGMENT_BATCH: usize = 500;
+
+    let mut segments = HashMap::with_capacity(sources.len());
+    for batch in sources.chunks(SEGMENT_BATCH) {
+        let placeholders = (1..=batch.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT segment_id, source_node_id, source_item_count, source_byte_count,
+                    min_block_idx, max_block_idx, doc_count, first_doc_id, last_doc_id
+             FROM search_segments
+             WHERE complete = 1 AND source_node_id IN ({placeholders})"
+        );
+        let parameters = batch
+            .iter()
+            .map(|source| rusqlite::types::Value::Text(source.id.clone()))
+            .collect::<Vec<_>>();
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(parameters),
+            decode_search_segment_row,
+        )?;
+        for row in rows {
+            let row = row?;
+            segments.insert(row.source_node_id.clone(), row);
+        }
+    }
+    Ok(segments)
 }
 
 fn decode_search_segment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchSegmentRow> {
@@ -1338,15 +1351,16 @@ pub(crate) fn search_transcript_candidate_page(
     let sources = search_source_segments(leaves, cancelled)?;
     let search_path = search_database_path(canonical_path)?;
     let search = open_search_reader(&search_path, lineage).ok().flatten();
+    let mut segments = search
+        .as_ref()
+        .and_then(|search| search_segment_rows(search, &sources).ok())
+        .unwrap_or_default();
     let mut plans = Vec::with_capacity(sources.len());
     for source in sources {
         request.check_cancelled()?;
-        let segment = search.as_ref().and_then(|search| {
-            search_segment_row(search, &source.id)
-                .ok()
-                .flatten()
-                .filter(|segment| search_segment_matches_source(segment, &source))
-        });
+        let segment = segments
+            .remove(&source.id)
+            .filter(|segment| search_segment_matches_source(segment, &source));
         plans.push((source, segment));
     }
     plans.sort_by(|(_, left), (_, right)| match request.direction {
@@ -1556,35 +1570,20 @@ fn search_ready_short_sources(
                 ])?,
                 None => docs_statement.query([segment_id_sql])?,
             };
-            let mut candidate_docs = Vec::new();
             while let Some(doc_row) = docs.next()? {
                 request.check_cancelled()?;
                 let doc = decode_search_doc(doc_row)?;
-                if ids.contains(&doc.doc_id) {
-                    candidate_docs.push(doc);
+                if !ids.contains(&doc.doc_id) {
+                    continue;
                 }
-            }
-            let record_ordinals = candidate_docs
-                .iter()
-                .flat_map(|doc| search_doc_record_ordinals(doc, request.direction))
-                .collect::<Vec<_>>();
-            let records = search_source_records_at(
-                request.canonical,
-                request.lineage,
-                source,
-                &record_ordinals,
-                request.cancelled,
-            )?;
-            for doc in candidate_docs {
-                request.check_cancelled()?;
                 if candidate_doc_is_beyond_page(&doc, &output, request) {
                     break;
                 }
-                append_search_doc_matches(
+                append_hydrated_search_doc_matches(
                     &doc,
+                    source,
                     segment,
                     request,
-                    |ordinal| records.get(&ordinal),
                     &mut seen,
                     &mut output,
                 )?;
@@ -1613,7 +1612,6 @@ fn search_ready_fts_sources(
         TranscriptSearchDirection::Backward => "d.max_block_idx",
     };
     let mut output = Vec::new();
-    let mut records_by_segment = HashMap::new();
     let mut seen = HashSet::new();
     for batch in sources.chunks(SEGMENT_BATCH) {
         request.check_cancelled()?;
@@ -1684,24 +1682,11 @@ fn search_ready_fts_sources(
             if candidate_doc_is_beyond_page(&doc, &output, request) {
                 break;
             }
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                records_by_segment.entry(segment_id)
-            {
-                entry.insert(search_source_records(
-                    request.canonical,
-                    request.lineage,
-                    source,
-                    request.cancelled,
-                )?);
-            }
-            let records = records_by_segment
-                .get(&segment_id)
-                .expect("loaded derived search source records");
-            append_search_doc_matches(
+            append_hydrated_search_doc_matches(
                 &doc,
+                source,
                 segment,
                 request,
-                |ordinal| records.get(ordinal),
                 &mut seen,
                 &mut output,
             )?;
@@ -1778,6 +1763,32 @@ fn validate_search_doc(
     Ok(())
 }
 
+fn append_hydrated_search_doc_matches(
+    doc: &SearchDoc,
+    source: &SearchSourceSegment,
+    segment: &SearchSegmentRow,
+    request: &CandidateSearch<'_>,
+    seen: &mut HashSet<u64>,
+    candidates: &mut Vec<TranscriptSearchCandidate>,
+) -> Result<()> {
+    let record_ordinals = search_doc_record_ordinals(doc, request.direction);
+    let records = search_source_records_at(
+        request.canonical,
+        request.lineage,
+        source,
+        &record_ordinals,
+        request.cancelled,
+    )?;
+    append_search_doc_matches(
+        doc,
+        segment,
+        request,
+        |ordinal| records.get(&ordinal),
+        seen,
+        candidates,
+    )
+}
+
 fn append_search_doc_matches<'a>(
     doc: &SearchDoc,
     segment: &SearchSegmentRow,
@@ -1822,6 +1833,12 @@ fn append_search_doc_matches<'a>(
         max_block_idx,
         segment,
     )?;
+    smelt_perf::perf::record_value(
+        "store:lineage:derived_search_records_verified",
+        doc.last_record_ordinal
+            .saturating_sub(doc.first_record_ordinal)
+            .saturating_add(1) as u64,
+    );
     candidates.extend(
         matches
             .into_iter()
