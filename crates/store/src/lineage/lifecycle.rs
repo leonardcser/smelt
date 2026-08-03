@@ -677,9 +677,12 @@ pub(crate) fn apply_lineage_submit_turn(
         command.turn.created_at_ms,
     )
     .map_err(store_failure)?;
-    tx.commit()
-        .map_err(StoreError::from)
-        .map_err(store_failure)?;
+    {
+        let _perf = smelt_perf::perf::begin("store:lineage:transaction_commit");
+        tx.commit()
+            .map_err(StoreError::from)
+            .map_err(store_failure)?;
+    }
     Ok(SubmitTurnReceipt { session, turn_id })
 }
 

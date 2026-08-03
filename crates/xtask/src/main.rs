@@ -42,7 +42,7 @@ fn print_usage() {
         "  bench-file-search [--runs N] [--entries N] [--queries CSV] benchmark file fuzzy search"
     );
     eprintln!(
-        "  bench-lineage-search --state-dir PATH [--session ID] benchmark production derived search"
+        "  bench-lineage-search --state-dir PATH [--session ID] [--runs N] [--allow-debug] benchmark production derived search"
     );
     eprintln!(
         "  bench-store-compression STATE_DIR [--max-samples N] [--max-bytes N] sample store compression"

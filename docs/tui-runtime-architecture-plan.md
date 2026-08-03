@@ -541,9 +541,8 @@ has made a listed stage unnecessary while preserving stronger invariants.
   navigation current.
 - Static searches find no generic session mutation router, caller-selected persistence
   flag, whole-app Lua escape hatch, binding-level `TuiApp`, raw Lua host pointer,
-  direct conversation field access, or ignored transcript benchmark runner. The six
-  code `COMPAT(...)` IDs exactly match `docs/compat.md`, and staged and unstaged diff
-  whitespace checks pass.
+  direct conversation field access, or ignored transcript benchmark runner. Staged
+  and unstaged diff whitespace checks pass.
 - Stage 7's fresh 50 MiB and 500 MiB transcript memory gates remain the final memory
   evidence because Stage 8 changed ownership surfaces, MCP process cleanup, and empty
   engine-event filtering without changing transcript storage, hydration, layout,

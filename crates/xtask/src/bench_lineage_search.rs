@@ -14,6 +14,7 @@ struct Options {
     state_dir: PathBuf,
     session: Option<String>,
     runs: usize,
+    allow_debug: bool,
 }
 
 pub fn run(args: Vec<String>) {
@@ -28,6 +29,7 @@ fn parse_options(args: &[String]) -> Options {
     let mut state_dir = None;
     let mut session = None;
     let mut runs = DEFAULT_RUNS;
+    let mut allow_debug = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -47,6 +49,7 @@ fn parse_options(args: &[String]) -> Options {
                     .filter(|runs| *runs > 0)
                     .unwrap_or_else(|| usage_error("--runs requires a positive integer"));
             }
+            "--allow-debug" => allow_debug = true,
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -59,6 +62,7 @@ fn parse_options(args: &[String]) -> Options {
         state_dir: state_dir.unwrap_or_else(|| usage_error("--state-dir is required")),
         session,
         runs,
+        allow_debug,
     }
 }
 
@@ -69,11 +73,24 @@ fn usage_error(message: &str) -> ! {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-lineage-search --state-dir PATH [--session ID] [--runs N]");
+    eprintln!(
+        "usage: cargo run --release -p xtask -- bench-lineage-search --state-dir PATH [--session ID] [--runs N] [--allow-debug]"
+    );
     eprintln!("The state directory must contain canonical lineage sessions.");
+    eprintln!(
+        "Use a representative large corpus; storage accounting includes per-record overhead."
+    );
+    eprintln!("Timing thresholds require a release build unless --allow-debug is passed.");
 }
 
 fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) && !options.allow_debug {
+        return Err(
+            "bench-lineage-search must run in release mode for timing thresholds; use `cargo run --release -p xtask -- bench-lineage-search ...` or pass --allow-debug"
+                .into(),
+        );
+    }
+
     let sessions = match &options.session {
         Some(session) => vec![session.clone()],
         None => smelt_store::lineage_session_ids(&options.state_dir)?,
@@ -87,25 +104,23 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut worst_query_p95 = Duration::ZERO;
     let mut reports = Vec::with_capacity(sessions.len());
     for session in &sessions {
-        let writer = smelt_store::OwnedLineageWriter::open_existing(&options.state_dir, session)?;
-        let projector = writer.spawn_search_projector()?;
-        projector.request();
         let reader = smelt_store::LineageSessionReader::open_existing(&options.state_dir, session)?;
+        let projector = reader.spawn_search_projector()?;
+        projector.request();
         let status = wait_for_projection(&reader, &projector)?;
         projector.stop();
 
         let text_bytes = canonical_text_bytes(&reader)?;
+        if text_bytes == 0 {
+            return Err(format!("session {session} has no searchable transcript bytes").into());
+        }
         let search_path = reader
             .database_path()
             .parent()
             .ok_or("lineage database has no parent directory")?
             .join("search.db");
         let physical = sqlite_physical_bytes(&search_path);
-        let ratio = if text_bytes == 0 {
-            0.0
-        } else {
-            physical as f64 / text_bytes as f64
-        };
+        let ratio = physical as f64 / text_bytes as f64;
         let (query_p95, query_reports) = benchmark_queries(&reader, options.runs)?;
         worst_query_p95 = worst_query_p95.max(query_p95);
         total_text_bytes = total_text_bytes.saturating_add(text_bytes);
@@ -120,14 +135,9 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
             "queries": query_reports,
             "components": sqlite_components(&search_path)?,
         }));
-        writer.release()?;
     }
 
-    let aggregate_ratio = if total_text_bytes == 0 {
-        0.0
-    } else {
-        total_search_bytes as f64 / total_text_bytes as f64
-    };
+    let aggregate_ratio = total_search_bytes as f64 / total_text_bytes as f64;
     println!(
         "LINEAGE_SEARCH_BENCH_JSON {}",
         serde_json::to_string(&serde_json::json!({

@@ -7201,6 +7201,7 @@ pub(crate) mod tests {
                         status: ToolStatus::Ok,
                         elapsed: Some(std::time::Duration::from_millis(1_250)),
                         called_at_ms: None,
+                        elapsed_active: false,
                         output: Some(Box::new(ToolOutput {
                             content: output,
                             is_error: false,

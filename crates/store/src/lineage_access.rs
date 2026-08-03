@@ -886,6 +886,14 @@ impl LineageSessionReader {
         }
     }
 
+    pub fn spawn_search_projector(&self) -> Result<crate::LineageSearchProjector> {
+        crate::LineageSearchProjector::spawn(
+            self.path.clone(),
+            self.lineage.clone(),
+            self.branch.clone(),
+        )
+    }
+
     pub fn search_transcript_candidate_page(
         &self,
         query: &str,

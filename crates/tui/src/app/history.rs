@@ -2397,7 +2397,7 @@ mod checkpoint_tests {
 
     fn assert_cached_persist_db() {
         assert_eq!(
-            perf_duration_max("store:db:open_read_write"),
+            perf_duration_max("store:lineage:open_read_write"),
             0,
             "hot suffix save should reuse the persist worker database connection"
         );

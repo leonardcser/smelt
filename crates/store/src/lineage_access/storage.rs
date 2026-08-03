@@ -109,6 +109,7 @@ pub(super) fn lineage_database_path(root: &Path, lineage: &LineageId) -> PathBuf
 }
 
 pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<Connection> {
+    let _perf = smelt_perf::perf::begin("store:lineage:open_read_write");
     reject_symlink(path)?;
     let new_database = !path.exists();
     if let Some(parent) = path.parent() {

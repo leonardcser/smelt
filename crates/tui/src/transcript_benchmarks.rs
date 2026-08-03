@@ -1595,7 +1595,7 @@ fn duration_total_us(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 
 fn print_resume_perf(label: &str, snapshot: &smelt_perf::perf::Snapshot) {
     for row in snapshot.durations.iter().filter(|row| {
         row.label.starts_with("session:")
-            || row.label.starts_with("store:db:")
+            || row.label.starts_with("store:lineage:")
             || row.label == "cmd:dispatch"
             || row.label == "lua:cmd"
             || row.label == "lua:timer"
@@ -1644,12 +1644,12 @@ fn resume_dialog_open_benchmark_suite() {
         app.state().active_modal.is_some(),
         "resume command did not open a dialog"
     );
-    let open_ro = duration_count(&open_snapshot, "store:db:open_read_only");
+    let open_ro = duration_count(&open_snapshot, "store:lineage:open_read_only");
     assert!(
         open_ro <= 8,
         "opening /resume opened {open_ro} read-only sqlite databases for {count} sessions; listing must not be proportional to session count"
     );
-    let open_rw = duration_count(&open_snapshot, "store:db:open_read_write");
+    let open_rw = duration_count(&open_snapshot, "store:lineage:open_read_write");
     assert!(
         open_rw <= 8,
         "opening /resume opened {open_rw} read-write sqlite databases for {count} sessions; listing must not backfill sidecars on the foreground path"
@@ -1689,8 +1689,8 @@ fn resume_dialog_open_benchmark_suite() {
         seeded_preview_bytes,
         open_ms,
         preview_ms,
-        duration_count(&open_snapshot, "store:db:open_read_only"),
-        duration_count(&open_snapshot, "store:db:open_read_write"),
+        duration_count(&open_snapshot, "store:lineage:open_read_only"),
+        duration_count(&open_snapshot, "store:lineage:open_read_write"),
         duration_total_us(&open_snapshot, "session:list_page"),
         duration_total_us(&open_snapshot, "session:render_preview_into")
             + duration_total_us(&preview_snapshot, "session:render_preview_into"),
@@ -2433,6 +2433,7 @@ fn heterogeneous_hot_path_history_item(idx: usize, target_bytes: usize) -> proto
                     })),
                 },
                 elapsed_ms: Some(idx as u64),
+                called_at_ms: None,
             }],
         )),
         _ => protocol::HistoryItem::note(protocol::HistoryNote::process_status(format!(
@@ -2578,13 +2579,13 @@ fn assert_hot_path_at_most(
 }
 
 fn assert_cached_persist_db(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
-    let open_us = perf_duration_max(snapshot, "store:db:open_read_write");
+    let open_us = perf_duration_max(snapshot, "store:lineage:open_read_write");
     assert_eq!(
         open_us, 0,
         "{operation} reopened the session database in {open_us}us instead of reusing the persist worker connection"
     );
     assert_eq!(
-        perf_value_max(snapshot, "store:db:cached_read_write"),
+        perf_value_max(snapshot, "store:lineage:cached_read_write"),
         1,
         "{operation} did not reuse the persist worker database connection"
     );
@@ -2614,7 +2615,7 @@ fn capture_hot_path_sample(
         ms,
         queue_wait_ms: perf_value_max(&snapshot, "persist:submit_turn:queue_wait_ms"),
         submit_turn_us: perf_duration_max(&snapshot, "persist:submit_turn"),
-        transaction_commit_us: perf_duration_max(&snapshot, "store:db:transaction_commit"),
+        transaction_commit_us: perf_duration_max(&snapshot, "store:lineage:transaction_commit"),
         begin_turn_us: perf_duration_max(&snapshot, "agent:begin_turn"),
         project_context_us: perf_duration_max(&snapshot, "agent:project_context"),
         thread_allocs: allocs_after.saturating_sub(allocs_before),
@@ -2853,7 +2854,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         sample.operation
     );
     assert_eq!(
-        perf_duration_max(&snapshot, "store:db:transaction_commit"),
+        perf_duration_max(&snapshot, "store:lineage:transaction_commit"),
         0,
         "{} committed low-priority completion metadata in the engine-event hot path",
         sample.operation

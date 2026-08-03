@@ -3082,7 +3082,7 @@ mod tests {
         let read_only_count = snapshot
             .durations
             .iter()
-            .find(|row| row.label == "store:db:open_read_only")
+            .find(|row| row.label == "store:lineage:open_read_only")
             .map(|row| row.count)
             .unwrap_or(0);
         assert_eq!(
@@ -3092,7 +3092,7 @@ mod tests {
         let read_write_count = snapshot
             .durations
             .iter()
-            .find(|row| row.label == "store:db:open_read_write")
+            .find(|row| row.label == "store:lineage:open_read_write")
             .map(|row| row.count)
             .unwrap_or(0);
         assert_eq!(

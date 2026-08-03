@@ -56,6 +56,9 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      - name: Build transcript benchmark target
+        run: cargo test -p smelt-tui --features "harness transcript-bench" --no-run
+
       - name: Run tests with coverage floor
         run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
 
