@@ -715,7 +715,8 @@ UTF-8 bytes as the denominator.
 The transcript root is decomposed into:
 
 - Immutable sealed corpus segments containing 2 MiB of logical searchable text.
-- 32 KiB search documents whose 1 KiB overlap is bounded by each canonical record.
+- 32 KiB search documents that pack consecutive records; oversized records use 1 KiB
+  record-local overlap.
 - A small right-edge frontier and dirty in-memory suffix searched directly.
 
 Stage 2 selected these sizes from the complete 1 to 8 MiB segment and 4 to 32 KiB
@@ -950,7 +951,7 @@ and single-format storage gates.
 ### Stage 5 implementation evidence
 
 Each lineage owns a disposable `search.db` with independently validated format
-version 3. The canonical lineage schema is version 1 and contains no transcript
+version 4. The canonical lineage schema is version 1 and contains no transcript
 search tables, FTS virtual tables, searchable-text copies, or search-maintenance
 triggers. A dormant per-lineage projector does no work until search is activated, and
 canonical submission only coalesces an asynchronous wake after activation. An
@@ -960,10 +961,11 @@ search and proves that Enter creates no `search.db`.
 Projection groups consecutive immutable transcript leaves into deterministic source
 segments bounded by 2 MiB and 32 leaves. The group identity hashes the ordered leaf
 IDs, so forks reuse complete shared groups and appends rebuild at most the bounded
-open suffix. Each installed segment uses 32 KiB record-local documents with 1 KiB
-overlap, contentless trigram FTS5 with `detail=none` and `columnsize=0`, compressed
-Unicode scalar and bigram postings, integer internal segment keys, a checksum, and an
-atomic completion marker. Boundary regressions cover exactly 2 MiB, crossing 2 MiB,
+open suffix. Each installed segment packs consecutive short records into 32 KiB
+documents and splits oversized records with 1 KiB overlap. It uses contentless trigram
+FTS5 with `detail=none` and `columnsize=0`, compressed Unicode scalar and bigram
+postings, integer internal segment keys, a checksum, and an atomic completion marker.
+Boundary regressions cover exactly 2 MiB, crossing 2 MiB,
 32 leaves, and 33 leaves and prove sealed group identities remain stable.
 
 Queries combine ready reachable segments with exact canonical scans for missing or
@@ -1132,6 +1134,11 @@ aggregate ratio. The worst query-class p95 was 47.252 ms. The fresh optimized ra
 typing and redraw gate measured 0.471 ms p95 with an artificial 80 ms worker delay;
 the unoptimized validation build measured 2.725 ms. Both remain below the 16 ms frame
 budget, and the persisted search result remains below the 50 ms warm-result ceiling.
+
+A post-review short-record stress fixture with 10,000 transcript records measured
+3,174,608 logical searchable bytes and 413,696 physical derived bytes, a 13.031
+percent ratio. Its worst 20-run query-class p95 was 36.880 ms. This fixture guards
+against per-record document overhead silently violating the same storage ceiling.
 
 The complete quality matrix passes:
 

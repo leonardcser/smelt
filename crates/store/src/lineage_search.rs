@@ -14,7 +14,7 @@ use crate::error::{Result, StoreError};
 use crate::history::{StoredTranscriptBlock, TranscriptSearchCandidate, TranscriptSearchDirection};
 use crate::lineage::{self, BranchId, LineageId, TranscriptSearchLeaf};
 
-pub const SEARCH_FORMAT_VERSION: i32 = 3;
+pub const SEARCH_FORMAT_VERSION: i32 = 4;
 const SEARCH_DB_FILENAME: &str = "search.db";
 const SEARCH_SEGMENT_BYTES: u64 = 2 * 1024 * 1024;
 const SEARCH_SEGMENT_MAX_LEAVES: usize = 32;
@@ -70,18 +70,17 @@ CREATE TABLE search_source_leaves (
 CREATE TABLE search_docs (
     doc_id INTEGER PRIMARY KEY,
     segment_id INTEGER NOT NULL,
-    record_ordinal INTEGER NOT NULL CHECK (record_ordinal >= 0),
-    block_idx INTEGER NOT NULL CHECK (block_idx >= 0),
-    core_start INTEGER NOT NULL CHECK (core_start >= 0),
-    core_end INTEGER NOT NULL CHECK (core_end > core_start),
-    record_end INTEGER NOT NULL CHECK (record_end >= core_end),
+    first_record_ordinal INTEGER NOT NULL CHECK (first_record_ordinal >= 0),
+    last_record_ordinal INTEGER NOT NULL CHECK (last_record_ordinal >= first_record_ordinal),
+    min_block_idx INTEGER NOT NULL CHECK (min_block_idx >= 0),
+    max_block_idx INTEGER NOT NULL CHECK (max_block_idx >= min_block_idx),
     FOREIGN KEY (segment_id) REFERENCES search_segments(segment_id)
         ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX search_docs_segment_idx
     ON search_docs(segment_id, doc_id);
 CREATE INDEX search_docs_block_idx
-    ON search_docs(segment_id, block_idx, doc_id);
+    ON search_docs(segment_id, min_block_idx, max_block_idx, doc_id);
 CREATE VIRTUAL TABLE search_fts USING fts5(
     text,
     content='',
@@ -271,11 +270,19 @@ struct SearchSegmentRow {
 #[derive(Clone, Debug)]
 struct SearchDoc {
     doc_id: u64,
-    record_ordinal: usize,
-    block_idx: u64,
-    core_start: usize,
-    core_end: usize,
-    record_end: usize,
+    first_record_ordinal: usize,
+    last_record_ordinal: usize,
+    min_block_idx: u64,
+    max_block_idx: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SearchDocumentInput {
+    first_record_ordinal: usize,
+    last_record_ordinal: usize,
+    min_block_idx: u64,
+    max_block_idx: u64,
+    text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -457,6 +464,94 @@ fn search_source_records_at(
     Ok(records)
 }
 
+fn search_document_inputs(records: &[StoredTranscriptBlock]) -> Result<Vec<SearchDocumentInput>> {
+    let mut documents = Vec::new();
+    let mut pending: Option<SearchDocumentInput> = None;
+
+    for (record_ordinal, record) in records.iter().enumerate() {
+        let record_text = record.indexed_text.as_str();
+        if record_text.is_empty() {
+            if let Some(document) = &mut pending {
+                document.last_record_ordinal = record_ordinal;
+                document.min_block_idx = document.min_block_idx.min(record.block_idx);
+                document.max_block_idx = document.max_block_idx.max(record.block_idx);
+            }
+            continue;
+        }
+
+        if record_text.len() > SEARCH_DOCUMENT_BYTES {
+            if let Some(document) = pending.take() {
+                documents.push(document);
+            }
+            let mut core_start = 0;
+            while core_start < record_text.len() {
+                let desired_end = core_start
+                    .saturating_add(SEARCH_DOCUMENT_BYTES)
+                    .min(record_text.len());
+                let mut core_end = text::snap(record_text, desired_end);
+                if core_end <= core_start {
+                    core_end = text::next_char_boundary(record_text, desired_end);
+                }
+                if core_end <= core_start {
+                    return Err(StoreError::Integrity(
+                        "search document boundary did not make progress".into(),
+                    ));
+                }
+                let extended_end = text::snap(
+                    record_text,
+                    core_end
+                        .saturating_add(SEARCH_DOCUMENT_OVERLAP_BYTES)
+                        .min(record_text.len()),
+                );
+                documents.push(SearchDocumentInput {
+                    first_record_ordinal: record_ordinal,
+                    last_record_ordinal: record_ordinal,
+                    min_block_idx: record.block_idx,
+                    max_block_idx: record.block_idx,
+                    text: text::slice(record_text, core_start..extended_end).to_string(),
+                });
+                core_start = core_end;
+            }
+            continue;
+        }
+
+        let would_overflow = pending.as_ref().is_some_and(|document| {
+            document
+                .text
+                .len()
+                .saturating_add(1)
+                .saturating_add(record_text.len())
+                > SEARCH_DOCUMENT_BYTES
+        });
+        if would_overflow {
+            documents.push(pending.take().expect("checked pending search document"));
+        }
+        match &mut pending {
+            Some(document) => {
+                document.text.push('\n');
+                document.text.push_str(record_text);
+                document.last_record_ordinal = record_ordinal;
+                document.min_block_idx = document.min_block_idx.min(record.block_idx);
+                document.max_block_idx = document.max_block_idx.max(record.block_idx);
+            }
+            None => {
+                pending = Some(SearchDocumentInput {
+                    first_record_ordinal: record_ordinal,
+                    last_record_ordinal: record_ordinal,
+                    min_block_idx: record.block_idx,
+                    max_block_idx: record.block_idx,
+                    text: record_text.to_string(),
+                });
+            }
+        }
+    }
+
+    if let Some(document) = pending {
+        documents.push(document);
+    }
+    Ok(documents)
+}
+
 fn project_current_branch(
     canonical_path: &Path,
     lineage: &LineageId,
@@ -592,59 +687,44 @@ pub(crate) fn reclaim_one_obsolete_search_segment(
             }
         };
 
+        let source_documents = search_document_inputs(&source_records)?;
         let tx = search.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut docs = tx.prepare(
-                "SELECT doc_id, record_ordinal, core_start, core_end, record_end
-             FROM search_docs
-             WHERE segment_id = ?1
-             ORDER BY doc_id",
+                "SELECT doc_id, first_record_ordinal, last_record_ordinal,
+                        min_block_idx, max_block_idx
+                 FROM search_docs
+                 WHERE segment_id = ?1
+                 ORDER BY doc_id",
             )?;
-            let rows =
-                docs.query_map([sql_i64(target.segment_id, "search segment ID")?], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })?;
+            let rows = docs
+                .query_map(
+                    [sql_i64(target.segment_id, "search segment ID")?],
+                    decode_search_doc,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if rows.len() != source_documents.len() {
+                return Err(StoreError::Integrity(
+                    "derived search document count does not match its source".into(),
+                ));
+            }
             let mut delete_fts = tx.prepare(
                 "INSERT INTO search_fts(search_fts, rowid, text)
-             VALUES ('delete', ?1, ?2)",
+                 VALUES ('delete', ?1, ?2)",
             )?;
-            for row in rows {
-                let (doc_id, ordinal, core_start, core_end, record_end) = row?;
-                let ordinal = nonnegative_usize(ordinal, "search record ordinal")?;
-                let core_start = nonnegative_usize(core_start, "search document start")?;
-                let core_end = nonnegative_usize(core_end, "search document end")?;
-                let record_end = nonnegative_usize(record_end, "search record end")?;
-                let text = source_records
-                    .get(ordinal)
-                    .map(|record| record.indexed_text.as_str())
-                    .ok_or_else(|| {
-                        StoreError::Integrity(
-                            "derived search document references a missing source record".into(),
-                        )
-                    })?;
-                if record_end != text.len()
-                    || core_start >= core_end
-                    || core_end > text.len()
-                    || text::snap(text, core_start) != core_start
-                    || text::snap(text, core_end) != core_end
-                {
-                    return Err(StoreError::Integrity(
-                        "derived search document has invalid source boundaries".into(),
-                    ));
-                }
-                let extended_end = text::snap(
-                    text,
-                    core_end
-                        .saturating_add(SEARCH_DOCUMENT_OVERLAP_BYTES)
-                        .min(text.len()),
-                );
-                delete_fts.execute(params![doc_id, text::slice(text, core_start..extended_end)])?;
+            for (doc, source) in rows.into_iter().zip(source_documents) {
+                validate_search_doc(
+                    &doc,
+                    source.first_record_ordinal,
+                    source.last_record_ordinal,
+                    source.min_block_idx,
+                    source.max_block_idx,
+                    &target,
+                )?;
+                delete_fts.execute(params![
+                    sql_i64(doc.doc_id, "search document ID")?,
+                    source.text
+                ])?;
             }
         }
         let deleted_segments = tx.execute(
@@ -898,6 +978,7 @@ fn build_search_segment(
             source.item_count
         )));
     }
+    let documents = search_document_inputs(records)?;
 
     let tx = conn.transaction()?;
     tx.execute(
@@ -941,85 +1022,59 @@ fn build_search_segment(
     let mut doc_count = 0_u64;
     let mut logical_text_bytes = 0_u64;
     let mut checksum = Sha256::new();
-    checksum.update(b"smelt-lineage-search-segment-v2\0");
+    checksum.update(b"smelt-lineage-search-segment-v3\0");
     checksum.update(source.id.as_bytes());
+    for (record_ordinal, record) in records.iter().enumerate() {
+        logical_text_bytes = logical_text_bytes.saturating_add(record.indexed_text.len() as u64);
+        checksum.update((record_ordinal as u64).to_le_bytes());
+        checksum.update(record.block_idx.to_le_bytes());
+        checksum.update((record.indexed_text.len() as u64).to_le_bytes());
+        checksum.update(record.indexed_text.as_bytes());
+    }
     let mut postings: BTreeMap<(u8, u64), Vec<u64>> = BTreeMap::new();
 
     {
         let mut insert_doc = tx.prepare(
             "INSERT INTO search_docs (
-                 doc_id, segment_id, record_ordinal, block_idx,
-                 core_start, core_end, record_end
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 doc_id, segment_id, first_record_ordinal, last_record_ordinal,
+                 min_block_idx, max_block_idx
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         let mut insert_fts = tx.prepare("INSERT INTO search_fts(rowid, text) VALUES (?1, ?2)")?;
-        for (record_ordinal, record) in records.iter().enumerate() {
+        for document in documents {
             if cancelled() {
                 return Ok(false);
             }
-            let text = record.indexed_text.as_str();
-            logical_text_bytes = logical_text_bytes.saturating_add(text.len() as u64);
-            checksum.update((record_ordinal as u64).to_le_bytes());
-            checksum.update(record.block_idx.to_le_bytes());
-            checksum.update((text.len() as u64).to_le_bytes());
-            checksum.update(text.as_bytes());
-            let mut core_start = 0_usize;
-            while core_start < text.len() {
-                if cancelled() {
-                    return Ok(false);
-                }
-                let desired_end = core_start
-                    .saturating_add(SEARCH_DOCUMENT_BYTES)
-                    .min(text.len());
-                let mut core_end = text::snap(text, desired_end);
-                if core_end <= core_start {
-                    core_end = text::next_char_boundary(text, desired_end);
-                }
-                if core_end <= core_start {
-                    return Err(StoreError::Integrity(
-                        "search document boundary did not make progress".into(),
-                    ));
-                }
-                let extended_end = text::snap(
-                    text,
-                    core_end
-                        .saturating_add(SEARCH_DOCUMENT_OVERLAP_BYTES)
-                        .min(text.len()),
-                );
-                let indexed = text::slice(text, core_start..extended_end);
-                let doc_id = u64::try_from(next_doc_id)
-                    .map_err(|_| StoreError::Integrity("search document ID is negative".into()))?;
-                insert_doc.execute(params![
-                    next_doc_id,
-                    sql_i64(segment_id, "search segment ID")?,
-                    sql_i64(record_ordinal, "search record ordinal")?,
-                    sql_i64(record.block_idx, "search block index")?,
-                    sql_i64(core_start, "search document start")?,
-                    sql_i64(core_end, "search document end")?,
-                    sql_i64(text.len(), "search record end")?,
-                ])?;
-                insert_fts.execute(params![next_doc_id, indexed])?;
-                let mut chars = HashSet::new();
-                let mut bigrams = HashSet::new();
-                collect_short_hashes(indexed, &mut chars, &mut bigrams);
-                for hash in chars {
-                    postings.entry((1, hash)).or_default().push(doc_id);
-                }
-                for hash in bigrams {
-                    postings.entry((2, hash)).or_default().push(doc_id);
-                }
-                checksum.update(doc_id.to_le_bytes());
-                checksum.update((record_ordinal as u64).to_le_bytes());
-                checksum.update(record.block_idx.to_le_bytes());
-                checksum.update((core_start as u64).to_le_bytes());
-                checksum.update((core_end as u64).to_le_bytes());
-                checksum.update((text.len() as u64).to_le_bytes());
-                next_doc_id = next_doc_id
-                    .checked_add(1)
-                    .ok_or_else(|| StoreError::Integrity("search document ID overflow".into()))?;
-                doc_count = doc_count.saturating_add(1);
-                core_start = core_end;
+            let doc_id = u64::try_from(next_doc_id)
+                .map_err(|_| StoreError::Integrity("search document ID is negative".into()))?;
+            insert_doc.execute(params![
+                next_doc_id,
+                sql_i64(segment_id, "search segment ID")?,
+                sql_i64(document.first_record_ordinal, "search first record ordinal")?,
+                sql_i64(document.last_record_ordinal, "search last record ordinal")?,
+                sql_i64(document.min_block_idx, "search minimum block index")?,
+                sql_i64(document.max_block_idx, "search maximum block index")?,
+            ])?;
+            insert_fts.execute(params![next_doc_id, document.text])?;
+            let mut chars = HashSet::new();
+            let mut bigrams = HashSet::new();
+            collect_short_hashes(&document.text, &mut chars, &mut bigrams);
+            for hash in chars {
+                postings.entry((1, hash)).or_default().push(doc_id);
             }
+            for hash in bigrams {
+                postings.entry((2, hash)).or_default().push(doc_id);
+            }
+            checksum.update(doc_id.to_le_bytes());
+            checksum.update((document.first_record_ordinal as u64).to_le_bytes());
+            checksum.update((document.last_record_ordinal as u64).to_le_bytes());
+            checksum.update(document.min_block_idx.to_le_bytes());
+            checksum.update(document.max_block_idx.to_le_bytes());
+            checksum.update((document.text.len() as u64).to_le_bytes());
+            next_doc_id = next_doc_id
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Integrity("search document ID overflow".into()))?;
+            doc_count = doc_count.saturating_add(1);
         }
     }
 
@@ -1169,7 +1224,7 @@ fn search_segment_source(
 fn validate_search_segment_structure(conn: &Connection, segment: &SearchSegmentRow) -> Result<()> {
     search_segment_source(conn, segment)?;
     let (doc_count, first_doc_id, last_doc_id, max_ordinal) = conn.query_row(
-        "SELECT COUNT(*), MIN(doc_id), MAX(doc_id), MAX(record_ordinal)
+        "SELECT COUNT(*), MIN(doc_id), MAX(doc_id), MAX(last_record_ordinal)
          FROM search_docs WHERE segment_id = ?1",
         [sql_i64(segment.segment_id, "search segment ID")?],
         |row| {
@@ -1417,6 +1472,10 @@ fn search_ready_short_sources(
         TranscriptSearchDirection::Forward => "s.min_block_idx",
         TranscriptSearchDirection::Backward => "s.max_block_idx",
     };
+    let doc_bound_column = match request.direction {
+        TranscriptSearchDirection::Forward => "min_block_idx",
+        TranscriptSearchDirection::Backward => "max_block_idx",
+    };
     let mut output: Vec<TranscriptSearchCandidate> = Vec::new();
     let mut seen = HashSet::new();
     for batch in sources.chunks(SEGMENT_BATCH) {
@@ -1478,14 +1537,15 @@ fn search_ready_short_sources(
                 request
                     .origin_block_idx
                     .map_or_else(String::new, |_| match request.direction {
-                        TranscriptSearchDirection::Forward => "AND block_idx >= ?2".into(),
-                        TranscriptSearchDirection::Backward => "AND block_idx <= ?2".into(),
+                        TranscriptSearchDirection::Forward => "AND max_block_idx >= ?2".into(),
+                        TranscriptSearchDirection::Backward => "AND min_block_idx <= ?2".into(),
                     });
             let docs_sql = format!(
-                "SELECT doc_id, record_ordinal, block_idx, core_start, core_end, record_end
+                "SELECT doc_id, first_record_ordinal, last_record_ordinal,
+                        min_block_idx, max_block_idx
                  FROM search_docs
                  WHERE segment_id = ?1 {origin_filter}
-                 ORDER BY block_idx {order}, doc_id {order}"
+                 ORDER BY {doc_bound_column} {order}, doc_id {order}"
             );
             let mut docs_statement = search.prepare(&docs_sql)?;
             let segment_id_sql = sql_i64(segment_id, "search segment ID")?;
@@ -1506,7 +1566,7 @@ fn search_ready_short_sources(
             }
             let record_ordinals = candidate_docs
                 .iter()
-                .map(|doc| doc.record_ordinal)
+                .flat_map(|doc| search_doc_record_ordinals(doc, request.direction))
                 .collect::<Vec<_>>();
             let records = search_source_records_at(
                 request.canonical,
@@ -1515,25 +1575,20 @@ fn search_ready_short_sources(
                 &record_ordinals,
                 request.cancelled,
             )?;
-            let mut source_matches = 0_usize;
             for doc in candidate_docs {
                 request.check_cancelled()?;
-                let record = records.get(&doc.record_ordinal).ok_or_else(|| {
-                    StoreError::Integrity(
-                        "derived short posting references a missing record".into(),
-                    )
-                })?;
-                validate_search_doc(&doc, record, segment)?;
-                if record.indexed_text.contains(request.query) && seen.insert(record.block_idx) {
-                    output.push(TranscriptSearchCandidate {
-                        block_idx: record.block_idx,
-                        history_idx: record.history_idx,
-                    });
-                    source_matches += 1;
-                    if source_matches >= request.limit {
-                        break;
-                    }
+                if candidate_doc_is_beyond_page(&doc, &output, request) {
+                    break;
                 }
+                append_search_doc_matches(
+                    &doc,
+                    segment,
+                    request,
+                    |ordinal| records.get(&ordinal),
+                    &mut seen,
+                    &mut output,
+                )?;
+                trim_candidate_page(&mut output, request.direction, request.limit);
             }
             trim_candidate_page(&mut output, request.direction, request.limit);
         }
@@ -1553,6 +1608,10 @@ fn search_ready_fts_sources(
         TranscriptSearchDirection::Forward => "ASC",
         TranscriptSearchDirection::Backward => "DESC",
     };
+    let doc_bound_column = match request.direction {
+        TranscriptSearchDirection::Forward => "d.min_block_idx",
+        TranscriptSearchDirection::Backward => "d.max_block_idx",
+    };
     let mut output = Vec::new();
     let mut records_by_segment = HashMap::new();
     let mut seen = HashSet::new();
@@ -1568,21 +1627,21 @@ fn search_ready_fts_sources(
                 .origin_block_idx
                 .map_or_else(String::new, |_| match request.direction {
                     TranscriptSearchDirection::Forward => {
-                        format!("AND d.block_idx >= ?{origin_parameter}")
+                        format!("AND d.max_block_idx >= ?{origin_parameter}")
                     }
                     TranscriptSearchDirection::Backward => {
-                        format!("AND d.block_idx <= ?{origin_parameter}")
+                        format!("AND d.min_block_idx <= ?{origin_parameter}")
                     }
                 });
         let sql = format!(
-            "SELECT d.segment_id, d.doc_id, d.record_ordinal, d.block_idx,
-                    d.core_start, d.core_end, d.record_end
+            "SELECT d.segment_id, d.doc_id, d.first_record_ordinal,
+                    d.last_record_ordinal, d.min_block_idx, d.max_block_idx
              FROM search_fts f
              JOIN search_docs d ON d.doc_id = f.rowid
              WHERE search_fts MATCH ?1
                AND d.segment_id IN ({placeholders})
                {origin_filter}
-             ORDER BY d.block_idx {order}, d.doc_id {order}"
+             ORDER BY {doc_bound_column} {order}, d.doc_id {order}"
         );
         let mut parameters = Vec::with_capacity(batch.len() + 2);
         parameters.push(rusqlite::types::Value::Text(expression.clone()));
@@ -1606,7 +1665,6 @@ fn search_ready_fts_sources(
             .collect::<HashMap<_, _>>();
         let mut statement = search.prepare(&sql)?;
         let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
-        let mut batch_matches = 0_usize;
         while let Some(row) = rows.next()? {
             request.check_cancelled()?;
             let segment_id = row_nonnegative_u64(row, 0)?;
@@ -1616,6 +1674,16 @@ fn search_ready_fts_sources(
                 ));
             };
             let (source, segment) = &batch[source_index];
+            let doc = SearchDoc {
+                doc_id: row_nonnegative_u64(row, 1)?,
+                first_record_ordinal: row_nonnegative_usize(row, 2)?,
+                last_record_ordinal: row_nonnegative_usize(row, 3)?,
+                min_block_idx: row_nonnegative_u64(row, 4)?,
+                max_block_idx: row_nonnegative_u64(row, 5)?,
+            };
+            if candidate_doc_is_beyond_page(&doc, &output, request) {
+                break;
+            }
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 records_by_segment.entry(segment_id)
             {
@@ -1626,37 +1694,48 @@ fn search_ready_fts_sources(
                     request.cancelled,
                 )?);
             }
-            let doc = SearchDoc {
-                doc_id: row_nonnegative_u64(row, 1)?,
-                record_ordinal: row_nonnegative_usize(row, 2)?,
-                block_idx: row_nonnegative_u64(row, 3)?,
-                core_start: row_nonnegative_usize(row, 4)?,
-                core_end: row_nonnegative_usize(row, 5)?,
-                record_end: row_nonnegative_usize(row, 6)?,
-            };
-            let record = records_by_segment
+            let records = records_by_segment
                 .get(&segment_id)
-                .and_then(|records| records.get(doc.record_ordinal))
-                .ok_or_else(|| {
-                    StoreError::Integrity(
-                        "derived FTS candidate references a missing record".into(),
-                    )
-                })?;
-            validate_search_doc(&doc, record, segment)?;
-            if record.indexed_text.contains(request.query) && seen.insert(record.block_idx) {
-                output.push(TranscriptSearchCandidate {
-                    block_idx: record.block_idx,
-                    history_idx: record.history_idx,
-                });
-                batch_matches += 1;
-                if batch_matches >= request.limit {
-                    break;
-                }
-            }
+                .expect("loaded derived search source records");
+            append_search_doc_matches(
+                &doc,
+                segment,
+                request,
+                |ordinal| records.get(ordinal),
+                &mut seen,
+                &mut output,
+            )?;
+            trim_candidate_page(&mut output, request.direction, request.limit);
         }
         trim_candidate_page(&mut output, request.direction, request.limit);
     }
     Ok(output)
+}
+
+fn candidate_doc_is_beyond_page(
+    doc: &SearchDoc,
+    candidates: &[TranscriptSearchCandidate],
+    request: &CandidateSearch<'_>,
+) -> bool {
+    if candidates.len() < request.limit {
+        return false;
+    }
+    match request.direction {
+        TranscriptSearchDirection::Forward => {
+            doc.min_block_idx
+                > candidates
+                    .last()
+                    .expect("bounded forward search page")
+                    .block_idx
+        }
+        TranscriptSearchDirection::Backward => {
+            doc.max_block_idx
+                < candidates
+                    .first()
+                    .expect("bounded backward search page")
+                    .block_idx
+        }
+    }
 }
 
 fn trim_candidate_page(
@@ -1674,25 +1753,89 @@ fn trim_candidate_page(
 
 fn validate_search_doc(
     doc: &SearchDoc,
-    record: &StoredTranscriptBlock,
+    first_record_ordinal: usize,
+    last_record_ordinal: usize,
+    min_block_idx: u64,
+    max_block_idx: u64,
     segment: &SearchSegmentRow,
 ) -> Result<()> {
-    if doc.block_idx != record.block_idx
-        || doc.core_start >= doc.core_end
-        || doc.core_end > doc.record_end
-        || doc.record_end != record.indexed_text.len()
-        || text::snap(&record.indexed_text, doc.core_start) != doc.core_start
-        || text::snap(&record.indexed_text, doc.core_end) != doc.core_end
+    if doc.first_record_ordinal != first_record_ordinal
+        || doc.last_record_ordinal != last_record_ordinal
+        || doc.min_block_idx != min_block_idx
+        || doc.max_block_idx != max_block_idx
+        || doc.first_record_ordinal > doc.last_record_ordinal
+        || doc.min_block_idx > doc.max_block_idx
+        || doc.last_record_ordinal as u64 >= segment.source_item_count
         || segment
             .first_doc_id
             .zip(segment.last_doc_id)
             .is_none_or(|(first, last)| doc.doc_id < first || doc.doc_id > last)
     {
         return Err(StoreError::Integrity(
-            "derived search document does not match its canonical record".into(),
+            "derived search document does not match its canonical records".into(),
         ));
     }
     Ok(())
+}
+
+fn append_search_doc_matches<'a>(
+    doc: &SearchDoc,
+    segment: &SearchSegmentRow,
+    request: &CandidateSearch<'_>,
+    record_at: impl Fn(usize) -> Option<&'a StoredTranscriptBlock>,
+    seen: &mut HashSet<u64>,
+    candidates: &mut Vec<TranscriptSearchCandidate>,
+) -> Result<()> {
+    if doc.first_record_ordinal > doc.last_record_ordinal
+        || doc.last_record_ordinal as u64 >= segment.source_item_count
+    {
+        return Err(StoreError::Integrity(
+            "derived search document has an invalid record range".into(),
+        ));
+    }
+    let mut min_block_idx = u64::MAX;
+    let mut max_block_idx = 0;
+    let mut matches = Vec::new();
+    for ordinal in search_doc_record_ordinals(doc, request.direction) {
+        let record = record_at(ordinal).ok_or_else(|| {
+            StoreError::Integrity("derived search document references a missing record".into())
+        })?;
+        min_block_idx = min_block_idx.min(record.block_idx);
+        max_block_idx = max_block_idx.max(record.block_idx);
+        if origin_allows(
+            record.block_idx,
+            request.origin_block_idx,
+            request.direction,
+        ) && record.indexed_text.contains(request.query)
+        {
+            matches.push(TranscriptSearchCandidate {
+                block_idx: record.block_idx,
+                history_idx: record.history_idx,
+            });
+        }
+    }
+    validate_search_doc(
+        doc,
+        doc.first_record_ordinal,
+        doc.last_record_ordinal,
+        min_block_idx,
+        max_block_idx,
+        segment,
+    )?;
+    candidates.extend(
+        matches
+            .into_iter()
+            .filter(|candidate| seen.insert(candidate.block_idx)),
+    );
+    Ok(())
+}
+
+fn search_doc_record_ordinals(doc: &SearchDoc, direction: TranscriptSearchDirection) -> Vec<usize> {
+    let ordinals = doc.first_record_ordinal..=doc.last_record_ordinal;
+    match direction {
+        TranscriptSearchDirection::Forward => ordinals.collect(),
+        TranscriptSearchDirection::Backward => ordinals.rev().collect(),
+    }
 }
 
 fn direct_search_segment(
@@ -1777,11 +1920,10 @@ fn origin_allows(
 fn decode_search_doc(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchDoc> {
     Ok(SearchDoc {
         doc_id: row_nonnegative_u64(row, 0)?,
-        record_ordinal: row_nonnegative_usize(row, 1)?,
-        block_idx: row_nonnegative_u64(row, 2)?,
-        core_start: row_nonnegative_usize(row, 3)?,
-        core_end: row_nonnegative_usize(row, 4)?,
-        record_end: row_nonnegative_usize(row, 5)?,
+        first_record_ordinal: row_nonnegative_usize(row, 1)?,
+        last_record_ordinal: row_nonnegative_usize(row, 2)?,
+        min_block_idx: row_nonnegative_u64(row, 3)?,
+        max_block_idx: row_nonnegative_u64(row, 4)?,
     })
 }
 
@@ -2140,6 +2282,55 @@ mod tests {
         assert_eq!(over_leaf_limit[0].id, leaf_limit_group[0].id);
         assert_eq!(over_leaf_limit[0].leaves.len(), SEARCH_SEGMENT_MAX_LEAVES);
         assert_eq!(over_leaf_limit[1].leaves.len(), 1);
+    }
+
+    #[test]
+    fn search_documents_pack_short_records_and_overlap_long_records() {
+        let record = |block_idx: u64, text: String| StoredTranscriptBlock {
+            block_idx,
+            history_idx: None,
+            kind: "assistant".into(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: format!("{block_idx:064x}"),
+            estimated_text_bytes: text.len() as u64,
+            preview_text: text.clone(),
+            block_json: "{}".into(),
+            indexed_text: text,
+            origin_json: None,
+            tool_state_json: None,
+        };
+        let long_text = "é".repeat(SEARCH_DOCUMENT_BYTES / 2 + 100);
+        let records = vec![
+            record(10, "alpha".into()),
+            record(100, String::new()),
+            record(30, "beta".into()),
+            record(40, long_text),
+        ];
+
+        let documents = search_document_inputs(&records).unwrap();
+        assert_eq!(documents.len(), 3);
+        assert_eq!(
+            documents[0],
+            SearchDocumentInput {
+                first_record_ordinal: 0,
+                last_record_ordinal: 2,
+                min_block_idx: 10,
+                max_block_idx: 100,
+                text: "alpha\nbeta".into(),
+            }
+        );
+        for document in &documents[1..] {
+            assert_eq!(document.first_record_ordinal, 3);
+            assert_eq!(document.last_record_ordinal, 3);
+            assert_eq!(document.min_block_idx, 40);
+            assert_eq!(document.max_block_idx, 40);
+            assert!(
+                document.text.len()
+                    <= SEARCH_DOCUMENT_BYTES.saturating_add(SEARCH_DOCUMENT_OVERLAP_BYTES)
+            );
+        }
+        assert!(documents[1].text.len() > SEARCH_DOCUMENT_BYTES);
     }
 
     #[test]
