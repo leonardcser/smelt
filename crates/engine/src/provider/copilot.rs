@@ -3,6 +3,7 @@
 use crate::log;
 use crate::paths::state_dir;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use smelt_provider::copilot::{self, CopilotAuthConfig, CopilotLoginProgress};
 use smelt_provider::copilot::{CopilotModel, CopilotTokens};
@@ -13,13 +14,17 @@ use super::{auth_storage::CredStore, LoginCallbacks};
 
 const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
-fn cred_store() -> CredStore {
-    CredStore::production(
-        "smelt-copilot-auth",
-        "default",
-        state_dir().join("copilot_auth.json"),
-        COPILOT_TOKENS_ENV,
-    )
+fn cred_store() -> &'static CredStore {
+    static STORE: OnceLock<CredStore> = OnceLock::new();
+
+    STORE.get_or_init(|| {
+        CredStore::production(
+            "smelt-copilot-auth",
+            "default",
+            state_dir().join("copilot_auth.json"),
+            COPILOT_TOKENS_ENV,
+        )
+    })
 }
 
 #[derive(Clone)]
@@ -31,7 +36,7 @@ struct CopilotAuthEnv {
 impl CopilotAuthEnv {
     fn production() -> Self {
         Self {
-            token_store: cred_store(),
+            token_store: cred_store().clone(),
             config: CopilotAuthConfig::production(unix_now),
         }
     }
@@ -47,8 +52,9 @@ fn load_tokens_from(store: &CredStore) -> Option<CopilotTokens> {
     serde_json::from_str(&json).ok()
 }
 
-pub(crate) fn load_tokens() -> Option<CopilotTokens> {
-    load_tokens_from(&cred_store())
+pub(crate) fn load_tokens_passive() -> Option<CopilotTokens> {
+    let json = cred_store().load_passive()?;
+    serde_json::from_str(&json).ok()
 }
 
 pub(crate) fn delete_tokens() {
@@ -65,7 +71,7 @@ pub(crate) async fn device_code_login(
     };
     let tokens =
         copilot::device_code_login(client, &progress, &CopilotAuthEnv::production().config).await?;
-    save_tokens_to(&tokens, &cred_store()).map_err(|e| format!("failed to save tokens: {e}"))?;
+    save_tokens_to(&tokens, cred_store()).map_err(|e| format!("failed to save tokens: {e}"))?;
 
     (callbacks.on_progress)("Fetching Copilot models…");
     let models =

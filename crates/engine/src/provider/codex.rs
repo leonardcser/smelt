@@ -1,5 +1,6 @@
 use crate::log;
 use crate::paths::state_dir;
+use std::sync::OnceLock;
 
 const ISSUER: &str = smelt_provider::codex::ISSUER;
 #[cfg(test)]
@@ -12,13 +13,17 @@ use smelt_provider::unix_now;
 
 use super::{auth_storage::CredStore, LoginCallbacks};
 
-fn cred_store() -> CredStore {
-    CredStore::production(
-        "smelt-codex-auth",
-        "default",
-        state_dir().join("codex_auth.json"),
-        CODEX_TOKENS_ENV,
-    )
+fn cred_store() -> &'static CredStore {
+    static STORE: OnceLock<CredStore> = OnceLock::new();
+
+    STORE.get_or_init(|| {
+        CredStore::production(
+            "smelt-codex-auth",
+            "default",
+            state_dir().join("codex_auth.json"),
+            CODEX_TOKENS_ENV,
+        )
+    })
 }
 
 #[derive(Clone)]
@@ -32,7 +37,7 @@ impl CodexAuthEnv {
     fn production() -> Self {
         Self {
             issuer: ISSUER.to_string(),
-            token_store: cred_store(),
+            token_store: cred_store().clone(),
             now: unix_now,
         }
     }
@@ -43,8 +48,9 @@ fn save_tokens_to(tokens: &CodexTokens, store: &CredStore) -> Result<(), String>
     store.save(&json)
 }
 
-pub(crate) fn load_tokens() -> Option<CodexTokens> {
-    load_tokens_from(&cred_store())
+pub(crate) fn load_tokens_passive() -> Option<CodexTokens> {
+    let json = cred_store().load_passive()?;
+    serde_json::from_str(&json).ok()
 }
 
 fn load_tokens_from(store: &CredStore) -> Option<CodexTokens> {

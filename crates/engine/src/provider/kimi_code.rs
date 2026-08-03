@@ -1,6 +1,7 @@
 use crate::log;
 use crate::paths::{cache_dir, state_dir};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use rand::RngExt;
 use smelt_provider::kimi_code::{self as kimi_protocol, KimiHeaders, KimiRequestError};
@@ -18,8 +19,12 @@ pub fn is_api_base(api_base: &str) -> bool {
     smelt_provider::is_kimi_code_api_base(api_base)
 }
 
-fn cred_store() -> CredStore {
-    CredStore::production("smelt-kimi-code-auth", "default", token_path(), TOKENS_ENV)
+fn cred_store() -> &'static CredStore {
+    static STORE: OnceLock<CredStore> = OnceLock::new();
+
+    STORE.get_or_init(|| {
+        CredStore::production("smelt-kimi-code-auth", "default", token_path(), TOKENS_ENV)
+    })
 }
 
 #[derive(Clone)]
@@ -33,7 +38,7 @@ impl EngineKimiEnv {
     fn production() -> Self {
         Self {
             protocol: protocol_env(),
-            token_store: cred_store(),
+            token_store: cred_store().clone(),
             models_cache_path: models_cache_path(),
         }
     }
@@ -48,8 +53,9 @@ fn save_tokens_to(tokens: &KimiCodeTokens, store: &CredStore) -> Result<(), Stri
     store.save(&json)
 }
 
-pub(crate) fn load_tokens() -> Option<KimiCodeTokens> {
-    load_tokens_from(&cred_store())
+pub(crate) fn load_tokens_passive() -> Option<KimiCodeTokens> {
+    let json = cred_store().load_passive()?;
+    serde_json::from_str(&json).ok()
 }
 
 fn load_tokens_from(store: &CredStore) -> Option<KimiCodeTokens> {
@@ -62,7 +68,7 @@ fn delete_tokens() {
 }
 
 pub fn is_logged_in() -> bool {
-    load_tokens().is_some()
+    load_tokens_passive().is_some()
 }
 
 pub fn logout() {

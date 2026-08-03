@@ -199,10 +199,11 @@ fn short_fingerprint(fingerprint: &str) -> Option<u64> {
     u64::from_str_radix(fingerprint.get(..16)?, 16).ok()
 }
 
+/// Reads only passive credential sources because this runs in background auth polling.
 pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<String> {
     match provider {
         AuthProvider::Codex => {
-            let tokens = provider::codex::load_tokens()?;
+            let tokens = provider::codex::load_tokens_passive()?;
             if let Some(account_id) = tokens.account_id {
                 Some(model_cache_fingerprint(provider, "account_id", &account_id))
             } else {
@@ -214,7 +215,7 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
             }
         }
         AuthProvider::Copilot => {
-            let tokens = provider::copilot::load_tokens()?;
+            let tokens = provider::copilot::load_tokens_passive()?;
             Some(model_cache_fingerprint(
                 provider,
                 "refresh_token",
@@ -222,7 +223,7 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
             ))
         }
         AuthProvider::KimiCode => {
-            let tokens = provider::kimi_code::load_tokens()?;
+            let tokens = provider::kimi_code::load_tokens_passive()?;
             Some(model_cache_fingerprint(
                 provider,
                 "refresh_token",

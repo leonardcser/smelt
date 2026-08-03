@@ -509,7 +509,7 @@ All runtime data is stored under the XDG base directories:
 | `$XDG_CONFIG_HOME/smelt/`           | `early.lua`, `init.lua`, autoloaded `plugins/`, reusable `lua/` modules, `commands/`, and `skills/` |
 | `$XDG_STATE_HOME/smelt/sessions/`   | Canonical `session.db` data, blobs, and deprecated `meta.json` / `content.txt` compatibility exports |
 | `$XDG_STATE_HOME/smelt/catalog.db`  | Disposable session-list catalog rebuilt from canonical session databases         |
-| `$XDG_STATE_HOME/smelt/*_auth.json` | Private OAuth fallback files for Codex, Copilot, and Kimi Code                    |
+| `$XDG_STATE_HOME/smelt/*_auth.json` | Private OAuth credential files for Codex, Copilot, and Kimi Code                  |
 | `$XDG_STATE_HOME/smelt/recent.json` | Last-used picks (model, mode, reasoning effort)                                   |
 | `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                                                   |
 | `$XDG_STATE_HOME/smelt/history`     | Prompt history                                                                    |
@@ -521,10 +521,12 @@ All runtime data is stored under the XDG base directories:
 | `$XDG_CACHE_HOME/smelt/`            | `copilot_models.json` and other discovered model caches                           |
 
 OAuth-backed providers load credentials in this order: a provider-specific
-environment override, the operating system's native keyring, then a private JSON
-fallback under `$XDG_STATE_HOME/smelt/`. `smelt auth` writes both keyring and
-fallback storage so login remains available when a desktop keyring is locked or
-unavailable. The fallback files are `codex_auth.json`, `copilot_auth.json`, and
+environment override, a private JSON file under `$XDG_STATE_HOME/smelt/`, then
+the operating system's native keyring. Background status and model-cache checks
+stop before the keyring, so they never open an operating-system credential
+prompt. A provider operation can recover a keyring-only credential and copy it
+to the private file after one successful read. `smelt auth` writes both file and
+keyring storage. The files are `codex_auth.json`, `copilot_auth.json`, and
 `kimi_code_auth.json`, with mode `0600` on Unix. Logout removes both copies.
 
 ## Environment Variables
