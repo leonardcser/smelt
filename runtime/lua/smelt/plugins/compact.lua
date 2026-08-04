@@ -101,7 +101,7 @@ local function is_terminal_provider_error(err)
 end
 
 local function set_compaction_preview(summary)
-	local transcript = smelt.transcript
+	local transcript = __smelt_internal.transcript
 	if transcript and transcript._set_compaction_preview then
 		transcript._set_compaction_preview(summary)
 	end
@@ -471,7 +471,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 end
 
 local function summarize_by_group_boundary_with_busy(history, instructions, done)
-	local handle = smelt.work._context_recalculation("compacting")
+	local handle = __smelt_internal.work._context_recalculation("compacting")
 	summarize_by_group_boundary(history, instructions, handle, done)
 end
 

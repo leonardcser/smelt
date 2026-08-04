@@ -79,7 +79,7 @@ pub use clipboard::{Clipboard, NullSink, Sink};
 pub(crate) use clipboard::{Osc52Sink, SystemSink};
 pub use engine_client::EngineClient;
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
-pub use headless_app::HeadlessApp;
+pub use headless_app::{HeadlessApp, HeadlessExit};
 pub use managed_models::{ManagedModels, ManagedModelsStatus, ManagedProviderModels, RefreshToken};
 pub use runtime::{Core, FrontendKind};
 pub use runtime_state::{

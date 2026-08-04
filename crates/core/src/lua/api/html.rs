@@ -7,7 +7,7 @@ use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "html",

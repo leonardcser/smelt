@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Session title. Use `smelt.session.title.get()` to read the current title and `smelt.session.title.set(title, slug?)` to write it. Writes update the task label and save the session.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.session.title
 local session_title = {}
 

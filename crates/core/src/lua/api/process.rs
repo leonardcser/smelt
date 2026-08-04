@@ -51,7 +51,7 @@ fn output_table(
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "process",
@@ -79,7 +79,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(out)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "kill",
         "Stop the supervised shell job with `id`. Schedules containment termination asynchronously; no-op when no host is installed.",
         &["id"],
@@ -93,7 +93,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "detach_foreground",
         "Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Returns true when a detach request was sent.",
         &[],
@@ -104,7 +104,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     {
         let s = Arc::clone(shared);
-        m.private_fn(
+        m.private_live_only_fn(
             "__start_stop",
             &["task_id", "id"],
             move |_, (task_id, id): (u64, String)| -> LuaResult<()> {
@@ -124,7 +124,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?;
     }
-    m.fn_(
+    m.live_only_fn(
         "read_output",
         "Drain bounded output from supervised job `id`. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.",
         &["id"],
@@ -142,7 +142,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     {
         let shared_spawn = Arc::clone(shared);
-        m.private_fn(
+        m.private_live_only_fn(
             "__start_spawn_bg",
             &["task_id", "command"],
             move |_, (task_id, command): (u64, String)| -> LuaResult<()> {
@@ -169,7 +169,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = Arc::clone(shared);
-        m.private_fn(
+        m.private_live_only_fn(
             "__start_run",
             &["task_id", "cmd", "args", "opts"],
             move |_,
@@ -206,7 +206,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let shared_run_streaming = Arc::clone(shared);
-        m.fn_(
+        m.live_only_fn(
             "run_streaming",
             "Run `command` as a contained job with a `timeout_ms` deadline, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, the same supervised job keeps running in the background.",
             &["task_id", "call_id", "command", "timeout_ms", "background_on_timeout"],

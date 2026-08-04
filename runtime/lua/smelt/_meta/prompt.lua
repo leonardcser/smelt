@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt
 local prompt = {}
 
@@ -15,6 +16,7 @@ local prompt = {}
 ---@type fun(): smelt.Reg
 prompt.acquire = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
 --- completer and closes the picker if it was active.
 ---@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
@@ -67,6 +69,7 @@ prompt.set_text = nil
 ---@type fun(): string
 prompt.text = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.
 ---@type fun(): smelt.win.Win
 prompt.win = nil

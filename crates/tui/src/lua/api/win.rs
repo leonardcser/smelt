@@ -722,7 +722,7 @@ pub(crate) struct SharedHandle(pub(crate) Arc<LuaShared>);
 impl mlua::UserData for SharedHandle {}
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "win",
@@ -740,13 +740,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.win.Win",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.win.Win"),
         doc: "Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Close the overlay leaf. No-op if the window is already closed.",
             "focus" => fn() -> (), "Move keyboard focus to this window. No-op if the window is not focusable.",
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the backing Buf handle, or `nil` if the window is gone.",
             "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
-            "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
+            "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
             "decorate" => fn(opts: mlua::Table) -> LuaDecoration, "Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.",
             "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
@@ -766,6 +767,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.win.Decoration",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.win.Decoration"),
         doc: "Handle returned by `Win:decorate(opts)` for a window-owned decoration.",
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Remove the decoration and any window leaves it owns.",
@@ -774,6 +776,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.win.RowHighlight",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.win.RowHighlight"),
         doc: "Window-owned row background highlight. Ranges use absolute visual rows and an exclusive `end`; `{ cursor = true }` follows the window cursor row. `mode` is `always` (default) or `focused`; `width` is `full` (default) or `content`.",
         fields: vec![
             LuaClassField { name: "start", ty: "integer".into(), optional: true, doc: "First absolute visual row to highlight (0-based). Required unless `cursor = true`." },
@@ -787,6 +790,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.win.DecorationOpts",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.win.DecorationOpts"),
         doc: "Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.layout` tree. `align` is one of `nw|n|ne|w|center|e|sw|s|se` and defaults to `center`. Width/height constraints use the same vocabulary as overlays but resolve against the owner window rect.",
         fields: vec![
             LuaClassField { name: "layout", ty: "smelt.ui.layout.Layout".into(), optional: false, doc: "Decoration layout tree." },

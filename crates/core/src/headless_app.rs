@@ -9,6 +9,27 @@ use protocol::{Content, Decision, EngineEvent, UiCommand};
 use super::headless::{HeadlessSink, OutputFormat};
 use super::runtime::Core;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessExit {
+    Success,
+    Error,
+    TurnError,
+    Interrupted,
+    Command(i32),
+}
+
+impl HeadlessExit {
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::Error => 1,
+            Self::TurnError => 3,
+            Self::Interrupted => 130,
+            Self::Command(code) => code,
+        }
+    }
+}
+
 pub struct HeadlessApp {
     pub core: Core,
     pub session: crate::session::Session,
@@ -366,9 +387,25 @@ impl HeadlessApp {
         }
     }
 
-    /// Send `message`, drain engine events, print assistant text + token/cost
-    /// summary, then exit. Ctrl-C sends `UiCommand::Cancel` and exits 130.
-    pub async fn run_oneshot(&mut self, message: String, cancel: Arc<tokio::sync::Notify>) {
+    fn report_engine_disconnect(&self) {
+        const MESSAGE: &str = "engine disconnected before the turn completed";
+        if self.sink.format == OutputFormat::Json {
+            self.sink.emit_json(&EngineEvent::TurnError {
+                message: MESSAGE.into(),
+                kind: None,
+                retry_at_ms: None,
+            });
+        } else {
+            self.sink.log_error(MESSAGE);
+        }
+    }
+
+    /// Send `message`, drain engine events, and print assistant text and usage.
+    pub async fn run_oneshot(
+        &mut self,
+        message: String,
+        cancel: Arc<tokio::sync::Notify>,
+    ) -> HeadlessExit {
         use std::io::Write;
 
         let trimmed = smelt_buffer::text::trim_whitespace(&message);
@@ -381,20 +418,30 @@ impl HeadlessApp {
                     .arg(cmd)
                     .current_dir(self.core.env.cwd())
                     .output();
-                match output {
-                    Ok(o) => {
-                        let _ = io::stdout().write_all(&o.stdout);
-                        let _ = io::stderr().write_all(&o.stderr);
+                return match output {
+                    Ok(output) => {
+                        let _ = io::stdout().write_all(&output.stdout);
+                        let _ = io::stderr().write_all(&output.stderr);
+                        let _ = io::stdout().flush();
+                        let _ = io::stderr().flush();
+                        match output.status.code() {
+                            Some(0) => HeadlessExit::Success,
+                            Some(code) => HeadlessExit::Command(code),
+                            None => HeadlessExit::Error,
+                        }
                     }
-                    Err(e) => eprintln!("error: {e}"),
-                }
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        HeadlessExit::Error
+                    }
+                };
             }
-            return;
+            return HeadlessExit::Success;
         }
 
         if crate::commands::command_name(trimmed).is_some() {
             eprintln!("\"{}\" requires interactive mode", trimmed);
-            std::process::exit(1);
+            return HeadlessExit::Error;
         }
 
         let turn_id = self.next_turn_id;
@@ -414,7 +461,7 @@ impl HeadlessApp {
         let tools = self.tool_defs();
         let Some(model_target) = self.model_target() else {
             eprintln!("error: no model is available for headless dispatch");
-            return;
+            return HeadlessExit::Error;
         };
         let fast_mode = self
             .session
@@ -447,20 +494,21 @@ impl HeadlessApp {
         let mut pending_tools: HashMap<protocol::InvocationId, (String, String, Vec<String>)> =
             HashMap::new();
 
-        let mut interrupted = false;
-        loop {
+        let outcome = loop {
             self.drive_lua_tasks();
             let wakeup = self.next_lua_wakeup();
             let ev = tokio::select! {
                 biased;
                 _ = cancel.notified() => {
                     self.core.engine.send(protocol::UiCommand::Cancel);
-                    interrupted = true;
-                    break;
+                    break HeadlessExit::Interrupted;
                 }
                 ev = self.core.engine.recv() => match ev {
                     Some(ev) => ev,
-                    None => break,
+                    None => {
+                        self.report_engine_disconnect();
+                        break HeadlessExit::TurnError;
+                    }
                 },
                 _ = Self::wait_for_lua_wakeup(self.lua_wakeup_rx.as_mut(), wakeup), if self.lua.is_some() => {
                     continue;
@@ -559,12 +607,18 @@ impl HeadlessApp {
                     if self.sink.format == OutputFormat::Text {
                         self.sink.log_error(message);
                     }
-                    break;
+                    break HeadlessExit::TurnError;
                 }
-                EngineEvent::TurnComplete { .. } => break,
+                EngineEvent::TurnComplete { meta, .. } => {
+                    break if meta.as_ref().is_some_and(|meta| meta.interrupted) {
+                        HeadlessExit::Interrupted
+                    } else {
+                        HeadlessExit::Success
+                    };
+                }
                 _ => {}
             }
-        }
+        };
 
         if self.sink.format == OutputFormat::Text {
             self.sink
@@ -592,10 +646,10 @@ impl HeadlessApp {
             }
         }
 
-        if interrupted {
+        if outcome == HeadlessExit::Interrupted {
             let _ = io::stderr().flush();
-            std::process::exit(130);
         }
+        outcome
     }
 }
 
@@ -741,6 +795,24 @@ mod tests {
         };
 
         tokio::join!(app.run_oneshot("hello".into(), cancel), assert_request);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_turn_fails_when_engine_disconnects() {
+        let (mut app, mut cmd_rx) = headless_app_with_cmd_rx(false);
+        let turn = app.run_oneshot("hello".into(), Arc::new(tokio::sync::Notify::new()));
+        let disconnect = async move {
+            assert!(matches!(cmd_rx.recv().await, Some(UiCommand::StartTurn(_))));
+            drop(cmd_rx);
+        };
+
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(turn, disconnect)
+        })
+        .await
+        .expect("headless turn should not hang after engine disconnect");
+
+        assert_eq!(outcome, HeadlessExit::TurnError);
     }
 
     #[test]

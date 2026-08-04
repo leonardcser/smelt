@@ -21,7 +21,7 @@ pub(super) fn register(
     shared: &Arc<LuaShared>,
     cache_root: &std::path::Path,
 ) -> LuaResult<()> {
-    let http = LuaMod::under(
+    let http = LuaMod::supported(
         lua,
         smelt,
         "http",
@@ -31,7 +31,7 @@ pub(super) fn register(
 
     {
         let shared = Arc::clone(shared);
-        http.private_fn(
+        http.private_live_only_fn(
             "__start_get",
             &["task_id", "url", "opts"],
             move |_, (task_id, url, opts): (u64, String, Option<mlua::Table>)| -> LuaResult<()> {
@@ -43,7 +43,7 @@ pub(super) fn register(
     }
     {
         let shared = Arc::clone(shared);
-        http.private_fn(
+        http.private_live_only_fn(
             "__start_post",
             &["task_id", "url", "body", "opts"],
             move |_,
@@ -78,7 +78,7 @@ pub(super) fn register(
         move |_, key: String| Ok(http::cache::get(&read_cache_root, &key)),
     )?;
     let write_cache_root = cache_root.to_path_buf();
-    cache.fn_(
+    cache.live_only_fn(
         "write",
         "Store `value` in the HTTP response cache under `key`.",
         &["key", "value"],

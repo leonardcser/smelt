@@ -7,7 +7,7 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let auth = LuaMod::under(
+    let auth = LuaMod::supported(
         lua,
         smelt,
         "auth",
@@ -17,7 +17,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        auth.private_fn(
+        auth.private_live_only_fn(
             "__start_request",
             &["task_id", "provider", "opts"],
             move |_, (task_id, provider, opts): (u64, String, mlua::Table)| -> LuaResult<()> {
@@ -30,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        auth.private_fn(
+        auth.private_live_only_fn(
             "__start_managed_usage",
             &["task_id", "provider"],
             move |_, (task_id, provider): (u64, String)| -> LuaResult<()> {

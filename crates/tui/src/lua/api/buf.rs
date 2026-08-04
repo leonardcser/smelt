@@ -171,49 +171,50 @@ impl LuaType for LuaBufNewOpts {
     fn lua_type() -> String {
         record_class(LuaClassDecl {
             name: "smelt.buf.NewOpts",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.buf.NewOpts"),
             doc: "Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous buffers are reaped.",
             fields: vec![
                 LuaClassField {
                     name: "name",
                     ty: "string".into(),
                     optional: true,
-                    doc: "Stable name used to reuse this buffer across `/reload`.",
+                                        doc: "Stable name used to reuse this buffer across `/reload`.",
                 },
                 LuaClassField {
                     name: "readonly",
                     ty: "boolean".into(),
                     optional: true,
-                    doc: "When true, UI editing operations cannot mutate the buffer.",
+                                        doc: "When true, UI editing operations cannot mutate the buffer.",
                 },
                 LuaClassField {
                     name: "editable",
                     ty: "boolean".into(),
                     optional: true,
-                    doc: "Enable undo history for plugin-managed editable buffers.",
+                                        doc: "Enable undo history for plugin-managed editable buffers.",
                 },
                 LuaClassField {
                     name: "undo",
                     ty: "integer".into(),
                     optional: true,
-                    doc: "Undo history entry limit when `editable = true` (defaults to 100).",
+                                        doc: "Undo history entry limit when `editable = true` (defaults to 100).",
                 },
                 LuaClassField {
                     name: "mode",
                     ty: "\"plain\"|\"markdown\"|\"md\"|\"code\"".into(),
                     optional: true,
-                    doc: "Attach a parser-backed renderer to the buffer.",
+                                        doc: "Attach a parser-backed renderer to the buffer.",
                 },
                 LuaClassField {
                     name: "lang",
                     ty: "string".into(),
                     optional: true,
-                    doc: "Syntax language token required by `mode = \"code\"`.",
+                                        doc: "Syntax language token required by `mode = \"code\"`.",
                 },
                 LuaClassField {
                     name: "diff_base",
                     ty: "string".into(),
                     optional: true,
-                    doc: "When `mode = \"code\"`, render the buffer source as an inline diff against this base text.",
+                                        doc: "When `mode = \"code\"`, render the buffer source as an inline diff against this base text.",
                 },
             ],
         });
@@ -438,7 +439,7 @@ impl mlua::UserData for LuaBuf {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "buf",
@@ -451,6 +452,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
 
     record_class(LuaClassDecl {
         name: "smelt.buf.Buf",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.buf.Buf"),
         doc: "Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
             "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.",

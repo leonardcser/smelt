@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Single-line input handle constructor. `smelt.input.new(opts)` returns an `Input` userdata that owns a buffer/window pair wired to shared line-input editing semantics.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.input
 local input = {}
 

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Workspace file search. Owns background indexing, filesystem watching, and recent-selection ranking.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.files
 local files = {}
 

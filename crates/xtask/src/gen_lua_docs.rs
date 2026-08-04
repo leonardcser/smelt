@@ -13,13 +13,13 @@
 //!
 //! Usage: `cargo xtask gen-lua-docs` from the repo root.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-
 use smelt_core::lua::doc::{
-    aliases_snapshot, classes_snapshot, modules_snapshot, snapshot, LuaFnMeta, Tier, Visibility,
+    aliases_snapshot, classes_snapshot, classification_for_type, modules_snapshot, snapshot,
+    ApiClassification, LuaFnMeta, Tier,
 };
 use smelt_core::lua::lua_type::{LuaAliasDecl, LuaClassDecl, LuaClassField};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use tui::lua::LuaRuntime;
 
 /// Set of LuaCATS type names declared via `#[derive(LuaOpts)]` /
@@ -128,7 +128,7 @@ fn run_inner() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Bundled Lua chunks (every entry in `BOOTSTRAP_FILES`) are part
+    // Bundled Lua chunks (every entry in `BOOTSTRAP_CHUNKS`) are part
     // of the public API surface. Each file can contribute three doc
     // artifacts in one pass:
     //   * functions (smelt.sleep, smelt.dialog.open, smelt.cmd.picker, …)
@@ -142,23 +142,19 @@ fn run_inner() -> std::io::Result<()> {
         metas.iter().map(|m| (m.module, m.name)).collect();
     let mut bundled_classes: Vec<LuaClassDecl> = Vec::new();
     let mut bundled_aliases: Vec<LuaAliasDecl> = Vec::new();
-    for rel in smelt_core::lua::runtime::BOOTSTRAP_FILES {
+    for chunk in smelt_core::lua::runtime::BOOTSTRAP_CHUNKS {
+        let rel = chunk.path;
         let path = runtime_root.join(rel);
         if !path.is_file() {
             continue;
         }
         let content = std::fs::read_to_string(&path)?;
-        let tier = if smelt_core::lua::runtime::UI_BOOTSTRAP_FILES.contains(rel) {
-            Tier::UiHost
-        } else {
-            Tier::Host
-        };
-        let items = parse_bundled_lua(&content, tier);
+        let items = parse_bundled_lua(&content, chunk.default_tier);
+        validate_bundled_host_availability(chunk, &items)?;
         for w in items.warnings {
             eprintln!("warning: {rel}:{w}");
         }
-        for mut parsed in items.fns {
-            parsed.tier = bundled_lua_fn_tier(tier, parsed.module, parsed.name);
+        for parsed in items.fns {
             if registered_fns.contains(&(parsed.module, parsed.name)) {
                 continue;
             }
@@ -168,13 +164,9 @@ fn run_inner() -> std::io::Result<()> {
         bundled_classes.extend(items.classes);
         bundled_aliases.extend(items.aliases);
     }
-
     let mut by_mod: BTreeMap<&str, Vec<&LuaFnMeta>> = BTreeMap::new();
     for m in &metas {
-        // Private API: names starting with `__` are not surfaced in
-        // generated stubs / reference docs. They stay callable from
-        // bundled lua (which can reference them by literal name).
-        if m.name.starts_with("__") {
+        if m.name.starts_with("__") || !m.classification.is_user_facing() {
             continue;
         }
         by_mod.entry(m.module).or_default().push(m);
@@ -200,6 +192,7 @@ fn run_inner() -> std::io::Result<()> {
             classes.push(c);
         }
     }
+    classes.retain(|class| class.classification.is_user_facing());
     classes.sort_by(|a, b| a.name.cmp(b.name));
 
     let mut aliases = aliases_snapshot();
@@ -210,12 +203,20 @@ fn run_inner() -> std::io::Result<()> {
             aliases.push(a);
         }
     }
+    aliases.retain(|alias| alias.classification.is_user_facing());
     aliases.sort_by(|a, b| a.name.cmp(b.name));
 
+    let modules = modules_snapshot();
     let type_index = TypeIndex::new(&classes, &aliases);
-    let mod_docs: BTreeMap<&str, (&str, Option<Tier>, Visibility)> = modules_snapshot()
-        .into_iter()
-        .map(|m| (m.module, (m.doc, m.tier, m.visibility)))
+    let mod_docs: BTreeMap<&str, (&str, Option<Tier>, ApiClassification)> = modules
+        .iter()
+        .filter(|module| module.classification.is_user_facing())
+        .map(|module| {
+            (
+                module.module,
+                (module.doc, module.tier, module.classification),
+            )
+        })
         .collect();
 
     let mut expected_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -223,9 +224,8 @@ fn run_inner() -> std::io::Result<()> {
     expected_stems.insert("index".into());
     expected_stems.insert("types".into());
 
-    // Doc-only modules (every fn is `__`-prefixed and filtered out)
-    // still appear in every generated surface so callers can discover the
-    // namespace and read its module doc.
+    // Modules whose functions are all Internal still appear when the namespace
+    // itself is user-facing and has documentation.
     let mut all_modules: BTreeSet<&str> = by_mod.keys().copied().collect();
     all_modules.extend(mod_docs.keys().copied());
     all_modules.retain(|module| {
@@ -237,10 +237,12 @@ fn run_inner() -> std::io::Result<()> {
     });
     for module in &all_modules {
         let fns = by_mod.get(module).map(Vec::as_slice).unwrap_or_default();
-        let (mod_doc, declared_tier, module_visibility) = mod_docs
-            .get(module)
-            .copied()
-            .unwrap_or(("", None, Visibility::Public));
+        let Some((mod_doc, declared_tier, module_classification)) = mod_docs.get(module).copied()
+        else {
+            return Err(std::io::Error::other(format!(
+                "Lua module `{module}` has functions but no classified declaration"
+            )));
+        };
         if mod_doc.is_empty() {
             eprintln!("warning: module `{module}` has functions but no module doc; consider adding record_module_doc");
         }
@@ -251,11 +253,18 @@ fn run_inner() -> std::io::Result<()> {
         expected_stems.insert(file_stem.clone());
         std::fs::write(
             stubs_dir.join(format!("{file_stem}.lua")),
-            render_stub(module, fns, mod_doc, tier, module_visibility),
+            render_stub(module, fns, mod_doc, tier, module_classification),
         )?;
         std::fs::write(
             md_dir.join(format!("{file_stem}.md")),
-            render_markdown(module, fns, &type_index, mod_doc, tier, module_visibility),
+            render_markdown(
+                module,
+                fns,
+                &type_index,
+                mod_doc,
+                tier,
+                module_classification,
+            ),
         )?;
     }
 
@@ -345,25 +354,6 @@ fn strip_markdown_links(text: &str) -> String {
     out
 }
 
-fn bundled_lua_fn_tier(default_tier: Tier, module: &str, name: &str) -> Tier {
-    // `_bootstrap.lua` is Host-loaded because it also installs task/fs/state
-    // helpers, but a few functions are guarded by UiHost-only namespaces.
-    // Document them at the tier where they can actually be called.
-    const UI_GUARDED_BOOTSTRAP_FNS: &[(&str, &str)] = &[
-        ("smelt.model", "preferred"),
-        ("smelt.notebook", "apply_edit_async"),
-        ("smelt.notebook", "read_async"),
-        ("smelt.notify", "scoped"),
-        ("smelt.picker", "fuzzy"),
-        ("smelt.theme", "use"),
-    ];
-    if UI_GUARDED_BOOTSTRAP_FNS.contains(&(module, name)) {
-        Tier::UiHost
-    } else {
-        default_tier
-    }
-}
-
 fn has_mixed_tiers(fns: &[&LuaFnMeta]) -> bool {
     fns.first()
         .is_some_and(|first| fns.iter().any(|f| f.tier != first.tier))
@@ -374,7 +364,7 @@ fn render_stub(
     fns: &[&LuaFnMeta],
     mod_doc: &str,
     tier: Tier,
-    module_visibility: Visibility,
+    module_classification: ApiClassification,
 ) -> String {
     let mut s = String::new();
     s.push_str("---@meta\n\n");
@@ -385,13 +375,11 @@ fn render_stub(
             s.push_str(&format!("--- {line}\n"));
         }
     }
-    if module_visibility == Visibility::Internal {
-        s.push_str(&format!(
-            "--- Visibility: {} - {}\n",
-            module_visibility.label(),
-            module_visibility.description()
-        ));
-    }
+    s.push_str(&format!(
+        "--- Classification: {} - {}\n",
+        module_classification.label(),
+        module_classification.description()
+    ));
     s.push_str(&format!("---@class {module}\n"));
     let local = if module == "smelt" {
         "smelt".into()
@@ -411,11 +399,11 @@ fn render_stub(
                 f.tier.description()
             ));
         }
-        if f.visibility == Visibility::Internal && module_visibility != Visibility::Internal {
+        if f.classification != module_classification {
             s.push_str(&format!(
-                "--- Visibility: {} - {}\n",
-                f.visibility.label(),
-                f.visibility.description()
+                "--- Classification: {} - {}\n",
+                f.classification.label(),
+                f.classification.description()
             ));
         }
         let plain_doc = strip_markdown_links(f.doc);
@@ -450,7 +438,7 @@ fn render_markdown(
     types: &TypeIndex,
     mod_doc: &str,
     tier: Tier,
-    module_visibility: Visibility,
+    module_classification: ApiClassification,
 ) -> String {
     let mut s = String::new();
     s.push_str(&format!("# `{module}`\n\n"));
@@ -469,9 +457,9 @@ Do not edit by hand. -->\n\n",
         ));
     }
     s.push_str(&format!(
-        "**Visibility:** `{}` - {}\n\n",
-        module_visibility.label(),
-        module_visibility.description()
+        "**Classification:** `{}` - {}\n\n",
+        module_classification.label(),
+        module_classification.description()
     ));
     if !mod_doc.is_empty() {
         s.push_str(mod_doc);
@@ -499,11 +487,11 @@ Do not edit by hand. -->\n\n",
                 f.tier.description()
             ));
         }
-        if f.visibility != module_visibility {
+        if f.classification != module_classification {
             s.push_str(&format!(
-                "**Visibility:** `{}` - {}\n\n",
-                f.visibility.label(),
-                f.visibility.description()
+                "**Classification:** `{}` - {}\n\n",
+                f.classification.label(),
+                f.classification.description()
             ));
         }
         s.push_str(f.doc);
@@ -515,7 +503,7 @@ Do not edit by hand. -->\n\n",
 fn render_index(
     all_modules: &BTreeSet<&str>,
     by_mod: &BTreeMap<&str, Vec<&LuaFnMeta>>,
-    mod_docs: &BTreeMap<&str, (&str, Option<Tier>, Visibility)>,
+    mod_docs: &BTreeMap<&str, (&str, Option<Tier>, ApiClassification)>,
     n_classes: usize,
     n_aliases: usize,
 ) -> String {
@@ -538,7 +526,7 @@ bundled Lua signatures come from LuaCATS annotations beside the implementation.\
         n_aliases,
     ));
 
-    s.push_str("Functions and namespaces marked `Internal` are implementation details for bundled Lua. They are documented for transparency, but user config and plugins should prefer public APIs.\n\n");
+    s.push_str("`Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.\n\n");
 
     s.push_str("## IDE completion\n\n");
     s.push_str(
@@ -578,23 +566,23 @@ for a working config.\n\n",
         for &module in rows {
             let fns = by_mod.get(module).map(Vec::as_slice).unwrap_or_default();
             let stem = module_file_stem(module);
-            let module_visibility = mod_docs
+            let module_classification = mod_docs
                 .get(module)
-                .map(|(_, _, visibility)| *visibility)
-                .unwrap_or(Visibility::Public);
-            let internal_count = fns
+                .map(|(_, _, classification)| *classification)
+                .unwrap_or(ApiClassification::Supported);
+            let advanced_count = fns
                 .iter()
-                .filter(|f| f.visibility == Visibility::Internal)
+                .filter(|f| f.classification == ApiClassification::Advanced)
                 .count();
-            let visibility_suffix = if module_visibility == Visibility::Internal {
-                " - Internal namespace".to_string()
-            } else if internal_count > 0 {
-                format!(" - {internal_count} internal function(s)")
+            let classification_suffix = if module_classification == ApiClassification::Advanced {
+                " - Advanced namespace".to_string()
+            } else if advanced_count > 0 {
+                format!(" - {advanced_count} advanced function(s)")
             } else {
                 String::new()
             };
             s.push_str(&format!(
-                "- [`{module}`]({stem}.md) - {} function(s){visibility_suffix}\n",
+                "- [`{module}`]({stem}.md) - {} function(s){classification_suffix}\n",
                 fns.len()
             ));
         }
@@ -618,24 +606,30 @@ fn render_types_stub(classes: &[LuaClassDecl], aliases: &[LuaAliasDecl]) -> Stri
                 s.push_str(&format!("--- {line}\n"));
             }
         }
+        s.push_str(&format!(
+            "--- Classification: {} - {}\n",
+            c.classification.label(),
+            c.classification.description()
+        ));
         s.push_str(&format!("---@class {}\n", c.name));
         for f in &c.fields {
+            let field_doc = f.doc;
             // `[string]` marks an index signature (rest-key capture);
             // LuaCATS spells it `---@field [string] V` (no `?` suffix on
             // the name - the index is always optional by definition).
             if f.name == "[string]" {
-                if f.doc.is_empty() {
+                if field_doc.is_empty() {
                     s.push_str(&format!("---@field [string] {}\n", f.ty));
                 } else {
-                    s.push_str(&format!("---@field [string] {} {}\n", f.ty, f.doc));
+                    s.push_str(&format!("---@field [string] {} {field_doc}\n", f.ty));
                 }
                 continue;
             }
             let opt = if f.optional { "?" } else { "" };
-            if f.doc.is_empty() {
+            if field_doc.is_empty() {
                 s.push_str(&format!("---@field {}{opt} {}\n", f.name, f.ty));
             } else {
-                s.push_str(&format!("---@field {}{opt} {} {}\n", f.name, f.ty, f.doc));
+                s.push_str(&format!("---@field {}{opt} {} {field_doc}\n", f.name, f.ty));
             }
         }
         s.push('\n');
@@ -646,6 +640,11 @@ fn render_types_stub(classes: &[LuaClassDecl], aliases: &[LuaAliasDecl]) -> Stri
                 s.push_str(&format!("--- {line}\n"));
             }
         }
+        s.push_str(&format!(
+            "--- Classification: {} - {}\n",
+            a.classification.label(),
+            a.classification.description()
+        ));
         let mut parts: Vec<String> = a.variants.iter().map(|v| format!("\"{v}\"")).collect();
         if a.open {
             // Open aliases admit any string at runtime; the literal
@@ -679,6 +678,11 @@ from `---@class` / `---@alias` blocks in the bundled Lua modules.\n\n",
         s.push_str("## Classes\n\n");
         for c in classes {
             s.push_str(&format!("### `{}`\n\n", c.name));
+            s.push_str(&format!(
+                "**Classification:** `{}` - {}\n\n",
+                c.classification.label(),
+                c.classification.description()
+            ));
             if !c.doc.is_empty() {
                 s.push_str(c.doc);
                 s.push_str("\n\n");
@@ -712,6 +716,11 @@ from `---@class` / `---@alias` blocks in the bundled Lua modules.\n\n",
         s.push_str("## Aliases\n\n");
         for a in aliases {
             s.push_str(&format!("### `{}`\n\n", a.name));
+            s.push_str(&format!(
+                "**Classification:** `{}` - {}\n\n",
+                a.classification.label(),
+                a.classification.description()
+            ));
             if !a.doc.is_empty() {
                 s.push_str(a.doc);
                 s.push_str("\n\n");
@@ -796,13 +805,13 @@ fn sync_zensical_nav(
 }
 
 /// Rewrite the three auto-generated regions of the built-in `customize`
-/// skill: API index, settings table, and bundled-plugin inventory. The
+/// skill: capability map, settings table, and bundled-plugin inventory. The
 /// hand-authored prose around them stays untouched. Idempotent.
 fn sync_customize_skill(
     root: &Path,
     all_modules: &BTreeSet<&str>,
     by_mod: &BTreeMap<&str, Vec<&LuaFnMeta>>,
-    mod_docs: &BTreeMap<&str, (&str, Option<Tier>, Visibility)>,
+    mod_docs: &BTreeMap<&str, (&str, Option<Tier>, ApiClassification)>,
 ) -> std::io::Result<&'static str> {
     let path = root.join("runtime/skills/customize/SKILL.md");
     let Ok(existing) = std::fs::read_to_string(&path) else {
@@ -811,8 +820,8 @@ fn sync_customize_skill(
 
     let mut out = existing.clone();
 
-    let api_body = render_skill_api_index(all_modules, by_mod, mod_docs);
-    out = match replace_region(&out, SKILL_API_BEGIN, SKILL_API_END, &api_body) {
+    let capability_body = render_skill_capability_map(all_modules, by_mod, mod_docs);
+    out = match replace_region(&out, SKILL_API_BEGIN, SKILL_API_END, &capability_body) {
         Some(s) => s,
         None => return Ok("skipped (no `<!-- API_INDEX_BEGIN -->` marker)"),
     };
@@ -901,13 +910,12 @@ fn replace_region(src: &str, begin: &str, end: &str, body: &str) -> Option<Strin
     Some(out)
 }
 
-/// Render the API index region: every module grouped by tier, each
-/// function as a single bullet with `signature` + first-sentence doc.
-/// Kept compact so the skill stays usable as an LLM context payload.
-fn render_skill_api_index(
+/// Render a compact capability map for the built-in `customize` skill. Full
+/// signatures remain in the generated API reference and LuaCATS stubs.
+fn render_skill_capability_map(
     all_modules: &BTreeSet<&str>,
     by_mod: &BTreeMap<&str, Vec<&LuaFnMeta>>,
-    mod_docs: &BTreeMap<&str, (&str, Option<Tier>, Visibility)>,
+    mod_docs: &BTreeMap<&str, (&str, Option<Tier>, ApiClassification)>,
 ) -> String {
     let mut by_tier: BTreeMap<&'static str, Vec<&str>> = BTreeMap::new();
     for &module in all_modules {
@@ -917,61 +925,35 @@ fn render_skill_api_index(
         } else {
             mod_docs
                 .get(module)
-                .and_then(|(_, t, _)| *t)
-                .or_else(|| fns.first().map(|f| f.tier))
+                .and_then(|(_, tier, _)| *tier)
+                .or_else(|| fns.first().map(|function| function.tier))
                 .unwrap_or(Tier::Host)
                 .label()
         };
         by_tier.entry(label).or_default().push(module);
     }
 
-    let mut s = String::new();
+    let mut output = String::new();
+    output.push_str("Use the generated Lua API reference for complete signatures and types.\n\n");
     for label in ["Host", "UiHost", "Mixed"] {
-        let Some(rows) = by_tier.get(label) else {
+        let Some(modules) = by_tier.get(label) else {
             continue;
         };
-        s.push_str(&format!("### {label} tier\n\n"));
-        let description = match label {
-            "Host" => Tier::Host.description(),
-            "UiHost" => Tier::UiHost.description(),
-            _ => {
-                "Contains both Host and UiHost functions; each function below lists its exact tier."
+        output.push_str(&format!("### {label} tier\n\n"));
+        for &module in modules {
+            let summary = mod_docs
+                .get(module)
+                .map(|(doc, _, _)| first_sentence(doc))
+                .unwrap_or_default();
+            output.push_str(&format!("- `{module}`"));
+            if !summary.is_empty() {
+                output.push_str(&format!(" - {summary}"));
             }
-        };
-        s.push_str(description);
-        s.push_str("\n\n");
-        for &module in rows {
-            let fns = by_mod.get(module).map(Vec::as_slice).unwrap_or_default();
-            s.push_str(&format!("#### `{module}`\n\n"));
-            if let Some((doc, _, _)) = mod_docs.get(module) {
-                if !doc.is_empty() {
-                    s.push_str(&first_sentence(doc));
-                    s.push_str("\n\n");
-                }
-            }
-            for f in fns {
-                if f.name.starts_with("__") || f.visibility == Visibility::Internal {
-                    continue;
-                }
-                let sig = clean_sig(&f.sig);
-                let summary = first_sentence(f.doc);
-                let tier_suffix = if label == "Mixed" {
-                    format!(" ({})", f.tier.label())
-                } else {
-                    String::new()
-                };
-                s.push_str(&format!(
-                    "- `{module}.{name}`{tier_suffix} :: `{sig}`\n",
-                    name = f.name,
-                ));
-                if !summary.is_empty() {
-                    s.push_str(&format!("  {summary}\n"));
-                }
-            }
-            s.push('\n');
+            output.push('\n');
         }
+        output.push('\n');
     }
-    s
+    output
 }
 
 /// Render the Settings region: every `smelt.settings.<key>` slot with
@@ -1183,6 +1165,58 @@ struct BundledItems {
     warnings: Vec<String>,
 }
 
+fn validate_bundled_host_availability(
+    chunk: &smelt_core::lua::runtime::BootstrapChunk,
+    items: &BundledItems,
+) -> std::io::Result<()> {
+    if chunk.load_in_host {
+        return Ok(());
+    }
+    let Some(function) = items
+        .fns
+        .iter()
+        .find(|function| function.tier == Tier::Host)
+    else {
+        return Ok(());
+    };
+    Err(std::io::Error::other(format!(
+        "bundled Host function `{}.{}` is declared in `{}`, which headless startup does not load",
+        function.module, function.name, chunk.path
+    )))
+}
+
+/// Parse a top-level Lua function declaration for documentation extraction.
+fn parse_lua_fn_decl(line: &str) -> Option<(String, String)> {
+    fn canonical_name(name: &str) -> Option<String> {
+        if name.starts_with("smelt.") {
+            Some(name.to_string())
+        } else {
+            name.strip_prefix("__smelt_internal.")
+                .map(|name| format!("smelt.{name}"))
+        }
+    }
+
+    let line = line.trim_start();
+    if let Some(rest) = line.strip_prefix("function ") {
+        let paren = rest.find('(')?;
+        let name = canonical_name(rest[..paren].trim())?;
+        let close = rest.rfind(')')?;
+        if close <= paren {
+            return None;
+        }
+        return Some((name, rest[paren + 1..close].trim().to_string()));
+    }
+    let eq = line.find('=')?;
+    let name = canonical_name(line[..eq].trim())?;
+    let rhs = line[eq + 1..].trim_start();
+    let after_fn = rhs.strip_prefix("function")?;
+    if !after_fn.starts_with('(') {
+        return None;
+    }
+    let close = after_fn.rfind(')')?;
+    Some((name, after_fn[1..close].trim().to_string()))
+}
+
 /// Walk a bundled Lua file once and emit every doc-bearing surface in
 /// it. Recognises three styles of annotation:
 ///
@@ -1198,14 +1232,20 @@ struct BundledItems {
 ///     `string` as the first member marks an open alias; the remaining
 ///     `"literal"` members become the well-known names.
 ///
-/// Names starting with `_` are skipped (internal helpers like
-/// `__smelt_state__` or `__smelt_raw_*`).
+/// Names starting with `_` default to Internal and are excluded from user docs;
+/// `---@advanced` explicitly preserves low-level public composition helpers.
 fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
     let mut out = BundledItems::default();
     let mut doc_buf: Vec<String> = Vec::new();
     let mut sig_override: Option<String> = None;
-    let mut visibility = Visibility::Public;
-    let mut active_class: Option<(&'static str, &'static str, Vec<LuaClassField>)> = None;
+    let mut classification: Option<ApiClassification> = None;
+    let mut tier_override: Option<Tier> = None;
+    let mut active_class: Option<(
+        &'static str,
+        &'static str,
+        ApiClassification,
+        Vec<LuaClassField>,
+    )> = None;
 
     let flush_doc = |doc_buf: &[String]| -> String {
         doc_buf
@@ -1219,9 +1259,8 @@ fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
         let lineno = lineno0 + 1;
         let trimmed = raw.trim_start();
 
-        // LuaCATS directives (`---@…`). Must be checked before the
-        // generic `---` / `--` doc-line rules so `---@class` doesn't
-        // get accumulated as a literal doc line.
+        // LuaCATS directives (`---@...`) must be checked before generic doc
+        // lines so declaration metadata does not become literal prose.
         if let Some(rest) = trimmed.strip_prefix("---@") {
             match parse_cats_directive(rest) {
                 CatsDirective::Class { name } => {
@@ -1232,60 +1271,69 @@ fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
                     } else {
                         flush_active_class(&mut active_class, &mut out.classes);
                         let doc = leak(flush_doc(&doc_buf));
-                        active_class = Some((leak(name), doc, Vec::new()));
+                        let type_classification = classification
+                            .take()
+                            .unwrap_or_else(|| classification_for_type(&name));
+                        active_class = Some((leak(name), doc, type_classification, Vec::new()));
                         doc_buf.clear();
                         sig_override = None;
+                        tier_override = None;
                     }
                 }
                 CatsDirective::Field(Some(field)) => {
-                    if let Some((_, _, ref mut fields)) = active_class {
+                    if let Some((_, _, _, ref mut fields)) = active_class {
                         fields.push(field);
                     } else {
                         out.warnings.push(format!(
                             "line {lineno}: `---@field` outside any `---@class` block - dropped"
                         ));
                     }
-                    // Stay in class-accumulation mode; don't clobber doc_buf.
                 }
                 CatsDirective::Field(None) => {
                     out.warnings.push(format!(
                         "line {lineno}: malformed `---@field` (expected `name[?] type [description]`)"
                     ));
                 }
-                CatsDirective::Alias(Some(decl)) => {
+                CatsDirective::Alias(Some(mut decl)) => {
                     flush_active_class(&mut active_class, &mut out.classes);
+                    if let Some(explicit) = classification.take() {
+                        decl.classification = explicit;
+                    }
                     out.aliases.push(LuaAliasDecl {
                         doc: leak(flush_doc(&doc_buf)),
                         ..decl
                     });
                     doc_buf.clear();
                     sig_override = None;
+                    tier_override = None;
                 }
                 CatsDirective::Alias(None) => {
                     out.warnings.push(format!(
-                        "line {lineno}: malformed `---@alias` (expected `smelt.X.Y T1|T2|\"lit\"|…`)"
+                        "line {lineno}: malformed `---@alias` (expected `smelt.X.Y T1|T2|\"lit\"|...)"
                     ));
                 }
                 CatsDirective::Type { sig } => {
                     sig_override = Some(sig);
                 }
-                CatsDirective::Internal => {
-                    visibility = Visibility::Internal;
+                CatsDirective::Classification(value) => {
+                    classification = Some(value);
                 }
-                CatsDirective::Ignored => {
-                    // `---@meta`, `---@see`, etc. - pass through silently.
+                CatsDirective::Tier(Some(value)) => {
+                    tier_override = Some(value);
                 }
+                CatsDirective::Tier(None) => {
+                    tier_override = None;
+                    out.warnings
+                        .push(format!("line {lineno}: unknown `---@tier` value"));
+                }
+                CatsDirective::Ignored => {}
             }
             continue;
         }
-        // Leaving any `---@field` streak closes the active class.
         if active_class.is_some() && !trimmed.is_empty() && !trimmed.starts_with("---@field") {
             flush_active_class(&mut active_class, &mut out.classes);
         }
 
-        // Both `---` (LuaCATS) and `--` (plain Lua) feed the same doc
-        // accumulator. `---` wins by being checked first via the
-        // directive arm above, so any non-directive `---` falls through.
         if let Some(rest) = trimmed.strip_prefix("---") {
             let text = rest.strip_prefix(' ').unwrap_or(rest);
             doc_buf.push(text.to_string());
@@ -1300,15 +1348,17 @@ fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
             let Some((module, name)) = split_module_and_name(&full_name) else {
                 doc_buf.clear();
                 sig_override = None;
-                visibility = Visibility::Public;
+                classification = None;
+                tier_override = None;
                 continue;
             };
-            if name.starts_with('_') {
-                doc_buf.clear();
-                sig_override = None;
-                visibility = Visibility::Public;
-                continue;
-            }
+            let item_classification = classification.take().unwrap_or_else(|| {
+                if name.starts_with('_') {
+                    ApiClassification::Internal
+                } else {
+                    classification_for_type(&full_name)
+                }
+            });
             let doc = flush_doc(&doc_buf);
             let sig = sig_override.clone().unwrap_or_else(|| default_sig(&args));
             out.fns.push(LuaFnMeta {
@@ -1316,22 +1366,21 @@ fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
                 name: leak(name),
                 doc: leak(doc),
                 sig,
-                tier,
-                visibility,
+                tier: tier_override.take().unwrap_or(tier),
+                classification: item_classification,
             });
             doc_buf.clear();
             sig_override = None;
-            visibility = Visibility::Public;
             continue;
         }
         if !trimmed.is_empty() {
             doc_buf.clear();
             sig_override = None;
-            visibility = Visibility::Public;
+            classification = None;
+            tier_override = None;
         }
     }
 
-    // Flush a trailing class block (file ended with `---@field` lines).
     flush_active_class(&mut active_class, &mut out.classes);
 
     out
@@ -1342,11 +1391,21 @@ fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
 /// `---@alias` boundary and once at end-of-file so the renderer always
 /// sees fully-formed classes.
 fn flush_active_class(
-    active: &mut Option<(&'static str, &'static str, Vec<LuaClassField>)>,
+    active: &mut Option<(
+        &'static str,
+        &'static str,
+        ApiClassification,
+        Vec<LuaClassField>,
+    )>,
     out: &mut Vec<LuaClassDecl>,
 ) {
-    if let Some((name, doc, fields)) = active.take() {
-        out.push(LuaClassDecl { name, doc, fields });
+    if let Some((name, doc, classification, fields)) = active.take() {
+        out.push(LuaClassDecl {
+            name,
+            doc,
+            classification,
+            fields,
+        });
     }
 }
 
@@ -1370,7 +1429,8 @@ enum CatsDirective {
     Field(Option<LuaClassField>),
     Alias(Option<LuaAliasDecl>),
     Type { sig: String },
-    Internal,
+    Classification(ApiClassification),
+    Tier(Option<Tier>),
     Ignored,
 }
 
@@ -1396,10 +1456,18 @@ fn parse_cats_directive(rest: &str) -> CatsDirective {
             sig: tail.trim().to_string(),
         };
     }
-    if rest == "internal" {
-        return CatsDirective::Internal;
+    match rest {
+        "supported" => CatsDirective::Classification(ApiClassification::Supported),
+        "advanced" => CatsDirective::Classification(ApiClassification::Advanced),
+        "internal" => CatsDirective::Classification(ApiClassification::Internal),
+        _ => {
+            if let Some(tier) = strip_keyword(rest, "tier") {
+                CatsDirective::Tier(Tier::from_annotation(tier.trim()))
+            } else {
+                CatsDirective::Ignored
+            }
+        }
     }
-    CatsDirective::Ignored
 }
 
 /// Strip a `keyword` followed by ASCII whitespace from the front of
@@ -1516,41 +1584,10 @@ fn parse_cats_alias(body: &str) -> Option<LuaAliasDecl> {
     Some(LuaAliasDecl {
         name: leak(raw_name),
         doc: "",
+        classification: classification_for_type(raw_name),
         variants,
         open,
     })
-}
-
-fn parse_lua_fn_decl(line: &str) -> Option<(String, String)> {
-    let line = line.trim_start();
-    // Form 1: `function smelt.X.Y(args)`
-    if let Some(rest) = line.strip_prefix("function ") {
-        let paren = rest.find('(')?;
-        let name = rest[..paren].trim().to_string();
-        if !name.starts_with("smelt.") {
-            return None;
-        }
-        let close = rest.rfind(')')?;
-        if close <= paren {
-            return None;
-        }
-        let args = rest[paren + 1..close].trim().to_string();
-        return Some((name, args));
-    }
-    // Form 2: `smelt.X.Y = function(args)`
-    if !line.starts_with("smelt.") {
-        return None;
-    }
-    let eq = line.find('=')?;
-    let lhs = line[..eq].trim();
-    let rhs = line[eq + 1..].trim_start();
-    let after_fn = rhs.strip_prefix("function")?;
-    if !after_fn.starts_with('(') {
-        return None;
-    }
-    let close = after_fn.rfind(')')?;
-    let args = after_fn[1..close].trim().to_string();
-    Some((lhs.to_string(), args))
 }
 
 fn split_module_and_name(full: &str) -> Option<(String, String)> {
@@ -1599,6 +1636,55 @@ fn repo_root() -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_function_tier_annotations_override_the_bootstrap_group() {
+        let items = parse_bundled_lua(
+            r#"
+            ---@internal
+            ---@tier ui_host
+            function smelt.test.live_action() end
+
+            ---@internal
+            ---@tier host
+            function smelt.test.declaration() end
+            "#,
+            Tier::Host,
+        );
+
+        assert!(items.warnings.is_empty(), "{:?}", items.warnings);
+        assert_eq!(items.fns.len(), 2);
+        assert_eq!(items.fns[0].tier, Tier::UiHost);
+        assert_eq!(items.fns[1].tier, Tier::Host);
+    }
+
+    #[test]
+    fn bundled_host_functions_must_be_loaded_by_headless_startup() {
+        let items = parse_bundled_lua(
+            r#"
+            ---@internal
+            ---@tier host
+            function smelt.test.declaration() end
+            "#,
+            Tier::UiHost,
+        );
+
+        let dialog = smelt_core::lua::runtime::BOOTSTRAP_CHUNKS
+            .iter()
+            .find(|chunk| chunk.path == "dialog.lua")
+            .unwrap();
+        let error = validate_bundled_host_availability(dialog, &items).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "bundled Host function `smelt.test.declaration` is declared in `dialog.lua`, which headless startup does not load"
+        );
+        let completer = smelt_core::lua::runtime::BOOTSTRAP_CHUNKS
+            .iter()
+            .find(|chunk| chunk.path == "widgets/completer.lua")
+            .unwrap();
+        validate_bundled_host_availability(completer, &items)
+            .expect("Host bootstrap files are available headlessly");
+    }
 
     #[test]
     fn split_type_and_doc_respects_balanced_delimiters() {
@@ -1674,7 +1760,7 @@ mod tests {
             (
                 "Build metadata exposed to plugins.",
                 Some(Tier::Host),
-                Visibility::Public,
+                ApiClassification::Supported,
             ),
         )]);
 
@@ -1682,9 +1768,8 @@ mod tests {
         assert!(index.contains("**Coverage:** 1 namespace(s), 0 function(s)"));
         assert!(index.contains("[`smelt.build`](build.md) - 0 function(s)"));
 
-        let skill_index = render_skill_api_index(&all_modules, &by_mod, &mod_docs);
-        assert!(skill_index.contains("#### `smelt.build`"));
-        assert!(skill_index.contains("Build metadata exposed to plugins."));
+        let capability_map = render_skill_capability_map(&all_modules, &by_mod, &mod_docs);
+        assert!(capability_map.contains("- `smelt.build` - Build metadata exposed to plugins."));
 
         let nav = render_zensical_nav(&all_modules);
         assert!(nav.contains("{ \"`smelt.build`\" = \"reference/api/build.md\" }"));

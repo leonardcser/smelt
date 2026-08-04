@@ -333,6 +333,10 @@ end
 ---@field wrap_width? integer Initial wrap width used before the first resize event.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
+-- Build a selectable menu and return `(leaf, controller)`. The controller uses
+-- 1-based item indices for cursor, item replacement, and submission. By
+-- default, submitting resolves the active dialog with `{ index, item }`;
+-- `opts.on_submit` can replace that behavior.
 ---@type fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table
 function smelt.dialog.menu(items, opts)
   opts = opts or {}
@@ -817,7 +821,7 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
   ctx.resolve = resolve
   ctx.close   = function() resolve(nil) end
 
-  ctx.host = smelt.dialog.__open({
+  ctx.host = __smelt_internal.dialog.__open({
     layout = layout,
     height = height,
     min_height = opts.min_height,

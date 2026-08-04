@@ -8,6 +8,8 @@ Records and string-literal unions referenced from the namespace pages. Generated
 
 ### `smelt.Plugin`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Handle returned by `smelt.plugin` for a named plugin scope.
 
 | Field | Type | Required | Description |
@@ -17,6 +19,8 @@ Handle returned by `smelt.plugin` for a named plugin scope.
 
 ### `smelt.Reg`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Registration handle returned by every reactive-subscription API. `:remove()` undoes the binding (frees the underlying callback / cancels the timer / drops the subscription). Idempotent: subsequent calls return `false`.
 
 | Field | Type | Required | Description |
@@ -24,6 +28,8 @@ Registration handle returned by every reactive-subscription API. `:remove()` und
 | `remove` | `fun(): boolean` | yes | Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone. |
 
 ### `smelt.buf.Buf`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.
 
@@ -38,6 +44,8 @@ Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same
 | `clear_ns` | `fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf` | yes | Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining. |
 
 ### `smelt.buf.MarkOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text fields, not both.
 
@@ -66,6 +74,8 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 
 ### `smelt.buf.NewOpts`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous buffers are reaped.
 
 | Field | Type | Required | Description |
@@ -80,6 +90,8 @@ Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous b
 
 ### `smelt.builtins.Selector`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names - see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
 
 | Field | Type | Required | Description |
@@ -91,6 +103,8 @@ Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of 
 | `modules` | `string[]` |  | Fully-qualified `smelt.<dotted>` module names, passed through verbatim. |
 
 ### `smelt.cli.RegisterFlagOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Flag specification accepted by `smelt.cli.register_flag`.
 
@@ -106,6 +120,8 @@ Flag specification accepted by `smelt.cli.register_flag`.
 
 ### `smelt.cmd.RegisterOpts`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Options accepted by `smelt.cmd.register`.
 
 | Field | Type | Required | Description |
@@ -119,6 +135,8 @@ Options accepted by `smelt.cmd.register`.
 
 ### `smelt.defaults.Config`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Spec accepted by `smelt.defaults`.
 
 | Field | Type | Required | Description |
@@ -128,6 +146,8 @@ Spec accepted by `smelt.defaults`.
 | `reasoning_effort` | `string` |  | Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`. |
 
 ### `smelt.dialog.Keymap`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 One dialog-level keymap entry. `on_press(ctx)` receives the dialog
 context exposing `ctx.close()` and `ctx.resolve(value)` so the
@@ -141,6 +161,8 @@ handler can dismiss the dialog or resolve the blocking `open` call.
 
 ### `smelt.dialog.MenuItem`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Each item displayed in `smelt.dialog.menu`. Strings are also accepted
 and lifted into this shape automatically.
 
@@ -152,6 +174,8 @@ and lifted into this shape automatically.
 | `disabled` | `boolean` |  | Render dimmed and skip selection/submission when true. |
 
 ### `smelt.dialog.MenuOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Options accepted by `smelt.dialog.menu`.
 
@@ -165,6 +189,8 @@ Options accepted by `smelt.dialog.menu`.
 | `on_submit` | `fun(ctx: any): any` |  | Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`. |
 
 ### `smelt.dialog.Opts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
 Dialogs fit their content by default while preserving transcript context.
@@ -193,6 +219,8 @@ setting both raises.
 
 ### `smelt.dialog.Panel`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 One body panel inside a dialog. `leaf` is the win/leaf built by one of
 the `smelt.dialog.*` helpers; `height` follows the same grammar as
 `smelt.dialog.open` (integer cells, `"N%"`, `"fill"`, `"fit"`).
@@ -203,6 +231,8 @@ the `smelt.dialog.*` helpers; `height` follows the same grammar as
 | `height` | `any` |  | Integer cells, `"N%"`, `"fill"`, or `"fit"`. |
 
 ### `smelt.dialog.PickerOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Options accepted by `smelt.dialog.picker`. Layered on top of
 `smelt.dialog.Opts`; only the picker-specific fields are listed.
@@ -227,6 +257,8 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 
 ### `smelt.engine.AskError`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaExecution::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
 
 | Field | Type | Required | Description |
@@ -235,6 +267,8 @@ Typed error table delivered to `on_response` when the underlying provider call f
 | `message` | `string` | yes | Human-readable single-line description (newlines collapsed to spaces). |
 
 ### `smelt.engine.AskMessage`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 One text-only message used by request hooks that exchange plain user/assistant rows.
 
@@ -245,6 +279,8 @@ One text-only message used by request hooks that exchange plain user/assistant r
 
 ### `smelt.engine.AskResponseFormat`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Structured JSON-output specification for `smelt.engine.ask`.
 
 | Field | Type | Required | Description |
@@ -253,6 +289,8 @@ Structured JSON-output specification for `smelt.engine.ask`.
 | `schema` | `table` | yes | JSON schema describing the expected response shape. Accepts a Lua table that round-trips through `lua_table_to_json` into a JSON value. |
 
 ### `smelt.engine.AskSpec`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Spec for `smelt.engine.ask`.
 
@@ -270,6 +308,8 @@ Spec for `smelt.engine.ask`.
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.CommandOverrides`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
 
@@ -289,6 +329,8 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 
 ### `smelt.engine.InheritedAskSpec`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Spec for `smelt.engine.ask_inherited`.
 
 | Field | Type | Required | Description |
@@ -305,6 +347,8 @@ Spec for `smelt.engine.ask_inherited`.
 
 ### `smelt.engine.PrepareContextEstimate`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 
 | Field | Type | Required | Description |
@@ -318,6 +362,8 @@ Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 
 ### `smelt.engine.PrepareRequest`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Request object passed to `smelt.engine.on_prepare_request`.
 
 | Field | Type | Required | Description |
@@ -329,6 +375,8 @@ Request object passed to `smelt.engine.on_prepare_request`.
 
 ### `smelt.engine.RuleOverride`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.
 
 | Field | Type | Required | Description |
@@ -337,7 +385,19 @@ Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-m
 | `ask` | `string[]` |  | Patterns that always prompt. |
 | `deny` | `string[]` |  | Patterns that auto-deny. |
 
+### `smelt.fs.Flock`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Exclusive advisory file lock returned by `smelt.fs.try_flock`. The lock is also released when this handle is garbage-collected.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `release` | `fun(): nil` | yes | Release the lock immediately. No-op if it is already released. |
+
 ### `smelt.input.Input`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Single-line input handle returned by `smelt.input.new(opts)`.
 
@@ -352,12 +412,18 @@ Single-line input handle returned by `smelt.input.new(opts)`.
 
 ### `smelt.layout.Node`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Opaque block-layout node returned by `smelt.layout.*` constructors and accepted by transcript renderers, tool previews, and other content-layout APIs.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 
 ### `smelt.lifecycle.Guard`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Cancellation and supersession guard returned by `smelt.lifecycle.guard`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -368,21 +434,29 @@ Opaque block-layout node returned by `smelt.layout.*` constructors and accepted 
 
 ### `smelt.list.List`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Structured list handle returned by `smelt.list.new`.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `refresh` | `fun(self: smelt.list.List)` | yes |  |
-| `set_items` | `fun(self: smelt.list.List, items: any[]?)` | yes |  |
-| `set_items_preserve` | `fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)` | yes |  |
-| `set_filter` | `fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)` | yes |  |
-| `set_render` | `fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)` | yes |  |
-| `visible` | `fun(self: smelt.list.List): any[]` | yes |  |
-| `size` | `fun(self: smelt.list.List): integer` | yes |  |
-| `selected_index` | `fun(self: smelt.list.List): integer?` | yes |  |
-| `selected` | `fun(self: smelt.list.List): any` | yes |  |
-| `set_cursor` | `fun(self: smelt.list.List, i: integer)` | yes |  |
-| `move_cursor` | `fun(self: smelt.list.List, delta: integer)` | yes |  |
+| `refresh` | `fun(self: smelt.list.List)` | yes | Re-apply the filter, render visible rows, and move the cursor to the first item. |
+| `set_items` | `fun(self: smelt.list.List, items: any[]?)` | yes | Replace the source items and refresh the list. |
+| `set_items_preserve` | `fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)` | yes | Replace items and restore the selected row by its `key_fn` result when possible. |
+| `set_filter` | `fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)` | yes | Replace or clear the filter predicate and refresh the list. |
+| `set_render` | `fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)` | yes | Replace the row renderer and redraw the current visible items. |
+| `visible` | `fun(self: smelt.list.List): any[]` | yes | Return the filtered items in display order. |
+| `size` | `fun(self: smelt.list.List): integer` | yes | Return the number of visible items. |
+| `selected_index` | `fun(self: smelt.list.List): integer?` | yes | Return the selected visible-item index (0-based), or `nil` when empty. |
+| `selected` | `fun(self: smelt.list.List): any` | yes | Return the selected source item, or `nil` when empty. |
+| `set_cursor` | `fun(self: smelt.list.List, i: integer)` | yes | Move to the clamped 0-based visible-item index. |
+| `move_cursor` | `fun(self: smelt.list.List, delta: integer)` | yes | Move the selection by `delta` rows, clamped to the visible list. |
 
 ### `smelt.list.Mark`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Extmark attached to one rendered list row.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -390,6 +464,8 @@ Opaque block-layout node returned by `smelt.layout.*` constructors and accepted 
 | `opts` | [smelt.buf.MarkOpts](types.md#smeltbufmarkopts) |  | Mark/highlight options. |
 
 ### `smelt.list.Opts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 they own the rendered selection cursor and the backing line buffer;
@@ -407,6 +483,10 @@ the rest configure how data is sourced, filtered, and rendered.
 
 ### `smelt.list.Row`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Row shape returned by a `smelt.list` render callback.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `text` | `string` |  | Plain row text. Used when `spans` is omitted. |
@@ -415,6 +495,10 @@ the rest configure how data is sourced, filtered, and rendered.
 
 ### `smelt.list.Span`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Styled text segment in a rendered list row.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `text` | `string` | yes | Span text. |
@@ -422,6 +506,8 @@ the rest configure how data is sourced, filtered, and rendered.
 | `syntax` | `string` |  | Inline syntax token for this span. |
 
 ### `smelt.mcp.Config`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 MCP server config accepted by `smelt.mcp.register`.
 
@@ -437,6 +523,8 @@ MCP server config accepted by `smelt.mcp.register`.
 
 ### `smelt.notify.Scoped`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Source-bound notify handle returned by `smelt.notify.scoped`.
 Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
 tag every toast with the bound source.
@@ -449,6 +537,8 @@ tag every toast with the bound source.
 
 ### `smelt.overlay.DragConfig`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.
 
 | Field | Type | Required | Description |
@@ -457,6 +547,8 @@ Overlay drag configuration table. Use `true` for the floating default: title chr
 | `body` | `boolean \| "inert"` |  | `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves. |
 
 ### `smelt.overlay.Keymap`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.
 
@@ -467,6 +559,8 @@ One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... }
 | `hint` | `string` |  | Human-readable hint for key-discovery plugins. |
 
 ### `smelt.overlay.NewOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.layout` tree.
 
@@ -500,6 +594,8 @@ Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.l
 
 ### `smelt.overlay.Overlay`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Overlay handle returned by `smelt.overlay.new(opts)`.
 
 | Field | Type | Required | Description |
@@ -508,6 +604,8 @@ Overlay handle returned by `smelt.overlay.new(opts)`.
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding. |
 
 ### `smelt.overlay.ResizeConfig`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.
 
@@ -521,6 +619,8 @@ Overlay resize configuration table. Use `true` for the floating default: left/ri
 
 ### `smelt.paint.Paint`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 
 | Field | Type | Required | Description |
@@ -530,6 +630,8 @@ Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.l
 | `on` | `fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription. |
 
 ### `smelt.paint.Slice`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.
 
@@ -543,19 +645,23 @@ Grid slice passed to paint callbacks. Methods delegate to the live grid slice fo
 
 ### `smelt.permissions.EffectRules`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Effect-level decisions that apply to tools without a more specific rule.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `read` | `string` |  |  |
-| `write` | `string` |  |  |
-| `network` | `string` |  |  |
-| `process` | `string` |  |  |
-| `config` | `string` |  |  |
-| `user` | `string` |  |  |
-| `other` | `string` |  |  |
+| `read` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that only read data. |
+| `write` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that write or mutate data. |
+| `network` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that access the network. |
+| `process` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that start or control processes. |
+| `config` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that modify configuration. |
+| `user` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools that require direct user interaction. |
+| `other` | [smelt.permissions.Decision](types.md#smeltpermissionsdecision) |  | Decision for tools whose effect has no more specific category. |
 
 ### `smelt.permissions.ListResult`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Current permission state returned by `smelt.permissions.list()`.
 
@@ -570,6 +676,8 @@ Current permission state returned by `smelt.permissions.list()`.
 
 ### `smelt.permissions.ModePerms`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Permission slots that apply within a single agent mode.
 
 | Field | Type | Required | Description |
@@ -580,6 +688,8 @@ Permission slots that apply within a single agent mode.
 
 ### `smelt.permissions.PolicySpec`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
 
 | Field | Type | Required | Description |
@@ -588,6 +698,8 @@ Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
 | `[string]` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Mode-specific rules keyed by registered mode name. |
 
 ### `smelt.permissions.RevokeSpec`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 One exact permission entry to revoke transactionally.
 
@@ -599,6 +711,8 @@ One exact permission entry to revoke transactionally.
 
 ### `smelt.permissions.RuleSet`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 `allow`/`ask`/`deny` arrays accepted by permission policy sections.
 
 | Field | Type | Required | Description |
@@ -609,6 +723,8 @@ One exact permission entry to revoke transactionally.
 
 ### `smelt.permissions.ScopeReplacement`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Revision-checked replacement for one persisted permission scope.
 
 | Field | Type | Required | Description |
@@ -618,6 +734,8 @@ Revision-checked replacement for one persisted permission scope.
 
 ### `smelt.permissions.SessionEntry`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 A single session permission entry (one approved tool/pattern pair).
 
 | Field | Type | Required | Description |
@@ -626,6 +744,8 @@ A single session permission entry (one approved tool/pattern pair).
 | `pattern` | `string` | yes | Pattern matched against the tool's argument bucket. |
 
 ### `smelt.permissions.SessionPathGrant`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, the grant applies only in that mode.
 
@@ -639,6 +759,8 @@ A tool-specific session path grant. Grants are in-memory only and can satisfy wo
 
 ### `smelt.permissions.SyncSpec`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Spec for `smelt.permissions.sync`.
 
 | Field | Type | Required | Description |
@@ -650,6 +772,8 @@ Spec for `smelt.permissions.sync`.
 
 ### `smelt.permissions.WorkspaceRule`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 A workspace permission rule (one tool with N patterns, persisted to disk).
 
 | Field | Type | Required | Description |
@@ -659,6 +783,10 @@ A workspace permission rule (one tool with N patterns, persisted to disk).
 
 ### `smelt.picker.FuzzyOpts`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Options for the yielding fuzzy-picker convenience facade.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `items` | `(string\|smelt.picker.Item)[]` | yes | Items to filter. |
@@ -667,6 +795,10 @@ A workspace permission rule (one tool with N patterns, persisted to disk).
 
 ### `smelt.picker.FuzzyResult`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Accepted fuzzy-picker value; dismissal returns `nil` instead.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `index` | `integer` | yes | 1-based accepted item index. |
@@ -674,6 +806,8 @@ A workspace permission rule (one tool with N patterns, persisted to disk).
 | `action` | `string` | yes | Accept action reported by the prompt picker. |
 
 ### `smelt.picker.Item`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.
 
@@ -688,6 +822,8 @@ Row accepted by picker constructors. A bare string is also accepted and is treat
 
 ### `smelt.picker.NewOpts`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Options for the low-level non-blocking picker handle constructor.
 
 | Field | Type | Required | Description |
@@ -697,12 +833,18 @@ Options for the low-level non-blocking picker handle constructor.
 
 ### `smelt.picker.OpenResult`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Accepted value returned by `smelt.picker.open`; dismissal returns `nil`.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `index` | `integer` | yes | 1-based accepted item index. |
 | `item` | `any` | yes | Original item from `opts.items`. |
 
 ### `smelt.picker.Picker`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.
 
@@ -715,6 +857,8 @@ Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the sa
 | `move` | `fun(delta: integer): smelt.picker.Picker` | yes | Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 
 ### `smelt.prompt.CompleterSpec`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Completer specification handed to `smelt.prompt.completer` for full candidate
 sets ranked in Lua.
@@ -731,6 +875,8 @@ sets ranked in Lua.
 | `on_select` | `fun(item: table): nil` |  | Live selection callback. |
 
 ### `smelt.prompt.MatchesCompleterSpec`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Completer specification handed to `smelt.prompt.completer` for bounded,
 already-ranked providers.
@@ -752,6 +898,8 @@ already-ranked providers.
 
 ### `smelt.prompt.PickerItem`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Picker entry shown in the prompt-docked dropdown. `label` and the
 optional flavour fields mirror what the fuzzy ranker renders; the
 caller is free to attach extra fields and read them back from
@@ -767,6 +915,8 @@ caller is free to attach extra fields and read them back from
 | `search_terms` | `string` |  | Extra haystack tokens for the fuzzy match. |
 
 ### `smelt.prompt.PickerOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Options accepted by `smelt.prompt.open_picker`. Passing `on_enter`
 switches the picker to persistent mode (stays open across selects);
@@ -787,6 +937,8 @@ omit it for single-shot behaviour.
 
 ### `smelt.provider.Config`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Spec accepted by `smelt.provider.register`.
 
 | Field | Type | Required | Description |
@@ -797,6 +949,8 @@ Spec accepted by `smelt.provider.register`.
 | `models` | `string\|smelt.provider.Model[]` |  | Models offered by this provider. |
 
 ### `smelt.provider.Model`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 One model entry in a provider's `models` list. Plugin authors can pass either a bare model id string or a full table - the wrapper handles both forms transparently.
 
@@ -822,6 +976,10 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 
 ### `smelt.provider.NormalizedResult`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Provider rows and loading state returned by `smelt.provider.normalize`.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `rows` | `table[]` | yes | Rows to render after optional synthetic message insertion. |
@@ -829,6 +987,8 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `loading` | `boolean` | yes | True while the provider is still scanning or searching. |
 
 ### `smelt.remember.Config`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Spec accepted by `smelt.remember`.
 
@@ -839,6 +999,8 @@ Spec accepted by `smelt.remember`.
 | `reasoning_effort` | `boolean` |  | When true (default), restore the last-used reasoning effort on launch. |
 
 ### `smelt.render.DiffSplitOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Options for `smelt.render.diff_split`.
 
@@ -851,6 +1013,8 @@ Options for `smelt.render.diff_split`.
 
 ### `smelt.render.SyntaxOpts`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Options for `smelt.render.syntax`.
 
 | Field | Type | Required | Description |
@@ -861,6 +1025,8 @@ Options for `smelt.render.syntax`.
 
 ### `smelt.render.TextOpts`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Options for `smelt.render.text`.
 
 | Field | Type | Required | Description |
@@ -869,6 +1035,8 @@ Options for `smelt.render.text`.
 | `width` | `integer` |  | Wrapping width in terminal cells. Defaults to the current terminal width. |
 
 ### `smelt.theme.ColorDecl`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 
@@ -880,6 +1048,8 @@ Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) 
 | `dark` | [smelt.theme.ColorDecl](types.md#smeltthemecolordecl) |  | Color this branch resolves to when `is_light == false`. |
 
 ### `smelt.theme.StyleDecl`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Style table for a single highlight group. Every field is optional - unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
 
@@ -896,6 +1066,8 @@ Style table for a single highlight group. Every field is optional - unset fields
 
 ### `smelt.theme.ThemeSpec`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Colorscheme table with optional metadata and a required `groups` map. `syntax` selects a bundled two-face syntax theme for code highlighting. `light` marks the palette as light or dark; omit it to use terminal background detection. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is a group.
 
 | Field | Type | Required | Description |
@@ -907,6 +1079,8 @@ Colorscheme table with optional metadata and a required `groups` map. `syntax` s
 
 ### `smelt.tools.PermissionDefaults`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 
 | Field | Type | Required | Description |
@@ -914,6 +1088,8 @@ Per-mode default decisions installed by `smelt.tools.register`. Keys are mode na
 | `[string]` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Per-mode decisions keyed by registered mode name. |
 
 ### `smelt.tools.ToolDef`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Plugin tool definition passed to `smelt.tools.register`. `execute` is required; the remaining hooks are optional and are invoked at well-defined points during a tool turn - see the field docs for each callback's contract.
 
@@ -946,6 +1122,8 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 
 ### `smelt.transcript.ArgumentField`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Opaque top-level string argument passed to transcript renderers. Complete field
 content remains in Rust and is available only through `smelt.layout.content`.
 
@@ -960,6 +1138,8 @@ content remains in Rust and is available only through `smelt.layout.content`.
 | `complete` | `boolean` | yes | True when the JSON parser has consumed the complete field value. |
 
 ### `smelt.transcript.Block`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Bounded semantic transcript metadata passed to the root renderer.
 
@@ -1013,6 +1193,8 @@ Bounded semantic transcript metadata passed to the root renderer.
 
 ### `smelt.transcript.ContentMetadata`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Metadata for a retained payload whose complete content remains in Rust and is
 available to renderers only through retained layout leaves.
 
@@ -1025,6 +1207,8 @@ available to renderers only through retained layout leaves.
 | `content_preview` | `string` | yes | Strictly bounded preview for labels, never the complete retained payload. |
 
 ### `smelt.transcript.Context`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Renderer context. Width, theme, and scroll state are intentionally absent.
 
@@ -1039,6 +1223,8 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 
 ### `smelt.transcript.Cursor`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Visible transcript cursor position relative to the committed viewport.
 
 | Field | Type | Required | Description |
@@ -1046,6 +1232,10 @@ Visible transcript cursor position relative to the committed viewport.
 | `viewport_row` | `integer` | yes | Zero-based row inside the transcript viewport. |
 
 ### `smelt.transcript.Group`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Semantic transcript group snapshot passed to default renderer helpers.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1056,6 +1246,8 @@ Visible transcript cursor position relative to the committed viewport.
 | `children` | [smelt.transcript.GroupChild[]](types.md#smelttranscriptgroupchild) |  | Ordered bounded child presentation metadata. |
 
 ### `smelt.transcript.GroupChild`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Bounded semantic metadata for one retained group child. Growing content and
 complete child payloads are never embedded in group renderer input.
@@ -1077,6 +1269,8 @@ complete child payloads are never embedded in group renderer input.
 
 ### `smelt.transcript.GroupSelector`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Group selector declared through `smelt.transcript.groups.register`.
 
 | Field | Type | Required | Description |
@@ -1093,6 +1287,8 @@ Group selector declared through `smelt.transcript.groups.register`.
 
 ### `smelt.transcript.GroupSpec`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Declarative transcript group registration. The host owns planning; the root
 transcript renderer owns presentation for the resulting semantic group node.
 
@@ -1108,11 +1304,19 @@ transcript renderer owns presentation for the resulting semantic group node.
 
 ### `smelt.transcript.NavigationOpts`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Filters accepted by semantic previous/next block navigation.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `role` | [smelt.transcript.Role](types.md#smelttranscriptrole) |  | Match only blocks with this semantic role. Defaults to `user`. |
 
 ### `smelt.transcript.RevealOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Viewport placement used when revealing a semantic transcript target.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1121,6 +1325,8 @@ transcript renderer owns presentation for the resulting semantic group node.
 | `move_cursor` | `boolean` |  | Move the transcript cursor to the target. Defaults to true. |
 
 ### `smelt.transcript.Stream`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
 
@@ -1133,11 +1339,17 @@ Transcript-shaped streaming renderer for plugin-owned buffers. Append model text
 
 ### `smelt.transcript.StreamOpts`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Rendering options for `smelt.transcript.stream`.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `width` | `integer` |  | Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters. |
 
 ### `smelt.transcript.StyledSpan`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 One span in a styled tool title. Style attributes may be supplied directly or through `style`.
 
@@ -1157,6 +1369,8 @@ One span in a styled tool title. Style attributes may be supplied directly or th
 
 ### `smelt.transcript.StyledSpanStyle`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Style attributes accepted on one styled title span.
 
 | Field | Type | Required | Description |
@@ -1170,6 +1384,8 @@ Style attributes accepted on one styled title span.
 
 ### `smelt.transcript.Target`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.
 
 | Field | Type | Required | Description |
@@ -1180,6 +1396,8 @@ Stable semantic transcript navigation target. Pass the target directly to `smelt
 
 ### `smelt.transcript.ToolBodyOptions`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Options passed to focused tool body and draft callbacks.
 
 | Field | Type | Required | Description |
@@ -1188,6 +1406,8 @@ Options passed to focused tool body and draft callbacks.
 
 ### `smelt.transcript.ToolHeaderOptions`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Options accepted by the default tool header renderer.
 
 | Field | Type | Required | Description |
@@ -1195,6 +1415,8 @@ Options accepted by the default tool header renderer.
 | `hl` | `string` |  | Status marker highlight group. |
 
 ### `smelt.transcript.ToolOutput`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Bounded tool output metadata passed to transcript renderers.
 
@@ -1211,6 +1433,8 @@ Bounded tool output metadata passed to transcript renderers.
 
 ### `smelt.transcript.ToolPresentation`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Public presentation policy for one tool name. A complete `render` callback
 takes precedence; otherwise the default renderer composes the focused pieces.
 Registrations are copied and immutable.
@@ -1226,6 +1450,8 @@ Registrations are copied and immutable.
 
 ### `smelt.transcript.View`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.
 
 | Field | Type | Required | Description |
@@ -1239,6 +1465,8 @@ Immutable committed transcript view delivered to `watch_view`. Navigation method
 | `next_block` | `fun(opts: smelt.transcript.NavigationOpts?): smelt.transcript.Target?` | yes | Return the nearest actionable matching block when moving forward from this view. |
 
 ### `smelt.transcript.Viewport`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Geometry and tail state from one committed transcript projection.
 
@@ -1254,6 +1482,8 @@ Geometry and tail state from one committed transcript projection.
 
 ### `smelt.ui.Size`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Terminal size in cells.
 
 | Field | Type | Required | Description |
@@ -1262,6 +1492,8 @@ Terminal size in cells.
 | `height` | `integer` | yes | Terminal height in cells. |
 
 ### `smelt.ui.layout.Measure`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Shareable natural-size handle returned by `smelt.ui.layout.measure`.
 
@@ -1272,6 +1504,8 @@ Shareable natural-size handle returned by `smelt.ui.layout.measure`.
 
 ### `smelt.win.Decoration`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Handle returned by `Win:decorate(opts)` for a window-owned decoration.
 
 | Field | Type | Required | Description |
@@ -1279,6 +1513,8 @@ Handle returned by `Win:decorate(opts)` for a window-owned decoration.
 | `close` | `fun(): nil` | yes | Remove the decoration and any window leaves it owns. |
 
 ### `smelt.win.DecorationOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.layout` tree. `align` is one of `nw|n|ne|w|center|e|sw|s|se` and defaults to `center`. Width/height constraints use the same vocabulary as overlays but resolve against the owner window rect.
 
@@ -1298,6 +1534,8 @@ Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.l
 
 ### `smelt.win.RowHighlight`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Window-owned row background highlight. Ranges use absolute visual rows and an exclusive `end`; `{ cursor = true }` follows the window cursor row. `mode` is `always` (default) or `focused`; `width` is `full` (default) or `content`.
 
 | Field | Type | Required | Description |
@@ -1311,6 +1549,8 @@ Window-owned row background highlight. Ranges use absolute visual rows and an ex
 
 ### `smelt.win.Win`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
 
 | Field | Type | Required | Description |
@@ -1319,7 +1559,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `focus` | `fun(): nil` | yes | Move keyboard focus to this window. No-op if the window is not focusable. |
 | `buf` | `fun(): smelt.buf.Buf?` | yes | Return the backing Buf handle, or `nil` if the window is gone. |
 | `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
-| `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
+| `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
 | `decorate` | `fun(opts: table): smelt.win.Decoration` | yes | Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays. |
 | `cursor` | `fun(row: integer?): any` | yes | Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
@@ -1339,11 +1579,15 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 
 ### `smelt.buf.VirtTextPos`
 
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
 Where a virtual-text chunk is rendered relative to the line.
 
 Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
 ### `smelt.cli.FlagKind`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 
@@ -1351,21 +1595,37 @@ Variants: `"boolean"` \| `"string"` \| `"integer"`
 
 ### `smelt.events.Name`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
 
 Open alias - accepts any `string`. Well-known names: `"block_done"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_resolved"` \| `"history"` \| `"input_submit"` \| `"session_ended"` \| `"session_started"` \| `"shutdown"` \| `"stream_delta"` \| `"stream_phase"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"`.
 
 ### `smelt.input.Event`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Variants: `"change"` \| `"submit"` \| `"cancel"`
 
 ### `smelt.paint.Event`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Paint-leaf events accepted by `paint:on(event, fn)`.
 
 Variants: `"press"` \| `"release"` \| `"drag"`
 
+### `smelt.permissions.Decision`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Decision accepted by effect-level permission rules.
+
+Variants: `"allow"` \| `"ask"` \| `"deny"`
+
 ### `smelt.reasoning.Effort`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Reasoning effort level string literal.
 
@@ -1373,11 +1633,15 @@ Variants: `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"max"`
 
 ### `smelt.signal.Name`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 
 Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"fast_mode"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_queue_revision"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_slug"` \| `"session_title"` \| `"settings_terminal_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"stream_phase"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.tools.Decision`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 
@@ -1385,25 +1649,35 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 
 ### `smelt.tools.Effect`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Coarse side-effect classification used by permission policy.
 
 Variants: `"read"` \| `"write"` \| `"network"` \| `"user"` \| `"process"` \| `"config"` \| `"other"`
 
 ### `smelt.transcript.RevealAlign`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Variants: `"top"`
 
 ### `smelt.transcript.Role`
 
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
 Variants: `"user"` \| `"mode"` \| `"process_status"` \| `"assistant"` \| `"thinking"` \| `"tool"` \| `"code"` \| `"exec"` \| `"compacted"` \| `"compaction_preview"`
 
 ### `smelt.vim.Mode`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Vim mode string literal.
 
 Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 ### `smelt.win.Event`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 

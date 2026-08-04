@@ -4,7 +4,7 @@
 
 **Tier:** `Mixed` - Contains both Host and UiHost functions; each function below lists its exact tier.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Transcript display policy and rendered transcript inspection. Host-tier renderer hooks are layered with UiHost read APIs when a TUI is active.
 
@@ -260,7 +260,7 @@ fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
 
 Types: [`smelt.transcript.View`](types.md#smelttranscriptview), [`smelt.Reg`](types.md#smeltreg)
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
 

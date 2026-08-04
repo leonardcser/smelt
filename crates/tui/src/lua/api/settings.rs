@@ -117,7 +117,7 @@ pub(super) fn register(
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let settings_tbl = LuaMod::under(
+    let settings_tbl = LuaMod::supported(
         lua,
         smelt,
         "settings",
@@ -128,11 +128,11 @@ pub(super) fn register(
         settings_tbl.tbl.raw_set(decl.key, (decl.init)(lua)?)?;
     }
     let mt_tbl = lua.create_table()?;
-    let mt = LuaMod::extend(lua, mt_tbl.clone(), "smelt.settings", Tier::UiHost);
+    let mt = LuaMod::extend_supported(lua, mt_tbl.clone(), "smelt.settings", Tier::UiHost);
 
     {
         let shared = Arc::clone(shared);
-        mt.private_fn(
+        mt.private_metamethod(
             "__index",
             &["_", "key"],
             move |lua, (_, key): (mlua::Value, String)| -> LuaResult<mlua::Value> {
@@ -159,7 +159,7 @@ pub(super) fn register(
 
     {
         let shared = Arc::clone(shared);
-        mt.private_fn(
+        mt.private_metamethod(
             "__newindex",
             &["_", "key", "value"],
             move |_, (table, key, value): (mlua::Table, String, mlua::Value)| -> LuaResult<()> {
@@ -184,7 +184,7 @@ pub(super) fn register(
 
     {
         let shared = Arc::clone(shared);
-        mt.private_fn(
+        mt.private_metamethod(
             "__pairs",
             &["settings"],
             move |lua,

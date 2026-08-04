@@ -149,7 +149,7 @@ impl mlua::UserData for LuaInput {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "input",
@@ -159,6 +159,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.input.Input",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.input.Input"),
         doc: "Single-line input handle returned by `smelt.input.new(opts)`.",
         fields: smelt_core::class_methods! {
             "win" => fn() -> super::win::LuaWin, "Return the underlying Win handle for layout, focus, and advanced event bindings.",

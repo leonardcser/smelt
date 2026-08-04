@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Declarative transcript display grouping. Register adjacent-run group rules while the host owns deterministic planning and the composed root renderer presents resulting group nodes.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.groups
 local transcript_groups = {}
 

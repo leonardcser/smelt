@@ -36,14 +36,13 @@ mod work;
 use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
 use smelt_core::lua::api::reasoning::LuaReasoningEffort;
-use smelt_core::lua::doc::{record_module_doc, Tier};
+use smelt_core::lua::doc::{record_module_doc, ApiClassification, Tier};
 use smelt_core::lua::module::LuaMod;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Schema version of the Lua API surface, exposed as `smelt.api_version`.
-/// Increments on breaking changes; additive changes do not bump it.
-pub(crate) const API_VERSION: &str = "2";
+/// Identifier for the current alpha Lua API, exposed as `smelt.api_version`.
+pub const API_VERSION: &str = "2";
 
 /// Build identity, exposed as `smelt.build`. `version` is sourced from
 /// `CARGO_PKG_VERSION` (for programmatic semver comparison); the rest come
@@ -78,6 +77,10 @@ impl LuaRuntime {
         state_root: &Path,
         cache_root: &Path,
     ) -> LuaResult<()> {
+        smelt_core::lua::doc::install_ui_host_availability(
+            lua,
+            crate::lua::app_ref::ui_host_available,
+        );
         let smelt = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
@@ -92,12 +95,36 @@ impl LuaRuntime {
         build.set("display", DISPLAY)?;
         smelt.set("build", build)?;
         smelt.set("api_version", API_VERSION)?;
-        record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
-        record_module_doc("smelt.build", "Compile-time build identity and version metadata for plugins. Fields: `version` (CARGO_PKG_VERSION, for semver comparison), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), and `display` (canonical user-facing identity). `display` is `v0.5.0-alpha.2` for a clean tagged build or `v0.5.0-alpha.2-122-97dce0e8-dirty` for a dev build. Shared by the banner, `/version`, `/upgrade`, and `smelt --version`.");
-        record_module_doc("smelt.tick", "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.");
-        record_module_doc("smelt.dialog", "Root-docked modal builders. A dialog replaces the complete composer block while preserving transcript context and the statusline; convenience entry points (`smelt.dialog.input`, `.options`, `.list`, `.picker`, `.markdown`) wrap common panel shapes. UiHost-only.");
-        record_module_doc("smelt.input", "First-class single-line input widget. `smelt.input.new(opts)` returns a handle with `:win()`, `:buf()`, `:text()`, `:set_text()`, `:on()`, and `:key()`; editing keys and paste use the shared line-input core. UiHost-only.");
-        record_module_doc("smelt.list", "Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.");
+        record_module_doc(
+            "smelt",
+            "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.build",
+            "Compile-time build identity and version metadata for plugins. Fields: `version` (CARGO_PKG_VERSION, for semver comparison), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), and `display` (canonical user-facing identity). `display` is `v0.5.0-alpha.2` for a clean tagged build or `v0.5.0-alpha.2-122-97dce0e8-dirty` for a dev build. Shared by the banner, `/version`, `/upgrade`, and `smelt --version`.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.tick",
+            "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.dialog",
+            "Root-docked modal builders. A dialog replaces the complete composer block while preserving transcript context and the statusline; convenience entry points (`smelt.dialog.input`, `.list`, `.picker`, `.markdown`) wrap common panel shapes. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.input",
+            "First-class single-line input widget. `smelt.input.new(opts)` returns a handle with `:win()`, `:buf()`, `:text()`, `:set_text()`, `:on()`, and `:key()`; editing keys and paste use the shared line-input core. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.list",
+            "Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.",
+            ApiClassification::Supported,
+        );
 
         smelt_core::lua::api::register_host_api(
             lua,
@@ -145,7 +172,7 @@ impl LuaRuntime {
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
         let command_shared = Arc::clone(shared);
-        LuaMod::extend(lua, cmd_tbl, "smelt.cmd", Tier::UiHost).fn_(
+        LuaMod::extend_supported(lua, cmd_tbl, "smelt.cmd", Tier::UiHost).live_only_fn(
             "run",
             "Schedule the slash-command line `line` (with or without leading `/`) as if the user had typed it. The app executes it after the current Lua callback returns. Errors are surfaced as in-app notifications.",
             &["line"],
@@ -155,7 +182,8 @@ impl LuaRuntime {
                     .map_err(LuaError::RuntimeError)
             },
         )?;
-        LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).fn_(
+        LuaMod::extend_supported(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost)
+            .live_only_fn(
             "set",
             "Set the active agent mode. The change is applied immediately to the UI and persisted according to the active remember policy.",
             &["mode"],
@@ -166,13 +194,13 @@ impl LuaRuntime {
                 Ok(())
             },
         )?;
-        LuaMod::extend(
+        LuaMod::extend_supported(
             lua,
             smelt.get("reasoning")?,
             "smelt.reasoning",
             Tier::UiHost,
         )
-        .fn_(
+        .live_only_fn(
             "set",
             "Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.",
             &["effort"],
@@ -181,8 +209,7 @@ impl LuaRuntime {
                 Ok(())
             },
         )?;
-        let smelt_root = LuaMod::extend(lua, smelt.clone(), "smelt", Tier::UiHost);
-        smelt_root.fn_(
+        LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host).advanced_fn(
             "ns",
             "Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.",
             &["name"],
@@ -190,6 +217,7 @@ impl LuaRuntime {
                 Ok(smelt_core::buffer::create_namespace(&name).0)
             },
         )?;
+        let smelt_root = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::UiHost);
         smelt_root.fn_(
             "focus",
             "Return which top-level pane currently has focus: `\"transcript\"` or `\"prompt\"`.",
@@ -201,7 +229,7 @@ impl LuaRuntime {
                 )
             },
         )?;
-        smelt_root.fn_(
+        smelt_root.live_only_fn(
             "quit",
             "Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.",
             &[],

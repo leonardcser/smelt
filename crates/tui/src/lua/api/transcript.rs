@@ -47,6 +47,7 @@ impl LuaTranscriptRole {
     }
 }
 
+/// Filters accepted by semantic previous/next block navigation.
 #[derive(Debug, Default, LuaOpts)]
 #[lua(name = "smelt.transcript.NavigationOpts")]
 pub struct LuaTranscriptNavigationOpts {
@@ -60,6 +61,7 @@ pub enum LuaTranscriptRevealAlign {
     Top,
 }
 
+/// Viewport placement used when revealing a semantic transcript target.
 #[derive(Debug, Default, LuaOpts)]
 #[lua(name = "smelt.transcript.RevealOpts")]
 pub struct LuaTranscriptRevealOpts {
@@ -215,6 +217,7 @@ impl mlua::UserData for LuaTranscriptView {
     }
 }
 
+/// Rendering options for `smelt.transcript.stream`.
 #[derive(Debug, Default, LuaOpts)]
 #[lua(name = "smelt.transcript.StreamOpts")]
 pub struct LuaTranscriptStreamOpts {
@@ -411,13 +414,15 @@ fn node_snapshot_table(
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript: mlua::Table = smelt.get("transcript")?;
-    let m = LuaMod::extend(lua, transcript, "smelt.transcript", Tier::UiHost);
+    let m = LuaMod::extend_supported(lua, transcript.clone(), "smelt.transcript", Tier::UiHost);
+    let host = LuaMod::extend_supported(lua, transcript, "smelt.transcript", Tier::Host);
     let _ = LuaTranscriptStreamOpts::lua_type();
     let navigation_opts_type = LuaTranscriptNavigationOpts::lua_type();
     let _ = LuaTranscriptRevealOpts::lua_type();
     let role_type = LuaTranscriptRole::lua_type();
     record_class(LuaClassDecl {
         name: "smelt.transcript.Stream",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.transcript.Stream"),
         doc: "Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.",
         fields: smelt_core::class_methods! {
             "append" => fn(delta: String) -> (), "Append one assistant text delta and re-render the target buffer.",
@@ -428,6 +433,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     });
     record_class(LuaClassDecl {
         name: "smelt.transcript.Target",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.transcript.Target"),
         doc: "Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.",
         fields: vec![
             LuaClassField { name: "block_id", ty: "integer".into(), optional: false, doc: "Stable transcript block identity." },
@@ -437,6 +443,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     });
     record_class(LuaClassDecl {
         name: "smelt.transcript.Viewport",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.transcript.Viewport"),
         doc: "Geometry and tail state from one committed transcript projection.",
         fields: vec![
             LuaClassField {
@@ -485,6 +492,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     });
     record_class(LuaClassDecl {
         name: "smelt.transcript.Cursor",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.transcript.Cursor"),
         doc: "Visible transcript cursor position relative to the committed viewport.",
         fields: vec![LuaClassField {
             name: "viewport_row",
@@ -495,6 +503,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     });
     record_class(LuaClassDecl {
         name: "smelt.transcript.View",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.transcript.View"),
         doc: "Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.",
         fields: vec![
             LuaClassField { name: "revision", ty: "integer".into(), optional: false, doc: "Monotonic revision of observable committed transcript state." },
@@ -514,7 +523,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(LuaTranscriptStream::new(buf, opts))
         },
     )?;
-    m.private_fn(
+    m.private_live_only_fn(
         "_set_compaction_preview",
         &["summary"],
         |_, summary: Option<String>| -> LuaResult<()> {
@@ -616,7 +625,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .flatten())
         },
     )?;
-    m.fn_(
+    host.fn_(
         "watch_view",
         "Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.",
         &["callback"],
@@ -629,7 +638,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(LuaReg::new(move || watchers.remove(id)))
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "reveal",
         "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.",
         &["target", "opts"],
@@ -674,7 +683,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             snap.map(|node| node_snapshot_table(lua, node)).transpose()
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "fold_at_row",
         "Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.",
         &["row", "action", "opts"],
@@ -697,7 +706,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .unwrap_or(false))
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "fold_node",
         "Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.",
         &["node_id", "action"],
@@ -712,7 +721,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .unwrap_or(false))
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "fold_all",
         "Apply a fold action (`open` or `close`) to every current transcript render node.",
         &["action"],
@@ -728,7 +737,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .unwrap_or(false))
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "fold_kind",
         "Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`. `toggle` is aggregate: open all if any matching node is folded, otherwise close all.",
         &["kind", "action"],

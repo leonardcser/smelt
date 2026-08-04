@@ -5,14 +5,14 @@ use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "clipboard",
         "Read and write the system clipboard.",
         Tier::Host,
     )?;
-    m.fn_(
+    m.live_only_fn(
         "write",
         "Write `text` to the system clipboard. Raises if the clipboard backend is unavailable.",
         &["text"],
@@ -22,7 +22,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "read",
         "Read the current clipboard contents as a string, or `nil` if empty/unavailable.",
         &[],

@@ -133,7 +133,7 @@ smelt.settings.worktree_root = ".worktrees"
 -- possible values: off, notify, auto
 smelt.settings.autoupgrade = "notify"
 
--- Release channel autoupgrade tracks: `"stable"` (tagged releases, including prereleases) or `"unstable"` (`main` HEAD).
+-- Release channel autoupgrade tracks: `"stable"` (published GitHub releases) or `"unstable"` (`main` HEAD).
 -- possible values: stable, unstable
 smelt.settings.autoupgrade_channel = "stable"
 

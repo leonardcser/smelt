@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Per-key opt-in to last-used recall on launch. `smelt.remember.set({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.remember
 local remember = {}
 

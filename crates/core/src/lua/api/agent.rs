@@ -8,7 +8,7 @@ use mlua::prelude::*;
 pub(super) const SYSTEM_PROMPT_FRAGMENTS_REGISTRY: &str = "__smelt_agent_system_prompt_fragments";
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "agent",

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Composable layout-tree primitives for the retained main TUI layout. `smelt.ui.layout.set(fn)` registers a composer; call `invalidate()` when closed-over state changes the resulting tree.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.ui.layout
 local ui_layout = {}
 

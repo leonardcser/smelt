@@ -97,6 +97,22 @@ impl TestApp {
         self.run_lua_result(snippet).is_ok()
     }
 
+    pub(crate) fn run_bundled_lua(&mut self, snippet: &str) -> bool {
+        let lua = self.app.lua.lua().clone();
+        let result = crate::lua::scope_app(&mut self.app, || {
+            let environment = smelt_core::lua::module::bundled_chunk_environment(&lua)
+                .map_err(|error| error.to_string())?;
+            lua.load(snippet)
+                .set_environment(environment)
+                .exec()
+                .map_err(|error| error.to_string())
+        });
+        self.app.pump_lua();
+        self.app.try_perform_scheduled_runtime_reconcile();
+        self.app.drain_deferred_layout();
+        result.is_ok()
+    }
+
     /// Run a Lua snippet and preserve the Lua error for focused harnesses that
     /// require a valid call path to succeed.
     pub fn run_lua_result(&mut self, snippet: &str) -> Result<(), String> {

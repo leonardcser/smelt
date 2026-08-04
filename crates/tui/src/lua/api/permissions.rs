@@ -2,7 +2,7 @@
 //! Session/workspace/repository entries sit over `RuntimeApprovals` + [`crate::permissions::store`];
 //! policy extensions layer on top of generated defaults.
 
-use lua_doc_derive::LuaOpts;
+use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
@@ -54,6 +54,9 @@ impl LuaType for LuaPermissionList {
     fn lua_type() -> String {
         record_class(LuaClassDecl {
             name: "smelt.permissions.ListResult",
+            classification: smelt_core::lua::doc::classification_for_type(
+                "smelt.permissions.ListResult",
+            ),
             doc: "Current permission state returned by `smelt.permissions.list()`.",
             fields: vec![
                 LuaClassField {
@@ -206,29 +209,55 @@ impl From<LuaRuleSet> for crate::permissions::rules::RawRuleSet {
     }
 }
 
+/// Decision accepted by effect-level permission rules.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.permissions.Decision")]
+pub enum LuaPermissionDecision {
+    Allow,
+    Ask,
+    Deny,
+}
+
+impl From<LuaPermissionDecision> for protocol::Decision {
+    fn from(value: LuaPermissionDecision) -> Self {
+        match value {
+            LuaPermissionDecision::Allow => Self::Allow,
+            LuaPermissionDecision::Ask => Self::Ask,
+            LuaPermissionDecision::Deny => Self::Deny,
+        }
+    }
+}
+
 /// Effect-level decisions that apply to tools without a more specific rule.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.EffectRules")]
 pub struct LuaEffectRules {
-    pub read: Option<String>,
-    pub write: Option<String>,
-    pub network: Option<String>,
-    pub process: Option<String>,
-    pub config: Option<String>,
-    pub user: Option<String>,
-    pub other: Option<String>,
+    /// Decision for tools that only read data.
+    pub read: Option<LuaPermissionDecision>,
+    /// Decision for tools that write or mutate data.
+    pub write: Option<LuaPermissionDecision>,
+    /// Decision for tools that access the network.
+    pub network: Option<LuaPermissionDecision>,
+    /// Decision for tools that start or control processes.
+    pub process: Option<LuaPermissionDecision>,
+    /// Decision for tools that modify configuration.
+    pub config: Option<LuaPermissionDecision>,
+    /// Decision for tools that require direct user interaction.
+    pub user: Option<LuaPermissionDecision>,
+    /// Decision for tools whose effect has no more specific category.
+    pub other: Option<LuaPermissionDecision>,
 }
 
 impl From<LuaEffectRules> for crate::permissions::rules::RawEffectRules {
     fn from(e: LuaEffectRules) -> Self {
         Self {
-            read: e.read.as_deref().map(parse_decision),
-            write: e.write.as_deref().map(parse_decision),
-            network: e.network.as_deref().map(parse_decision),
-            process: e.process.as_deref().map(parse_decision),
-            config: e.config.as_deref().map(parse_decision),
-            user: e.user.as_deref().map(parse_decision),
-            other: e.other.as_deref().map(parse_decision),
+            read: e.read.map(Into::into),
+            write: e.write.map(Into::into),
+            network: e.network.map(Into::into),
+            process: e.process.map(Into::into),
+            config: e.config.map(Into::into),
+            user: e.user.map(Into::into),
+            other: e.other.map(Into::into),
         }
     }
 }
@@ -276,13 +305,14 @@ pub(super) fn register(
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "permissions",
-        "Inspect, revoke, sync, and extend permission policy state. UiHost-only.",
-        Tier::UiHost,
+        "Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants.",
+        Tier::Host,
     )?;
+    let ui = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.permissions", Tier::UiHost);
     m.fn_(
         "list",
         "Return current permission rules and persisted scope revisions. Pass `workspace_revision` or `repository_revision` back as the matching scope replacement revision in `smelt.permissions.sync()`.",
@@ -333,7 +363,7 @@ pub(super) fn register(
         },
     )?;
     let sync_context = Arc::clone(&shared.core);
-    m.fn_(
+    ui.live_only_fn(
         "sync",
         "Replace selected permission entries. Omitted fields are unchanged. Persisted replacements require the revision from `smelt.permissions.list()` and a call may replace only one of `workspace` or `repository`, so a stale snapshot cannot discard concurrent grants.",
         &["spec"],
@@ -364,7 +394,7 @@ pub(super) fn register(
             .map_err(LuaError::external)
         },
     )?;
-    m.fn_(
+    ui.live_only_fn(
         "revoke",
         "Remove one exact session, workspace, or repository permission entry transactionally. Returns false when the entry no longer exists.",
         &["spec"],
@@ -376,7 +406,7 @@ pub(super) fn register(
         },
     )?;
     let grant_context = Arc::clone(&shared.core);
-    m.fn_(
+    ui.live_only_fn(
         "grant_session",
         "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode?, tool, access = \"read\"|\"write\", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` to scope the grant to one mode.",
         &["grant"],
@@ -486,14 +516,6 @@ fn path_access_label(access: &smelt_core::permissions::PathAccess) -> &'static s
         smelt_core::permissions::PathAccess::Read => "read",
         smelt_core::permissions::PathAccess::Write => "write",
         smelt_core::permissions::PathAccess::Unknown => "unknown",
-    }
-}
-
-fn parse_decision(value: &str) -> protocol::Decision {
-    match value {
-        "allow" => protocol::Decision::Allow,
-        "deny" => protocol::Decision::Deny,
-        _ => protocol::Decision::Ask,
     }
 }
 

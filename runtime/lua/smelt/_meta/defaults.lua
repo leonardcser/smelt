@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Startup fallbacks for new sessions. `smelt.defaults.set({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.defaults
 local defaults = {}
 

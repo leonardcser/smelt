@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Wrap a hot Lua block to see where time goes when perf collection is enabled.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.perf
 local perf = {}
 

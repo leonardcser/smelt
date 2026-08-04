@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Search controls for the active UI session.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.search
 local search = {}
 

@@ -47,14 +47,15 @@ fn tool_result_capabilities(provider_type: &str, api_base: &str) -> (bool, bool)
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "model",
         "Model selector. `smelt.model.current()` reads the active model key, `smelt.model.set(v)` switches, and `smelt.model.list()` returns the available models.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.model", Tier::Host);
+    host.fn_(
         "list",
         "Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.",
         &[],
@@ -346,7 +347,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "set",
         "Switch the active model by key. Errors when the name cannot be resolved.",
         &["name"],

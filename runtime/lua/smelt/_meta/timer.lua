@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- One-shot and recurring timer callbacks. Each call returns a `Reg` whose `:remove()` cancels the timer.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.timer
 local timer = {}
 

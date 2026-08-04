@@ -2,11 +2,11 @@
 //! instrumentation consumed by Lua UI.
 
 use mlua::prelude::*;
-use smelt_core::lua::doc::Tier;
+use smelt_core::lua::doc::{ApiClassification, Tier};
 use smelt_core::lua::module::LuaMod;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "metrics",
@@ -37,12 +37,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    let perf = m.sub(
+    let perf = m.sub_with_classification(
         "perf",
         "Perf instrumentation toggle, clear, and snapshot. UiHost-only.",
+        ApiClassification::Advanced,
     )?;
 
-    perf.fn_(
+    perf.live_only_fn(
         "set_enabled",
         "Toggle perf instrumentation collection on/off. Disabled by default; enable to populate `snapshot` for the F12 debug panel.",
         &["on"],
@@ -52,7 +53,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    perf.fn_(
+    perf.live_only_fn(
         "clear",
         "Clear all accumulated perf samples (durations and value gauges).",
         &[],

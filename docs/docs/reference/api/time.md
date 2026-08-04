@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Wall-clock time parsing and formatting. Host-tier so plugins can render provider timestamps consistently in both TUI and headless contexts.
 

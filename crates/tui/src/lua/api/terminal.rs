@@ -96,7 +96,7 @@ pub(crate) fn commit_staged_title(shared: &Arc<LuaShared>) -> LuaResult<()> {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "terminal",
@@ -126,14 +126,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
-    m.fn_(
+    m.live_only_fn(
         "bell",
         "Ring the terminal bell (BEL). Returns false when no interactive terminal is attached.",
         &[],
         |_, ()| -> LuaResult<bool> { write_terminal_control(&[BEL as u8]) },
     )?;
 
-    m.fn_(
+    m.live_only_fn(
         "osc9_notify",
         "Post an OSC 9 terminal notification with `message`. Pass `{ dcs_passthrough = true }` inside tmux to wrap the notification for tmux passthrough. Control characters are stripped from messages before writing.",
         &["message", "opts"],

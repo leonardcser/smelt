@@ -11,7 +11,7 @@ use mlua::prelude::*;
 use std::path::{Path, PathBuf};
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, state_root: &Path) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "state",
@@ -36,7 +36,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, state_root: &Path) -> Lua
             }
         },
     )?;
-    m.private_fn(
+    m.private_live_only_fn(
         "__save",
         &["name", "value"],
         move |lua, (name, value): (String, mlua::Value)| -> LuaResult<()> {

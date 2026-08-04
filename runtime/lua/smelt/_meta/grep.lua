@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Ripgrep wrapper for searching files. Exit code 1 (no match) is not an error.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.grep
 local grep = {}
 

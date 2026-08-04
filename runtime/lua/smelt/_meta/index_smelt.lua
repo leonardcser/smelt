@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt
 local smelt = {}
 
@@ -11,6 +12,8 @@ local smelt = {}
 ---@type fun(): string
 smelt.focus = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
 ---@type fun(name: string): integer
 smelt.ns = nil

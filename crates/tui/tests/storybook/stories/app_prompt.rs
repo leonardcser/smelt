@@ -341,7 +341,7 @@ app_story!(prompt_compacting_keeps_context_token_counter, |ctx| {
     ctx.set_viewport(28, 8);
     ctx.set_context_window(Some(25_000));
     ctx.set_context_tokens(19_500);
-    ctx.run_lua("_G._busy_handle = smelt.work._context_recalculation('compacting')");
+    ctx.push_context_recalculation("compacting");
     ctx.push_compaction_preview("");
     ctx.assert_snapshot();
 });

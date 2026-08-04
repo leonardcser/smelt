@@ -998,12 +998,12 @@ mod runtime_path_tests {
 
         first
             .run_lua_result(&format!(
-                "local s = smelt.state.persistent({quoted_key}, {{ debounce_ms = 100000 }}); s.value = 'first'; smelt.__flush_persistent_state()"
+                "local s = smelt.state.persistent({quoted_key}, {{ debounce_ms = 100000 }}); s.value = 'first'; s.save()"
             ))
             .expect("persist first runtime state");
         second
             .run_lua_result(&format!(
-                "local s = smelt.state.persistent({quoted_key}, {{ debounce_ms = 100000 }}); s.value = 'second'; smelt.__flush_persistent_state()"
+                "local s = smelt.state.persistent({quoted_key}, {{ debounce_ms = 100000 }}); s.value = 'second'; s.save()"
             ))
             .expect("persist second runtime state");
 

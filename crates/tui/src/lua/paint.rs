@@ -354,6 +354,7 @@ impl mlua::UserData for PaintSliceUd {
 pub fn register_paint_slice_docs() {
     record_class(LuaClassDecl {
         name: "smelt.paint.Slice",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.paint.Slice"),
         doc: "Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.",
         fields: smelt_core::class_methods! {
             "width" => fn() -> i64, "Return the slice width in cells.",

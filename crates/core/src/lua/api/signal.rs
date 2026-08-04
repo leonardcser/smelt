@@ -27,6 +27,7 @@ impl LuaType for LuaSignalName {
         record_alias(LuaAliasDecl {
             name: "smelt.signal.Name",
             doc: "Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.",
+            classification: crate::lua::doc::ApiClassification::Supported,
             variants: crate::signals::builtin_signal_names(),
             open: true,
         });
@@ -66,7 +67,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     use crate::signals::{LuaSignalValue, SubscriberKind};
     use std::rc::Rc;
 
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "signal",
@@ -83,7 +84,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        m.fn_(
+        m.live_only_fn(
             "set",
             "Publish `value` for signal `name`.",
             &["name", "value"],

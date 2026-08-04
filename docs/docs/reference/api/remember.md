@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Per-key opt-in to last-used recall on launch. `smelt.remember.set({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.
 

@@ -174,7 +174,8 @@ smelt.transcript = smelt.transcript or {}
 
 local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v3"
 local transcript = smelt.transcript
-local base_renderer = transcript.__get_renderer and transcript.__get_renderer() or nil
+local internal_transcript = __smelt_internal.transcript
+local base_renderer = internal_transcript.__get_renderer and internal_transcript.__get_renderer() or nil
 local base_renderer_cache_key = nil
 local extensions = {}
 local order = {}
@@ -246,7 +247,7 @@ local function rebuild_renderer()
       end
     end
   end
-  if renderer then transcript.__set_renderer(renderer, effective_cache_key()) end
+  if renderer then internal_transcript.__set_renderer(renderer, effective_cache_key()) end
 end
 
 local function set_base_renderer(renderer, cache_key)
@@ -271,7 +272,7 @@ end
 --- default renderer has been installed.
 ---@type fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?
 function smelt.transcript.get_renderer()
-  return transcript.__get_renderer()
+  return internal_transcript.__get_renderer()
 end
 
 --- Add or replace named middleware around the root renderer. Later extensions
@@ -312,7 +313,7 @@ end
 --- the renderer is installed again with a cache key.
 ---@type fun(): integer
 function smelt.transcript.invalidate_renderer()
-  return transcript.__invalidate_renderer()
+  return internal_transcript.__invalidate_renderer()
 end
 
 --- Register or replace presentation policy for a tool. The supported fields are
@@ -389,31 +390,31 @@ function smelt.transcript.groups.register(spec)
     error("smelt.transcript.groups.register: spec.selector must be a table", 2)
   end
 
-  local token = transcript.__register_group(spec)
+  local token = internal_transcript.__register_group(spec)
   local name = spec.name
   return smelt.reg.new(function()
-    transcript.__unregister_group(name, token)
+    internal_transcript.__unregister_group(name, token)
   end)
 end
 
 --- Return group specs in planner order: higher priority first, then registration order.
 ---@type fun(): smelt.transcript.GroupSpec[]
 function smelt.transcript.groups.list()
-  return transcript.__groups()
+  return internal_transcript.__groups()
 end
 
 --- Current group-registry generation. Rust render planning uses this to invalidate
 --- plan/cache state once group planning is enabled.
 ---@type fun(): integer
 function smelt.transcript.groups.generation()
-  return transcript.__groups_generation()
+  return internal_transcript.__groups_generation()
 end
 
 --- Current group-registry cache key, or nil when any active group opted out of
 --- persisted planning/layout caches.
 ---@type fun(): integer?
 function smelt.transcript.groups.cache_key()
-  return transcript.__groups_cache_key()
+  return internal_transcript.__groups_cache_key()
 end
 
 local defaults = require("smelt.transcript.defaults")

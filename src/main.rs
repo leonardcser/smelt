@@ -1173,8 +1173,8 @@ async fn async_main() {
 
     let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
     let (resolved_startup, project_trust) = if args.headless {
-        lua_runtime.load_full_bootstrap();
-        lua_runtime.load_autoload();
+        lua_runtime.load_host_bootstrap();
+        lua_runtime.load_host_autoload();
         lua_runtime.load_user_config();
         lua_runtime.load_global_plugins();
         let project_trust = lua_runtime.load_project_config(&cwd);
@@ -1478,9 +1478,12 @@ async fn async_main() {
                 unavailable_mcp.join(", ")
             );
         }
-        headless
+        let exit = headless
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
+        if exit != smelt_core::HeadlessExit::Success {
+            std::process::exit(exit.code());
+        }
     } else {
         let tui_construct_startup = smelt_perf::perf::begin("startup:tui_construct");
         let session_persistence = if args.ephemeral {

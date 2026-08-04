@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Session title. Use `smelt.session.title.get()` to read the current title and `smelt.session.title.set(title, slug?)` to write it. Writes update the task label and save the session.
 

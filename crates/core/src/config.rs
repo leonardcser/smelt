@@ -261,8 +261,8 @@ settings! {
     /// pill when an update is available; `"auto"` installs in
     /// background on detection.
     autoupgrade:           String = "notify", choices: ["off", "notify", "auto"];
-    /// Release channel autoupgrade tracks: `"stable"` (tagged releases,
-    /// including prereleases) or `"unstable"` (`main` HEAD).
+    /// Release channel autoupgrade tracks: `"stable"` (published GitHub
+    /// releases) or `"unstable"` (`main` HEAD).
     autoupgrade_channel:   String = "stable", choices: ["stable", "unstable"];
     /// Seconds between background autoupgrade checks. The upgrade
     /// plugin clamps to a 60-second minimum to avoid hammering GitHub.

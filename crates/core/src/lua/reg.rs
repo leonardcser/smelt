@@ -56,6 +56,7 @@ pub fn register_class_doc() {
         doc: "Registration handle returned by every reactive-subscription API. \
 `:remove()` undoes the binding (frees the underlying callback / cancels the timer / drops the subscription). \
 Idempotent: subsequent calls return `false`.",
+        classification: crate::lua::doc::ApiClassification::Supported,
         fields: crate::class_methods! {
             "remove" => fn() -> bool, "Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone.",
         },

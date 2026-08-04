@@ -5,7 +5,7 @@
 
 pub(crate) mod api;
 pub(crate) use api::vim::LuaVimMode;
-pub use api::{BUILD_SHA, BUILD_TARGET, DISPLAY};
+pub use api::{API_VERSION, BUILD_SHA, BUILD_TARGET, DISPLAY};
 pub mod app_ref;
 pub(crate) mod paint;
 pub(crate) mod parse;
@@ -262,7 +262,7 @@ fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
 /// inside an event-loop callback). Plugin authors get auto-named
 /// hot-reload-survivable resources without typing `opts.name = "..."`.
 pub(crate) fn auto_name_for_scope(lua: &Lua, kind: &str) -> Option<String> {
-    let f: mlua::Function = lua.globals().get("__smelt_auto_name").ok()?;
+    let f = smelt_core::lua::module::internal_api_function(lua, "smelt", "__auto_name").ok()?;
     f.call::<Option<String>>(kind).ok().flatten()
 }
 
@@ -589,9 +589,11 @@ impl std::ops::DerefMut for LuaRuntime {
 }
 
 impl LuaRuntime {
-    /// Build a fresh runtime and register the `smelt` global.
+    /// Build an isolated fixture runtime and register the `smelt` global.
     /// Does not load `init.lua` - call [`LuaRuntime::load_autoload`] after
     /// startup snapshots are available so plugins see real data at registration time.
+    /// Production startup uses [`LuaRuntime::new_for_runtime`] and loads the UI
+    /// bootstrap from an actual application scope.
     pub fn new() -> Self {
         Self::with_shared(Arc::new(LuaShared::default()))
     }
@@ -632,7 +634,15 @@ impl LuaRuntime {
         }
         if core.load_error.is_none() {
             if load_bootstrap {
+                // The isolated fixture has no TuiApp to lend during bundled
+                // declaration setup. Restore the real availability check before
+                // returning it to callers.
+                smelt_core::lua::doc::install_ui_host_availability(&core.lua, || true);
                 core.load_full_bootstrap();
+                smelt_core::lua::doc::install_ui_host_availability(
+                    &core.lua,
+                    crate::lua::app_ref::ui_host_available,
+                );
             } else {
                 core.enable_ui_bootstrap();
             }
@@ -673,7 +683,11 @@ impl LuaRuntime {
         let shared = Arc::new(LuaShared::default());
         let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
         Self::register_api(&core.lua, &shared, core.state_root(), core.cache_root())?;
+        smelt_core::lua::doc::install_ui_host_availability(&core.lua, || true);
         core.load_full_bootstrap();
+        if let Some(error) = core.load_error() {
+            return Err(mlua::Error::external(error.to_string()));
+        }
         Ok(())
     }
 
@@ -1213,6 +1227,16 @@ mod tests {
             .expect("install_test_notify");
     }
 
+    fn reload_fixture(rt: &mut LuaRuntime, cwd: Option<&std::path::Path>) -> Option<String> {
+        smelt_core::lua::doc::install_ui_host_availability(&rt.lua, || true);
+        let error = rt.reload(cwd);
+        smelt_core::lua::doc::install_ui_host_availability(
+            &rt.lua,
+            crate::lua::app_ref::ui_host_available,
+        );
+        error
+    }
+
     fn test_env() -> ToolEnv<'static> {
         static EMPTY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let p = EMPTY_PATH.get_or_init(std::path::PathBuf::new);
@@ -1443,6 +1467,269 @@ mod tests {
             .eval()
             .expect("eval");
         assert!(!target.is_empty(), "smelt.build.target should be non-empty");
+    }
+
+    #[test]
+    fn ui_host_apis_return_lua_errors_without_an_active_tui_entry() {
+        let runtime = LuaRuntime::new();
+
+        let mode: String = runtime
+            .lua
+            .load("return smelt.mode.current()")
+            .eval()
+            .expect("Host API remains available without a terminal UI entry");
+        assert_eq!(mode, "normal");
+        let registered_mode: bool = runtime
+            .lua
+            .load("return smelt.mode.get('normal') ~= nil")
+            .eval()
+            .expect("bundled Host API remains available without a terminal UI entry");
+        assert!(registered_mode);
+        let line_count: u64 = runtime
+            .lua
+            .load("return smelt.text.line_count('first\\nsecond')")
+            .eval()
+            .expect("pure text helpers remain available without a terminal UI entry");
+        assert_eq!(line_count, 2);
+        let namespace: u32 = runtime
+            .lua
+            .load("return smelt.ns('headless_probe')")
+            .eval()
+            .expect("namespace allocation remains available without a terminal UI entry");
+        assert!(namespace > 0);
+        let models: mlua::Table = runtime
+            .lua
+            .load("return smelt.model.list()")
+            .eval()
+            .expect("model registry inspection remains available without a terminal UI entry");
+        assert_eq!(models.raw_len(), 0);
+        let preferred: Option<String> = runtime
+            .lua
+            .load("return smelt.model.preferred('headless_probe')")
+            .eval()
+            .expect("model preference inspection remains available without a terminal UI entry");
+        assert_eq!(preferred, None);
+        runtime
+            .lua
+            .load("smelt.cmd.picker('headless_probe', { items = {} })")
+            .exec()
+            .expect("command picker declarations remain available without a terminal UI entry");
+        runtime
+            .lua
+            .load("smelt.keymap.set('normal', '<C-h>', function() end)")
+            .exec()
+            .expect("keymap declarations remain available without a terminal UI entry");
+        runtime
+            .lua
+            .load(
+                r#"
+                local reg = smelt.prompt.completer({
+                    detect = function() return nil end,
+                    items = function() return {} end,
+                    query = function() return "" end,
+                    accept = function() end,
+                })
+                assert(reg:remove())
+                "#,
+            )
+            .exec()
+            .expect("prompt completer declarations remain available without a terminal UI entry");
+        let (notebook_ok, notebook_error): (bool, String) = runtime
+            .lua
+            .load(
+                "local ok, err = pcall(smelt.notebook.read_async, 'missing.ipynb', 0, 1); return ok, tostring(err)",
+            )
+            .eval()
+            .expect("evaluate host notebook read precondition");
+        assert!(!notebook_ok);
+        assert!(
+            !notebook_error.contains("requires an active terminal UI"),
+            "notebook reads must remain Host-tier: {notebook_error}"
+        );
+        let (notebook_result, notebook_error): (Option<mlua::Table>, String) = runtime
+            .lua
+            .load("return smelt.notebook.apply_edit({})")
+            .eval()
+            .expect("notebook edits should reach the runtime-host precondition");
+        assert!(notebook_result.is_none());
+        assert_eq!(notebook_error, "notebook.apply_edit: no runtime host");
+
+        for (call, api) in [
+            ("return smelt.model.current()", "smelt.model.current"),
+            ("return smelt.mode.set('normal')", "smelt.mode.set"),
+            ("return smelt.buf.new()", "smelt.buf.new"),
+            ("return smelt.quit()", "smelt.quit"),
+        ] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.lua.load(call).exec()
+            }));
+
+            let result =
+                result.expect("UiHost API must not panic without an active terminal UI entry");
+            let error = match result {
+                Ok(()) => panic!("{api} must reject calls without an active terminal UI entry"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{api} requires an active terminal UI")),
+                "unexpected {api} error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_notebook_tool_applies_edits_with_the_core_host() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir_all(&cwd).expect("workspace");
+        let notebook_path = cwd.join("analysis.ipynb");
+        std::fs::write(
+            &notebook_path,
+            r#"{
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {},
+                "cells": [{
+                    "cell_type": "code",
+                    "id": "first",
+                    "metadata": {},
+                    "execution_count": null,
+                    "outputs": [],
+                    "source": ["print('before')\n"]
+                }]
+            }"#,
+        )
+        .expect("notebook fixture");
+
+        let env = Arc::new(engine::env::RuntimeEnv::scripted(
+            4242,
+            root.path().join("home"),
+            root.path().join("config"),
+            root.path().join("state"),
+            root.path().join("cache"),
+            root.path().join("data"),
+            root.path().join("runtime"),
+            cwd.clone(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        ));
+        let mut runtime = LuaRuntime::new_for_runtime(&env, None, None, Some(cwd.clone()));
+        runtime.load_host_bootstrap();
+        runtime.load_host_autoload();
+        assert!(
+            runtime.load_error.is_none(),
+            "headless Lua startup failed: {:?}",
+            runtime.load_error
+        );
+        assert!(
+            runtime.tool_available_for("edit_notebook", smelt_core::lua::ToolVisibility::Headless)
+        );
+
+        let config = smelt_core::config::Config {
+            providers: vec![smelt_core::config::ProviderConfig {
+                name: Some("test".into()),
+                provider_type: Some("openai".into()),
+                api_base: Some("http://example.invalid".into()),
+                api_key_env: Some("SMELT_TEST_KEY".into()),
+                models: vec![protocol::ModelConfig {
+                    name: Some("test-model".into()),
+                    tool_calling: Some(true),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let models = config.resolve_models();
+        let state = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
+            config: &config,
+            startup: &smelt_core::StartupOverrides::default(),
+            available_models: &models,
+            registered_modes: &[],
+            selections: &smelt_core::RuntimeSelections::default(),
+            previous: None,
+            headless: true,
+        })
+        .expect("headless runtime state");
+        let (engine, _cmd_rx, _event_tx) = engine::EngineHandle::for_test();
+        let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
+        let mut core = smelt_core::Core::new(
+            state,
+            smelt_core::StartupOverrides::default(),
+            engine,
+            smelt_core::FrontendKind::Headless,
+            smelt_core::permissions::PermissionsHandle::new(
+                smelt_core::permissions::Permissions::load(),
+            ),
+            clock,
+            env,
+        );
+
+        // Mirror the end-user flow: read_file records the notebook before the
+        // write tool's staleness preflight permits an edit.
+        let observed = std::fs::read_to_string(&notebook_path).expect("observe notebook");
+        core.files.record_read(
+            &notebook_path.to_string_lossy(),
+            observed.clone(),
+            (0, observed.len()),
+        );
+
+        let args = std::collections::HashMap::from([
+            (
+                "notebook_path".into(),
+                serde_json::Value::String(notebook_path.to_string_lossy().into_owned()),
+            ),
+            ("cell_number".into(), serde_json::json!(0)),
+            ("edit_mode".into(), serde_json::json!("replace")),
+            ("new_source".into(), serde_json::json!("print('after')\n")),
+        ]);
+        let started = smelt_core::host::scope_core(&mut core, || {
+            runtime.execute_tool(
+                "edit_notebook",
+                &args,
+                smelt_core::lua::ToolCallIds {
+                    invocation_id: protocol::InvocationId::new(1),
+                    request_id: 1,
+                    call_id: "notebook-call",
+                },
+                smelt_core::lua::ToolEnv {
+                    mode: protocol::AgentMode::parse("apply").unwrap(),
+                    session_id: "headless-test",
+                    session_dir: root.path(),
+                },
+                std::time::Instant::now(),
+            )
+        });
+        if let smelt_core::lua::ToolExecResult::Immediate {
+            content, is_error, ..
+        } = started
+        {
+            panic!("headless notebook tool completed immediately: is_error={is_error}, content={content}");
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut completion = None;
+        while std::time::Instant::now() < deadline && completion.is_none() {
+            let outputs = smelt_core::host::scope_core(&mut core, || {
+                runtime.pump_task_events();
+                runtime.drive_tasks(std::time::Instant::now())
+            });
+            completion = outputs.into_iter().find_map(|output| match output {
+                smelt_core::lua::TaskDriveOutput::ToolComplete {
+                    content, is_error, ..
+                } => Some((content, is_error)),
+                _ => None,
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        let (content, is_error) = completion.expect("headless notebook tool completion");
+        assert!(!is_error, "headless notebook edit failed: {content}");
+        let edited = smelt_core::notebook::parse(
+            &std::fs::read_to_string(&notebook_path).expect("edited notebook"),
+        )
+        .expect("valid edited notebook JSON");
+        assert_eq!(edited.cells[0].source, "print('after')\n");
     }
 
     #[test]
@@ -2513,15 +2800,19 @@ mod tests {
     }
 
     #[test]
-    fn session_context_note_noops_without_frontend_host() {
-        let mut rt = LuaRuntime::new();
-        rt.load_autoload();
-        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-
-        rt.lua
+    fn session_context_note_requires_frontend_host() {
+        let rt = LuaRuntime::new();
+        let error = rt
+            .lua
             .load("smelt.session.context_note('goal', 'hello')")
             .exec()
-            .unwrap();
+            .expect_err("live session mutation must require a terminal UI entry");
+        assert!(
+            error
+                .to_string()
+                .contains("smelt.session.context_note requires an active terminal UI"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -3186,7 +3477,7 @@ mod tests {
         // Autoload-registered keymaps (e.g. F5/reload, F12/perf_panel) come
         // back, so we only assert the user chord is gone.
         std::fs::write(&init, "").unwrap();
-        let err = rt.reload(None);
+        let err = reload_fixture(&mut rt, None);
         assert!(err.is_none(), "reload: {err:?}");
 
         assert!(!shared.commands.lock().unwrap().contains_key("plug_cmd"));
@@ -3408,7 +3699,7 @@ mod tests {
         assert_eq!(leader, "<space>");
 
         std::fs::write(&init, "").unwrap();
-        let err = rt.reload(None);
+        let err = reload_fixture(&mut rt, None);
         assert!(err.is_none(), "reload: {err:?}");
         let leader: String = rt.lua.load("return smelt.keymap.leader()").eval().unwrap();
         assert_eq!(leader, "\\");

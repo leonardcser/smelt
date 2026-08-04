@@ -255,32 +255,36 @@ function List:move_cursor(delta)
   self:set_cursor(idx + delta)
 end
 
+--- Extmark attached to one rendered list row.
 ---@class smelt.list.Mark
 ---@field col? integer 0-based byte column for the mark.
 ---@field opts? smelt.buf.MarkOpts Mark/highlight options.
 
+--- Styled text segment in a rendered list row.
 ---@class smelt.list.Span
 ---@field text string Span text.
 ---@field style? table Highlight style passed through to `buf:styled`.
 ---@field syntax? string Inline syntax token for this span.
 
+--- Row shape returned by a `smelt.list` render callback.
 ---@class smelt.list.Row
 ---@field text? string Plain row text. Used when `spans` is omitted.
 ---@field spans? smelt.list.Span[] Styled spans for the row.
 ---@field marks? smelt.list.Mark[] Extmarks to apply after rendering.
 
+--- Structured list handle returned by `smelt.list.new`.
 ---@class smelt.list.List
----@field refresh fun(self: smelt.list.List)
----@field set_items fun(self: smelt.list.List, items: any[]?)
----@field set_items_preserve fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)
----@field set_filter fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)
----@field set_render fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)
----@field visible fun(self: smelt.list.List): any[]
----@field size fun(self: smelt.list.List): integer
----@field selected_index fun(self: smelt.list.List): integer?
----@field selected fun(self: smelt.list.List): any
----@field set_cursor fun(self: smelt.list.List, i: integer)
----@field move_cursor fun(self: smelt.list.List, delta: integer)
+---@field refresh fun(self: smelt.list.List) Re-apply the filter, render visible rows, and move the cursor to the first item.
+---@field set_items fun(self: smelt.list.List, items: any[]?) Replace the source items and refresh the list.
+---@field set_items_preserve fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any) Replace items and restore the selected row by its `key_fn` result when possible.
+---@field set_filter fun(self: smelt.list.List, fn: (fun(item: any): boolean)?) Replace or clear the filter predicate and refresh the list.
+---@field set_render fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row) Replace the row renderer and redraw the current visible items.
+---@field visible fun(self: smelt.list.List): any[] Return the filtered items in display order.
+---@field size fun(self: smelt.list.List): integer Return the number of visible items.
+---@field selected_index fun(self: smelt.list.List): integer? Return the selected visible-item index (0-based), or `nil` when empty.
+---@field selected fun(self: smelt.list.List): any Return the selected source item, or `nil` when empty.
+---@field set_cursor fun(self: smelt.list.List, i: integer) Move to the clamped 0-based visible-item index.
+---@field move_cursor fun(self: smelt.list.List, delta: integer) Move the selection by `delta` rows, clamped to the visible list.
 
 --- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 --- they own the rendered selection cursor and the backing line buffer;
@@ -300,10 +304,9 @@ end
 -- whenever `:set_filter` / `:refresh` fires. `opts.empty_text` shows
 -- when no row passes the filter. `opts.anchor = "bottom"` pads short result
 -- sets above the rows so filtered pickers stay pinned to the bottom of their
--- viewport. Returns a handle with `:selected`,
--- `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
--- `:set_cursor`, `:move_cursor`. See the header docstring for the full
--- usage shape.
+-- viewport. The returned handle can replace items while preserving selection,
+-- change its filter or renderer, inspect visible/selected rows, and move its
+-- 0-based cursor.
 ---@type fun(opts: smelt.list.Opts): smelt.list.List
 function smelt.list.new(opts)
   if type(opts) ~= "table" then

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Status-area toasts. Each call appends the body to `smelt.messages` and surfaces a one-line summary in the toast row above the prompt. The optional `source` arg tags the entry in `/messages` (defaults to `"lua"`). UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.notify
 local notify = {}
 
@@ -15,6 +16,7 @@ notify.error = nil
 ---@type fun(msg: string, source: string?): nil
 notify.info = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Bind `source` once and return a small bag that forwards to
 --- `smelt.notify.info` / `smelt.notify.error` / `smelt.notify.warn` with the
 --- source pinned. A plugin opts in with one line at the top of the file:

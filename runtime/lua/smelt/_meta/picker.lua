@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker
 local picker = {}
 

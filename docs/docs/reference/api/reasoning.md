@@ -4,7 +4,7 @@
 
 **Tier:** `Mixed` - Contains both Host and UiHost functions; each function below lists its exact tier.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Reasoning-effort selector. `smelt.reasoning.current()` reads the active effort, `smelt.reasoning.set(v)` sets it in a TUI session, and `smelt.reasoning.cycle_list()` lists the configured cycle.
 

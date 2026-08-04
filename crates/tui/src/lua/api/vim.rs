@@ -30,7 +30,7 @@ impl LuaVimMode {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "vim",
@@ -48,7 +48,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .flatten())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "set_mode",
         "Switch the vim mode of the focused vim-enabled window. Raises on unknown values.",
         &["mode"],

@@ -18,6 +18,19 @@ async fn smoke_harness_starts() {
     assert!(cfg.exists());
 }
 
+/// Shell escapes bypass the model and preserve the child command's status.
+#[tokio::test]
+async fn shell_escape_propagates_child_status() {
+    let h = Harness::new().await;
+    h.write_config("anthropic", "claude-test");
+    h.write_init_lua("");
+
+    let out = h.run("!exit 7", "test/claude-test");
+
+    assert_eq!(out.status, 7, "stderr: {}", out.stderr);
+    assert!(out.events.is_empty());
+}
+
 /// Plain turn: user types a prompt; provider returns a single text
 /// content block; engine emits the streaming + completion events.
 #[tokio::test]
@@ -63,6 +76,7 @@ async fn plain_turn() {
     .await;
 
     let out = h.run("hi", "test/claude-test");
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     insta::assert_json_snapshot!(out.events, {
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
@@ -189,11 +203,8 @@ async fn streaming_concat_across_deltas() {
     });
 }
 
-/// Provider returns 401 Unauthorized. Engine maps to a non-retryable
-/// `Auth` error; the JSONL event stream still ends with `TurnComplete`
-/// (no assistant message). The auth failure surfaces through stderr,
-/// not through an `EngineEvent::TurnError`. Worth pinning so we notice
-/// if the refactor moves the error onto the event stream.
+/// Provider returns 401 Unauthorized. The engine emits `TurnError`, and the
+/// headless process reports a dispatch failure.
 #[tokio::test]
 async fn provider_auth_error() {
     let h = Harness::new().await;
@@ -208,6 +219,7 @@ async fn provider_auth_error() {
     .await;
 
     let out = h.run("hi", "test/claude-test");
+    assert_eq!(out.status, 3, "stderr: {}", out.stderr);
     insta::assert_json_snapshot!(out.events, {
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
@@ -252,6 +264,7 @@ async fn incomplete_stream() {
     .await;
 
     let out = h.run("hi", "test/claude-test");
+    assert_eq!(out.status, 3, "stderr: {}", out.stderr);
     insta::assert_json_snapshot!(out.events, {
         "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
         "[].TurnComplete.meta.avg_tps" => "[avg_tps]",

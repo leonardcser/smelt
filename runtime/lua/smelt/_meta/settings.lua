@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.settings
 local settings = {}
 

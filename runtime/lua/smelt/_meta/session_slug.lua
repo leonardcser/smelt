@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Session slug. Use `smelt.session.slug.get()` to read it. Writing flows through `smelt.session.title.set(title, slug)`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.session.slug
 local session_slug = {}
 

@@ -19,7 +19,7 @@ pub enum LuaReasoningEffort {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "reasoning",

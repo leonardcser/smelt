@@ -289,14 +289,15 @@ pub struct LuaInheritedAskSpec {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "engine",
         "LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.engine", Tier::Host);
+    m.live_only_fn(
         "cancel",
         "Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.",
         &[],
@@ -322,7 +323,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             )
         },
     )?;
-    m.fn_(
+    host.fn_(
         "summary_prefix",
         "Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.",
         &[],
@@ -332,7 +333,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         type ReplyCb = LuaCallback<(mlua::Value,), ()>;
         type HookCb = LuaCallback<(Vec<LuaAskMessage>, ReplyCb), ()>;
-        m.fn_(
+        host.fn_(
             "on_context_limit",
             "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once - with `{ action = \"replace\", messages = messages }` (engine swaps it in and retries the turn), `{ action = \"abort\", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = \"continue\" }` (engine continues without recovery). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
             &["hook"],
@@ -346,7 +347,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         type ReplyCb = LuaCallback<(mlua::Value,), ()>;
         type HookCb = LuaCallback<(LuaPrepareRequest, ReplyCb), ()>;
-        m.fn_(
+        host.fn_(
             "on_prepare_request",
             "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - with `{ action = \"replace\", messages = messages }` (engine swaps it in before sampling), `{ action = \"replace\", source = \"model_history\" }` (engine uses the current checkpointed session model history), `{ action = \"abort\", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = \"continue\" }` (engine sends the original request). `messages` is built lazily when the hook reads it. Returns a `Reg` whose `:remove()` drops the hook.",
             &["hook"],
@@ -356,7 +357,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?;
     }
-    m.fn_(
+    m.live_only_fn(
         "reload",
         "Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. An open modal is dismissed before the request is queued.",
         &[],
@@ -366,7 +367,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    m.fn_(
+    m.live_only_fn(
         "reload_when_idle",
         "Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`. Returns `true` when this call queued a new reload and `false` when one was already pending.",
         &[],
@@ -375,7 +376,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    m.fn_(
+    m.live_only_fn(
         "submit_command",
         "Start an agent turn from a Lua-defined custom command (`/name`). `display` overrides the transcript label while `name` remains the command id. Queues behind the active turn if the agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.",
         &["name", "body", "overrides", "display"],
@@ -399,7 +400,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    m.fn_(
+    m.live_only_fn(
         "submit_command_continuation",
         "Start an idle custom-command continuation without using the prompt queue. Returns `false` instead of queuing when a turn, compaction, or busy token is active or when `continuation_token` does not match the most recent completed turn. When it starts, the work elapsed timer carries forward from that completed turn.",
         &["name", "body", "overrides", "display", "continuation_token"],
@@ -431,7 +432,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // smelt.engine.ask({system, messages?, question?, model?, response_format?, reasoning_effort?, on_response})
     {
         let s = shared.clone();
-        m.fn_(
+        m.live_only_fn(
             "ask",
             "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
@@ -501,7 +502,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // smelt.engine.ask_inherited({messages?, question?, model?, response_format?, reasoning_effort?, on_response})
     {
         let s = shared.clone();
-        m.fn_(
+        m.live_only_fn(
             "ask_inherited",
             "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],

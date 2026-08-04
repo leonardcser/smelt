@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Host-phase hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands. `on_ready` fires after each generation is committed (cold start and `/reload`) with `ctx = { kind = "launch" | "reload" }`; use it for work that requires committed runtime state or current layout. Normal configuration and plugin bodies already have UiHost access. `on_shutdown` fires once on graceful process exit. The registry is wiped between generations - re-register the hook in module body if you want it to fire every time. Each `on*` returns a `Reg` whose `:remove()` unregisters the hook before it fires.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.lifecycle
 local lifecycle = {}
 

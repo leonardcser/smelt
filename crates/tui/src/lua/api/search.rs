@@ -3,14 +3,14 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    LuaMod::under(
+    LuaMod::supported(
         lua,
         smelt,
         "search",
         "Search controls for the active UI session.",
         Tier::UiHost,
     )?
-    .fn_(
+    .live_only_fn(
         "clear",
         "Clear the active search session and remove search highlights from its target window.",
         &[],

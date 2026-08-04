@@ -36,7 +36,7 @@ fn worktree_repo() -> tempfile::TempDir {
 }
 
 #[test]
-fn launch_and_reload_evaluate_each_lua_phase_once_per_generation() {
+fn launch_and_reload_evaluate_each_config_phase_once_per_generation() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let config_dir = root.path().join("config");
@@ -48,15 +48,6 @@ fn launch_and_reload_evaluate_each_lua_phase_once_per_generation() {
     std::fs::create_dir_all(config_dir.join("plugins")).unwrap();
     std::fs::create_dir_all(runtime_smelt.join("commands")).unwrap();
     std::fs::create_dir_all(&project_config_dir).unwrap();
-
-    let bootstrap = format!(
-        "_G.__bootstrap_count = (_G.__bootstrap_count or 0) + 1\n{}",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../runtime/lua/smelt/_bootstrap.lua"
-        ))
-    );
-    std::fs::write(runtime_smelt.join("_bootstrap.lua"), bootstrap).unwrap();
 
     let color_command = format!(
         "_G.__autoload_count = (_G.__autoload_count or 0) + 1\n{}",
@@ -104,7 +95,6 @@ fn launch_and_reload_evaluate_each_lua_phase_once_per_generation() {
 
     assert_eq!(app.lua_probe().id, 0, "launch must retain generation zero");
     for name in [
-        "__bootstrap_count",
         "__early_count",
         "__autoload_count",
         "__config_count",
@@ -119,7 +109,6 @@ fn launch_and_reload_evaluate_each_lua_phase_once_per_generation() {
 
     assert_eq!(app.lua_probe().id, 1, "reload must commit generation one");
     for name in [
-        "__bootstrap_count",
         "__autoload_count",
         "__config_count",
         "__plugin_count",
@@ -127,6 +116,114 @@ fn launch_and_reload_evaluate_each_lua_phase_once_per_generation() {
     ] {
         assert_eq!(app.lua_int_global(name), Some(1), "{name} reload count");
     }
+}
+
+#[test]
+fn internal_lua_capabilities_stay_private_across_user_sources_and_reload() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config_dir = root.path().join("config");
+    let runtime_dir = root.path().join("runtime");
+    let project_dir = root.path().join("project");
+    let project_config_dir = project_dir.join(".smelt");
+    let project_runtime_dir = project_config_dir.join("runtime/smelt");
+
+    std::fs::create_dir_all(config_dir.join("plugins")).unwrap();
+    std::fs::create_dir_all(runtime_dir.join("smelt/commands")).unwrap();
+    std::fs::create_dir_all(&project_runtime_dir).unwrap();
+
+    let probe = r#"
+        assert(__smelt_internal == nil)
+        assert(rawget(_G, "__smelt_internal") == nil)
+        assert(rawget(_G, "__smelt_lifecycle_latest__") == nil)
+        assert(rawget(_G, "__smelt_raw_engine_ask__") == nil)
+        assert(rawget(_G, "__smelt_raw_engine_ask_inherited__") == nil)
+        assert(rawget(_G, "__smelt_raw_tools_register__") == nil)
+        assert(rawget(smelt, "__sweep_state") == nil)
+        assert(rawget(smelt.confirm, "__resolve") == nil)
+        assert(rawget(smelt.notebook, "preview_data") == nil)
+        assert(rawget(smelt.session, "_rewind_active_turn_if_clean") == nil)
+        assert(package.loaded.__smelt_internal == nil)
+        assert(not pcall(require, "__smelt_internal"))
+        assert(debug == nil or type(debug.getregistry) ~= "function")
+        assert(type(smelt.state.get("internal-privacy-probe")) == "table")
+        assert(type(smelt.ns("internal-privacy-probe")) == "number")
+    "#;
+    let source = |marker: &str| format!("{probe}\n_G.{marker} = true\n");
+
+    std::fs::write(config_dir.join("init.lua"), source("user_init_private")).unwrap();
+    std::fs::write(
+        config_dir.join("plugins/privacy.lua"),
+        source("user_plugin_private"),
+    )
+    .unwrap();
+    std::fs::write(
+        project_config_dir.join("init.lua"),
+        format!(
+            "{}\nrequire('smelt.project_privacy_probe')\n",
+            source("project_init_private")
+        ),
+    )
+    .unwrap();
+    // A user override keeps the name of a bundled module. Source origin, not
+    // module name, determines capability access.
+    std::fs::write(
+        runtime_dir.join("smelt/commands/color.lua"),
+        source("user_override_private"),
+    )
+    .unwrap();
+    std::fs::write(
+        project_runtime_dir.join("project_privacy_probe.lua"),
+        source("project_override_private"),
+    )
+    .unwrap();
+
+    smelt_core::trust::TrustStore::new(home.join("state/smelt"))
+        .mark_trusted(&project_dir)
+        .unwrap();
+
+    let mut app = TestApp::builder()
+        .with_runtime_home(&home)
+        .with_lua_load_paths(&config_dir, Some(runtime_dir))
+        .with_cwd(&project_dir)
+        .build();
+
+    let markers = [
+        "user_init_private",
+        "user_plugin_private",
+        "project_init_private",
+        "user_override_private",
+        "project_override_private",
+    ];
+    for marker in markers {
+        assert!(
+            app.eval_lua::<bool>(&format!("return {marker}"))
+                .unwrap_or(false),
+            "{marker} launch probe"
+        );
+    }
+
+    let generation = app.lua_probe().id;
+    app.reload_lua();
+    assert_eq!(app.lua_probe().id, generation.wrapping_add(1));
+    for marker in markers {
+        assert!(
+            app.eval_lua::<bool>(&format!("return {marker}"))
+                .unwrap_or(false),
+            "{marker} reload probe"
+        );
+    }
+
+    let committed_generation = app.lua_probe().id;
+    std::fs::write(
+        config_dir.join("init.lua"),
+        format!("{probe}\nerror('internal privacy candidate probe complete')\n"),
+    )
+    .unwrap();
+    app.reload_lua();
+    assert_eq!(app.lua_probe().id, committed_generation);
+    assert!(app.lua_messages_contain("internal privacy candidate probe complete"));
+    assert!(app.run_lua(probe));
 }
 
 #[test]
@@ -505,7 +602,58 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
 }
 
 #[test]
-fn candidate_rejects_unstaged_perf_mutations() {
+fn bundled_composition_uses_live_effect_guards() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"smelt.cmd.register("committed_before_bundled_guard", function() end)"#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let committed_generation = app.lua_probe().id;
+
+    std::fs::write(&init, "smelt.mode.cycle()").unwrap();
+    app.reload_lua();
+
+    assert_eq!(app.lua_probe().id, committed_generation);
+    let failure = app
+        .app
+        .lua_reload_failure()
+        .expect("the direct effect should fail candidate loading");
+    assert!(
+        failure
+            .message
+            .contains("smelt.mode.set is unavailable while loading a Lua candidate"),
+        "unexpected candidate failure: {failure}"
+    );
+    assert!(app
+        .lua_probe()
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("committed_before_bundled_guard"));
+
+    std::fs::write(
+        &init,
+        r#"
+        smelt.cmd.register("call_bundled_after_commit", function()
+            smelt.mode.cycle()
+            _G.__bundled_guard_called_after_commit = true
+        end)
+        "#,
+    )
+    .unwrap();
+    app.reload_lua();
+
+    assert_eq!(app.lua_probe().id, committed_generation.wrapping_add(1));
+    assert!(app.app.lua_reload_failure().is_none());
+    assert!(app.run_lua("smelt.mode.cycle(); _G.__bundled_guard_called_after_commit = true"));
+    assert!(app.run_lua("assert(_G.__bundled_guard_called_after_commit == true)"));
+}
+
+#[test]
+fn candidate_rejects_direct_perf_mutations() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(
@@ -956,9 +1104,6 @@ fn shutdown_hooks_and_state_flush_lend_the_tui_host() {
                 _G.__shutdown_host_session = smelt.session.id()
                 _G.__shutdown_ctx_session = ctx.session_id
             end)
-            smelt.__flush_persistent_state = function()
-                _G.__flush_host_session = smelt.session.id()
-            end
             "#,
     )
     .expect("register shutdown callbacks");
@@ -967,17 +1112,10 @@ fn shutdown_hooks_and_state_flush_lend_the_tui_host() {
 
     assert!(errors.is_empty(), "shutdown errors: {errors:?}");
     assert_eq!(flush_error, None);
-    let values: (String, String, String) = app
-        .eval_lua("return __shutdown_host_session, __shutdown_ctx_session, __flush_host_session")
+    let values: (String, String) = app
+        .eval_lua("return __shutdown_host_session, __shutdown_ctx_session")
         .expect("read shutdown callback results");
-    assert_eq!(
-        values,
-        (
-            expected_session_id.clone(),
-            expected_session_id.clone(),
-            expected_session_id,
-        )
-    );
+    assert_eq!(values, (expected_session_id.clone(), expected_session_id));
 }
 
 #[test]
@@ -2565,6 +2703,11 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
             assert(type(pricing.source) == "string")
             local max_tokens = smelt.model.max_tokens()
             assert(max_tokens == nil or type(max_tokens) == "number")
+            assert(smelt.model.preferred("coverage") == nil)
+            assert(smelt.model.preferred("coverage", "test-model") == "test-model")
+            assert(smelt.model.preferred("coverage") == "test-model")
+            assert(smelt.model.preferred("coverage", nil) == nil)
+            assert(smelt.model.preferred("coverage") == nil)
 
             local original = smelt.settings.show_slug
             assert(type(original) == "boolean")
@@ -2822,7 +2965,15 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
             local subcommand_decision = smelt.permissions.check("default", "bash", "git status")
             assert(type(tool_decision) == "string" and #tool_decision > 0, "permission tool decision")
             assert(type(subcommand_decision) == "string" and #subcommand_decision > 0, "permission subcommand decision")
-            smelt.permissions.extend({ default = { tools = { ask = { "*" } } } })
+            smelt.permissions.extend({
+                default = {
+                    tools = { ask = { "*" } },
+                    effects = { read = "ask" },
+                },
+            })
+            assert(not pcall(function()
+                smelt.permissions.extend({ default = { effects = { read = "sometimes" } } })
+            end), "permission effects reject unknown decisions")
 
             smelt.notify.info("hello from lua contract", "coverage")
             smelt.notify.warn("careful from lua contract", "coverage")
@@ -3259,31 +3410,23 @@ fn sweep_state_prunes_untouched_entries() {
         .exec()
         .expect("seed");
 
-    // Mimic what `reload()` does: reset the touched table, simulate one
-    // plugin re-touching its state, then sweep.
+    // Re-running bootstrap starts a new touch cycle while preserving the
+    // private state table. Simulate one plugin re-touching its state, then use
+    // the host-only lifecycle hook to finish the cycle.
+    smelt_core::lua::runtime::load_host_bootstrap_chunks(&rt.lua)
+        .expect("start a new state touch cycle");
     rt.lua
-        .load(
-            r#"
-                __smelt_state_touched__ = {}
-                smelt.state.get("alive")
-                smelt.__sweep_state()
-                "#,
-        )
+        .load("smelt.state.get('alive')")
         .exec()
+        .expect("touch alive state");
+    smelt_core::lua::module::internal_api_function(&rt.lua, "smelt", "__sweep_state")
+        .unwrap()
+        .call::<()>(())
         .expect("sweep");
 
-    let alive: bool = rt
-        .lua
-        .load("return __smelt_state__.alive ~= nil")
-        .eval()
-        .unwrap();
-    let dead: bool = rt
-        .lua
-        .load("return __smelt_state__.dead ~= nil")
-        .eval()
-        .unwrap();
-    assert!(alive, "touched entry survives");
-    assert!(!dead, "untouched entry is swept");
+    let state = rt.state_snapshot();
+    assert!(state.get("alive").is_some(), "touched entry survives");
+    assert!(state.get("dead").is_none(), "untouched entry is swept");
 }
 
 #[test]
@@ -3292,35 +3435,41 @@ fn sweep_state_prunes_clean_untouched_persistent_entries() {
     rt.lua
         .load(
             r#"
-                __smelt_persistent_state__.alive = { dirty = false }
-                __smelt_persistent_state__.dead = { dirty = false }
-                __smelt_persistent_state__.dirty = { dirty = true }
-                __smelt_persistent_state_touched__ = { alive = true }
-                smelt.__sweep_state()
+                smelt.state.persistent("sweep_alive", { debounce_ms = 100000 })
+                smelt.state.persistent("sweep_dead", { debounce_ms = 100000 })
+                local dirty = smelt.state.persistent("sweep_dirty", { debounce_ms = 100000 })
+                dirty.value = true
                 "#,
         )
         .exec()
+        .expect("seed persistent state");
+
+    smelt_core::lua::runtime::load_host_bootstrap_chunks(&rt.lua)
+        .expect("start a new persistent-state touch cycle");
+    rt.lua
+        .load("smelt.state.persistent('sweep_alive', { debounce_ms = 100000 })")
+        .exec()
+        .expect("touch alive persistent state");
+    smelt_core::lua::module::internal_api_function(&rt.lua, "smelt", "__sweep_state")
+        .unwrap()
+        .call::<()>(())
         .expect("sweep");
 
-    let alive: bool = rt
-        .lua
-        .load("return __smelt_persistent_state__.alive ~= nil")
-        .eval()
-        .unwrap();
-    let dead: bool = rt
-        .lua
-        .load("return __smelt_persistent_state__.dead ~= nil")
-        .eval()
-        .unwrap();
-    let dirty: bool = rt
-        .lua
-        .load("return __smelt_persistent_state__.dirty ~= nil")
-        .eval()
-        .unwrap();
-    assert!(alive, "touched persistent entry survives");
-    assert!(!dead, "clean untouched persistent entry is swept");
+    let internal = smelt_core::lua::module::internal_api_root(&rt.lua).unwrap();
+    let persistent: mlua::Table = internal.raw_get("__persistent_state").unwrap();
+    let exists = |name: &str| {
+        !matches!(
+            persistent.raw_get::<mlua::Value>(name).unwrap(),
+            mlua::Value::Nil
+        )
+    };
+    assert!(exists("sweep_alive"), "touched persistent entry survives");
     assert!(
-        dirty,
+        !exists("sweep_dead"),
+        "clean untouched persistent entry is swept"
+    );
+    assert!(
+        exists("sweep_dirty"),
         "dirty untouched persistent entry is kept for flushing"
     );
 }
@@ -3391,10 +3540,10 @@ fn reload_lua_preserves_nested_state_tables() {
         app.reload_lua();
     }
     let width: u64 = app
-        .eval_lua("return __smelt_state__.nested.cfg.panel.width")
+        .eval_lua("return smelt.state.get('nested').cfg.panel.width")
         .unwrap();
     let last: u64 = app
-        .eval_lua("return __smelt_state__.nested.cfg.panel.history[3]")
+        .eval_lua("return smelt.state.get('nested').cfg.panel.history[3]")
         .unwrap();
     assert_eq!(width, 80);
     assert_eq!(last, 3);
@@ -3422,18 +3571,6 @@ fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
         !state_path.exists(),
         "debounced save should not have reached disk before reload"
     );
-    let dirty_before: bool = app
-        .eval_lua("return __smelt_persistent_state__.flush_reload.dirty == true")
-        .unwrap();
-    let pending_before: bool = app
-        .eval_lua("return __smelt_persistent_state__.flush_reload.pending ~= nil")
-        .unwrap();
-    assert!(
-        dirty_before,
-        "persistent write should be dirty before reload"
-    );
-    assert!(pending_before, "debounced save should still be pending");
-
     std::fs::write(&init, "-- no persistent write on reload\n").unwrap();
     app.reload_lua();
 
@@ -3441,14 +3578,6 @@ fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
         .unwrap_or_else(|e| panic!("read {}: {e}", state_path.display()));
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(json["value"], "before-reload");
-
-    let entry_swept_after: bool = app
-        .eval_lua("return __smelt_persistent_state__.flush_reload == nil")
-        .unwrap();
-    assert!(
-        entry_swept_after,
-        "clean persistent state not touched by the new config should be swept"
-    );
 }
 
 #[test]
@@ -3720,7 +3849,7 @@ fn reload_lua_drains_ready_hooks_with_kind_reload() {
 
     let read = |app: &mut TestApp, k: &str| -> String {
         app.eval_lua(&format!(
-            "return tostring(__smelt_state__['ready_kind_probe'].{k})"
+            "return tostring(smelt.state.get('ready_kind_probe').{k})"
         ))
         .unwrap()
     };
@@ -3750,10 +3879,7 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
     .unwrap();
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
-    let exists = |app: &mut TestApp, k: &str| -> bool {
-        app.eval_lua(&format!("return __smelt_state__['{k}'] ~= nil"))
-            .unwrap()
-    };
+    let exists = |app: &TestApp, key: &str| app.app.lua.state_snapshot().get(key).is_some();
     {
         assert!(exists(&mut app, "kept"));
         assert!(exists(&mut app, "dropped"));
@@ -3806,6 +3932,10 @@ fn reload_clears_every_lua_surface() {
                 api_base = "http://seed.invalid",
                 models = { "seed-model" },
             })
+            smelt.mcp.register("seed_mcp", {
+                command = { "seed-mcp" },
+                enabled = false,
+            })
             smelt.tools.middleware("", { before = function() end })
             smelt.provider.middleware({ on_response = function() end })
 
@@ -3843,6 +3973,7 @@ fn reload_clears_every_lua_surface() {
     .unwrap();
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.assert_no_handle_leak_across_reload();
     let shared = app.lua_probe().shared().core.clone();
 
     // Pre-reload: every surface has at least the seeded entry.
@@ -3868,6 +3999,7 @@ fn reload_clears_every_lua_surface() {
         .unwrap()
         .iter()
         .any(|p| p.name.as_deref() == Some("seed_provider")));
+    assert!(shared.mcp_configs.lock().unwrap().contains_key("seed_mcp"));
     assert!(!shared.hooks.tool_before.is_empty());
     assert!(!shared.hooks.provider_response.is_empty());
     assert!(!app.core_probe().timers.is_empty());
@@ -3932,6 +4064,10 @@ fn reload_clears_every_lua_surface() {
         "provider registry cleared"
     );
     assert!(
+        !shared.mcp_configs.lock().unwrap().contains_key("seed_mcp"),
+        "MCP registry cleared"
+    );
+    assert!(
         shared.hooks.tool_before.is_empty(),
         "tool middleware cleared"
     );
@@ -3954,13 +4090,21 @@ fn reload_clears_every_lua_surface() {
         "stale named overlay retired"
     );
     assert!(
+        app.ui_probe().named_win("seed.win").is_none(),
+        "stale named window retired"
+    );
+    assert!(
+        app.ui_probe().named_buf("seed.buf").is_none(),
+        "stale named buffer retired"
+    );
+    assert!(
         app.ui_probe().overlay(anon_overlay).is_none(),
         "anonymous overlay reaped"
     );
-    let dropped_state: bool = app
-        .eval_lua("return __smelt_state__.seed_plugin ~= nil")
-        .unwrap();
-    assert!(!dropped_state, "dropped-plugin state slot swept");
+    assert!(
+        app.app.lua.state_snapshot().get("seed_plugin").is_none(),
+        "dropped-plugin state slot swept"
+    );
 }
 
 #[test]
@@ -3994,6 +4138,52 @@ fn reload_lua_cancels_in_flight_tasks() {
     assert_eq!(output_count, 0, "no task outputs after reload cancellation");
     let completed: bool = app.eval_lua("return _G.__task_completed__").unwrap();
     assert!(!completed, "cancelled task must not have run to completion");
+}
+
+#[test]
+fn removing_spawn_reg_exposes_cancellation_and_cleans_the_task() {
+    let mut app = TestApp::builder().build();
+    let baseline = app.lua_probe().core_shared().tasks.lock().unwrap().len();
+    assert!(app
+        .lua_probe()
+        .core_shared()
+        .task_inbox
+        .lock()
+        .unwrap()
+        .is_empty());
+
+    assert!(app.run_lua(
+        r#"
+            _G.cancel_observed = false
+            _G.cancel_finished = false
+            _G.cancel_reg = smelt.spawn(function()
+                local ok, err = pcall(function() smelt.sleep(60000) end)
+                _G.cancel_observed = not ok and smelt.task.is_cancelled(err)
+                _G.cancel_finished = true
+            end)
+            "#,
+    ));
+    app.drive_lua_tasks_once();
+    assert_eq!(
+        app.lua_probe().core_shared().tasks.lock().unwrap().len(),
+        baseline + 1
+    );
+
+    assert!(app.run_lua("_G.cancel_reg:remove()"));
+    assert_eq!(app.drive_lua_tasks_once(), 0);
+    assert!(app.eval_lua::<bool>("return _G.cancel_observed").unwrap());
+    assert!(app.eval_lua::<bool>("return _G.cancel_finished").unwrap());
+    assert_eq!(
+        app.lua_probe().core_shared().tasks.lock().unwrap().len(),
+        baseline
+    );
+    assert!(app
+        .lua_probe()
+        .core_shared()
+        .task_inbox
+        .lock()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

@@ -19,8 +19,9 @@
 </p>
 
 > [!WARNING]
-> smelt is in active development. Use the latest pre-release tag and update
-> often; interfaces may still change between releases.
+> smelt is beta software until 1.0. Beta maturity is not encoded as a SemVer
+> prerelease: releases use normal `0.x.y` versions. Use the latest release and
+> update often; interfaces may still change between releases.
 
 ## Why
 

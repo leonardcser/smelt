@@ -3,6 +3,7 @@ name = "smelt-provider"
 version = "0.5.0-alpha.12"
 edition = "2021"
 rust-version.workspace = true
+publish = false
 
 [lib]
 name = "smelt_provider"

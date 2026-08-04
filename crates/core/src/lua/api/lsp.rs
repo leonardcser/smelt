@@ -8,7 +8,7 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "lsp",
@@ -40,7 +40,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
 fn register_call(m: &LuaMod, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let s = shared.clone();
-    m.private_fn(
+    m.private_live_only_fn(
         "__call",
         &["task_id", "operation", "args"],
         move |lua, (task_id, operation, args): (u64, String, mlua::Table)| -> LuaResult<()> {

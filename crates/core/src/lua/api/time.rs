@@ -6,7 +6,7 @@ use chrono::{Local, TimeZone, Utc};
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "time",

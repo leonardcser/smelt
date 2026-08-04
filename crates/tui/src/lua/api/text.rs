@@ -1,6 +1,6 @@
-//! `smelt.text` - visual-width measurement and human-readable formatting.
-//! UiHost-only (the width metric matches the TUI's terminal-cell column
-//! count). Render helpers live in `smelt.render`.
+//! `smelt.text` - terminal-cell measurement and pure text formatting.
+//! These helpers do not access live UI state. Render helpers live in
+//! `smelt.render`.
 
 use mlua::prelude::*;
 use smelt_buffer::{cell_width, text};
@@ -161,12 +161,12 @@ fn prefixed_row(prefix: &str, text: &str, width: usize) -> (String, usize) {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "text",
-        "Visual-width measurement. UiHost-only.",
-        Tier::UiHost,
+        "Terminal-cell measurement and pure text formatting.",
+        Tier::Host,
     )?;
     m.fn_(
         "width",

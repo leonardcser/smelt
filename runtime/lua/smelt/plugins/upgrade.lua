@@ -1,5 +1,5 @@
 -- Autoupgrade plugin. Two channels:
---   * stable   - latest tagged release (any tag, including prereleases)
+--   * stable   - latest published GitHub release by SemVer
 --   * unstable - main branch HEAD (needs smelt.build.sha)
 --
 -- Settings:

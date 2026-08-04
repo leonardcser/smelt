@@ -110,10 +110,10 @@ end
 -- Drive the bundled tool-permission confirm dialog for `handle_id`.
 -- Reads the matching request out of the `confirm_requested` signal, builds
 -- the header + preview + option leaves, dispatches the user's choice
--- through `smelt.confirm.__resolve`. Bails when no matching request is
--- active (e.g. a newer prompt has superseded it). Called by the host;
--- plugins should not invoke directly.
----@internal
+-- through the bundled host bridge. Bails when no matching request is active
+-- (e.g. a newer prompt has superseded it). The host calls this Advanced
+-- override point; plugins may replace it but should not invoke it directly.
+---@advanced
 ---@type fun(handle_id: string): nil
 function smelt.confirm.open(handle_id)
   -- Bail if the signal doesn't match this handle; a newer request may have
@@ -124,7 +124,7 @@ function smelt.confirm.open(handle_id)
   local header_buf  = smelt.buf.new()
   local preview_buf = smelt.buf.new({ readonly = true })
   render_header(header_buf, req, label_value.initial_dialog_width())
-  smelt.confirm.__render_preview(preview_buf, handle_id)
+  __smelt_internal.confirm.__render_preview(preview_buf, handle_id)
   local first_preview = preview_buf:line(1)
   local has_preview = first_preview ~= nil and first_preview ~= ""
 
@@ -156,7 +156,7 @@ function smelt.confirm.open(handle_id)
   local function close_with(idx, message)
     if resolved then return end
     resolved = true
-    smelt.confirm.__resolve(handle_id, decisions[idx] or "no", message)
+    __smelt_internal.confirm.__resolve(handle_id, decisions[idx] or "no", message)
   end
 
   local function current_reason()
@@ -197,7 +197,7 @@ function smelt.confirm.open(handle_id)
     focus = options_leaf,
     keymaps = {
       { key = "s-tab", on_press = function(ctx)
-          if smelt.confirm.__back_tab(handle_id) then
+          if __smelt_internal.confirm.__back_tab(handle_id) then
             resolved = true
             ctx.close()
           end

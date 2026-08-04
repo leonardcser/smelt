@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Window handle constructor. `smelt.win.new(buf, opts?)` opens a split window over `buf` and returns a `Win` userdata. `opts.name` opts the window into hot-reload survival. UiHost-only - windows are layout leaves that render a buffer onto the screen.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.win
 local win = {}
 

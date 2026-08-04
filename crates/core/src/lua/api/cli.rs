@@ -84,7 +84,7 @@ fn value_to_lua(lua: &Lua, v: &CliFlagValue) -> LuaResult<mlua::Value> {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "cli",

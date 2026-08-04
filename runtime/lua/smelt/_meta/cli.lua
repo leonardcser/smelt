@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Declare and read CLI flags from Lua. `register_flag` is intended to be called from `early.lua` so the flag is folded into the main binary's argument parser. `get(name)` returns the parsed value (or the declared default) after the binary has parsed argv.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.cli
 local cli = {}
 

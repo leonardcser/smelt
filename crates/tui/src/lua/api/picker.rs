@@ -17,6 +17,7 @@ impl LuaType for LuaPickerNewOpts {
     fn lua_type() -> String {
         record_class(LuaClassDecl {
             name: "smelt.picker.Item",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.picker.Item"),
             doc: "Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.",
             fields: vec![
                 LuaClassField { name: "label", ty: "string".into(), optional: false, doc: "Primary text shown for this row." },
@@ -29,6 +30,7 @@ impl LuaType for LuaPickerNewOpts {
         });
         record_class(LuaClassDecl {
             name: "smelt.picker.NewOpts",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.picker.NewOpts"),
             doc: "Options for the low-level non-blocking picker handle constructor.",
             fields: vec![
                 LuaClassField {
@@ -138,7 +140,7 @@ impl mlua::UserData for LuaPicker {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "picker",
@@ -149,6 +151,7 @@ The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `s
 
     record_class(LuaClassDecl {
         name: "smelt.picker.Picker",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.picker.Picker"),
         doc: "Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
             "win" => fn() -> super::win::LuaWin, "Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).",

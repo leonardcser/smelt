@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
 

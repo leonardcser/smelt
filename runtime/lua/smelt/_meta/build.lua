@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Compile-time build identity and version metadata for plugins. Fields: `version` (CARGO_PKG_VERSION, for semver comparison), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), and `display` (canonical user-facing identity). `display` is `v0.5.0-alpha.2` for a clean tagged build or `v0.5.0-alpha.2-122-97dce0e8-dirty` for a dev build. Shared by the banner, `/version`, `/upgrade`, and `smelt --version`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.build
 local build = {}
 

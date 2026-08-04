@@ -1,6 +1,8 @@
 -- Task-yielding primitives. Autoloaded before user init.lua so all plugins
 -- see `smelt.sleep` and dialog/picker helpers can reference them.
 
+local internal = __smelt_internal
+
 -- Yieldable-context guard. `level = 3` so the error points at the caller's
 -- caller (the user code), not this helper.
 local function require_yieldable(name)
@@ -77,7 +79,7 @@ end
 ---@type fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
 function smelt.tools.call(name, args, parent_call_id)
   return smelt.task.external(function(id)
-    smelt.tools.__send_call(id, parent_call_id or "", name, args or {})
+    internal.tools.__send_call(id, parent_call_id or "", name, args or {})
   end)
 end
 
@@ -116,10 +118,14 @@ end
 
 -- Compact repeated absolute cwd prefixes in model-facing tool output. This is
 -- display-only policy for structured path outputs, not a filesystem primitive.
+---@advanced
 function smelt.tools._compact_cwd_path(path)
   return compact_cwd_path(path, cwd_prefixes())
 end
 
+-- Apply `_compact_cwd_path` to each path in an array, preserving order.
+-- Returns an empty array when `paths` is `nil`.
+---@advanced
 function smelt.tools._compact_cwd_paths(paths)
   local prefixes = cwd_prefixes()
   if #prefixes == 0 then return paths or {} end
@@ -130,6 +136,9 @@ function smelt.tools._compact_cwd_paths(paths)
   return out
 end
 
+-- Remove the active working-directory prefix from the start of each line in
+-- model-facing text while preserving line endings. Returns `""` for `nil`.
+---@advanced
 function smelt.tools._compact_cwd_prefix_lines(content)
   if not content or content == "" then return content or "" end
   local prefixes = cwd_prefixes()
@@ -155,6 +164,7 @@ end
 -- Attach an outer watchdog to a tool definition. This is intentionally
 -- separate from the tool's own timeout handling: builtins use a small grace
 -- period so their domain-specific timeout result wins before the watchdog fires.
+---@advanced
 function smelt.tools._with_watchdog(def, opts)
   opts = opts or {}
   local default_ms = opts.default_ms or 30000
@@ -173,6 +183,7 @@ end
 -- Loading messages are caller-controlled so UIs can delay them or keep stale rows.
 smelt.provider = smelt.provider or {}
 
+--- Provider rows and loading state returned by `smelt.provider.normalize`.
 ---@class smelt.provider.NormalizedResult
 ---@field rows table[] Rows to render after optional synthetic message insertion.
 ---@field result? table Original provider result when the input used the provider shape.
@@ -223,8 +234,9 @@ function smelt.provider.synthetic_only(rows)
   return #list == 1 and list[1]._synthetic == true
 end
 
--- Internal UI helper: keep stale rows visible while a provider is loading an
+-- Advanced UI helper: keep stale rows visible while a provider is loading an
 -- empty/synthetic refresh, instead of flashing to a status row.
+---@advanced
 function smelt.provider._should_keep_stale_rows(result, rows, current_rows)
   local list = rows or {}
   return smelt.provider.is_loading(result)
@@ -232,7 +244,8 @@ function smelt.provider._should_keep_stale_rows(result, rows, current_rows)
     and smelt.provider.has_real_rows(current_rows)
 end
 
--- Internal UI helper: 1-based row position for a stable item key.
+-- Advanced UI helper: 1-based row position for a stable item key.
+---@advanced
 function smelt.provider._position_of_key(rows, key)
   if not key then return nil end
   for i, item in ipairs(rows or {}) do
@@ -241,7 +254,8 @@ function smelt.provider._position_of_key(rows, key)
   return nil
 end
 
--- Internal UI helper: select the fallback row unless stable-key preservation succeeds.
+-- Advanced UI helper: select the fallback row unless stable-key preservation succeeds.
+---@advanced
 function smelt.provider._select_row(rows, old_key, preserve, fallback)
   fallback = fallback or 1
   if preserve then
@@ -258,7 +272,7 @@ end
 --
 -- ```lua
 -- return smelt.reg.compose(
---   smelt.win.cur():key("n", "<leader>x", handler),
+--   smelt.keymap.set("n", "<leader>x", handler),
 --   smelt.fs.watch(path, on_change),
 --   smelt.timer.every(1000, tick)
 -- )
@@ -376,7 +390,7 @@ if smelt.lifecycle and smelt.signal then
     history = "history_epoch",
     input = "input_epoch",
   }
-  __smelt_lifecycle_latest__ = __smelt_lifecycle_latest__ or {}
+  local lifecycle_latest = {}
 
   local function normalize_guard_scopes(scopes)
     local out = {}
@@ -406,6 +420,7 @@ if smelt.lifecycle and smelt.signal then
     return out
   end
 
+  --- Cancellation and supersession guard returned by `smelt.lifecycle.guard`.
   ---@class smelt.lifecycle.Guard
   ---@field alive fun(self:smelt.lifecycle.Guard):boolean Return true while every captured epoch still matches and the guard was not cancelled or superseded.
   ---@field cancel fun(self:smelt.lifecycle.Guard) Mark the guard stale immediately.
@@ -428,7 +443,7 @@ if smelt.lifecycle and smelt.signal then
 
     function guard:alive()
       if not active then return false end
-      if latest_key and __smelt_lifecycle_latest__[latest_key] ~= latest_token then return false end
+      if latest_key and lifecycle_latest[latest_key] ~= latest_token then return false end
       for signal_name, value in pairs(snapshot) do
         if smelt.signal.get(signal_name) ~= value then return false end
       end
@@ -442,7 +457,7 @@ if smelt.lifecycle and smelt.signal then
     function guard:latest(key)
       latest_key = tostring(key)
       latest_token = {}
-      __smelt_lifecycle_latest__[latest_key] = latest_token
+      lifecycle_latest[latest_key] = latest_token
       return self
     end
 
@@ -460,8 +475,10 @@ end
 
 -- `smelt.engine.ask({ guard = ... })` suppresses stale callbacks centrally.
 if smelt.engine and smelt.lifecycle then
-  __smelt_raw_engine_ask__ = __smelt_raw_engine_ask__ or smelt.engine.ask
-  __smelt_raw_engine_ask_inherited__ = __smelt_raw_engine_ask_inherited__ or smelt.engine.ask_inherited
+  internal.__raw_engine_ask = internal.__raw_engine_ask or smelt.engine.ask
+  internal.__raw_engine_ask_inherited = internal.__raw_engine_ask_inherited or smelt.engine.ask_inherited
+  local raw_engine_ask = internal.__raw_engine_ask
+  local raw_engine_ask_inherited = internal.__raw_engine_ask_inherited
 
   local function guarded_ask(raw, spec)
     if type(spec) == "table" and spec.guard then
@@ -491,35 +508,40 @@ if smelt.engine and smelt.lifecycle then
     return raw(spec)
   end
 
+  ---@tier ui_host
   smelt.engine.ask = function(spec)
-    return guarded_ask(__smelt_raw_engine_ask__, spec)
+    return guarded_ask(raw_engine_ask, spec)
   end
 
+  ---@tier ui_host
   smelt.engine.ask_inherited = function(spec)
-    return guarded_ask(__smelt_raw_engine_ask_inherited__, spec)
+    return guarded_ask(raw_engine_ask_inherited, spec)
   end
 end
 
--- Idempotent across `/reload`: cache the raw register in a global so each
--- bootstrap run re-wraps the same raw - never the previous wrap.
-__smelt_raw_tools_register__ = __smelt_raw_tools_register__ or smelt.tools.register
+-- Idempotent across `/reload`: cache the raw register privately so each
+-- bootstrap run re-wraps the same raw - never the previous wrapper.
+internal.__raw_tools_register = internal.__raw_tools_register or smelt.tools.register
+local raw_tools_register = internal.__raw_tools_register
 smelt.tools.register = function(def)
   if type(def) == "table" then
     if def.summary == nil then
       def.summary = smelt.tools.default_summary
     end
   end
-  return __smelt_raw_tools_register__(def)
+  return raw_tools_register(def)
 end
 
--- Picker depends on `smelt.prompt.open_picker` (UiHost tier). Only
--- attach the convenience wrapper when the prompt namespace is present.
-if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
+-- The body resolves `smelt.prompt.open_picker` only when invoked, after the
+-- remaining UI bootstrap chunks have installed it.
+if smelt.picker and smelt.prompt then
+  --- Options for the yielding fuzzy-picker convenience facade.
   ---@class smelt.picker.FuzzyOpts
   ---@field items (string|smelt.picker.Item)[] Items to filter.
   ---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Defaults to "prompt_docked" for this wrapper.
   ---@field on_select? fun(item: smelt.picker.Item) Live selection callback.
 
+  --- Accepted fuzzy-picker value; dismissal returns `nil` instead.
   ---@class smelt.picker.FuzzyResult
   ---@field index integer 1-based accepted item index.
   ---@field item smelt.picker.Item Accepted normalized item.
@@ -531,6 +553,7 @@ if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
   -- `{ index, item, action }` on accept or `nil` on dismiss.
   --   • `opts.on_select(item)` - fires on navigation
   --   • `opts.placement` - defaults to "prompt_docked"
+  ---@tier ui_host
   ---@type fun(opts: smelt.picker.FuzzyOpts): smelt.picker.FuzzyResult?
   function smelt.picker.fuzzy(opts)
     if type(opts) ~= "table" then
@@ -563,7 +586,7 @@ end
 -- file mtime in milliseconds when available.
 ---@type fun(path: string): string?, string?, integer?
 function smelt.fs.read_async(path)
-  local result = smelt.task.external(function(id) smelt.fs.__start_read(id, path) end)
+  local result = smelt.task.external(function(id) internal.fs.__start_read(id, path) end)
   if result.content ~= nil then return result.content, nil, result.mtime_ms end
   return nil, result.err, nil
 end
@@ -571,7 +594,7 @@ end
 -- Return `{ is_file, len, mtime_ms }` for `path` off the main thread, or `(nil, err)`.
 ---@type fun(path: string): table?, string?
 function smelt.fs.file_info_async(path)
-  return external_or_err(function(id) smelt.fs.__start_file_info(id, path) end)
+  return external_or_err(function(id) internal.fs.__start_file_info(id, path) end)
 end
 
 -- Write `contents` to `path` off the main thread. Same yielding rules as
@@ -579,7 +602,7 @@ end
 -- `(false, err, nil)` on failure - mirrors `smelt.fs.write`.
 ---@type fun(path: string, contents: string): boolean, string?, integer?
 function smelt.fs.write_async(path, contents)
-  local result = smelt.task.external(function(id) smelt.fs.__start_write(id, path, contents) end)
+  local result = smelt.task.external(function(id) internal.fs.__start_write(id, path, contents) end)
   if result.ok then return true, nil, result.mtime_ms end
   return false, result.err, nil
 end
@@ -588,7 +611,7 @@ end
 -- `smelt.fs.mkdir_all`.
 ---@type fun(path: string): boolean, string?
 function smelt.fs.mkdir_all_async(path)
-  local result = smelt.task.external(function(id) smelt.fs.__start_mkdir_all(id, path) end)
+  local result = smelt.task.external(function(id) internal.fs.__start_mkdir_all(id, path) end)
   if result.ok then return true, nil end
   return false, result.err
 end
@@ -598,7 +621,7 @@ end
 -- `{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
 ---@type fun(pattern: string, path: string?, opts: table?): table?, string?
 function smelt.fs.glob_async(pattern, path, opts)
-  return external_or_err(function(id) smelt.fs.__start_glob(id, pattern, path or "", opts or {}) end)
+  return external_or_err(function(id) internal.fs.__start_glob(id, pattern, path or "", opts or {}) end)
 end
 
 -- Read and base64-encode a file off the main thread. Without `mime`, the MIME
@@ -606,7 +629,7 @@ end
 ---@type fun(path: string, mime?: string): string?, string?
 function smelt.image.read_as_data_url_async(path, mime)
   local result = smelt.task.external(function(id)
-    smelt.image.__start_read_as_data_url(id, path, mime)
+    internal.image.__start_read_as_data_url(id, path, mime)
   end)
   if result.url ~= nil then return result.url, nil end
   return nil, result.err
@@ -618,7 +641,7 @@ if smelt.notebook then
   ---@type fun(path: string, offset: integer, limit: integer): string?, string?, string?, integer?
   function smelt.notebook.read_async(path, offset, limit)
     local result = smelt.task.external(function(id)
-      smelt.notebook.__start_read(id, path, offset, limit)
+      internal.notebook.__start_read(id, path, offset, limit)
     end)
     if result.content ~= nil then return result.content, nil, result.raw, result.mtime_ms end
     return nil, result.err, nil, nil
@@ -629,7 +652,7 @@ if smelt.notebook then
   ---@type fun(args: table): table?, string?
   function smelt.notebook.apply_edit_async(args)
     local result = smelt.task.external(function(id)
-      smelt.notebook.__start_apply_edit(id, args or {})
+      internal.notebook.__start_apply_edit(id, args or {})
     end)
     if result.err ~= nil then return nil, result.err end
     return { message = result.message, metadata = result.metadata }, nil
@@ -660,7 +683,7 @@ end
 -- yielding API.
 ---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.process.run(cmd, args, opts)
-  return external_or_err(function(id) smelt.process.__start_run(id, cmd, args, opts) end)
+  return external_or_err(function(id) internal.process.__start_run(id, cmd, args, opts) end)
 end
 
 -- Stop the supervised shell job `id` and return its bounded output. Yields until
@@ -668,7 +691,7 @@ end
 -- nil)` on success or `(nil, err)` when the job does not exist or cannot stop.
 ---@type fun(id: string): { text: string }?, string?
 function smelt.process.stop(id)
-  return external_or_err(function(task_id) smelt.process.__start_stop(task_id, id) end)
+  return external_or_err(function(task_id) internal.process.__start_stop(task_id, id) end)
 end
 
 -- Perform an HTTP GET against `url`. Yields the calling coroutine until the
@@ -680,14 +703,14 @@ end
 -- task drops the in-flight request and raises `cancelled` from this call.
 ---@type fun(url: string, opts: table?): { status: integer, final_url: string, body: string, body_encoding: string?, headers: table, truncated: boolean }?, string?
 function smelt.http.get(url, opts)
-  return external_or_err(function(id) smelt.http.__start_get(id, url, opts) end)
+  return external_or_err(function(id) internal.http.__start_get(id, url, opts) end)
 end
 
 -- Perform an HTTP POST against `url` with `body` bytes. Yields the calling
 -- coroutine until the response lands. Same return shape as `smelt.http.get`.
 ---@type fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, body_encoding: string?, headers: table, truncated: boolean }?, string?
 function smelt.http.post(url, body, opts)
-  return external_or_err(function(id) smelt.http.__start_post(id, url, body, opts) end)
+  return external_or_err(function(id) internal.http.__start_post(id, url, body, opts) end)
 end
 
 --- Run an authenticated request against a provider-owned endpoint using
@@ -696,7 +719,7 @@ end
 --- URL scheme; `opts.method` defaults to `GET`.
 ---@type fun(provider: string, opts: { path: string, method: string?, body: string? }): { status: integer, body: string }?, string?
 function smelt.auth.request(provider, opts)
-  return external_or_err(function(id) smelt.auth.__start_request(id, provider, opts or {}) end)
+  return external_or_err(function(id) internal.auth.__start_request(id, provider, opts or {}) end)
 end
 
 --- Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
@@ -704,7 +727,7 @@ end
 --- resetHint? }`. Only providers with managed quota endpoints support this.
 ---@type fun(provider: string): { summary: table?, limits: table[] }?, string?
 function smelt.auth.managed_usage(provider)
-  return external_or_err(function(id) smelt.auth.__start_managed_usage(id, provider) end)
+  return external_or_err(function(id) internal.auth.__start_managed_usage(id, provider) end)
 end
 
 -- Run ripgrep with `pattern` over `path` off the main thread. Yields the
@@ -720,7 +743,7 @@ end
 -- is not an error - inspect `exit_code` on the result.
 ---@type fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.grep.run(pattern, path, opts)
-  return external_or_err(function(id) smelt.grep.__start_run(id, pattern, path, opts) end)
+  return external_or_err(function(id) internal.grep.__start_run(id, pattern, path, opts) end)
 end
 
 smelt.tick = smelt.tick or {}
@@ -768,14 +791,14 @@ function smelt.fs.watch(path, handler, opts)
   if type(handler) ~= "function" then
     error("smelt.fs.watch: handler must be a function", 2)
   end
-  local watcher_id, err = smelt.fs.__watch_register(path, opts or {})
+  local watcher_id, err = internal.fs.__watch_register(path, opts or {})
   if not watcher_id then
     error("smelt.fs.watch: " .. tostring(err), 2)
   end
   local task = smelt.spawn(function()
     while true do
       local task_id = smelt.task.alloc()
-      smelt.fs.__watch_arm(watcher_id, task_id)
+      internal.fs.__watch_arm(watcher_id, task_id)
       local events = smelt.task.wait(task_id)
       if events == nil then return end
       for _, ev in ipairs(events) do
@@ -791,7 +814,7 @@ function smelt.fs.watch(path, handler, opts)
     end
   end)
   return smelt.reg.compose(task, smelt.reg.new(function()
-    smelt.fs.__watch_stop(watcher_id)
+    internal.fs.__watch_stop(watcher_id)
   end))
 end
 
@@ -862,6 +885,7 @@ if smelt.theme then
   -- Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua`
   -- and apply it. `name` may be either a module slug (`catppuccin-mocha`) or
   -- the display syntax theme name (`Catppuccin Mocha`).
+  ---@tier ui_host
   ---@type fun(name: string): nil
   function smelt.theme.use(name)
     local scheme = resolve_scheme(name)
@@ -896,35 +920,37 @@ end
 --   smelt.state.get(name?)        → ephemeral table; survives /reload only.
 --   smelt.state.persistent(name)  → JSON-backed wrapper; survives restart.
 --
--- Ephemeral storage lives in a Lua global so bootstrap re-runs preserve
--- it. `__smelt_state_touched__` is reset on every reload; the Rust side
--- calls `smelt.__sweep_state()` after autoload to prune slots no plugin
--- touched this cycle (removed plugins don't leak state).
-__smelt_state__ = __smelt_state__ or {}
-__smelt_state_touched__ = {}
-__smelt_persistent_state__ = __smelt_persistent_state__ or {}
-__smelt_persistent_state_touched__ = {}
+-- Ephemeral storage lives in the VM-private capability tree so bootstrap
+-- re-runs preserve it without exposing it to user chunks. Touch tracking is
+-- reset on every reload; Rust invokes the private sweep hook after autoload to
+-- prune slots no plugin touched this cycle.
+internal.__state = internal.__state or {}
+internal.__persistent_state = internal.__persistent_state or {}
+local state = internal.__state
+local state_touched = {}
+local persistent_state = internal.__persistent_state
+local persistent_state_touched = {}
 
 -- Persistent wrapper: backed by JSON under
 -- `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level writes are
 -- debounced and auto-saved; nested mutations require an explicit
 -- `s.save()` call. Reads pass through to the loaded table.
 local function persistent_entry(name)
-  __smelt_persistent_state_touched__[name] = true
-  local entry = __smelt_persistent_state__[name]
+  persistent_state_touched[name] = true
+  local entry = persistent_state[name]
   if not entry then
-    entry = { data = smelt.state.__load(name), pending = nil, dirty = false }
-    __smelt_persistent_state__[name] = entry
+    entry = { data = internal.state.__load(name), pending = nil, dirty = false }
+    persistent_state[name] = entry
   end
   return entry
 end
 
-function smelt.__flush_persistent_state()
+function __smelt_internal.__flush_persistent_state()
   local errors = {}
-  for name, entry in pairs(__smelt_persistent_state__) do
+  for name, entry in pairs(persistent_state) do
     if entry.pending then entry.pending:remove(); entry.pending = nil end
     if entry.dirty then
-      local ok, err = pcall(smelt.state.__save, name, entry.data or {})
+      local ok, err = pcall(internal.state.__save, name, entry.data or {})
       if ok then
         entry.dirty = false
       else
@@ -935,6 +961,10 @@ function smelt.__flush_persistent_state()
   if #errors > 0 then error(table.concat(errors, "\n"), 2) end
 end
 
+-- Return the JSON-backed state wrapper for `name`. Top-level assignments are
+-- saved after `opts.debounce_ms` (100 ms by default). Call `state.save()` after
+-- mutating nested values; `state.all` exposes the underlying table. Pending
+-- top-level writes are also flushed during runtime teardown and reload.
 ---@type fun(name: string, opts: { debounce_ms: integer? }?): table
 smelt.state.persistent = function(name, opts)
   opts = opts or {}
@@ -943,7 +973,7 @@ smelt.state.persistent = function(name, opts)
   local data = entry.data
   local function flush()
     if entry.pending then entry.pending:remove(); entry.pending = nil end
-    smelt.state.__save(name, data)
+    internal.state.__save(name, data)
     entry.dirty = false
   end
   local function schedule()
@@ -951,7 +981,7 @@ smelt.state.persistent = function(name, opts)
     if entry.pending then return end
     entry.pending = smelt.timer.set(debounce_ms, function()
       entry.pending = nil
-      smelt.state.__save(name, data)
+      internal.state.__save(name, data)
       entry.dirty = false
     end)
   end
@@ -970,30 +1000,30 @@ smelt.state.persistent = function(name, opts)
 end
 
 -- Plugin scope stack. Each Rust loader (autoload, init.lua, plugin
--- files) pushes a placeholder frame around the module body via
--- `__smelt_with_scope`. The frame stays unnamed (`false`) by default -
+-- files) pushes a placeholder frame around the module body via the private
+-- scope wrapper. The frame stays unnamed (`false`) by default -
 -- the module body opts in to hot-reload survival by calling
 -- `smelt.plugin("name")`, which promotes its frame to that name.
 -- While the frame is named, `smelt.state.get()` and the unnamed-resource
 -- constructors (`smelt.paint.register`, `smelt.overlay.new`,
 -- `smelt.win.new`, `smelt.buf.new`) auto-name on the plugin's behalf
 -- so survival is implicit for the rest of the body.
-__smelt_scope_stack = __smelt_scope_stack or {}
+local scope_stack = {}
 -- Per-scope per-type counter - minted in declaration order during a
 -- module body run, reset every time `smelt.plugin(name)` promotes a
 -- fresh frame so auto-names stay stable across `/reload` when the
 -- module body runs the same constructors in the same order.
-__smelt_scope_counters = __smelt_scope_counters or {}
+local scope_counters = {}
 
 -- Push an unnamed frame, run `fn(...)`, pop it. The frame starts as
 -- `false` (no auto-naming, no scoped state); the module body can
 -- promote it to a named plugin scope via `smelt.plugin(name)`. Errors
 -- propagate after restoring the stack so a failing module body doesn't
 -- leak its frame.
-function __smelt_with_scope(fn, ...)
-  __smelt_scope_stack[#__smelt_scope_stack + 1] = false
+function __smelt_internal.__with_scope(fn, ...)
+  scope_stack[#scope_stack + 1] = false
   local ok, ret = pcall(fn, ...)
-  __smelt_scope_stack[#__smelt_scope_stack] = nil
+  scope_stack[#scope_stack] = nil
   if not ok then error(ret, 0) end
   return ret
 end
@@ -1002,8 +1032,8 @@ end
 -- scope is active (no `smelt.plugin(...)` call, or running inside a
 -- callback fired from the event loop). Used by `smelt.state.get()` and
 -- unnamed-resource auto-naming.
-function __smelt_current_scope()
-  local top = __smelt_scope_stack[#__smelt_scope_stack]
+function __smelt_internal.__current_scope()
+  local top = scope_stack[#scope_stack]
   if top == false then return nil end
   return top
 end
@@ -1012,13 +1042,13 @@ end
 -- in the current scope. Returns nil if no scope is active. The naming
 -- is `"<scope>:<kind>:<idx>"`, deterministic per (scope, kind, declaration
 -- order); idx counts from 0.
-function __smelt_auto_name(kind)
-  local scope = __smelt_current_scope()
+function __smelt_internal.__auto_name(kind)
+  local scope = internal.__current_scope()
   if not scope then return nil end
-  local counters = __smelt_scope_counters[scope]
+  local counters = scope_counters[scope]
   if not counters then
     counters = { paint = 0, buf = 0, win = 0, overlay = 0 }
-    __smelt_scope_counters[scope] = counters
+    scope_counters[scope] = counters
   end
   local idx = counters[kind] or 0
   counters[kind] = idx + 1
@@ -1055,12 +1085,12 @@ function smelt.plugin(name)
   if type(name) ~= "string" or name == "" then
     error("smelt.plugin: name must be a non-empty string", 2)
   end
-  local i = #__smelt_scope_stack
+  local i = #scope_stack
   if i == 0 then
     error("smelt.plugin: must be called from a module body (or init.lua)", 2)
   end
-  __smelt_scope_stack[i] = name
-  __smelt_scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
+  scope_stack[i] = name
+  scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
   return setmetatable({ name = name }, {
     __index = function(_, key)
       if key == "state" then return smelt.state.get(name) end
@@ -1075,29 +1105,29 @@ end
 ---@type fun(name?: string): table
 function smelt.state.get(name)
   if name == nil then
-    name = __smelt_current_scope()
+    name = internal.__current_scope()
     if not name then
       error("smelt.state.get(): no plugin scope active - pass an explicit name from outside module body", 2)
     end
   end
-  __smelt_state_touched__[name] = true
-  local s = __smelt_state__[name]
+  state_touched[name] = true
+  local s = state[name]
   if not s then
     s = {}
-    __smelt_state__[name] = s
+    state[name] = s
   end
   return s
 end
 
-function smelt.__sweep_state()
-  for k in pairs(__smelt_state__) do
-    if not __smelt_state_touched__[k] then
-      __smelt_state__[k] = nil
+function __smelt_internal.__sweep_state()
+  for k in pairs(state) do
+    if not state_touched[k] then
+      state[k] = nil
     end
   end
-  for k, entry in pairs(__smelt_persistent_state__) do
-    if not __smelt_persistent_state_touched__[k] and not entry.dirty then
-      __smelt_persistent_state__[k] = nil
+  for k, entry in pairs(persistent_state) do
+    if not persistent_state_touched[k] and not entry.dirty then
+      persistent_state[k] = nil
     end
   end
 end
@@ -1133,18 +1163,19 @@ if smelt and smelt.notify then
   end
 end
 
--- smelt.model.preferred(name): read; (name, value): write/clear (nil clears).
--- Stored under smelt.state.persistent("model_preferred"). Plugins use this to
--- remember per-plugin model overrides across reloads.
 if smelt and smelt.model then
   local function prefs() return smelt.state.persistent("model_preferred") end
-  smelt.model.preferred = function(name, value)
-    if select("#", value) == 0 then
-      local p = prefs()
-      return p[name]
+  -- Read or update a named model preference. With only `name`, returns the
+  -- stored model key or `nil`. Passing a second argument stores that model key;
+  -- passing `nil` explicitly clears it. Preferences survive Lua reloads through
+  -- `smelt.state.persistent("model_preferred")`.
+  ---@type fun(name: string, ...: string?): string?
+  smelt.model.preferred = function(name, ...)
+    if select("#", ...) == 0 then
+      return prefs()[name]
     end
-    local p = prefs()
-    p[name] = value
+    local value = ...
+    prefs()[name] = value
     return value
   end
 end

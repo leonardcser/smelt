@@ -357,6 +357,7 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 ::smelt_core::lua::lua_type::LuaClassDecl {
                     name: #lua_name,
                     doc: #class_doc,
+                    classification: ::smelt_core::lua::doc::classification_for_type(#lua_name),
                     fields: ::std::vec![ #( #field_descs ),* ],
                 }
             }
@@ -472,6 +473,7 @@ fn expand_lua_alias(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 ::smelt_core::lua::lua_type::LuaAliasDecl {
                     name: #lua_name,
                     doc: #alias_doc,
+                    classification: ::smelt_core::lua::doc::classification_for_type(#lua_name),
                     variants: ::std::vec![ #( #variants ),* ],
                     open: false,
                 }

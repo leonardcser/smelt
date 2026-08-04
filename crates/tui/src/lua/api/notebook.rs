@@ -11,17 +11,17 @@ pub(super) fn register(
     smelt: &mlua::Table,
     shared: &std::sync::Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "notebook",
-        "Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only.",
-        Tier::UiHost,
+        "Parse and read notebook cells, apply edits, and compute preview data for the edit_notebook tool.",
+        Tier::Host,
     )?;
     let preview_context = std::sync::Arc::clone(&shared.core);
-    m.internal_fn(
+    // Compute the preview payload consumed by the bundled edit_notebook tool.
+    m.private_fn(
         "preview_data",
-        "Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.",
         &["args"],
         move |lua, args: mlua::Table| -> LuaResult<Option<mlua::Table>> {
             let mut args = lua_table_to_json_map(&args)
@@ -76,7 +76,7 @@ pub(super) fn register(
     )?;
 
     let apply_context = std::sync::Arc::clone(&shared.core);
-    m.fn_(
+    m.live_only_fn(
         "apply_edit",
         "Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.",
         &["args"],
@@ -86,10 +86,10 @@ pub(super) fn register(
             resolve_notebook_path(&mut args_map, &apply_context);
             let cwd = apply_context.evaluation_cwd();
             let home = apply_context.runtime_home();
-            let result = crate::lua::try_with_platform_host(|host| {
+            let result = smelt_core::host::try_with_core(|core| {
                 smelt_core::notebook::apply_edit_with_roots(
                     &args_map,
-                    &host.file_cache(),
+                    &core.files,
                     &cwd,
                     &home,
                 )
@@ -105,7 +105,7 @@ pub(super) fn register(
                     Ok((Some(LuaValue::Table(row)), None))
                 }
                 Some(Err(err)) => Ok((None, Some(err))),
-                None => Ok((None, Some("notebook.apply_edit: no app context".into()))),
+                None => Ok((None, Some("notebook.apply_edit: no runtime host".into()))),
             }
 
         },
@@ -150,7 +150,7 @@ pub(super) fn register(
     {
         let context = std::sync::Arc::clone(&shared.core);
         let sink = shared.core.resume_sink();
-        m.private_fn(
+        m.private_live_only_fn(
             "__start_apply_edit",
             &["task_id", "args"],
             move |_, (task_id, args): (u64, mlua::Table)| -> LuaResult<()> {
@@ -160,11 +160,11 @@ pub(super) fn register(
                 resolve_notebook_path(&mut args_map, &context);
                 let cwd = context.evaluation_cwd();
                 let home = context.runtime_home();
-                let files = crate::lua::try_with_platform_host(|host| host.file_cache());
+                let files = smelt_core::host::try_with_core(|core| core.files.clone());
                 let Some(files) = files else {
                     sink.resolve_json(
                         task_id,
-                        serde_json::json!({ "err": "notebook.apply_edit: no app context" }),
+                        serde_json::json!({ "err": "notebook.apply_edit: no runtime host" }),
                     );
                     return Ok(());
                 };

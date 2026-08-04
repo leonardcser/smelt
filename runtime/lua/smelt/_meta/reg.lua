@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Helpers for constructing `Reg` handles. Plugins that own several reactive subscriptions can wrap their teardown logic in a single `Reg` returned to callers.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.reg
 local reg = {}
 
@@ -15,7 +16,7 @@ local reg = {}
 --- 
 --- ```lua
 --- return smelt.reg.compose(
----   smelt.win.cur():key("n", "<leader>x", handler),
+---   smelt.keymap.set("n", "<leader>x", handler),
 ---   smelt.fs.watch(path, on_change),
 ---   smelt.timer.every(1000, tick)
 --- )

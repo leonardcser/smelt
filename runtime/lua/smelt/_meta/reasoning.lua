@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Reasoning-effort selector. `smelt.reasoning.current()` reads the active effort, `smelt.reasoning.set(v)` sets it in a TUI session, and `smelt.reasoning.cycle_list()` lists the configured cycle.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.reasoning
 local reasoning = {}
 

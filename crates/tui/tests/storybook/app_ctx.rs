@@ -144,6 +144,10 @@ impl AppStoryCtx {
         self.app.push_compaction_preview(summary);
     }
 
+    pub fn push_context_recalculation(&mut self, label: &str) {
+        self.app.push_context_recalculation(label);
+    }
+
     /// Push a typed background-process completion status block. This drives the
     /// same transcript block shape produced by the live job supervisor without
     /// spawning a subprocess in the story.

@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.
 

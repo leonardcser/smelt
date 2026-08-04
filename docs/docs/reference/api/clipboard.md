@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Read and write the system clipboard.
 

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let files = LuaMod::under(
+    let files = LuaMod::supported(
         lua,
         smelt,
         "files",
@@ -58,7 +58,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let accept_context = Arc::clone(shared);
-    files.fn_(
+    files.live_only_fn(
         "accept",
         "Record a selected file result for recent-selection ranking. Options: `{ cwd? }`. Returns `(true, nil)` or `(false, err)`.",
         &["item", "opts"],
@@ -123,7 +123,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let rescan_context = Arc::clone(shared);
-    files.fn_(
+    files.live_only_fn(
         "rescan",
         "Trigger an asynchronous full rescan for the current workspace or `opts.cwd`. Returns `(true, nil)` or `(false, err)`.",
         &["opts"],

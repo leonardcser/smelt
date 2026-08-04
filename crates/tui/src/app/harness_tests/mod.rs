@@ -426,7 +426,7 @@ async fn compaction_prepare_probe_completes_and_preserves_turn() {
 // keep the old one.
 
 // `smelt.state` entries for plugins that no longer touch them on
-// reload should be swept by `smelt.__sweep_state()`.
+// reload should be swept by the runtime lifecycle.
 
 // ── Full-cycle /reload integration ──────────────────────────────
 //
@@ -492,8 +492,7 @@ fn find_anon_paint(app: &TestApp) -> crate::smelt_edit::layout::PaintId {
 // passes `ctx = { kind = "launch" | "reload" }`.
 
 // A `smelt.state.get(...)` slot that the new init.lua no longer
-// references must be pruned by `smelt.__sweep_state` (called by
-// `reload()` at the end of the cycle).
+// references must be pruned at the end of the reload cycle.
 
 // **Single ledger** for "what does `/reload` clear?" Touches every
 // Lua-side surface, triggers reload, asserts each is in the expected

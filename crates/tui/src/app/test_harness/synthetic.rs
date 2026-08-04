@@ -6,6 +6,13 @@ fn next_synthetic_invocation_id() -> protocol::InvocationId {
 }
 
 impl TestApp {
+    pub fn push_context_recalculation(&mut self, label: impl Into<String>) {
+        let _token = self
+            .app
+            .busy_stack
+            .push_context_recalculation_token(label.into());
+    }
+
     pub(crate) fn push_transcript_block(&mut self, block: smelt_core::transcript_model::Block) {
         self.app.push_block(block);
     }

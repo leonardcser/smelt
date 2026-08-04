@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Wall-clock time parsing and formatting. Host-tier so plugins can render provider timestamps consistently in both TUI and headless contexts.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.time
 local time = {}
 

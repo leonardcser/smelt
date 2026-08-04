@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Authenticated provider helpers. Requests use smelt-managed credentials without exposing bearer tokens to Lua.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.auth
 local auth = {}
 

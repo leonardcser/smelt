@@ -9,14 +9,14 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "prompt",
         "The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.prompt", Tier::Host).fn_(
         "win",
         "Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.",
         &[],
@@ -30,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(crate::lua::try_with_conversation_host(|host| host.prompt_text()).unwrap_or_default())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "set_text",
         "Replace the prompt buffer with `text`. The cursor lands at the end and undo state is reset.",
         &["text"],
@@ -39,7 +39,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "cursor",
         "Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.",
         &["pos"],
@@ -47,7 +47,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(crate::lua::with_conversation_host(|host| host.prompt_cursor(pos)))
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "replace_range",
         "UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.",
         &["start", "end", "text"],

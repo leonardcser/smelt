@@ -4,8 +4,25 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- List built-in model providers and register custom ones. Headless-safe.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.provider
 local provider = {}
+
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+--- Advanced UI helper: 1-based row position for a stable item key.
+---@type fun(rows: any, key: any): any
+provider._position_of_key = nil
+
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+--- Advanced UI helper: select the fallback row unless stable-key preservation succeeds.
+---@type fun(rows: any, old_key: any, preserve: any, fallback: any): any
+provider._select_row = nil
+
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+--- Advanced UI helper: keep stale rows visible while a provider is loading an
+--- empty/synthetic refresh, instead of flashing to a status row.
+---@type fun(result: any, rows: any, current_rows: any): any
+provider._should_keep_stale_rows = nil
 
 --- Return true when the row list contains at least one non-synthetic row.
 ---@type fun(rows: table[]?): boolean

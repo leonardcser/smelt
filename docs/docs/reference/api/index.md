@@ -4,9 +4,9 @@
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 85 namespace(s), 472 function(s), 102 class(es), 13 alias(es).
+**Coverage:** 85 namespace(s), 478 function(s), 103 class(es), 14 alias(es).
 
-Functions and namespaces marked `Internal` are implementation details for bundled Lua. They are documented for transparency, but user config and plugins should prefer public APIs.
+`Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.
 
 ## IDE completion
 
@@ -26,8 +26,8 @@ Available in every runtime, including headless mode.
 - [`smelt.events`](events.md) - 3 function(s)
 - [`smelt.files`](files.md) - 4 function(s)
 - [`smelt.frontend`](frontend.md) - 2 function(s)
-- [`smelt.fs`](fs.md) - 23 function(s)
-- [`smelt.fs.file_state`](fs_file_state.md) - 7 function(s)
+- [`smelt.fs`](fs.md) - 24 function(s)
+- [`smelt.fs.file_state`](fs_file_state.md) - 7 function(s) - Advanced namespace
 - [`smelt.fuzzy`](fuzzy.md) - 2 function(s)
 - [`smelt.grep`](grep.md) - 1 function(s)
 - [`smelt.html`](html.md) - 5 function(s)
@@ -35,30 +35,33 @@ Available in every runtime, including headless mode.
 - [`smelt.http.cache`](http_cache.md) - 2 function(s)
 - [`smelt.image`](image.md) - 7 function(s)
 - [`smelt.json`](json.md) - 3 function(s)
-- [`smelt.layout`](layout.md) - 20 function(s)
+- [`smelt.keymap`](keymap.md) - 7 function(s)
+- [`smelt.layout`](layout.md) - 20 function(s) - Advanced namespace
 - [`smelt.lifecycle`](lifecycle.md) - 4 function(s)
 - [`smelt.log`](log.md) - 3 function(s)
-- [`smelt.lsp`](lsp.md) - 1 function(s)
+- [`smelt.lsp`](lsp.md) - 1 function(s) - Advanced namespace
 - [`smelt.mcp`](mcp.md) - 4 function(s)
 - [`smelt.messages`](messages.md) - 6 function(s)
+- [`smelt.notebook`](notebook.md) - 6 function(s) - Advanced namespace
 - [`smelt.os`](os.md) - 12 function(s)
 - [`smelt.parse`](parse.md) - 2 function(s)
 - [`smelt.path`](path.md) - 14 function(s)
-- [`smelt.perf`](perf.md) - 1 function(s)
+- [`smelt.perf`](perf.md) - 1 function(s) - Advanced namespace
 - [`smelt.process`](process.md) - 11 function(s)
-- [`smelt.provider`](provider.md) - 8 function(s)
+- [`smelt.provider`](provider.md) - 11 function(s) - 3 advanced function(s)
 - [`smelt.reg`](reg.md) - 2 function(s)
 - [`smelt.remember`](remember.md) - 1 function(s)
 - [`smelt.shell`](shell.md) - 6 function(s)
 - [`smelt.signal`](signal.md) - 5 function(s)
 - [`smelt.skills`](skills.md) - 3 function(s)
 - [`smelt.state`](state.md) - 2 function(s)
-- [`smelt.task`](task.md) - 8 function(s)
+- [`smelt.task`](task.md) - 8 function(s) - Advanced namespace
+- [`smelt.text`](text.md) - 11 function(s) - Advanced namespace
 - [`smelt.tick`](tick.md) - 1 function(s)
 - [`smelt.time`](time.md) - 6 function(s)
 - [`smelt.timer`](timer.md) - 2 function(s)
-- [`smelt.tools`](tools.md) - 9 function(s)
-- [`smelt.transcript.defaults`](transcript_defaults.md) - 30 function(s)
+- [`smelt.tools`](tools.md) - 13 function(s) - 4 advanced function(s)
+- [`smelt.transcript.defaults`](transcript_defaults.md) - 30 function(s) - Advanced namespace
 - [`smelt.transcript.groups`](transcript_groups.md) - 4 function(s)
 - [`smelt.trust`](trust.md) - 2 function(s)
 
@@ -66,49 +69,46 @@ Available in every runtime, including headless mode.
 
 Requires a terminal UI; calling these from headless mode raises.
 
-- [`smelt.buf`](buf.md) - 1 function(s)
+- [`smelt.buf`](buf.md) - 1 function(s) - Advanced namespace
 - [`smelt.config`](config.md) - 6 function(s)
-- [`smelt.confirm`](confirm.md) - 1 function(s) - 1 internal function(s)
+- [`smelt.confirm`](confirm.md) - 1 function(s) - 1 advanced function(s)
 - [`smelt.dialog`](dialog.md) - 11 function(s)
-- [`smelt.engine`](engine.md) - 12 function(s)
 - [`smelt.history`](history.md) - 2 function(s)
 - [`smelt.input`](input.md) - 1 function(s)
-- [`smelt.inspect`](inspect.md) - 1 function(s)
-- [`smelt.keymap`](keymap.md) - 7 function(s)
+- [`smelt.inspect`](inspect.md) - 1 function(s) - Advanced namespace
 - [`smelt.list`](list.md) - 1 function(s)
 - [`smelt.metrics`](metrics.md) - 1 function(s)
-- [`smelt.metrics.perf`](metrics_perf.md) - 5 function(s)
-- [`smelt.model`](model.md) - 11 function(s)
-- [`smelt.notebook`](notebook.md) - 7 function(s) - 1 internal function(s)
-- [`smelt.notify`](notify.md) - 4 function(s)
-- [`smelt.overlay`](overlay.md) - 1 function(s)
-- [`smelt.paint`](paint.md) - 1 function(s)
-- [`smelt.permissions`](permissions.md) - 7 function(s)
+- [`smelt.metrics.perf`](metrics_perf.md) - 5 function(s) - Advanced namespace
+- [`smelt.overlay`](overlay.md) - 1 function(s) - Advanced namespace
+- [`smelt.paint`](paint.md) - 1 function(s) - Advanced namespace
 - [`smelt.picker`](picker.md) - 3 function(s)
-- [`smelt.prompt`](prompt.md) - 12 function(s)
-- [`smelt.render`](render.md) - 4 function(s)
+- [`smelt.render`](render.md) - 4 function(s) - Advanced namespace
 - [`smelt.search`](search.md) - 1 function(s)
-- [`smelt.session`](session.md) - 35 function(s) - 1 internal function(s)
 - [`smelt.session.messages`](session_messages.md) - 1 function(s)
 - [`smelt.session.slug`](session_slug.md) - 1 function(s)
 - [`smelt.session.title`](session_title.md) - 2 function(s)
 - [`smelt.settings`](settings.md) - 1 function(s)
 - [`smelt.terminal`](terminal.md) - 7 function(s)
-- [`smelt.text`](text.md) - 11 function(s)
 - [`smelt.ui`](ui.md) - 1 function(s)
-- [`smelt.ui.layout`](ui_layout.md) - 6 function(s)
+- [`smelt.ui.layout`](ui_layout.md) - 6 function(s) - Advanced namespace
 - [`smelt.vim`](vim.md) - 2 function(s)
-- [`smelt.win`](win.md) - 2 function(s)
+- [`smelt.win`](win.md) - 2 function(s) - Advanced namespace
 - [`smelt.work`](work.md) - 4 function(s)
 
 ## Mixed namespaces
 
 Contains both Host and UiHost functions; per-function pages list the exact tier.
 
-- [`smelt`](index_smelt.md) - 6 function(s)
+- [`smelt`](index_smelt.md) - 6 function(s) - 1 advanced function(s)
 - [`smelt.cmd`](cmd.md) - 4 function(s)
+- [`smelt.engine`](engine.md) - 12 function(s)
 - [`smelt.mode`](mode.md) - 12 function(s)
+- [`smelt.model`](model.md) - 11 function(s)
+- [`smelt.notify`](notify.md) - 4 function(s)
+- [`smelt.permissions`](permissions.md) - 7 function(s)
+- [`smelt.prompt`](prompt.md) - 12 function(s)
 - [`smelt.reasoning`](reasoning.md) - 4 function(s)
+- [`smelt.session`](session.md) - 34 function(s)
 - [`smelt.theme`](theme.md) - 10 function(s)
 - [`smelt.transcript`](transcript.md) - 22 function(s)
 

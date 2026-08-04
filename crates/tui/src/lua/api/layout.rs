@@ -11,7 +11,7 @@
 
 use crate::lua::LuaShared;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_class, Tier};
+use smelt_core::lua::doc::{record_class, ApiClassification, Tier};
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::LuaHandle;
@@ -24,6 +24,7 @@ impl LuaType for LuaUiSize {
     fn lua_type() -> String {
         record_class(LuaClassDecl {
             name: "smelt.ui.Size",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.ui.Size"),
             doc: "Terminal size in cells.",
             fields: vec![
                 LuaClassField {
@@ -54,7 +55,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // `smelt.ui` is a thin grouping namespace for screen-composition primitives.
     // It's distinct from `smelt.layout` (which composes block content inside
     // transcript messages for tool render callbacks).
-    let ui = LuaMod::under(
+    let ui = LuaMod::supported(
         lua,
         smelt,
         "ui",
@@ -76,11 +77,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    let m = ui.sub(
+    let m = ui.sub_with_classification(
         "layout",
         "Composable layout-tree primitives for the retained main TUI layout. \
 `smelt.ui.layout.set(fn)` registers a composer; call `invalidate()` when \
 closed-over state changes the resulting tree.",
+        ApiClassification::Advanced,
     )?;
 
     super::overlay_layout::register_layout_constructors(&m)?;

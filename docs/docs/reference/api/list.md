@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.
 
@@ -22,8 +22,7 @@ returns `{ text, spans?, marks }`; `opts.filter(item)` is optional and re-runs
 whenever `:set_filter` / `:refresh` fires. `opts.empty_text` shows
 when no row passes the filter. `opts.anchor = "bottom"` pads short result
 sets above the rows so filtered pickers stay pinned to the bottom of their
-viewport. Returns a handle with `:selected`,
-`:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
-`:set_cursor`, `:move_cursor`. See the header docstring for the full
-usage shape.
+viewport. The returned handle can replace items while preserving selection,
+change its filter or renderer, inspect visible/selected rows, and move its
+0-based cursor.
 

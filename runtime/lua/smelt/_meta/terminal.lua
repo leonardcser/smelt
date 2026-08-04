@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Terminal integration helpers. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.terminal
 local terminal = {}
 

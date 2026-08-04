@@ -57,6 +57,29 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      - name: Check crate publication policy
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > /tmp/cargo-metadata.json
+          python3 <<'PY'
+          import json
+
+          with open("/tmp/cargo-metadata.json", encoding="utf-8") as metadata_file:
+              metadata = json.load(metadata_file)
+          public = set(
+              metadata["metadata"]["smelt"]["release"]["independent-crates"]
+          )
+          packages = {package["name"]: package for package in metadata["packages"]}
+          errors = [f"unknown independent crate {name}" for name in sorted(public - packages.keys())]
+          for name, package in packages.items():
+              publish = package["publish"]
+              if name in public and publish is not None:
+                  errors.append(f"{name} must remain publishable on crates.io")
+              if name not in public and publish != []:
+                  errors.append(f"{name} must set publish = false")
+          if errors:
+              raise SystemExit("\n".join(errors))
+          PY
+
       - name: Build transcript benchmark target
         run: cargo test -p smelt-tui --features "harness transcript-bench" --no-run
 

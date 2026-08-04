@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.events
 local events = {}
 

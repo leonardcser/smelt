@@ -131,7 +131,7 @@ smelt.tools.register({
     return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   preview = function(args)
-    local meta = smelt.notebook.preview_data(args)
+    local meta = __smelt_internal.notebook.preview_data(args)
     if not meta then
       return nil
     end

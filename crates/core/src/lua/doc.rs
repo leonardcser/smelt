@@ -15,6 +15,7 @@
 //! fills the registry; the closures themselves are never fired) and
 //! emits LuaCATS stubs + Markdown reference pages.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MaybeSend};
@@ -26,12 +27,35 @@ use super::lua_type::{LuaAliasDecl, LuaClassDecl, LuaType, LuaTypeTuple};
 /// `Host` bindings (`smelt.fs`, `smelt.http`, `smelt.signal`, …) live in
 /// `smelt-core` and work without a terminal UI - headless plugins can
 /// call them. `UiHost` bindings (`smelt.win`, `smelt.theme`,
-/// `smelt.confirm`, …) live in the TUI crate and crash if invoked
-/// without an attached UI.
+/// `smelt.confirm`, …) live in the TUI crate and return a Lua error when
+/// invoked without an active terminal UI entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     Host,
     UiHost,
+}
+
+#[derive(Clone, Copy)]
+struct UiHostAvailability(fn() -> bool);
+
+/// Install the frontend-owned availability check applied to every UiHost binding.
+pub fn install_ui_host_availability(lua: &Lua, available: fn() -> bool) {
+    lua.set_app_data(UiHostAvailability(available));
+}
+
+fn ui_host_available(lua: &Lua) -> bool {
+    lua.app_data_ref::<UiHostAvailability>()
+        .is_some_and(|available| (available.0)())
+}
+
+pub(crate) fn require_ui_host(lua: &Lua, api: &str) -> mlua::Result<()> {
+    if ui_host_available(lua) {
+        Ok(())
+    } else {
+        Err(mlua::Error::RuntimeError(format!(
+            "{api} requires an active terminal UI"
+        )))
+    }
 }
 
 impl Tier {
@@ -39,6 +63,14 @@ impl Tier {
         match self {
             Tier::Host => "Host",
             Tier::UiHost => "UiHost",
+        }
+    }
+
+    pub fn from_annotation(value: &str) -> Option<Self> {
+        match value {
+            "host" => Some(Self::Host),
+            "ui_host" => Some(Self::UiHost),
+            _ => None,
         }
     }
 
@@ -51,25 +83,67 @@ impl Tier {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Visibility {
-    Public,
+/// Audience and stability classification for one Lua API surface.
+///
+/// Supported APIs are the primary plugin facade. Advanced APIs deliberately
+/// expose lower-level composition primitives; both remain user-callable,
+/// documented, and typed while the alpha API evolves. Internal APIs are
+/// implementation capabilities supplied only to bundled runtime code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ApiClassification {
+    Supported,
+    Advanced,
     Internal,
 }
 
-impl Visibility {
+impl ApiClassification {
     pub fn label(self) -> &'static str {
         match self {
-            Visibility::Public => "Public",
-            Visibility::Internal => "Internal",
+            Self::Supported => "Supported",
+            Self::Advanced => "Advanced",
+            Self::Internal => "Internal",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Visibility::Public => "Stable Lua API intended for user config and plugins.",
-            Visibility::Internal => "Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.",
+            Self::Supported => "Primary alpha facade for user config and plugins.",
+            Self::Advanced => "Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.",
+            Self::Internal => "Bundled runtime implementation capability. It is not part of the user-facing API and is excluded from documentation and completion.",
         }
+    }
+
+    pub fn is_user_facing(self) -> bool {
+        self != Self::Internal
+    }
+}
+
+struct CandidateGate(AtomicBool);
+
+pub(crate) fn begin_candidate_load(lua: &Lua) {
+    lua.set_app_data(CandidateGate(AtomicBool::new(false)));
+}
+
+pub(crate) fn commit_candidate_load(lua: &Lua) -> mlua::Result<()> {
+    let gate = lua
+        .app_data_ref::<CandidateGate>()
+        .ok_or_else(|| mlua::Error::external("Lua candidate gate is unavailable"))?;
+    gate.0.store(true, Ordering::Release);
+    Ok(())
+}
+
+pub(crate) fn candidate_is_loading(lua: &Lua) -> bool {
+    lua.app_data_ref::<CandidateGate>()
+        .is_some_and(|gate| !gate.0.load(Ordering::Acquire))
+}
+
+pub(crate) fn require_live(lua: &Lua, api: &str) -> mlua::Result<()> {
+    if candidate_is_loading(lua) {
+        Err(mlua::Error::RuntimeError(format!(
+            "{api} is unavailable while loading a Lua candidate"
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -80,7 +154,7 @@ pub struct LuaFnMeta {
     pub doc: &'static str,
     pub sig: String,
     pub tier: Tier,
-    pub visibility: Visibility,
+    pub classification: ApiClassification,
 }
 
 /// Module-level documentation, attached by [`record_module_doc`].
@@ -93,7 +167,7 @@ pub struct LuaModuleMeta {
     pub module: &'static str,
     pub doc: &'static str,
     pub tier: Option<Tier>,
-    pub visibility: Visibility,
+    pub classification: ApiClassification,
 }
 
 static REGISTRY: Mutex<Vec<LuaFnMeta>> = Mutex::new(Vec::new());
@@ -140,37 +214,25 @@ pub fn aliases_snapshot() -> Vec<LuaAliasDecl> {
     ALIASES.lock().map(|v| v.clone()).unwrap_or_default()
 }
 
-/// Attach a one-shot description to a Lua module. Normally fired
-/// automatically by [`super::module::LuaMod::under`] / `.sub`; call
-/// directly only when extending a table that was already attached by
-/// another tier (e.g. `LuaMod::extend`). Repeated calls for the same
-/// module replace the previous entry.
-pub fn record_module_doc(module: &'static str, doc: &'static str) {
-    record_module(module, doc, None);
+/// Attach a one-shot description and explicit classification to a Lua module.
+/// Normally fired automatically by [`super::module::LuaMod::under`] / `.sub`;
+/// call directly only for bundled-Lua namespaces that do not have a Rust module
+/// builder. Repeated calls for the same module replace the previous entry.
+pub fn record_module_doc(
+    module: &'static str,
+    doc: &'static str,
+    classification: ApiClassification,
+) {
+    record_module(module, doc, None, classification);
 }
 
-/// Attach a one-shot internal description to a Lua module.
-pub fn record_internal_module_doc(module: &'static str, doc: &'static str) {
-    record_module_with_visibility(module, doc, None, Visibility::Internal);
-}
-
-/// Like [`record_module_doc`] but also pins the module's tier so the
-/// rendered page picks up the right label even when every fn is
-/// filtered out (private `__`-prefixed names). Called from
-/// [`super::module::LuaMod::under`] / `.sub`.
-pub fn record_module(module: &'static str, doc: &'static str, tier: Option<Tier>) {
-    record_module_with_visibility(module, doc, tier, Visibility::Public);
-}
-
-pub fn record_internal_module(module: &'static str, doc: &'static str, tier: Option<Tier>) {
-    record_module_with_visibility(module, doc, tier, Visibility::Internal);
-}
-
-fn record_module_with_visibility(
+/// Like [`record_module_doc`] but also pins the module's tier so the rendered
+/// page has a label even when it contains no user-facing functions.
+pub fn record_module(
     module: &'static str,
     doc: &'static str,
     tier: Option<Tier>,
-    visibility: Visibility,
+    classification: ApiClassification,
 ) {
     if let Ok(mut v) = MODULES.lock() {
         v.retain(|m| m.module != module);
@@ -178,13 +240,32 @@ fn record_module_with_visibility(
             module,
             doc,
             tier,
-            visibility,
+            classification,
         });
     }
 }
 
 pub fn modules_snapshot() -> Vec<LuaModuleMeta> {
     MODULES.lock().map(|v| v.clone()).unwrap_or_default()
+}
+
+/// Resolve a named class or alias to the most specific declared namespace.
+/// Derived type declarations use this so their classification cannot drift from
+/// the module that owns them.
+pub fn classification_for_type(name: &str) -> ApiClassification {
+    MODULES
+        .lock()
+        .expect("Lua module registry poisoned")
+        .iter()
+        .filter(|module| {
+            name == module.module
+                || name
+                    .strip_prefix(module.module)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+        .max_by_key(|module| module.module.len())
+        .unwrap_or_else(|| panic!("Lua type `{name}` has no classified owning module"))
+        .classification
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,7 +278,8 @@ pub(crate) fn register_fn_inner<F, A, R>(
     lua: &Lua,
     f: F,
     tier: Tier,
-    visibility: Visibility,
+    classification: ApiClassification,
+    live_only: bool,
 ) -> mlua::Result<()>
 where
     F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
@@ -214,14 +296,91 @@ where
         name
     );
     let sig = format!("fun({}): {}", A::lua_param_list(param_names), R::lua_type());
-    tbl.set(name, lua.create_function(f)?)?;
+    let api = format!("{module}.{name}");
+    let function = lua.create_function(move |lua, args| {
+        if live_only {
+            require_live(lua, &api)?;
+        }
+        if tier == Tier::UiHost {
+            require_ui_host(lua, &api)?;
+        }
+        f(lua, args)
+    })?;
+    tbl.set(name, function)?;
     record(LuaFnMeta {
         module,
         name,
         doc,
         sig,
         tier,
-        visibility,
+        classification,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lua::module::LuaMod;
+
+    #[test]
+    fn live_only_functions_are_blocked_until_candidate_commit() {
+        let lua = Lua::new();
+        let module = LuaMod::own_supported(
+            &lua,
+            lua.create_table().unwrap(),
+            "smelt.effect_test",
+            "Effect guard test module.",
+            Tier::Host,
+        );
+        module
+            .live_only_fn("effect", "Direct effect.", &[], |_, ()| Ok(()))
+            .unwrap();
+
+        begin_candidate_load(&lua);
+        let effect: mlua::Function = module.tbl.get("effect").unwrap();
+        assert!(effect
+            .call::<()>(())
+            .unwrap_err()
+            .to_string()
+            .contains("smelt.effect_test.effect is unavailable while loading a Lua candidate"));
+        commit_candidate_load(&lua).unwrap();
+        effect.call::<()>(()).unwrap();
+    }
+
+    #[test]
+    fn ui_host_and_private_storage_are_enforced() {
+        let lua = Lua::new();
+        let module = LuaMod::own_supported(
+            &lua,
+            lua.create_table().unwrap(),
+            "smelt.ui_test",
+            "UI test module.",
+            Tier::UiHost,
+        );
+        module
+            .fn_("visible", "Visible call.", &[], |_, ()| Ok("visible"))
+            .unwrap();
+        module
+            .private_fn("hidden", &[], |_, ()| Ok("hidden"))
+            .unwrap();
+        module
+            .private_metamethod("__call", &[], |_, ()| Ok("metamethod"))
+            .unwrap();
+
+        let visible: mlua::Function = module.tbl.get("visible").unwrap();
+        assert!(visible.call::<String>(()).is_err());
+        assert!(matches!(
+            module.tbl.raw_get::<mlua::Value>("hidden").unwrap(),
+            mlua::Value::Nil
+        ));
+        let hidden =
+            crate::lua::module::internal_api_function(&lua, "smelt.ui_test", "hidden").unwrap();
+        install_ui_host_availability(&lua, || true);
+        assert_eq!(hidden.call::<String>(()).unwrap(), "hidden");
+        assert!(matches!(
+            module.tbl.raw_get::<mlua::Value>("__call").unwrap(),
+            mlua::Value::Function(_)
+        ));
+    }
 }

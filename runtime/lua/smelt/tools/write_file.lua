@@ -96,7 +96,7 @@ smelt.tools.register({
     end
 
     local result = smelt.task.external(function(id)
-      smelt.fs.__start_write_file(id, path, content)
+      __smelt_internal.fs.__start_write_file(id, path, content)
     end)
     if result.err then
       return { content = result.err, is_error = true }

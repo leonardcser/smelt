@@ -13,7 +13,7 @@ pub(super) fn register(
     shared: &Arc<LuaShared>,
     state_root: &Path,
 ) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "trust",
@@ -37,7 +37,7 @@ pub(super) fn register(
     )?;
 
     let mark_context = Arc::clone(shared);
-    m.fn_(
+    m.live_only_fn(
         "mark",
         "Mark the current working directory as trusted, persisting it in the user's trust store.",
         &[],

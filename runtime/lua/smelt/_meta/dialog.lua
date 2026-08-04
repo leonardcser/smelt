@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Root-docked modal dialog primitives. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog
 local dialog = {}
 
@@ -49,6 +50,10 @@ dialog.list = nil
 ---@type fun(text: string): smelt.win.Win, smelt.buf.Buf
 dialog.markdown = nil
 
+--- Build a selectable menu and return `(leaf, controller)`. The controller uses
+--- 1-based item indices for cursor, item replacement, and submission. By
+--- default, submitting resolves the active dialog with `{ index, item }`;
+--- `opts.on_submit` can replace that behavior.
 ---@type fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table
 dialog.menu = nil
 

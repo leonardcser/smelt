@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Declarative transcript display grouping. Register adjacent-run group rules while the host owns deterministic planning and the composed root renderer presents resulting group nodes.
 

@@ -179,6 +179,7 @@ impl LuaType for ColorDecl {
     fn lua_type() -> String {
         record_class(LuaClassDecl {
             name: "smelt.theme.ColorDecl",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.theme.ColorDecl"),
             doc: Self::DOC,
             fields: vec![
                 LuaClassField {
@@ -226,6 +227,7 @@ impl LuaOpts for ColorDecl {
         // sees the class.
         LuaClassDecl {
             name: "smelt.theme.ColorDecl",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.theme.ColorDecl"),
             doc: Self::DOC,
             fields: vec![],
         }
@@ -299,31 +301,32 @@ impl LuaType for ThemeSpec {
         let _ = ColorDecl::lua_type();
         record_class(LuaClassDecl {
             name: "smelt.theme.ThemeSpec",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.theme.ThemeSpec"),
             doc: Self::DOC,
             fields: vec![
                 LuaClassField {
                     name: "name",
                     ty: "string".into(),
                     optional: true,
-                    doc: "Display name for this colorscheme.",
+                                        doc: "Display name for this colorscheme.",
                 },
                 LuaClassField {
                     name: "syntax",
                     ty: "string".into(),
                     optional: true,
-                    doc: "Bundled syntect/two-face syntax theme name for code highlighting.",
+                                        doc: "Bundled syntect/two-face syntax theme name for code highlighting.",
                 },
                 LuaClassField {
                     name: "light",
                     ty: "boolean".into(),
                     optional: true,
-                    doc: "Whether this colorscheme is light. Omit to use terminal background detection.",
+                                        doc: "Whether this colorscheme is light. Omit to use terminal background detection.",
                 },
                 LuaClassField {
                     name: "groups",
                     ty: "table<string, string | smelt.theme.StyleDecl>".into(),
                     optional: false,
-                    doc: "Highlight groups keyed by group name.",
+                                        doc: "Highlight groups keyed by group name.",
                 },
             ],
         });
@@ -343,6 +346,7 @@ impl LuaOpts for ThemeSpec {
     fn lua_class_decl() -> LuaClassDecl {
         LuaClassDecl {
             name: "smelt.theme.ThemeSpec",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.theme.ThemeSpec"),
             doc: Self::DOC,
             fields: vec![],
         }

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Bundled default transcript renderers. These are ordinary Lua helpers used by the default root renderer and available for user renderers to call or compose.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.transcript.defaults
 local transcript_defaults = {}
 

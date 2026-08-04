@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Opt out of bundled `smelt.<dotted>` modules. Call from `early.lua` to prevent the module from auto-loading; calls made later mark the module as disabled but its body has already run. For runtime removal of an already-loaded tool, call `smelt.tools.unregister` directly; for commands, hold the `Reg` returned by `smelt.cmd.register` and call `:remove()`.
 

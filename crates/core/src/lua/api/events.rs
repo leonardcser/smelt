@@ -20,6 +20,7 @@ impl LuaType for LuaEventName {
         record_alias(LuaAliasDecl {
             name: "smelt.events.Name",
             doc: "Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.",
+            classification: crate::lua::doc::ApiClassification::Supported,
             variants: crate::signals::builtin_event_names(),
             open: true,
         });
@@ -45,7 +46,7 @@ impl FromLua for LuaEventName {
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     use std::rc::Rc;
 
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "events",
@@ -75,7 +76,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        m.fn_(
+        m.live_only_fn(
             "emit",
             "Publish `payload` for the event named `event`. Custom events are declared automatically on first emit.",
             &["event", "payload"],

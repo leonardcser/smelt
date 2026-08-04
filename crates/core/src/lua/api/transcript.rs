@@ -5,7 +5,7 @@ use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::lua::doc::{record_module_doc, Tier};
+use crate::lua::doc::{record_module_doc, ApiClassification, Tier};
 use crate::lua::module::LuaMod;
 
 fn renderer_cache_key_hash(cache_key: Option<String>) -> u64 {
@@ -21,7 +21,7 @@ fn renderer_cache_key_hash(cache_key: Option<String>) -> u64 {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "transcript",
@@ -31,10 +31,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     record_module_doc(
         "smelt.transcript.defaults",
         "Bundled default transcript renderers. These are ordinary Lua helpers used by the default root renderer and available for user renderers to call or compose.",
+        ApiClassification::Advanced,
     );
     record_module_doc(
         "smelt.transcript.groups",
         "Declarative transcript display grouping. Register adjacent-run group rules while the host owns deterministic planning and the composed root renderer presents resulting group nodes.",
+        ApiClassification::Supported,
     );
 
     let shared_set = Arc::clone(shared);

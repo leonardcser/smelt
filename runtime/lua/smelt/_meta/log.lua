@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Structured JSONL log entries written to the engine log file. Use for machine-readable telemetry events; pair with `smelt.notify` for user-visible toasts.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.log
 local log = {}
 

@@ -423,12 +423,10 @@ function M._tab()
   return time("completer:tab", manual_tab_body)
 end
 
--- This file is in `BOOTSTRAP_FILES` so user init.lua can call
--- `smelt.prompt.completer(...)`. Bootstrap runs at `LuaRuntime::new`,
--- before any frontend host exists; `smelt.prompt.win():on(...)` is headless-safe
--- (no-ops when no frontend host is in scope), and production re-registers the
--- subscription on every `bring_up_lua` because `BOOTSTRAP_FILES` are
--- re-executed with the frontend host in scope.
+-- This mixed-tier file participates in Host bootstrap so headless user config can
+-- declare `smelt.prompt.completer(...)`. The prompt event subscription is owned by
+-- the Lua generation and does not require an active terminal UI; live picker and
+-- prompt operations remain UiHost-guarded when their callbacks eventually run.
 smelt.prompt.win():on("text_changed", function() M._recompute() end)
 
 --- Completer specification handed to `smelt.prompt.completer` for full candidate
@@ -461,6 +459,7 @@ smelt.prompt.win():on("text_changed", function() M._recompute() end)
 
 -- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
 -- completer and closes the picker if it was active.
+---@tier host
 ---@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
 function smelt.prompt.completer(spec)
   assert(type(spec) == "table", "smelt.prompt.completer: expected table")

@@ -7,7 +7,7 @@ local function edit_fields(args)
 end
 
 local function plan_edit(args)
-  return smelt.fs.__plan_edit_file(edit_fields(args))
+  return __smelt_internal.fs.__plan_edit_file(edit_fields(args))
 end
 
 local function diff_from_content(path, old_content, new_content, anchor)
@@ -179,7 +179,7 @@ smelt.tools.register({
     local path, old_string, new_string, do_all = edit_fields(args)
 
     local result = smelt.task.external(function(id)
-      smelt.fs.__start_edit_file(id, path, old_string, new_string, do_all)
+      __smelt_internal.fs.__start_edit_file(id, path, old_string, new_string, do_all)
     end)
     if result.err then
       return { content = result.err, is_error = true }

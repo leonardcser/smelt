@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine
 local engine = {}
 
@@ -28,10 +29,12 @@ engine.has_active_turn = nil
 ---@type fun(): boolean
 engine.is_running = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once - with `{ action = "replace", messages = messages }` (engine swaps it in and retries the turn), `{ action = "abort", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = "continue" }` (engine continues without recovery). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.
 ---@type fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: any))): smelt.Reg
 engine.on_context_limit = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - with `{ action = "replace", messages = messages }` (engine swaps it in before sampling), `{ action = "replace", source = "model_history" }` (engine uses the current checkpointed session model history), `{ action = "abort", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = "continue" }` (engine sends the original request). `messages` is built lazily when the hook reads it. Returns a `Reg` whose `:remove()` drops the hook.
 ---@type fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: any))): smelt.Reg
 engine.on_prepare_request = nil
@@ -53,6 +56,7 @@ engine.submit_command = nil
 ---@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?, continuation_token: integer?): boolean
 engine.submit_command_continuation = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.
 ---@type fun(): string
 engine.summary_prefix = nil

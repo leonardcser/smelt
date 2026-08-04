@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Config-time MCP server registration. Unknown fields raise errors.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.mcp
 local mcp = {}
 

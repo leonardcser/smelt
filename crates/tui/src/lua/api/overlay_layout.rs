@@ -55,6 +55,9 @@ impl LuaType for LuaMeasure {
     fn lua_type() -> String {
         smelt_core::lua::doc::record_class(LuaClassDecl {
             name: "smelt.ui.layout.Measure",
+            classification: smelt_core::lua::doc::classification_for_type(
+                "smelt.ui.layout.Measure",
+            ),
             doc: "Shareable natural-size handle returned by `smelt.ui.layout.measure`.",
             fields: vec![
                 LuaClassField {

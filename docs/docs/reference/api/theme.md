@@ -4,9 +4,9 @@
 
 **Tier:** `Mixed` - Contains both Host and UiHost functions; each function below lists its exact tier.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-List bundled colorschemes, or apply, read, and override the active one. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). A `ThemeSpec` has optional `name`, `syntax`, and `light` metadata plus a required `groups` map. Listing metadata is Host-tier; active-theme operations require UiHost.
+List bundled colorschemes, or apply, read, and override the active one. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). A `ThemeSpec` has optional `name`, `syntax`, and `light` metadata plus a required `groups` map. Catalog and active-theme metadata reads are Host-tier; highlight-group access and mutations require UiHost.
 
 ## `smelt.theme.apply`
 
@@ -46,7 +46,7 @@ Return metadata for a built-in colorscheme by display name or module slug.
 fun(): boolean
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return `true` if the active theme is a light theme. Lets plugins flip glyphs or contrast levels based on the current palette.
 
@@ -88,7 +88,7 @@ Snapshot every group currently set on the active theme into a `{ group = StyleDe
 fun(): string?
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.
 
@@ -98,7 +98,7 @@ Return the active bundled syntect/two-face syntax theme name, if the colorscheme
 fun(): table
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return all bundled syntect/two-face syntax theme names accepted by `ThemeSpec.syntax`.
 

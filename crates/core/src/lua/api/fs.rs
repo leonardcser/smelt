@@ -1,7 +1,8 @@
 //! `smelt.fs` - sync filesystem primitives. Errors use `(value, err_string)` convention.
 
 use crate::fs::FlockGuard;
-use crate::lua::doc::Tier;
+use crate::lua::doc::{classification_for_type, record_class, Tier};
+use crate::lua::lua_type::{LuaClassDecl, LuaType};
 use crate::lua::module::LuaMod;
 use crate::lua::watchers::WatcherEntry;
 use crate::lua::LuaShared;
@@ -13,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let fs = LuaMod::under(
+    let fs = LuaMod::supported(
         lua,
         smelt,
         "fs",
@@ -50,7 +51,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let write_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "write",
         "Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p", "contents"],
@@ -121,7 +122,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let mkdir_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "mkdir",
         "Create directory `p` (parents must exist). Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
@@ -132,7 +133,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let mkdir_all_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "mkdir_all",
         "Create directory `p` along with any missing parent directories. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
@@ -143,7 +144,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let remove_file_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "remove_file",
         "Delete the file at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
@@ -154,7 +155,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let remove_dir_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "remove_dir",
         "Delete the empty directory at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
@@ -165,7 +166,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let remove_dir_all_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "remove_dir_all",
         "Recursively delete the directory tree rooted at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
@@ -176,7 +177,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let rename_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "rename",
         "Rename or move `from` to `to`. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["from", "to"],
@@ -192,7 +193,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let copy_context = Arc::clone(shared);
-    fs.fn_(
+    fs.live_only_fn(
         "copy",
         "Copy file `from` to `to`. Returns `(bytes_copied, nil)` on success or `(nil, err_string)` on failure.",
         &["from", "to"],
@@ -242,9 +243,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    let file_state = fs.sub(
+    let file_state = fs.sub_with_classification(
         "file_state",
         "Cached file-state tracker used by tools to detect external modifications between reads and writes.",
+        crate::lua::doc::ApiClassification::Advanced,
     )?;
 
     let file_state_has_context = Arc::clone(shared);
@@ -290,7 +292,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let record_read_context = Arc::clone(shared);
-    file_state.fn_(
+    file_state.live_only_fn(
         "record_read",
         "Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.",
         &["p", "content", "offset", "limit"],
@@ -308,7 +310,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let record_read_with_mtime_context = Arc::clone(shared);
-    file_state.fn_(
+    file_state.live_only_fn(
         "record_read_with_mtime",
         "Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.",
         &["p", "content", "offset", "limit", "mtime_ms"],
@@ -327,7 +329,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let record_write_context = Arc::clone(shared);
-    file_state.fn_(
+    file_state.live_only_fn(
         "record_write",
         "Record that `p` was written with `content` so subsequent staleness checks see the latest state.",
         &["p", "content"],
@@ -369,15 +371,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let flock_context = Arc::clone(shared);
-    fs.tbl.set(
+    fs.live_only_fn(
         "try_flock",
-        lua.create_function(move |_, p: String| {
+        "Acquire an exclusive non-blocking advisory lock for `p`. Returns a lock handle on success or an error string when the file is already locked or cannot be opened.",
+        &["p"],
+        move |_, p: String| -> LuaResult<(Option<FlockHandle>, Option<String>)> {
             let path = flock_context.resolve_project_path(p);
             match crate::fs::try_flock(&path.to_string_lossy()) {
                 Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
                 Err(err) => Ok((None, Some(err))),
             }
-        })?,
+        },
     )?;
 
     {
@@ -448,7 +452,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.private_fn(
+        fs.private_live_only_fn(
             "__start_write",
             &["task_id", "path", "contents"],
             move |_, (task_id, path, contents): (u64, String, mlua::LuaString)| -> LuaResult<()> {
@@ -471,7 +475,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.private_fn(
+        fs.private_live_only_fn(
             "__start_write_file",
             &["task_id", "path", "contents"],
             move |_, (task_id, path, contents): (u64, String, String)| -> LuaResult<()> {
@@ -558,7 +562,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.private_fn(
+        fs.private_live_only_fn(
             "__start_edit_file",
             &["task_id", "path", "old_string", "new_string", "replace_all"],
             move |_,
@@ -601,7 +605,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.private_fn(
+        fs.private_live_only_fn(
             "__start_mkdir_all",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
@@ -792,6 +796,20 @@ struct FlockHandle(RefCell<Option<FlockGuard>>);
 impl FlockHandle {
     fn new(guard: FlockGuard) -> Self {
         Self(RefCell::new(Some(guard)))
+    }
+}
+
+impl LuaType for FlockHandle {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.fs.Flock",
+            doc: "Exclusive advisory file lock returned by `smelt.fs.try_flock`. The lock is also released when this handle is garbage-collected.",
+            classification: classification_for_type("smelt.fs.Flock"),
+            fields: crate::class_methods! {
+                "release" => fn() -> (), "Release the lock immediately. No-op if it is already released.",
+            },
+        });
+        "smelt.fs.Flock".into()
     }
 }
 

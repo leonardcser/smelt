@@ -43,7 +43,7 @@ fn intern_label(label: &str) -> &'static str {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "perf",

@@ -9,7 +9,7 @@ use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "work",
@@ -18,7 +18,7 @@ top-bar indicator and the reactive `work_*` signals; plugins observe \
 state by subscribing to those signals. UiHost-only.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    m.live_only_fn(
         "busy",
         "Push a busy token onto the per-app stack and return a `Reg` \
 whose `:remove()` pops it. While any token is live the prompt top-bar \

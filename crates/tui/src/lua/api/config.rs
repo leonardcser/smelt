@@ -7,7 +7,7 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "config",

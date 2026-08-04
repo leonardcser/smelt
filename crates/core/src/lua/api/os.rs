@@ -7,7 +7,7 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "os",
@@ -21,7 +21,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |_, name: String| Ok(std::env::var(name).ok()),
     )?;
 
-    m.fn_(
+    m.live_only_fn(
         "setenv",
         "Set the process environment variable `name` to `value`. Mutates the live process env; visible to subsequent `getenv` calls and child processes.",
         &["name", "value"],
@@ -45,7 +45,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    m.fn_(
+    m.live_only_fn(
         "unsetenv",
         "Remove the environment variable `name` from the process environment.",
         &["name"],
@@ -119,7 +119,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     })?;
 
     let open_url_context = Arc::clone(shared);
-    m.fn_(
+    m.live_only_fn(
         "open_url",
         "Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.",
         &["url"],
@@ -133,7 +133,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let available_context = Arc::clone(shared);
-    m.fn_(
+    m.live_only_fn(
         "open_url_if_available",
         "Open `url` only when the host environment can auto-open a browser. Returns `{ opened = bool, error = string?, reason = string? }`.",
         &["url"],

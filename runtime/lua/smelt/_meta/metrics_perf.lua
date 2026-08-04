@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Perf instrumentation toggle, clear, and snapshot. UiHost-only.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.metrics.perf
 local metrics_perf = {}
 

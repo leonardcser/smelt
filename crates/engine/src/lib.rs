@@ -325,12 +325,23 @@ impl EngineHandle {
         self.cmd_tx.send(cmd).map_err(|_| EngineDisconnected)
     }
 
+    /// Receive the next ordered engine output. Returns `None` when the engine's
+    /// command receiver disconnects, after draining any output already queued.
     pub async fn recv_output(&mut self) -> Option<EngineOutput> {
-        self.output_rx.recv().await
+        tokio::select! {
+            biased;
+            output = self.output_rx.recv() => output,
+            _ = self.cmd_tx.closed() => None,
+        }
     }
 
     pub fn try_recv_output(&mut self) -> Result<EngineOutput, mpsc::error::TryRecvError> {
-        self.output_rx.try_recv()
+        match self.output_rx.try_recv() {
+            Err(mpsc::error::TryRecvError::Empty) if self.cmd_tx.is_closed() => {
+                Err(mpsc::error::TryRecvError::Disconnected)
+            }
+            result => result,
+        }
     }
 
     /// Receive only protocol events, dropping unsupported host callbacks.
@@ -601,6 +612,23 @@ mod tests {
             }
             _ => panic!("unexpected event"),
         }
+    }
+
+    #[tokio::test]
+    async fn recv_detects_engine_disconnect_while_event_injectors_remain() {
+        let (mut handle, cmd_rx, _output_injector) = EngineHandle::for_test();
+        drop(cmd_rx);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), handle.recv())
+                .await
+                .expect("engine disconnect should wake receivers")
+                .is_none()
+        );
+        assert!(matches!(
+            handle.try_recv_output(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]

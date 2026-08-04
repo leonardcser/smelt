@@ -332,6 +332,7 @@ impl LuaType for crate::lua::api::layout::LuaBlockLayout {
         crate::lua::doc::record_class(LuaClassDecl {
             name: "smelt.layout.Node",
             doc: "Opaque block-layout node returned by `smelt.layout.*` constructors and accepted by transcript renderers, tool previews, and other content-layout APIs.",
+            classification: crate::lua::doc::ApiClassification::Advanced,
             fields: Vec::new(),
         });
         "smelt.layout.Node".into()
@@ -358,6 +359,7 @@ pub struct LuaClassField {
 pub struct LuaClassDecl {
     pub name: &'static str,
     pub doc: &'static str,
+    pub classification: crate::lua::doc::ApiClassification,
     pub fields: Vec<LuaClassField>,
 }
 
@@ -409,6 +411,7 @@ pub trait LuaOpts {
 pub struct LuaAliasDecl {
     pub name: &'static str,
     pub doc: &'static str,
+    pub classification: crate::lua::doc::ApiClassification,
     /// Known string literals. For closed aliases this is the full
     /// accepted set; for open aliases (`open: true`) it's a
     /// non-exhaustive list of well-known names that surfaces as

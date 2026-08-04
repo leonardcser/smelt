@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "grep",
@@ -18,7 +18,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     {
         let s = Arc::clone(shared);
-        m.private_fn(
+        m.private_live_only_fn(
             "__start_run",
             &["task_id", "pattern", "path", "opts"],
             move |_,

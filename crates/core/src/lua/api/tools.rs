@@ -192,7 +192,7 @@ fn reorder_schema_properties(value: &mut serde_json::Value) {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "tools",
@@ -444,7 +444,7 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             },
         )?;
     }
-    m.fn_(
+    m.live_only_fn(
         "resolve",
         "Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.",
         &["request_id", "call_id", "result"],
@@ -514,7 +514,7 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             Ok(String::new())
         },
     )?;
-    m.private_fn(
+    m.private_live_only_fn(
         "__send_call",
         &["request_id", "parent_call_id", "tool_name", "args"],
         |lua,

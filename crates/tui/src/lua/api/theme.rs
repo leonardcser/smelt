@@ -14,15 +14,15 @@ use smelt_core::lua::module::LuaMod;
 use smelt_core::style::{Color, Style};
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "theme",
         "List bundled colorschemes, or apply, read, and override the active one. Highlight \
 groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). \
 A `ThemeSpec` has optional `name`, `syntax`, and `light` metadata plus a \
-required `groups` map. Listing metadata is Host-tier; active-theme operations \
-require UiHost.",
+required `groups` map. Catalog and active-theme metadata reads are Host-tier; \
+highlight-group access and mutations require UiHost.",
         Tier::UiHost,
     )?;
 
@@ -79,7 +79,8 @@ resolve to an empty table.",
         },
     )?;
 
-    m.fn_(
+    let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.theme", Tier::Host);
+    host.fn_(
         "is_light",
         "Return `true` if the active theme is a light theme. Lets \
 plugins flip glyphs or contrast levels based on the current palette.",
@@ -87,7 +88,7 @@ plugins flip glyphs or contrast levels based on the current palette.",
         |_, ()| Ok(smelt_core::theme::active().is_light()),
     )?;
 
-    m.fn_(
+    host.fn_(
         "syntax_theme",
         "Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.",
         &[],
@@ -98,7 +99,7 @@ plugins flip glyphs or contrast levels based on the current palette.",
         },
     )?;
 
-    m.fn_(
+    host.fn_(
         "syntax_theme_names",
         "Return all bundled syntect/two-face syntax theme names accepted by `ThemeSpec.syntax`.",
         &[],

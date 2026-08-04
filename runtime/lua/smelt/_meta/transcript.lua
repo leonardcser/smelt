@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Transcript display policy and rendered transcript inspection. Host-tier renderer hooks are layered with UiHost read APIs when a TUI is active.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript
 local transcript = {}
 
@@ -125,7 +126,6 @@ transcript.view = nil
 ---@type fun(): table
 transcript.visible_blocks = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
 ---@type fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
 transcript.watch_view = nil

@@ -306,13 +306,14 @@ pub(super) fn register(
     smelt: &mlua::Table,
     shared: &std::sync::Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "session",
         "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.",
         Tier::UiHost,
     )?;
+    let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.session", Tier::Host);
     let title = m.sub(
         "title",
         "Session title. Use `smelt.session.title.get()` to read the current title and `smelt.session.title.set(title, slug?)` to write it. Writes update the task label and save the session.",
@@ -325,7 +326,7 @@ pub(super) fn register(
             Ok(crate::lua::try_with_session_host(|host| host.session_title()).unwrap_or_default())
         },
     )?;
-    title.fn_(
+    title.live_only_fn(
         "set",
         "Set the session title. When `slug` is omitted, one is derived from the title.",
         &["title", "slug"],
@@ -337,7 +338,7 @@ pub(super) fn register(
             Ok(())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "set_title_for_history",
         "Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.",
         &["title", "slug", "history_len"],
@@ -376,7 +377,7 @@ pub(super) fn register(
             }
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "context_note",
         "Set or clear a named hidden model-visible context note. `context_note(name, text)` creates or replaces that note for future turns; `context_note(name, nil)` clears it. Named notes do not replace each other, so plugins can maintain independent steering state. UiHost-only.",
         &["name", "text", "opts"],
@@ -391,7 +392,7 @@ pub(super) fn register(
             Ok(())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "enter_worktree",
         "Create or open a managed git worktree and request a coherent project-context transition. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. The transition updates Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ name, branch, path, base, created, pending }`.",
         &["opts"],
@@ -445,7 +446,7 @@ pub(super) fn register(
             Ok(out)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "switch_cwd",
         "Request a coherent project-context transition. Relative paths resolve from the current cwd, and a leading `~` resolves from the runtime home. Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots commit together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ cwd, pending }`.",
         &["path"],
@@ -484,7 +485,7 @@ pub(super) fn register(
             usage_to_lua(lua, &usage)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "set_fast_mode",
         "Enable or disable accelerated inference for the current session.",
         &["enabled"],
@@ -628,7 +629,7 @@ pub(super) fn register(
         &[],
         |_, ()| Ok(crate::lua::try_with_session_host(|host| host.session_id()).unwrap_or_default()),
     )?;
-    m.fn_(
+    host.fn_(
         "artifact_dir",
         "Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
         &[],
@@ -639,7 +640,7 @@ pub(super) fn register(
             )
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "checkpoint",
         "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.",
         &["spec"],
@@ -828,7 +829,7 @@ pub(super) fn register(
             Ok(out)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "rewind_to",
         "Rewind the session to a prior user turn. `history_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.",
         &["history_idx", "opts"],
@@ -842,9 +843,9 @@ pub(super) fn register(
             Ok(())
         },
     )?;
-    m.internal_fn(
+    // Used by the bundled esc-chord plugin to rewind only before output starts.
+    m.private_live_only_fn(
         "_rewind_active_turn_if_clean",
-        "Cancel the active turn and restore its submitted user message into the prompt only if no assistant or tool output has started. Returns true when it rewound.",
         &["opts"],
         |_, opts: Option<mlua::Table>| -> LuaResult<bool> {
             let restore_vim_insert = opts
@@ -923,7 +924,7 @@ pub(super) fn register(
             Ok(result)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "retry_persistence",
         "Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.",
         &[],
@@ -934,7 +935,7 @@ pub(super) fn register(
             )
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "load",
         "Request a UI switch to canonical lineage session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.",
         &["id"],
@@ -1046,7 +1047,7 @@ pub(super) fn register(
             Ok(Some(out))
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "delete",
         "Delete the persisted session with `id`. Refuses to delete the currently active session.",
         &["id"],
@@ -1055,7 +1056,7 @@ pub(super) fn register(
                 .map_err(mlua::Error::RuntimeError)
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "fork",
         "Fork the current session: clone its messages into a new session id and switch to it. Useful for branching off an experiment without losing the original timeline.",
         &[],
@@ -1064,7 +1065,7 @@ pub(super) fn register(
             Ok(())
         },
     )?;
-    m.fn_(
+    m.live_only_fn(
         "reset",
         "Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.",
         &[],

@@ -10,6 +10,12 @@ The full surface lives in the [Lua API reference](../reference/api/index.md);
 this page walks through the workflow and patterns for writing plugins against
 it.
 
+!!! warning "Plugins are trusted code"
+
+    Lua configuration and plugins run in-process with the same operating-system
+    privileges as smelt. They are not sandboxed. Review third-party plugins and
+    project `.smelt` configuration before trusting or loading them.
+
 ## Anatomy of a plugin
 
 A plugin is a Lua module with no manifest. Top-level statements run when the
@@ -121,12 +127,17 @@ Normal, denied in Plan, asks in Apply, and is allowed in Yolo.
 ## Hot reload
 
 Saved Lua files reload automatically by default; press `F5` or run `/reload` to
-reload manually. The current transcript and agent state stay put. Reload is
-transactional: smelt evaluates early config,
-autoloaded modules, user config, and trusted project config in a fresh candidate,
-then commits the complete generation only if every file succeeds. On failure,
-the running commands, tools, keymaps, hooks, providers, settings, permissions,
-and UI resources stay active, and diagnostics land in `/messages`.
+reload manually. The current transcript and agent state stay put. smelt evaluates
+early config, autoloaded modules, user config, and trusted project config in a
+fresh candidate, then replaces its generation-owned declarations and resources
+only if every file succeeds. On failure, the running commands, tools, keymaps,
+hooks, providers, settings, permissions, and UI resources stay active, and
+diagnostics land in `/messages`.
+
+The transaction covers state managed by smelt's generation machinery, not every
+possible effect of trusted Lua code. Arbitrary filesystem, process, network, or
+other external effects are not rolled back. APIs that directly affect the live
+application reject calls during candidate evaluation.
 
 Manual reload also refreshes the on-disk inputs that feed the agent's system
 prompt and tool surface, not just Lua:
@@ -494,7 +505,7 @@ unwinds. When a plugin owns several reactive subscriptions, combine them with
 
 ```lua
 return smelt.reg.compose(
-  smelt.win.cur():key("n", "<leader>x", handler),
+  smelt.keymap.set("n", "<leader>x", handler),
   smelt.fs.watch(path, on_change),
   smelt.timer.every(1000, tick)
 )
@@ -502,6 +513,26 @@ return smelt.reg.compose(
 
 `smelt.reg.new(fn)` wraps an arbitrary teardown function as a `Reg` for cases
 that need custom cleanup logic.
+
+If you catch a yielding call, use `smelt.task.is_cancelled(err)` to distinguish
+cancellation without parsing an error message:
+
+```lua
+local ok, value = pcall(function()
+  return smelt.process.run("slow-command", {})
+end)
+if not ok and smelt.task.is_cancelled(value) then
+  return
+end
+if not ok then error(value, 0) end
+```
+
+Failure shapes are consistent by role. Invalid arguments and unavailable
+runtime capabilities raise Lua errors. Fallible I/O returns `(value, nil)` or
+`(nil, message)`; APIs add a status/code field when callers need a typed branch.
+A completed process with a non-zero exit is still a process result. Tool calls
+return `{ content, is_error, metadata? }` because tool failures are model-visible
+results rather than Lua transport failures.
 
 ## Concurrency combinators
 

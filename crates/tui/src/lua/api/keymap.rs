@@ -107,12 +107,12 @@ pub(super) fn register(
     smelt_keymap: &mlua::Table,
     shared: &Arc<LuaShared>,
 ) -> LuaResult<()> {
-    let m = LuaMod::own(
+    let m = LuaMod::own_supported(
         lua,
         smelt_keymap.clone(),
         "smelt.keymap",
-        "Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately. UiHost-only.",
-        Tier::UiHost,
+        "Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately.",
+        Tier::Host,
     );
     m.fn_(
         "help_sections",

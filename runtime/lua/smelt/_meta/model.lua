@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Model selector. `smelt.model.current()` reads the active model key, `smelt.model.set(v)` switches, and `smelt.model.list()` returns the available models.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.model
 local model = {}
 
@@ -19,6 +20,7 @@ model.current = nil
 ---@type fun(): table?
 model.input_modalities = nil
 
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.
 ---@type fun(): table
 model.list = nil
@@ -27,7 +29,12 @@ model.list = nil
 ---@type fun(): integer?
 model.max_tokens = nil
 
----@type fun(name: any, value: any): any
+--- Tier: Host - Available in every runtime, including headless mode.
+--- Read or update a named model preference. With only `name`, returns the
+--- stored model key or `nil`. Passing a second argument stores that model key;
+--- passing `nil` explicitly clears it. Preferences survive Lua reloads through
+--- `smelt.state.persistent("model_preferred")`.
+---@type fun(name: string, ...: string?): string?
 model.preferred = nil
 
 --- Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `"config override"`, `"models.dev"`, or `"none"`. Prices are USD per 1M tokens.

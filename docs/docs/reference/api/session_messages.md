@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Session messages. `smelt.session.messages.list(opts?)` returns transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; by default this reads a bounded tail. Pass `opts.limit`, `opts.since_index`, or `opts.all = true` for an explicit full read. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.
 

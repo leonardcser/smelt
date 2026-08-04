@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Helpers for constructing `Reg` handles. Plugins that own several reactive subscriptions can wrap their teardown logic in a single `Reg` returned to callers.
 
@@ -24,7 +24,7 @@ returns one composed Reg to its caller.
 
 ```lua
 return smelt.reg.compose(
-  smelt.win.cur():key("n", "<leader>x", handler),
+  smelt.keymap.set("n", "<leader>x", handler),
   smelt.fs.watch(path, on_change),
   smelt.timer.every(1000, tick)
 )

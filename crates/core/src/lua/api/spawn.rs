@@ -10,7 +10,7 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::extend(lua, smelt.clone(), "smelt", Tier::Host);
+    let m = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host);
     let s = shared.clone();
     m.fn_(
         "spawn",

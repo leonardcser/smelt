@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Single-line input handle constructor. `smelt.input.new(opts)` returns an `Input` userdata that owns a buffer/window pair wired to shared line-input editing semantics.
 

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Query which frontend is active (TUI vs headless).
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.frontend
 local frontend = {}
 

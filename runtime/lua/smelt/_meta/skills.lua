@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- List and load skill content from the SkillLoader populated at startup. Markdown custom commands can opt into skill discovery with `agent_skill: true` (or `agent-skill: true`) in their frontmatter; the skill name is the command file stem. Loaded command skills are static context: slash-command arguments are not included, and shell output markers are not evaluated.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.skills
 local skills = {}
 

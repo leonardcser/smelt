@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Opt out of bundled `smelt.<dotted>` modules. Call from `early.lua` to prevent the module from auto-loading; calls made later mark the module as disabled but its body has already run. For runtime removal of an already-loaded tool, call `smelt.tools.unregister` directly; for commands, hold the `Reg` returned by `smelt.cmd.register` and call `:remove()`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.builtins
 local builtins = {}
 

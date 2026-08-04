@@ -22,30 +22,32 @@ impl LuaType for LuaOverlayNewOpts {
     fn lua_type() -> String {
         record_class(LuaClassDecl {
             name: "smelt.overlay.Keymap",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.Keymap"),
             doc: "One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.",
             fields: vec![
                 LuaClassField {
                     name: "key",
                     ty: "string".into(),
                     optional: false,
-                    doc: "Key chord such as `<Esc>`, `<C-j>`, or `q`.",
+                                        doc: "Key chord such as `<Esc>`, `<C-j>`, or `q`.",
                 },
                 LuaClassField {
                     name: "on_press",
                     ty: "fun(ctx: table)".into(),
                     optional: false,
-                    doc: "Handler invoked when the key fires while any overlay leaf has focus.",
+                                        doc: "Handler invoked when the key fires while any overlay leaf has focus.",
                 },
                 LuaClassField {
                     name: "hint",
                     ty: "string".into(),
                     optional: true,
-                    doc: "Human-readable hint for key-discovery plugins.",
+                                        doc: "Human-readable hint for key-discovery plugins.",
                 },
             ],
         });
         record_class(LuaClassDecl {
             name: "smelt.overlay.NewOpts",
+            classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.NewOpts"),
             doc: "Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.layout` tree.",
             fields: vec![
                 LuaClassField { name: "layout", ty: "smelt.ui.layout".into(), optional: false, doc: "Layout tree to render inside the overlay." },
@@ -159,7 +161,7 @@ fn current_shared(lua: &Lua) -> LuaResult<Arc<LuaShared>> {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "overlay",
@@ -170,62 +172,65 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     record_class(LuaClassDecl {
         name: "smelt.overlay.DragConfig",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.DragConfig"),
         doc: "Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.",
         fields: vec![
             LuaClassField {
                 name: "title",
                 ty: "boolean".into(),
                 optional: true,
-                doc: "When true, the overlay chrome moves the overlay unless a resize handle owns the cell.",
+                                doc: "When true, the overlay chrome moves the overlay unless a resize handle owns the cell.",
             },
             LuaClassField {
                 name: "body",
                 ty: "boolean | \"inert\"".into(),
                 optional: true,
-                doc: "`true` moves from any body leaf; `\"inert\"` moves only from non-focusable, non-selectable leaves.",
+                                doc: "`true` moves from any body leaf; `\"inert\"` moves only from non-focusable, non-selectable leaves.",
             },
         ],
     });
 
     record_class(LuaClassDecl {
         name: "smelt.overlay.ResizeConfig",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.ResizeConfig"),
         doc: "Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.",
         fields: vec![
             LuaClassField {
                 name: "top",
                 ty: "boolean".into(),
                 optional: true,
-                doc: "Enable top-edge resize.",
+                                doc: "Enable top-edge resize.",
             },
             LuaClassField {
                 name: "right",
                 ty: "boolean".into(),
                 optional: true,
-                doc: "Enable right-edge resize.",
+                                doc: "Enable right-edge resize.",
             },
             LuaClassField {
                 name: "bottom",
                 ty: "boolean".into(),
                 optional: true,
-                doc: "Enable bottom-edge resize.",
+                                doc: "Enable bottom-edge resize.",
             },
             LuaClassField {
                 name: "left",
                 ty: "boolean".into(),
                 optional: true,
-                doc: "Enable left-edge resize.",
+                                doc: "Enable left-edge resize.",
             },
             LuaClassField {
                 name: "corners",
                 ty: "boolean".into(),
                 optional: true,
-                doc: "Upgrade cells where two enabled edges meet into diagonal resize handles.",
+                                doc: "Upgrade cells where two enabled edges meet into diagonal resize handles.",
             },
         ],
     });
 
     record_class(LuaClassDecl {
         name: "smelt.overlay.Overlay",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.Overlay"),
         doc: "Overlay handle returned by `smelt.overlay.new(opts)`.",
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Close the overlay. No-op if already closed.",

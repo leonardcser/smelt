@@ -4,15 +4,18 @@
 -- Do not edit by hand; update the `#[derive(LuaOpts)]` / `#[derive(LuaAlias)]` site in Rust, or the `---@class` / `---@alias` block in the matching bundled Lua module.
 
 --- Handle returned by `smelt.plugin` for a named plugin scope.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.Plugin
 ---@field name string Stable scope name.
 ---@field state table Ephemeral JSON-shaped state that survives `/reload` but not restart.
 
 --- Registration handle returned by every reactive-subscription API. `:remove()` undoes the binding (frees the underlying callback / cancels the timer / drops the subscription). Idempotent: subsequent calls return `false`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.Reg
 ---@field remove fun(): boolean Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone.
 
 --- Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.buf.Buf
 ---@field source fun(s: string?): any Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.
 ---@field lines fun(arr: string[]?): any Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. On the built-in prompt buffer, writes are joined with `\n` and installed through `smelt.prompt.set_text` semantics.
@@ -23,6 +26,7 @@
 ---@field clear_ns fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.
 
 --- Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text fields, not both.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.buf.MarkOpts
 ---@field id? integer Retarget an existing mark by id instead of allocating a new one.
 ---@field end_row? integer 1-based end row (inclusive). `nil` keeps the mark single-line.
@@ -46,6 +50,7 @@
 ---@field yank_as? string Override the yanked string when the user copies this range.
 
 --- Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous buffers are reaped.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.buf.NewOpts
 ---@field name? string Stable name used to reuse this buffer across `/reload`.
 ---@field readonly? boolean When true, UI editing operations cannot mutate the buffer.
@@ -56,6 +61,7 @@
 ---@field diff_base? string When `mode = "code"`, render the buffer source as an inline diff against this base text.
 
 --- Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names - see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.builtins.Selector
 ---@field tools? string[] Short tool names under `smelt.tools.*` (e.g. `"bash"`, `"web_search"`).
 ---@field commands? string[] Short command names under `smelt.commands.*` (e.g. `"compact"`).
@@ -64,6 +70,7 @@
 ---@field modules? string[] Fully-qualified `smelt.<dotted>` module names, passed through verbatim.
 
 --- Flag specification accepted by `smelt.cli.register_flag`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.cli.RegisterFlagOpts
 ---@field name string Flag name without `--`. Used as the key for `smelt.cli.get`.
 ---@field kind smelt.cli.FlagKind `"boolean"` (default `false`), `"string"`, or `"integer"`.
@@ -74,6 +81,7 @@
 ---@field value_optional? boolean String/Integer flags only. When true, the flag may be passed without a value (`smelt -r` valid alongside `smelt -r abc`); the value-less form yields `""` for String and `0` for Integer. Defaults to `false`. Ignored for Boolean flags.
 
 --- Options accepted by `smelt.cmd.register`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.cmd.RegisterOpts
 ---@field desc? string Human-readable description shown in `/help` and the slash-command picker.
 ---@field args? string[] Positional argument labels used for help text and completion hints.
@@ -83,6 +91,7 @@
 ---@field override? boolean If true, replace an existing command with the same name. Defaults to `false`.
 
 --- Spec accepted by `smelt.defaults`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.defaults.Config
 ---@field model? string Starting model reference (`"provider/model"` or bare model name).
 ---@field mode? string Starting agent mode. Must name a registered mode.
@@ -91,6 +100,7 @@
 --- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
 --- context exposing `ctx.close()` and `ctx.resolve(value)` so the
 --- handler can dismiss the dialog or resolve the blocking `open` call.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog.Keymap
 ---@field key string Chord string (e.g. `"q"`, `"<Esc>"`, `"ctrl-j"`).
 ---@field hint? string Optional one-line hint surfaced in the dialog footer.
@@ -98,6 +108,7 @@
 
 --- Each item displayed in `smelt.dialog.menu`. Strings are also accepted
 --- and lifted into this shape automatically.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog.MenuItem
 ---@field label string Row text after the dim ` N. ` numbering.
 ---@field description? string Optional second row, rendered dim.
@@ -105,6 +116,7 @@
 ---@field disabled? boolean Render dimmed and skip selection/submission when true.
 
 --- Options accepted by `smelt.dialog.menu`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog.MenuOpts
 ---@field selected? integer 1-based starting cursor (default 1).
 ---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
@@ -118,6 +130,7 @@
 --- Integer `height` values are body-relative and gain
 --- the top chrome row automatically. Pick one of `height` or `max_height`;
 --- setting both raises.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
@@ -139,12 +152,14 @@
 --- One body panel inside a dialog. `leaf` is the win/leaf built by one of
 --- the `smelt.dialog.*` helpers; `height` follows the same grammar as
 --- `smelt.dialog.open` (integer cells, `"N%"`, `"fill"`, `"fit"`).
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog.Panel
 ---@field leaf smelt.win.Win A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
 ---@field height? any Integer cells, `"N%"`, `"fill"`, or `"fit"`.
 
 --- Options accepted by `smelt.dialog.picker`. Layered on top of
 --- `smelt.dialog.Opts`; only the picker-specific fields are listed.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.dialog.PickerOpts
 ---@field items? any[] | fun(): any[] Eager item table or a lazy producer; re-evaluated by `on_query`.
 ---@field render fun(item: any): table Per-item `{ text, marks }` table - see `smelt.list.new`.
@@ -163,21 +178,25 @@
 ---@field blocks_agent? boolean Forwarded to `smelt.dialog.open`.
 
 --- Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaExecution::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskError
 ---@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cyber_policy" | "cancelled" | "other"`.
 ---@field message string Human-readable single-line description (newlines collapsed to spaces).
 
 --- One text-only message used by request hooks that exchange plain user/assistant rows.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskMessage
 ---@field role string Either `"user"` or `"assistant"`. Other roles are silently dropped.
 ---@field content string Message body as plain text.
 
 --- Structured JSON-output specification for `smelt.engine.ask`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskResponseFormat
 ---@field name string Schema name (used by some providers as the response_format label).
 ---@field schema table JSON schema describing the expected response shape. Accepts a Lua table that round-trips through `lua_table_to_json` into a JSON value.
 
 --- Spec for `smelt.engine.ask`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskSpec
 ---@field system string System prompt sent before the conversation.
 ---@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
@@ -191,6 +210,7 @@
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.CommandOverrides
 ---@field description? string Override the command description shown in `/help`.
 ---@field provider? string Force a specific provider for this command's turn.
@@ -205,6 +225,7 @@
 ---@field [string] smelt.engine.RuleOverride Per-subcommand pattern buckets keyed by tool name.
 
 --- Spec for `smelt.engine.ask_inherited`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.InheritedAskSpec
 ---@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`. When omitted or empty, the live model-visible history is inherited.
 ---@field question? string Single-shot question appended as a final user message after `messages`.
@@ -217,6 +238,7 @@
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.PrepareContextEstimate
 ---@field source string One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "checkpoint_estimate" | "checkpoint_estimate_plus_history_delta"`.
 ---@field total_context_tokens integer Total active-context estimate used by auto-compaction.
@@ -226,6 +248,7 @@
 ---@field current_history_len integer Current session history length at the prepare hook.
 
 --- Request object passed to `smelt.engine.on_prepare_request`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.PrepareRequest
 ---@field messages smelt.engine.AskMessage[] Model-visible conversation excluding the system prompt.
 ---@field estimated_tokens integer Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions.
@@ -233,12 +256,19 @@
 ---@field context_estimate smelt.engine.PrepareContextEstimate Structured breakdown explaining how `estimated_context_tokens` was computed.
 
 --- Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.RuleOverride
 ---@field allow? string[] Patterns that auto-allow.
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
 
+--- Exclusive advisory file lock returned by `smelt.fs.try_flock`. The lock is also released when this handle is garbage-collected.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.fs.Flock
+---@field release fun(): nil Release the lock immediately. No-op if it is already released.
+
 --- Single-line input handle returned by `smelt.input.new(opts)`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.input.Input
 ---@field win fun(): smelt.win.Win Return the underlying Win handle for layout, focus, and advanced event bindings.
 ---@field buf fun(): smelt.buf.Buf? Return the backing buffer, or `nil` if the input window is gone.
@@ -248,27 +278,34 @@
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on the underlying input window. Returns a Reg handle.
 
 --- Opaque block-layout node returned by `smelt.layout.*` constructors and accepted by transcript renderers, tool previews, and other content-layout APIs.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.layout.Node
 
+--- Cancellation and supersession guard returned by `smelt.lifecycle.guard`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.lifecycle.Guard
 ---@field alive fun(self:smelt.lifecycle.Guard):boolean Return true while every captured epoch still matches and the guard was not cancelled or superseded.
 ---@field cancel fun(self:smelt.lifecycle.Guard) Mark the guard stale immediately.
 ---@field latest fun(self:smelt.lifecycle.Guard,key:string):smelt.lifecycle.Guard Mark this guard as the latest request for `key`; older guards with the same key become stale.
 ---@field wrap fun(self:smelt.lifecycle.Guard,fn:function):function Return a wrapper that calls `fn` only while the guard is alive.
 
+--- Structured list handle returned by `smelt.list.new`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.list.List
----@field refresh fun(self: smelt.list.List)
----@field set_items fun(self: smelt.list.List, items: any[]?)
----@field set_items_preserve fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)
----@field set_filter fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)
----@field set_render fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)
----@field visible fun(self: smelt.list.List): any[]
----@field size fun(self: smelt.list.List): integer
----@field selected_index fun(self: smelt.list.List): integer?
----@field selected fun(self: smelt.list.List): any
----@field set_cursor fun(self: smelt.list.List, i: integer)
----@field move_cursor fun(self: smelt.list.List, delta: integer)
+---@field refresh fun(self: smelt.list.List) Re-apply the filter, render visible rows, and move the cursor to the first item.
+---@field set_items fun(self: smelt.list.List, items: any[]?) Replace the source items and refresh the list.
+---@field set_items_preserve fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any) Replace items and restore the selected row by its `key_fn` result when possible.
+---@field set_filter fun(self: smelt.list.List, fn: (fun(item: any): boolean)?) Replace or clear the filter predicate and refresh the list.
+---@field set_render fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row) Replace the row renderer and redraw the current visible items.
+---@field visible fun(self: smelt.list.List): any[] Return the filtered items in display order.
+---@field size fun(self: smelt.list.List): integer Return the number of visible items.
+---@field selected_index fun(self: smelt.list.List): integer? Return the selected visible-item index (0-based), or `nil` when empty.
+---@field selected fun(self: smelt.list.List): any Return the selected source item, or `nil` when empty.
+---@field set_cursor fun(self: smelt.list.List, i: integer) Move to the clamped 0-based visible-item index.
+---@field move_cursor fun(self: smelt.list.List, delta: integer) Move the selection by `delta` rows, clamped to the visible list.
 
+--- Extmark attached to one rendered list row.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.list.Mark
 ---@field col? integer 0-based byte column for the mark.
 ---@field opts? smelt.buf.MarkOpts Mark/highlight options.
@@ -276,6 +313,7 @@
 --- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 --- they own the rendered selection cursor and the backing line buffer;
 --- the rest configure how data is sourced, filtered, and rendered.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.list.Opts
 ---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
@@ -285,17 +323,22 @@
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
 ---@field anchor? "top"|"bottom" Render short lists at the top or bottom of the viewport. Defaults to "top".
 
+--- Row shape returned by a `smelt.list` render callback.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.list.Row
 ---@field text? string Plain row text. Used when `spans` is omitted.
 ---@field spans? smelt.list.Span[] Styled spans for the row.
 ---@field marks? smelt.list.Mark[] Extmarks to apply after rendering.
 
+--- Styled text segment in a rendered list row.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.list.Span
 ---@field text string Span text.
 ---@field style? table Highlight style passed through to `buf:styled`.
 ---@field syntax? string Inline syntax token for this span.
 
 --- MCP server config accepted by `smelt.mcp.register`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.mcp.Config
 ---@field type? string Server kind. Only `"local"` (the default) is supported.
 ---@field command? string|string[] Executable + leading argv. Either a string (`"my-server"`) or a list (`{"my-server", "--flag"}`).
@@ -308,23 +351,27 @@
 --- Source-bound notify handle returned by `smelt.notify.scoped`.
 --- Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
 --- tag every toast with the bound source.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.notify.Scoped
 ---@field info fun(msg: string) Raise an informational toast tagged with the bound source.
 ---@field error fun(msg: string) Raise an error toast tagged with the bound source.
 ---@field warn fun(msg: string) Raise a warning toast tagged with the bound source.
 
 --- Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.DragConfig
 ---@field title? boolean When true, the overlay chrome moves the overlay unless a resize handle owns the cell.
 ---@field body? boolean | "inert" `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves.
 
 --- One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.Keymap
 ---@field key string Key chord such as `<Esc>`, `<C-j>`, or `q`.
 ---@field on_press fun(ctx: table) Handler invoked when the key fires while any overlay leaf has focus.
 ---@field hint? string Human-readable hint for key-discovery plugins.
 
 --- Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.layout` tree.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.NewOpts
 ---@field layout smelt.ui.layout Layout tree to render inside the overlay.
 ---@field name? string Stable name used to hot-reload this overlay in place.
@@ -353,11 +400,13 @@
 ---@field keymaps? smelt.overlay.Keymap[] Overlay-scoped key bindings.
 
 --- Overlay handle returned by `smelt.overlay.new(opts)`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.Overlay
 ---@field close fun(): nil Close the overlay. No-op if already closed.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.
 
 --- Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.ResizeConfig
 ---@field top? boolean Enable top-edge resize.
 ---@field right? boolean Enable right-edge resize.
@@ -366,12 +415,14 @@
 ---@field corners? boolean Upgrade cells where two enabled edges meet into diagonal resize handles.
 
 --- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Paint
 ---@field remove fun(): boolean Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.
 ---@field rect fun(): any Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
 ---@field on fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.
 
 --- Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Slice
 ---@field width fun(): integer Return the slice width in cells.
 ---@field height fun(): integer Return the slice height in cells.
@@ -380,16 +431,18 @@
 ---@field fill_rect fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with one optional Unicode scalar and style.
 
 --- Effect-level decisions that apply to tools without a more specific rule.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.EffectRules
----@field read? string
----@field write? string
----@field network? string
----@field process? string
----@field config? string
----@field user? string
----@field other? string
+---@field read? smelt.permissions.Decision Decision for tools that only read data.
+---@field write? smelt.permissions.Decision Decision for tools that write or mutate data.
+---@field network? smelt.permissions.Decision Decision for tools that access the network.
+---@field process? smelt.permissions.Decision Decision for tools that start or control processes.
+---@field config? smelt.permissions.Decision Decision for tools that modify configuration.
+---@field user? smelt.permissions.Decision Decision for tools that require direct user interaction.
+---@field other? smelt.permissions.Decision Decision for tools whose effect has no more specific category.
 
 --- Current permission state returned by `smelt.permissions.list()`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.ListResult
 ---@field session smelt.permissions.SessionEntry[] Session-scoped tool/pattern approvals for this run.
 ---@field path_grants smelt.permissions.SessionPathGrant[] Session-scoped path grants for this run.
@@ -399,39 +452,46 @@
 ---@field repository_revision integer Revision required to replace the repository rules safely.
 
 --- Permission slots that apply within a single agent mode.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.ModePerms
 ---@field tools? smelt.permissions.RuleSet Exact tool-name `allow`/`ask`/`deny` entries.
 ---@field effects? smelt.permissions.EffectRules Effect-level decisions keyed by effect name.
 ---@field patterns? table<string, smelt.permissions.RuleSet> Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …).
 
 --- Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.PolicySpec
 ---@field default? smelt.permissions.ModePerms Baseline rules applied unless a mode-specific slot overrides.
 ---@field [string] smelt.permissions.ModePerms Mode-specific rules keyed by registered mode name.
 
 --- One exact permission entry to revoke transactionally.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.RevokeSpec
 ---@field scope string Permission scope: `"session"`, `"workspace"`, or `"repository"`.
 ---@field tool string Tool name the entry applies to. Use `"directory"` for path-prefix entries.
 ---@field pattern string Exact pattern to remove. Use `"*"` for a blanket tool approval.
 
 --- `allow`/`ask`/`deny` arrays accepted by permission policy sections.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.RuleSet
 ---@field allow? string[] Patterns that auto-allow without prompting.
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
 
 --- Revision-checked replacement for one persisted permission scope.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.ScopeReplacement
 ---@field revision integer Revision returned by the `smelt.permissions.list()` snapshot being edited.
 ---@field rules smelt.permissions.WorkspaceRule[] Complete replacement rule set for this scope.
 
 --- A single session permission entry (one approved tool/pattern pair).
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.SessionEntry
 ---@field tool string Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access.
 ---@field pattern string Pattern matched against the tool's argument bucket.
 
 --- A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, the grant applies only in that mode.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.SessionPathGrant
 ---@field kind string Grant kind. Currently only `"path"` is supported.
 ---@field mode? string Optional mode, e.g. `"plan"`. Omit for mode-independent path trust.
@@ -440,6 +500,7 @@
 ---@field path_prefix string Directory prefix covered by the grant.
 
 --- Spec for `smelt.permissions.sync`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.SyncSpec
 ---@field session? smelt.permissions.SessionEntry[] Session entries to replace for this run. Omit to leave them unchanged.
 ---@field path_grants? smelt.permissions.SessionPathGrant[] Tool-specific session path grants to replace. Omit to leave them unchanged.
@@ -447,21 +508,27 @@
 ---@field repository? smelt.permissions.ScopeReplacement Revision-checked repository replacement. Cannot be combined with `workspace`.
 
 --- A workspace permission rule (one tool with N patterns, persisted to disk).
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.permissions.WorkspaceRule
 ---@field tool string Tool name the rule applies to.
 ---@field patterns string[] Patterns granted for this tool.
 
+--- Options for the yielding fuzzy-picker convenience facade.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.FuzzyOpts
 ---@field items (string|smelt.picker.Item)[] Items to filter.
 ---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Defaults to "prompt_docked" for this wrapper.
 ---@field on_select? fun(item: smelt.picker.Item) Live selection callback.
 
+--- Accepted fuzzy-picker value; dismissal returns `nil` instead.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.FuzzyResult
 ---@field index integer 1-based accepted item index.
 ---@field item smelt.picker.Item Accepted normalized item.
 ---@field action string Accept action reported by the prompt picker.
 
 --- Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.Item
 ---@field label string Primary text shown for this row.
 ---@field description? string Secondary text shown next to the label.
@@ -471,15 +538,19 @@
 ---@field search_terms? string[] Extra strings considered by fuzzy pickers.
 
 --- Options for the low-level non-blocking picker handle constructor.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.NewOpts
 ---@field items (string | smelt.picker.Item)[] Initial picker rows. Must be non-empty.
 ---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Where to place the picker. Defaults to `center`.
 
+--- Accepted value returned by `smelt.picker.open`; dismissal returns `nil`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.OpenResult
 ---@field index integer 1-based accepted item index.
 ---@field item any Original item from `opts.items`.
 
 --- Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.Picker
 ---@field win fun(): smelt.win.Win Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).
 ---@field close fun(): nil Close the picker overlay. No-op if already closed.
@@ -489,6 +560,7 @@
 
 --- Completer specification handed to `smelt.prompt.completer` for full candidate
 --- sets ranked in Lua.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt.CompleterSpec
 ---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
 ---@field items fun(anchor: integer, text: string, cpos: integer): table[] Build a full candidate set for Lua-side ranking.
@@ -501,6 +573,7 @@
 
 --- Completer specification handed to `smelt.prompt.completer` for bounded,
 --- already-ranked providers.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt.MatchesCompleterSpec
 ---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
 ---@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states.
@@ -519,6 +592,7 @@
 --- optional flavour fields mirror what the fuzzy ranker renders; the
 --- caller is free to attach extra fields and read them back from
 --- `on_select` / `on_enter`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt.PickerItem
 ---@field label string Primary text rendered for the row.
 ---@field description? string Secondary text shown dimmed after the label.
@@ -530,6 +604,7 @@
 --- Options accepted by `smelt.prompt.open_picker`. Passing `on_enter`
 --- switches the picker to persistent mode (stays open across selects);
 --- omit it for single-shot behaviour.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt.PickerOpts
 ---@field items? smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
 ---@field provider? fun(query: string, limit: integer): table Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`.
@@ -543,6 +618,7 @@
 ---@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
 --- Spec accepted by `smelt.provider.register`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.provider.Config
 ---@field type? string Provider kind tag (`"openai"`, `"anthropic"`, etc.).
 ---@field api_base? string Base URL the engine talks to.
@@ -550,6 +626,7 @@
 ---@field models? string|smelt.provider.Model[] Models offered by this provider.
 
 --- One model entry in a provider's `models` list. Plugin authors can pass either a bare model id string or a full table - the wrapper handles both forms transparently.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.provider.Model
 ---@field name? string Model id as it appears in API requests.
 ---@field temperature? number Default sampling temperature.
@@ -569,18 +646,22 @@
 ---@field supports_fast_mode? boolean Whether this model supports accelerated inference.
 ---@field input_modalities? string[] Input modalities supported by this model, for example { "text", "image", "pdf" }.
 
+--- Provider rows and loading state returned by `smelt.provider.normalize`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.provider.NormalizedResult
 ---@field rows table[] Rows to render after optional synthetic message insertion.
 ---@field result? table Original provider result when the input used the provider shape.
 ---@field loading boolean True while the provider is still scanning or searching.
 
 --- Spec accepted by `smelt.remember`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.remember.Config
 ---@field model? boolean When true (default), restore the last-used model on launch.
 ---@field mode? boolean When true (default), restore the last-used agent mode on launch.
 ---@field reasoning_effort? boolean When true (default), restore the last-used reasoning effort on launch.
 
 --- Options for `smelt.render.diff_split`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.render.DiffSplitOpts
 ---@field old? string Left/pre-edit text.
 ---@field new? string Right/post-edit text.
@@ -588,17 +669,20 @@
 ---@field path? string Path whose extension is used when `lang` is omitted.
 
 --- Options for `smelt.render.syntax`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.render.SyntaxOpts
 ---@field content? string Source code to render.
 ---@field lang? string Syntax language token such as `"rust"`, `"lua"`, or `"py"`.
 ---@field path? string Path whose extension is used when `lang` is omitted.
 
 --- Options for `smelt.render.text`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.render.TextOpts
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.ColorDecl
 ---@field ansi? integer ANSI 256-color palette index for the default (non-branched) case.
 ---@field rgb? integer[] `[r, g, b]` sRGB triple for the default (non-branched) case.
@@ -606,6 +690,7 @@
 ---@field dark? smelt.theme.ColorDecl Color this branch resolves to when `is_light == false`.
 
 --- Style table for a single highlight group. Every field is optional - unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.StyleDecl
 ---@field fg? smelt.theme.ColorDecl Foreground color.
 ---@field bg? smelt.theme.ColorDecl Background color.
@@ -617,6 +702,7 @@
 ---@field reverse? boolean Reverse video.
 
 --- Colorscheme table with optional metadata and a required `groups` map. `syntax` selects a bundled two-face syntax theme for code highlighting. `light` marks the palette as light or dark; omit it to use terminal background detection. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is a group.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.ThemeSpec
 ---@field name? string Display name for this colorscheme.
 ---@field syntax? string Bundled syntect/two-face syntax theme name for code highlighting.
@@ -624,10 +710,12 @@
 ---@field groups table<string, string | smelt.theme.StyleDecl> Highlight groups keyed by group name.
 
 --- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.tools.PermissionDefaults
 ---@field [string] smelt.tools.Decision Per-mode decisions keyed by registered mode name.
 
 --- Plugin tool definition passed to `smelt.tools.register`. `execute` is required; the remaining hooks are optional and are invoked at well-defined points during a tool turn - see the field docs for each callback's contract.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.tools.ToolDef
 ---@field name string Tool name; used as the engine-facing identifier.
 ---@field execute function Required handler: `execute(args, ctx)` - returns the tool result.
@@ -656,6 +744,7 @@
 
 --- Opaque top-level string argument passed to transcript renderers. Complete field
 --- content remains in Rust and is available only through `smelt.layout.content`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ArgumentField
 ---@field name string Top-level argument name.
 ---@field content_id integer Stable shared-content id accepted by `smelt.layout.content`.
@@ -666,6 +755,7 @@
 ---@field complete boolean True when the JSON parser has consumed the complete field value.
 
 --- Bounded semantic transcript metadata passed to the root renderer.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
@@ -715,6 +805,7 @@
 
 --- Metadata for a retained payload whose complete content remains in Rust and is
 --- available to renderers only through retained layout leaves.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ContentMetadata
 ---@field content_id integer Stable shared-content id accepted by retained layout leaves.
 ---@field content_revision integer Monotonic content revision.
@@ -723,6 +814,7 @@
 ---@field content_preview string Strictly bounded preview for labels, never the complete retained payload.
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Context
 ---@field view_state "collapsed"|"peek"|"expanded"|"trimmed_head"|"trimmed_tail" Effective view state for the node currently being rendered.
 ---@field renderer_generation integer Current renderer generation used for cache invalidation.
@@ -732,9 +824,12 @@
 ---@field render fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node Re-enter the composed root renderer for a semantic child.
 
 --- Visible transcript cursor position relative to the committed viewport.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Cursor
 ---@field viewport_row integer Zero-based row inside the transcript viewport.
 
+--- Semantic transcript group snapshot passed to default renderer helpers.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Group
 ---@field id? integer Stable render-plan group id.
 ---@field name? string Group spec name.
@@ -744,6 +839,7 @@
 
 --- Bounded semantic metadata for one retained group child. Growing content and
 --- complete child payloads are never embedded in group renderer input.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.GroupChild
 ---@field id integer Stable child block id.
 ---@field kind string Semantic block kind.
@@ -759,6 +855,7 @@
 ---@field exit_code? integer Background process exit code.
 
 --- Group selector declared through `smelt.transcript.groups.register`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.GroupSelector
 ---@field kind? string Match block kind.
 ---@field name? string Match one tool name for tool blocks.
@@ -772,6 +869,7 @@
 
 --- Declarative transcript group registration. The host owns planning; the root
 --- transcript renderer owns presentation for the resulting semantic group node.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.GroupSpec
 ---@field name string Unique group name. Registering the same name replaces it.
 ---@field cache_key? string Persisted layout cache key; omit to opt out while active.
@@ -781,25 +879,33 @@
 ---@field selector smelt.transcript.GroupSelector Declarative block matcher.
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
 
+--- Filters accepted by semantic previous/next block navigation.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.NavigationOpts
 ---@field role? smelt.transcript.Role Match only blocks with this semantic role. Defaults to `user`.
 
+--- Viewport placement used when revealing a semantic transcript target.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.RevealOpts
 ---@field align? smelt.transcript.RevealAlign Target alignment within the transcript viewport. Currently only `top`.
 ---@field top_padding? integer Rows to reserve above the target. Defaults to zero.
 ---@field move_cursor? boolean Move the transcript cursor to the target. Defaults to true.
 
 --- Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Stream
 ---@field append fun(delta: string): nil Append one assistant text delta and re-render the target buffer.
 ---@field finish fun(final_text: string?): nil Finalize the streaming block. If `final_text` is provided and differs from the streamed text, the final text is rendered instead.
 ---@field reset fun(): nil Clear the stream and the target buffer.
 ---@field width fun(width: integer?): integer? Read or set the render width in terminal cells.
 
+--- Rendering options for `smelt.transcript.stream`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.StreamOpts
 ---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
 --- One span in a styled tool title. Style attributes may be supplied directly or through `style`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.StyledSpan
 ---@field text? string Span text. The positional field `[1]` is also accepted.
 ---@field style? smelt.transcript.StyledSpanStyle Nested style attributes.
@@ -814,6 +920,7 @@
 ---@field title_suffix? boolean Whether this span is transient pending-state title metadata.
 
 --- Style attributes accepted on one styled title span.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.StyledSpanStyle
 ---@field hl? string Theme highlight group.
 ---@field fg? string Foreground color.
@@ -823,20 +930,24 @@
 ---@field italic? boolean Whether to render italic text.
 
 --- Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse record coordinates are intentionally hidden.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Target
 ---@field block_id integer Stable transcript block identity.
 ---@field role smelt.transcript.Role Semantic block role.
 ---@field first_line string First source line, suitable for navigation labels.
 
 --- Options passed to focused tool body and draft callbacks.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolBodyOptions
 ---@field gutter? string Prefix rendered before each body line.
 
 --- Options accepted by the default tool header renderer.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolHeaderOptions
 ---@field hl? string Status marker highlight group.
 
 --- Bounded tool output metadata passed to transcript renderers.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolOutput
 ---@field content_id integer Stable shared-content id accepted by `smelt.layout.content`.
 ---@field content_revision integer Monotonic content revision.
@@ -850,6 +961,7 @@
 --- Public presentation policy for one tool name. A complete `render` callback
 --- takes precedence; otherwise the default renderer composes the focused pieces.
 --- Registrations are copied and immutable.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.ToolPresentation
 ---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
@@ -859,6 +971,7 @@
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
 --- Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.View
 ---@field revision integer Monotonic revision of observable committed transcript state.
 ---@field window smelt.win.Win Transcript window handle for overlay anchoring.
@@ -869,6 +982,7 @@
 ---@field next_block fun(opts: smelt.transcript.NavigationOpts?): smelt.transcript.Target? Return the nearest actionable matching block when moving forward from this view.
 
 --- Geometry and tail state from one committed transcript projection.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.Viewport
 ---@field width integer Outer transcript width in cells.
 ---@field height integer Transcript viewport height in rows.
@@ -879,20 +993,24 @@
 ---@field at_bottom boolean Whether the committed viewport is at the current transcript bottom.
 
 --- Terminal size in cells.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.ui.Size
 ---@field width integer Terminal width in cells.
 ---@field height integer Terminal height in cells.
 
 --- Shareable natural-size handle returned by `smelt.ui.layout.measure`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.ui.layout.Measure
 ---@field set fun(w: integer, h: integer): nil Update the measured natural size.
 ---@field get fun(): integer, integer Return the current measured width and height.
 
 --- Handle returned by `Win:decorate(opts)` for a window-owned decoration.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.win.Decoration
 ---@field close fun(): nil Remove the decoration and any window leaves it owns.
 
 --- Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.layout` tree. `align` is one of `nw|n|ne|w|center|e|sw|s|se` and defaults to `center`. Width/height constraints use the same vocabulary as overlays but resolve against the owner window rect.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.win.DecorationOpts
 ---@field layout smelt.ui.layout.Layout Decoration layout tree.
 ---@field align? string Owner-relative alignment point; default `center`.
@@ -907,6 +1025,7 @@
 ---@field min_height? any Optional height floor.
 
 --- Window-owned row background highlight. Ranges use absolute visual rows and an exclusive `end`; `{ cursor = true }` follows the window cursor row. `mode` is `always` (default) or `focused`; `width` is `full` (default) or `content`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.win.RowHighlight
 ---@field start? integer First absolute visual row to highlight (0-based). Required unless `cursor = true`.
 ---@field end? integer Exclusive absolute visual row end. Defaults to `start + 1`.
@@ -916,12 +1035,13 @@
 ---@field width? "full"|"content" Paint the full window row, including gutter and padding, or only the content region. Default `full`.
 
 --- Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.win.Win
 ---@field close fun(): nil Close the overlay leaf. No-op if the window is already closed.
 ---@field focus fun(): nil Move keyboard focus to this window. No-op if the window is not focusable.
 ---@field buf fun(): smelt.buf.Buf? Return the backing Buf handle, or `nil` if the window is gone.
 ---@field rect fun(): any Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
----@field content_width fun(): any Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.
+---@field content_width fun(): any Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.
 ---@field decorate fun(opts: table): smelt.win.Decoration Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.
 ---@field cursor fun(row: integer?): any Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
@@ -938,38 +1058,55 @@
 ---@field invalidate_renderer fun(): smelt.win.Win Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.
 
 --- Where a virtual-text chunk is rendered relative to the line.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"
 
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
 
 --- Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.events.Name string|"block_done"|"cmd_post"|"cmd_pre"|"confirm_resolved"|"history"|"input_submit"|"session_ended"|"session_started"|"shutdown"|"stream_delta"|"stream_phase"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"
 
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.input.Event "change"|"submit"|"cancel"
 
 --- Paint-leaf events accepted by `paint:on(event, fn)`.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@alias smelt.paint.Event "press"|"release"|"drag"
 
+--- Decision accepted by effect-level permission rules.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@alias smelt.permissions.Decision "allow"|"ask"|"deny"
+
 --- Reasoning effort level string literal.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.reasoning.Effort "off"|"low"|"medium"|"high"|"max"
 
 --- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.signal.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.tools.Decision "allow"|"ask"|"deny"
 
 --- Coarse side-effect classification used by permission policy.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.tools.Effect "read"|"write"|"network"|"user"|"process"|"config"|"other"
 
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.transcript.RevealAlign "top"
 
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.transcript.Role "user"|"mode"|"process_status"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"
 
 --- Vim mode string literal.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.vim.Mode "insert"|"normal"|"visual"|"visual_line"
 
 --- Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"press"|"release"|"drag"|"scrolled"|"resized"|"placeholder_accepted"|"placeholder_dismissed"
 

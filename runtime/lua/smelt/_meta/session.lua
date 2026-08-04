@@ -4,14 +4,11 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.session
 local session = {}
 
---- Visibility: Internal - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
---- Cancel the active turn and restore its submitted user message into the prompt only if no assistant or tool output has started. Returns true when it rewound.
----@type fun(opts: table?): boolean
-session._rewind_active_turn_if_clean = nil
-
+--- Tier: Host - Available in every runtime, including headless mode.
 --- Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.
 ---@type fun(): string
 session.artifact_dir = nil

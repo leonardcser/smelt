@@ -33,11 +33,18 @@ requires review and trust again.
 
 ### Reload behavior
 
-Lua config reloads are transactional. smelt loads and validates a fresh candidate
-before replacing the running generation. If any early, autoload, user, project,
-or plugin file raises or contains invalid syntax, the current commands, keymaps,
-tools, hooks, providers, settings, permissions, MCP/LSP declarations, and watcher
-roots remain active. Candidate `on_ready` hooks do not run.
+smelt-managed configuration and registrations reload transactionally. smelt loads
+and validates a fresh candidate before replacing the running generation. If any
+early, autoload, user, project, or plugin file raises or contains invalid syntax,
+the current commands, keymaps, tools, hooks, providers, settings, permissions,
+MCP/LSP declarations, and watcher roots remain active. Candidate `on_ready` hooks
+do not run.
+
+This guarantee covers declarations and resources owned by smelt's generation
+machinery. Lua configuration is trusted in-process code, not a sandbox: arbitrary
+filesystem, process, network, or other external effects are not rolled back when
+a candidate fails. APIs that directly affect the live application are unavailable
+during candidate evaluation.
 
 A successful `/reload` reconciles providers, models, settings, permissions, modes,
 MCP, LSP, and watched config roots as one committed generation. Background
@@ -306,7 +313,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `web_fetch_renderer_command` | string | `""` | Renderer executable used by `web_fetch`. It reads a JSON request from stdin and writes rendered HTML, status, and final URL as JSON to stdout. |
 | `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
 | `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection. |
-| `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases, including prereleases) or `"unstable"` (`main` HEAD). |
+| `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (published GitHub releases) or `"unstable"` (`main` HEAD). |
 | `autoupgrade_interval` | `number` | `3600` | Seconds between background autoupgrade checks. The upgrade plugin clamps to a 60-second minimum to avoid hammering GitHub. |
 
 <!-- SETTINGS_REFERENCE_END -->

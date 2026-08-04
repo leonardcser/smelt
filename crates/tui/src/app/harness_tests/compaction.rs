@@ -275,15 +275,15 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
 fn ordered_prepare_request_paints_transient_streaming_state() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    assert!(app.run_lua(
+    assert!(app.run_bundled_lua(
         r#"
         smelt.engine.ask_inherited({
             messages = { { role = "user", content = "summarize" } },
             on_delta = function(delta)
-                smelt.transcript._set_compaction_preview(delta)
+                __smelt_internal.transcript._set_compaction_preview(delta)
             end,
             on_response = function()
-                smelt.transcript._set_compaction_preview(nil)
+                __smelt_internal.transcript._set_compaction_preview(nil)
             end,
         })
         "#
@@ -432,12 +432,12 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
 #[test]
 fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
     let mut app = TestApp::builder().build();
-    assert!(app.run_lua(
+    assert!(app.run_bundled_lua(
         r#"
         smelt.engine.ask_inherited({
             messages = { { role = "user", content = "summarize" } },
             on_delta = function(delta)
-                smelt.transcript._set_compaction_preview(delta)
+                __smelt_internal.transcript._set_compaction_preview(delta)
             end,
             on_response = function() end,
         })

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Asynchronous HTTP get/post. Yields the calling coroutine until the response lands; runtime stays responsive. Errors use the `(value, err_string)` convention.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.http
 local http = {}
 

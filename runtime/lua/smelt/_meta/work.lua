@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Push background work-state tokens. Tokens drive the prompt top-bar indicator and the reactive `work_*` signals; plugins observe state by subscribing to those signals. UiHost-only.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.work
 local work = {}
 

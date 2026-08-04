@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Persistent message log with full bodies and tracebacks.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.messages
 local messages = {}
 

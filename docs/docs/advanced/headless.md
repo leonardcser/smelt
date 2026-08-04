@@ -24,7 +24,8 @@ smelt --headless "summarize @src/main.rs"
 Slash commands (`/resume`, `/clear`, etc.) are interactive-only and exit 1 with
 `"..." requires interactive mode`. The shell escape (`!cmd`) does work; it runs
 the command via `sh -c`, forwards its output, and exits without calling the
-model. smelt does not currently propagate the child command's exit status.
+model. Its process status matches the child command's exit status; failure to
+launch the shell or termination by a signal returns 1.
 
 ## Provider and Model
 
@@ -116,16 +117,18 @@ smelt --headless --color=always "fix the bug" 2>&1 | less -R
 
 ## Exit Codes
 
-| Code | Meaning                                                             |
-| ---- | ------------------------------------------------------------------- |
-| 0    | Dispatch finished, including `TurnError`; shell escapes also return 0 after launch |
-| 1    | Missing message, startup/auth failure, or an interactive-only slash command |
+| Code | Meaning |
+| ---- | ------- |
+| 0    | The model turn or shell escape completed successfully |
+| 1    | Missing message, startup/auth failure, interactive-only slash command, or shell launch failure |
 | 2    | Invalid CLI syntax or option value |
+| 3    | The model turn failed after dispatch, including provider, stream, and engine failures |
 | 130  | Interrupted by `SIGINT` / `SIGTERM` (Ctrl-C) |
 
-For model failures after dispatch, inspect stderr in text mode or the terminal
-`TurnComplete` / `TurnError` event in JSON mode. On interrupt, smelt sends a
-cancel to the engine and exits 130.
+Shell escapes otherwise return the child command's status, so they may return
+nonzero codes not listed above. In text mode, model-turn details are written to
+stderr. In JSON mode, the stream ends with `TurnError`. On interrupt, smelt sends
+a cancel to the engine and exits 130.
 
 ## Sessions
 

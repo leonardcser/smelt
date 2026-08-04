@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Image file detection and base64 data-URL loading.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.image
 local image = {}
 

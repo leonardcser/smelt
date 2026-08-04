@@ -9,7 +9,7 @@ pub(super) fn register(
     smelt: &mlua::Table,
     shared: &std::sync::Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let inspect = LuaMod::under(
+    let inspect = LuaMod::advanced(
         lua,
         smelt,
         "inspect",
@@ -17,7 +17,7 @@ pub(super) fn register(
         Tier::UiHost,
     )?;
 
-    inspect.private_fn(
+    inspect.private_live_only_fn(
         "__start",
         &["task_id"],
         move |_, task_id: u64| -> LuaResult<()> {
@@ -26,7 +26,7 @@ pub(super) fn register(
         },
     )?;
 
-    inspect.private_fn(
+    inspect.private_live_only_fn(
         "__stop",
         &["task_id"],
         move |_, task_id: u64| -> LuaResult<()> {
@@ -36,7 +36,7 @@ pub(super) fn register(
     )?;
 
     let open_context = std::sync::Arc::clone(&shared.core);
-    inspect.private_fn(
+    inspect.private_live_only_fn(
         "__open_url",
         &["url"],
         move |lua, url: String| -> LuaResult<mlua::Table> {

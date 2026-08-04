@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`. UiHost-only.
 

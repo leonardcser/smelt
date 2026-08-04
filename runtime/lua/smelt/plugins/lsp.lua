@@ -373,11 +373,11 @@ end
 local function call_backend(name, args)
   args = args or {}
   local operation = backend_operation(name)
-  if not operation or not smelt.lsp or not smelt.lsp.__call then
+  if not operation or not __smelt_internal.lsp or not __smelt_internal.lsp.__call then
     return { content = "Language server backend is unavailable.", is_error = true }
   end
   local payload = smelt.task.external(function(id)
-    smelt.lsp.__call(id, operation, args)
+    __smelt_internal.lsp.__call(id, operation, args)
   end)
   if payload.err then return { content = payload.err, is_error = true } end
   local result = payload.result

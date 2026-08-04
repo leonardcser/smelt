@@ -53,6 +53,44 @@ fn install_explicit_api_fixtures(lua: &mlua::Lua) {
     .expect("install explicit API fixtures");
 }
 
+fn bootstrap_fixture_environment(lua: &mlua::Lua, path: &'static str) -> mlua::Table {
+    assert!(
+        smelt_core::lua::runtime::BOOTSTRAP_CHUNKS
+            .iter()
+            .any(|chunk| chunk.path == path),
+        "missing bootstrap manifest entry for {path}"
+    );
+    smelt_core::lua::doc::install_ui_host_availability(lua, || true);
+    smelt_core::lua::module::bootstrap_chunk_environment(lua, true)
+        .unwrap_or_else(|error| panic!("build bootstrap fixture environment for {path}: {error}"))
+}
+
+fn load_transcript_defaults(lua: &mlua::Lua) {
+    let environment = bootstrap_fixture_environment(lua, "transcript/defaults.lua");
+    let internal: mlua::Table = lua
+        .load(
+            r#"
+            return {
+              layout = {
+                __is_node = function(value)
+                  return type(value) == "table" and type(value.kind) == "string"
+                end,
+              },
+            }
+            "#,
+        )
+        .eval()
+        .expect("trusted transcript fixture capabilities");
+    environment
+        .raw_set("__smelt_internal", internal)
+        .expect("install transcript fixture capabilities");
+    lua.load(TRANSCRIPT_DEFAULTS_LUA)
+        .set_name("transcript/defaults.lua")
+        .set_environment(environment)
+        .exec()
+        .expect("load transcript defaults");
+}
+
 fn install_notifications_preload(lua: &mlua::Lua) {
     lua.globals()
         .set("__NOTIFICATIONS_LUA", NOTIFICATIONS_LUA)
@@ -318,7 +356,11 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
     )
     .exec()
     .expect("install dialog stubs");
-    lua.load(DIALOG_LUA).exec().expect("load dialog module");
+    lua.load(DIALOG_LUA)
+        .set_name("dialog.lua")
+        .set_environment(bootstrap_fixture_environment(&lua, "dialog.lua"))
+        .exec()
+        .expect("load dialog module");
 
     let submitted: Vec<i64> = lua
         .load(
@@ -459,7 +501,11 @@ fn session_tree_orders_nested_forks_and_prefixes() {
     lua.load("smelt = { session = {} }")
         .exec()
         .expect("init smelt table");
-    lua.load(SESSION_LUA).exec().expect("load session helpers");
+    lua.load(SESSION_LUA)
+        .set_name("session.lua")
+        .set_environment(bootstrap_fixture_environment(&lua, "session.lua"))
+        .exec()
+        .expect("load session helpers");
 
     let rows: mlua::Table = lua
         .load(
@@ -599,9 +645,7 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     )
     .exec()
     .expect("install fake smelt api");
-    lua.load(TRANSCRIPT_DEFAULTS_LUA)
-        .exec()
-        .expect("load transcript defaults");
+    load_transcript_defaults(&lua);
     lua.load(WEB_FETCH_LUA).exec().expect("load web_fetch");
 
     let (body_kind, output_kind, child_kind, format, dim, rows): (
@@ -796,9 +840,7 @@ fn structured_tool_output_uses_shared_code_content() {
     )
     .exec()
     .expect("install fake smelt api");
-    lua.load(TRANSCRIPT_DEFAULTS_LUA)
-        .exec()
-        .expect("load transcript defaults");
+    load_transcript_defaults(&lua);
 
     let (node_kind, child_kind, format, lang): (String, String, String, String) = lua
         .load(

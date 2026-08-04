@@ -141,7 +141,7 @@ impl mlua::UserData for LuaPaintReg {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::advanced(
         lua,
         smelt,
         "paint",
@@ -152,6 +152,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.paint.Paint",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.paint.Paint"),
         doc: "Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).",
         fields: smelt_core::class_methods! {
             "remove" => fn() -> bool, "Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.",

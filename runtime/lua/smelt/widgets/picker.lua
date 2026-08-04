@@ -7,6 +7,7 @@
 
 local M = {}
 
+--- Accepted value returned by `smelt.picker.open`; dismissal returns `nil`.
 ---@class smelt.picker.OpenResult
 ---@field index integer 1-based accepted item index.
 ---@field item any Original item from `opts.items`.

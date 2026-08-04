@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 List and load skill content from the SkillLoader populated at startup. Markdown custom commands can opt into skill discovery with `agent_skill: true` (or `agent-skill: true`) in their frontmatter; the skill name is the command file stem. Loaded command skills are static context: slash-command arguments are not included, and shell output markers are not evaluated.
 

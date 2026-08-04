@@ -1,13 +1,9 @@
 name: Publish library crate
 
-# Publishes one of the independently-versioned library crates
-# (smelt-perf, smelt-style, smelt-ansi, smelt-term) to crates.io.
+# Publishes an independently versioned library crate declared in
+# `[workspace.metadata.smelt.release]` to crates.io.
 #
-# Trigger by pushing a tag of the form `<crate>-v<version>`, e.g.:
-#   git tag smelt-perf-v0.1.0 && git push origin smelt-perf-v0.1.0
-#   git tag smelt-style-v0.1.0 && git push origin smelt-style-v0.1.0
-#   git tag smelt-ansi-v0.1.0 && git push origin smelt-ansi-v0.1.0
-#   git tag smelt-term-v0.1.0 && git push origin smelt-term-v0.1.0
+# Trigger by pushing a tag of the form `<crate>-v<version>`.
 #
 # Auth uses crates.io Trusted Publishing (OIDC). No long-lived token
 # secret is required; configure the trusted publisher entry on
@@ -16,10 +12,7 @@ name: Publish library crate
 on:
   push:
     tags:
-      - "smelt-perf-v*"
-      - "smelt-style-v*"
-      - "smelt-ansi-v*"
-      - "smelt-term-v*"
+      - "smelt-*-v*"
 
 jobs:
   publish:
@@ -30,12 +23,10 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout tagged source
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned Rust
         run: rustup toolchain install
@@ -43,67 +34,61 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-edit
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-edit
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Parse tag
+      - name: Parse and verify tag
         id: parse
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
           VERSION="${TAG##*-v}"
           CRATE="${TAG%-v${VERSION}}"
+          test "$(git rev-list -n 1 "$TAG")" = "$(git rev-parse HEAD)"
+          git tag --points-at HEAD | grep -Fx "$TAG"
+          cargo metadata --locked --no-deps --format-version 1 > /tmp/cargo-metadata.json
+          ACTUAL_VERSION=$(python3 - "$CRATE" <<'PY'
+          import json
+          import sys
+
+          crate = sys.argv[1]
+          with open("/tmp/cargo-metadata.json", encoding="utf-8") as metadata_file:
+              metadata = json.load(metadata_file)
+          independent = set(
+              metadata["metadata"]["smelt"]["release"]["independent-crates"]
+          )
+          if crate not in independent:
+              raise SystemExit(f"unsupported release crate: {crate}")
+          matches = [
+              package["version"]
+              for package in metadata["packages"]
+              if package["name"] == crate
+          ]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one workspace package named {crate}, found {len(matches)}")
+          print(matches[0])
+          PY
+          )
+          test "$ACTUAL_VERSION" = "$VERSION" || {
+            echo "tag version $VERSION does not match $CRATE package version $ACTUAL_VERSION" >&2
+            exit 1
+          }
+          git diff --exit-code
           echo "crate=$CRATE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing crate=$CRATE version=$VERSION"
-
-      - name: Bump version
-        env:
-          CRATE: ${{ steps.parse.outputs.crate }}
-          VERSION: ${{ steps.parse.outputs.version }}
-        run: |
-          cargo set-version -p "$CRATE" "$VERSION"
-          python3 <<'PY'
-          import os
-          from pathlib import Path
-
-          crate = os.environ["CRATE"]
-          version = os.environ["VERSION"]
-          paths = {
-              "smelt-perf": "crates/perf",
-              "smelt-style": "crates/style",
-              "smelt-ansi": "crates/ansi",
-              "smelt-term": "crates/term",
-          }
-          crate_path = paths[crate]
-          root = Path("Cargo.toml")
-          lines = root.read_text().splitlines()
-          prefix = f'{crate} = {{ path = "{crate_path}", version = "'
-          replacement = f'{crate} = {{ path = "{crate_path}", version = "{version}" }}'
-          for i, line in enumerate(lines):
-              if line.startswith(prefix):
-                  lines[i] = replacement
-                  break
-          else:
-              raise SystemExit(f"workspace dependency for {crate} not found")
-          root.write_text("\n".join(lines) + "\n")
-          PY
 
       - name: Check formatting
         run: cargo fmt -- --check
 
       - name: Run lints
-        run: cargo clippy -p "${{ steps.parse.outputs.crate }}" --all-targets -- -D warnings
+        run: cargo clippy --locked -p "${{ steps.parse.outputs.crate }}" --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo nextest run -p "${{ steps.parse.outputs.crate }}" --no-tests pass
+        run: cargo nextest run --locked -p "${{ steps.parse.outputs.crate }}" --no-tests pass
 
       - name: Verify packaging
-        run: cargo publish -p "${{ steps.parse.outputs.crate }}" --dry-run --allow-dirty
+        run: cargo publish --locked -p "${{ steps.parse.outputs.crate }}" --dry-run
 
       - name: Authenticate to crates.io
         id: auth
@@ -112,22 +97,7 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p "${{ steps.parse.outputs.crate }}" --allow-dirty
-
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
-          if git diff --staged --quiet; then
-            echo "No version bump to commit"
-          else
-            git commit -m "chore: publish ${{ steps.parse.outputs.crate }} v${{ steps.parse.outputs.version }}"
-            git push origin main
-          fi
-          # Re-tag against the new commit so the tag points at the published state.
-          git tag -f "${GITHUB_REF_NAME}"
-          git push -f origin "${GITHUB_REF_NAME}"
+        run: cargo publish --locked -p "${{ steps.parse.outputs.crate }}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3

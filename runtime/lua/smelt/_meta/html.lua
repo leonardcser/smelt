@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.html
 local html = {}
 

@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival - repeat calls with the same name return the same handle with mutable opts re-applied. Anonymous buffers are reaped on `/reload`. UiHost-only - buffers are terminal-screen backing stores that windows render into.
 

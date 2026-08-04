@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Run subprocesses and manage contained shell jobs. Background jobs are non-blocking; foreground jobs stream bounded output and wait for completion.
 

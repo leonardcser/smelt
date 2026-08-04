@@ -24,25 +24,33 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Inlined copy of `runtime/lua/smelt/_bootstrap.lua` so the host-only
-/// runtime tests can evaluate it directly. Loading the full bundled
-/// bootstrap chain (`dialog.lua`, `widgets/picker.lua`, …) would pull
-/// in UiHost-tier namespaces the core tests don't register.
-const BOOTSTRAP_LUA: &str = include_str!("../../../runtime/lua/smelt/_bootstrap.lua");
 const READ_PROCESS_OUTPUT_LUA: &str =
     include_str!("../../../runtime/lua/smelt/tools/read_process_output.lua");
 const LSP_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/lsp.lua");
 
-/// Build a runtime with bootstrap evaluated. Tests that don't need
-/// host I/O can drive coroutines through this directly.
+/// Build a runtime with the trusted Host bootstrap evaluated. Tests that don't
+/// need host I/O can drive coroutines through this directly.
 fn fresh() -> LuaRuntime {
-    let rt = LuaRuntime::new();
+    LuaRuntime::new()
+}
+
+fn load_lsp_plugin(rt: &LuaRuntime) {
+    let smelt: mlua::Table = rt.lua.globals().get("smelt").expect("smelt table");
+    let public_lsp: mlua::Table = smelt.get("lsp").expect("public lsp table");
+    if let Ok(call) = public_lsp.get::<mlua::Function>("__call") {
+        smelt_core::lua::module::internal_api_table(&rt.lua, "smelt.lsp")
+            .expect("internal lsp table")
+            .raw_set("__call", call)
+            .expect("install test lsp backend");
+    }
+    let environment = smelt_core::lua::module::bundled_chunk_environment(&rt.lua)
+        .expect("bundled chunk environment");
     rt.lua
-        .load(BOOTSTRAP_LUA)
-        .set_name("smelt/_bootstrap.lua")
+        .load(LSP_PLUGIN_LUA)
+        .set_name("smelt/plugins/lsp.lua")
+        .set_environment(environment)
         .exec()
-        .expect("bootstrap");
-    rt
+        .expect("load lsp plugin");
 }
 
 fn execute_tool(
@@ -777,11 +785,7 @@ fn lsp_plugin_formats_semantic_results_as_text() {
         )
         .exec()
         .expect("stub lsp backend");
-    rt.lua
-        .load(LSP_PLUGIN_LUA)
-        .set_name("smelt/plugins/lsp.lua")
-        .exec()
-        .expect("load lsp plugin");
+    load_lsp_plugin(&rt);
 
     let mut args = HashMap::new();
     args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
@@ -858,11 +862,7 @@ fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
         )
         .exec()
         .expect("stub lsp backend");
-    rt.lua
-        .load(LSP_PLUGIN_LUA)
-        .set_name("smelt/plugins/lsp.lua")
-        .exec()
-        .expect("load lsp plugin");
+    load_lsp_plugin(&rt);
 
     let mut args = HashMap::new();
     args.insert("file_path".into(), serde_json::json!("/tmp/empty.rs"));
@@ -922,11 +922,7 @@ fn lsp_plugin_registers_agent_friendly_semantic_tools() {
         )
         .exec()
         .expect("stub lsp backend");
-    rt.lua
-        .load(LSP_PLUGIN_LUA)
-        .set_name("smelt/plugins/lsp.lua")
-        .exec()
-        .expect("load lsp plugin");
+    load_lsp_plugin(&rt);
 
     let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
     let outline = defs
@@ -1034,11 +1030,7 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
         )
         .exec()
         .expect("stub lsp backend");
-    rt.lua
-        .load(LSP_PLUGIN_LUA)
-        .set_name("smelt/plugins/lsp.lua")
-        .exec()
-        .expect("load lsp plugin");
+    load_lsp_plugin(&rt);
 
     let mut args = HashMap::new();
     args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
@@ -1128,11 +1120,7 @@ fn lsp_plugin_truncates_large_structured_results() {
         )
         .exec()
         .expect("stub lsp backend");
-    rt.lua
-        .load(LSP_PLUGIN_LUA)
-        .set_name("smelt/plugins/lsp.lua")
-        .exec()
-        .expect("load lsp plugin");
+    load_lsp_plugin(&rt);
 
     let mut args = HashMap::new();
     args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
@@ -1539,10 +1527,11 @@ async fn process_run_happy_path() {
 fn runtime_constructor_defers_bootstrap_until_explicit_load() {
     let root = tempfile::tempdir().expect("runtime root");
     let runtime_dir = root.path().join("runtime");
-    for relative_path in smelt_core::lua::runtime::BOOTSTRAP_FILES {
+    for chunk in smelt_core::lua::runtime::BOOTSTRAP_CHUNKS {
+        let relative_path = chunk.path;
         let path = runtime_dir.join("smelt").join(relative_path);
         std::fs::create_dir_all(path.parent().unwrap()).expect("bootstrap parent");
-        let source = if *relative_path == "_bootstrap.lua" {
+        let source = if relative_path == "_bootstrap.lua" {
             "BOOTSTRAP_COUNT = (BOOTSTRAP_COUNT or 0) + 1\n"
         } else {
             ""
@@ -1597,12 +1586,8 @@ async fn process_run_uses_runtime_cwd_without_core_host() {
     );
     #[allow(clippy::arc_with_non_send_sync)]
     let shared = Arc::new(LuaShared::default());
-    let rt = LuaRuntime::with_shared_for_runtime(shared, &env, None, None, None);
-    rt.lua
-        .load(BOOTSTRAP_LUA)
-        .set_name("smelt/_bootstrap.lua")
-        .exec()
-        .expect("bootstrap");
+    let mut rt = LuaRuntime::with_shared_for_runtime(shared, &env, None, None, None);
+    rt.load_host_bootstrap();
     rt.lua
         .load(
             r#"

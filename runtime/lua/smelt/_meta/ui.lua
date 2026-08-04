@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Screen-composition primitives: main layout composer and per-window renderer registration.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.ui
 local ui = {}
 

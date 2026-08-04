@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.fuzzy
 local fuzzy = {}
 

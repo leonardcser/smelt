@@ -4,9 +4,54 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Register, unregister, and resolve plugin tools for the engine.
+
+## `smelt.tools._compact_cwd_path`
+
+```lua
+fun(path: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Compact repeated absolute cwd prefixes in model-facing tool output. This is
+display-only policy for structured path outputs, not a filesystem primitive.
+
+## `smelt.tools._compact_cwd_paths`
+
+```lua
+fun(paths: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Apply `_compact_cwd_path` to each path in an array, preserving order.
+Returns an empty array when `paths` is `nil`.
+
+## `smelt.tools._compact_cwd_prefix_lines`
+
+```lua
+fun(content: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Remove the active working-directory prefix from the start of each line in
+model-facing text while preserving line endings. Returns `""` for `nil`.
+
+## `smelt.tools._with_watchdog`
+
+```lua
+fun(def: any, opts: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Attach an outer watchdog to a tool definition. This is intentionally
+separate from the tool's own timeout handling: builtins use a small grace
+period so their domain-specific timeout result wins before the watchdog fires.
 
 ## `smelt.tools.call`
 

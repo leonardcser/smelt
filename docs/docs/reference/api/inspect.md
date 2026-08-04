@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Local session introspection web UI. `smelt.inspect.url()` reads the running server URL; the optional `inspect` plugin adds `smelt.inspect.start()`, `smelt.inspect.stop()`, and `smelt.inspect.open()`.
 

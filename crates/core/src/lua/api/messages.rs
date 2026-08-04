@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "messages",
@@ -59,7 +59,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let s = shared.clone();
-    m.fn_(
+    m.live_only_fn(
         "mark_read",
         "Mark every message in the log as read so `unread_count` returns `0` until new errors arrive.",
         &[],
@@ -72,7 +72,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let s = shared.clone();
-    m.fn_(
+    m.live_only_fn(
         "clear",
         "Drop every message from the log.",
         &[],
@@ -85,7 +85,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     let s = shared.clone();
-    m.fn_(
+    m.live_only_fn(
         "append",
         "Append a new message of `kind` (`\"error\"`, `\"warn\"`/`\"warning\"`, anything else falls back to `\"info\"`) attributed to `source` with body `msg`.",
         &["kind", "source", "msg"],

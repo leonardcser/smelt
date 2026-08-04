@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. UiHost-only.
 
@@ -14,12 +14,12 @@ Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resol
 fun(handle_id: string): nil
 ```
 
-**Visibility:** `Internal` - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Drive the bundled tool-permission confirm dialog for `handle_id`.
 Reads the matching request out of the `confirm_requested` signal, builds
 the header + preview + option leaves, dispatches the user's choice
-through `smelt.confirm.__resolve`. Bails when no matching request is
-active (e.g. a newer prompt has superseded it). Called by the host;
-plugins should not invoke directly.
+through the bundled host bridge. Bails when no matching request is active
+(e.g. a newer prompt has superseded it). The host calls this Advanced
+override point; plugins may replace it but should not invoke it directly.
 

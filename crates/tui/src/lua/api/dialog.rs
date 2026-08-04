@@ -28,6 +28,12 @@ pub(crate) struct LuaDockedDialog {
     modal: crate::smelt_edit::ModalId,
 }
 
+impl smelt_core::lua::lua_type::LuaType for LuaDockedDialog {
+    fn lua_type() -> String {
+        "any".into()
+    }
+}
+
 impl mlua::UserData for LuaDockedDialog {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("close", |_, this, ()| {
@@ -97,7 +103,7 @@ fn install_modal_key(
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let module = LuaMod::under(
+    let module = LuaMod::supported(
         lua,
         smelt,
         "dialog",

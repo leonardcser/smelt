@@ -4,9 +4,40 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 List built-in model providers and register custom ones. Headless-safe.
+
+## `smelt.provider._position_of_key`
+
+```lua
+fun(rows: any, key: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Advanced UI helper: 1-based row position for a stable item key.
+
+## `smelt.provider._select_row`
+
+```lua
+fun(rows: any, old_key: any, preserve: any, fallback: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Advanced UI helper: select the fallback row unless stable-key preservation succeeds.
+
+## `smelt.provider._should_keep_stale_rows`
+
+```lua
+fun(result: any, rows: any, current_rows: any): any
+```
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Advanced UI helper: keep stale rows visible while a provider is loading an
+empty/synthetic refresh, instead of flashing to a status row.
 
 ## `smelt.provider.has_real_rows`
 

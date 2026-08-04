@@ -917,10 +917,6 @@ impl PlatformLuaHost<'_> {
         self.app.terminal_is_focused()
     }
 
-    pub(crate) fn file_cache(&self) -> smelt_core::fs::FileStateCache {
-        self.app.core.files.clone()
-    }
-
     pub(crate) fn ui_size(&self) -> (u16, u16) {
         (self.app.last_width, self.app.last_height)
     }
@@ -1823,6 +1819,10 @@ pub(crate) fn scope_app<R>(app: &mut TuiApp, body: impl FnOnce() -> R) -> R {
             output
         })
     })
+}
+
+pub(crate) fn ui_host_available() -> bool {
+    TUI_APP.is_set()
 }
 
 fn with_scoped_app<R>(callback: impl FnOnce(&mut TuiApp) -> R) -> R {

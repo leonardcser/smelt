@@ -4,7 +4,7 @@ smelt.transcript.defaults = smelt.transcript.defaults or {}
 local M = smelt.transcript.defaults
 
 local layout = smelt.layout
-local is_layout_node = layout.__is_node
+local is_layout_node = __smelt_internal.layout.__is_node
 
 local status_hl = {
   drafting = "SmeltToolPending",
@@ -788,6 +788,7 @@ local function field_path_value(item, field)
   return value
 end
 
+--- Semantic transcript group snapshot passed to default renderer helpers.
 ---@class smelt.transcript.Group
 ---@field id? integer Stable render-plan group id.
 ---@field name? string Group spec name.

@@ -4461,6 +4461,7 @@ name = "xtask"
 version = "0.5.0-alpha.12"
 dependencies = [
  "rusqlite",
+ "serde",
  "serde_json",
  "smelt-core",
  "smelt-perf",

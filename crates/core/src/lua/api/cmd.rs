@@ -42,7 +42,7 @@ fn parse_busy_behavior(value: Option<String>) -> Result<CommandBusyBehavior, Str
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "cmd",

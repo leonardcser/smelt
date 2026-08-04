@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.signal
 local signal = {}
 

@@ -32,6 +32,10 @@ local function normalize(spec)
   return mode
 end
 
+-- Register an agent mode from `{ name, label?, icon?, hl_group?, note?,
+-- permissions?, after? }`. Registering a new name appends it, or inserts it
+-- after an existing `after` name. Registering an existing name replaces its
+-- definition without changing its position. Raises when `name` is missing.
 ---@type fun(spec: table): nil
 smelt.mode.register = function(spec)
   local mode = normalize(spec)
@@ -51,11 +55,13 @@ smelt.mode.register = function(spec)
   registry[mode.name] = mode
 end
 
+-- Return the registered mode definition for `name`, or `nil` when unknown.
 ---@type fun(name: string): table|nil
 smelt.mode.get = function(name)
   return registry[name]
 end
 
+-- Return registered mode definitions in registration order.
 ---@type fun(): table[]
 smelt.mode.list = function()
   local out = {}
@@ -65,12 +71,15 @@ smelt.mode.list = function()
   return out
 end
 
+-- Return the icon for `name`, or `""` when the mode is unknown.
 ---@type fun(name: string): string
 smelt.mode.icon = function(name)
   local mode = registry[name]
   return mode and mode.icon or ""
 end
 
+-- Set a mode's icon. An unknown name is registered with the default mode
+-- fields and the supplied icon.
 ---@type fun(name: string, icon: string): nil
 smelt.mode.set_icon = function(name, icon)
   local mode = registry[name]
@@ -81,17 +90,22 @@ smelt.mode.set_icon = function(name, icon)
   end
 end
 
+-- Return `{ hl_group = string }` for `name`. Unknown modes use
+-- `"SmeltModeDefault"`.
 ---@type fun(name: string): table
 smelt.mode.style = function(name)
   local mode = registry[name]
   return { hl_group = mode and mode.hl_group or "SmeltModeDefault" }
 end
 
+-- Return the status note for `name`, falling back to `"now in <name> mode"`.
 ---@type fun(name: string): string
 smelt.mode.note = function(name)
   return note_for(name)
 end
 
+-- Return a map from every registered mode name to its permission behavior
+-- table. Modes without explicit behaviors map to an empty table.
 ---@type fun(): table<string, table>
 smelt.mode.permission_behaviors = function()
   local out = {}
@@ -139,6 +153,7 @@ smelt.mode.register({
 
 -- Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
 -- wrapping at the end. No-op when the cycle is empty.
+---@tier ui_host
 ---@type fun(): nil
 smelt.mode.cycle = function()
   local list = smelt.mode.cycle_list()
@@ -150,6 +165,7 @@ end
 -- Advance the active reasoning effort to the next entry in
 -- `smelt.reasoning.cycle_list()`, wrapping at the end. No-op when the
 -- cycle is empty.
+---@tier ui_host
 ---@type fun(): nil
 smelt.reasoning.cycle = function()
   local list = smelt.reasoning.cycle_list()

@@ -11,11 +11,51 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout tagged source
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install pinned Rust
         run: rustup toolchain install
+
+      - name: Verify immutable release source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          test "$RELEASE_TAG" = "v$VERSION"
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          git tag --points-at HEAD | grep -Fx "$RELEASE_TAG"
+          cargo metadata --locked --no-deps --format-version 1 > /tmp/cargo-metadata.json
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+
+          expected = sys.argv[1]
+          if expected.startswith("0.") and "-" in expected:
+              raise SystemExit(
+                  "0.x releases are beta-quality normal releases; "
+                  "remove the prerelease suffix"
+              )
+          with open("/tmp/cargo-metadata.json", encoding="utf-8") as metadata_file:
+              metadata = json.load(metadata_file)
+          independent = set(
+              metadata["metadata"]["smelt"]["release"]["independent-crates"]
+          )
+          mismatches = [
+              f"{package['name']}={package['version']}"
+              for package in metadata["packages"]
+              if package["name"] not in independent and package["version"] != expected
+          ]
+          if mismatches:
+              raise SystemExit(
+                  f"tag version {expected} does not match workspace packages: "
+                  + ", ".join(mismatches)
+              )
+          PY
+          git diff --exit-code
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -30,13 +70,13 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run lints
-        run: cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features smelt-tui/harness -- -D warnings
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Run tests
-        run: cargo nextest run --workspace --features smelt-tui/harness
+        run: cargo nextest run --locked --workspace --features smelt-tui/harness
 
   build:
     name: Build (${{ matrix.target }})
@@ -62,13 +102,21 @@ jobs:
             artifact: smelt-x86_64-pc-windows-msvc.tar.gz
 
     steps:
-      - name: Checkout code
+      - name: Checkout tagged source
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install pinned Rust
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
+
+      - name: Verify build source
+        run: |
+          set -euo pipefail
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse HEAD)"
+          git tag --points-at HEAD | grep -Fx "$GITHUB_REF_NAME"
 
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -83,16 +131,52 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --profile dist --bin smelt --target ${{ matrix.target }}
+        run: cargo build --locked --profile dist --bin smelt --target ${{ matrix.target }}
+
+      - name: Smoke-test native binary identity
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          EXPECTED="smelt v${GITHUB_REF_NAME#v}"
+          ACTUAL="$(target/${{ matrix.target }}/dist/smelt --version)"
+          test "$ACTUAL" = "$EXPECTED" || {
+            echo "expected '$EXPECTED', got '$ACTUAL'" >&2
+            exit 1
+          }
 
       - name: Package binary
         if: runner.os != 'Windows'
-        run: tar czf "${{ matrix.artifact }}" -C "target/${{ matrix.target }}/dist" smelt
+        run: |
+          set -euo pipefail
+          STAGE="$(mktemp -d)"
+          cp target/${{ matrix.target }}/dist/smelt "$STAGE/smelt"
+          cp LICENSE README.md "$STAGE/"
+          {
+            echo "version=${GITHUB_REF_NAME#v}"
+            echo "tag=$GITHUB_REF_NAME"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "target=${{ matrix.target }}"
+          } > "$STAGE/BUILD_INFO"
+          tar -C "$STAGE" -czf "$GITHUB_WORKSPACE/${{ matrix.artifact }}" smelt LICENSE README.md BUILD_INFO
 
       - name: Package Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
-        run: tar czf "${{ matrix.artifact }}" -C "target/${{ matrix.target }}/dist" smelt.exe
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/dist/smelt.exe" "$stage/smelt.exe"
+          Copy-Item LICENSE, README.md $stage
+          $commit = git rev-parse HEAD
+          @(
+            "version=$($env:GITHUB_REF_NAME -replace '^v', '')"
+            "tag=$env:GITHUB_REF_NAME"
+            "commit=$commit"
+            "target=${{ matrix.target }}"
+          ) | Set-Content "$stage/BUILD_INFO"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "${{ matrix.artifact }}"
+          tar -C $stage -czf $archive smelt.exe LICENSE README.md BUILD_INFO
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -108,59 +192,25 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout tagged source
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update version in all Cargo.toml files
+      - name: Verify release source
         run: |
-          # Extract version from tag (remove 'v' prefix)
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Updating version to: $VERSION"
-
-          # Independently versioned library crates are published to crates.io
-          # on their own schedule via publish.yml. Skip them here.
-          for file in Cargo.toml crates/*/Cargo.toml; do
-            case "$file" in
-              crates/perf/Cargo.toml|crates/term/Cargo.toml|crates/style/Cargo.toml|crates/ansi/Cargo.toml)
-                echo "Skipping $file (independently versioned)"
-                continue
-                ;;
-            esac
-            sed -i.bak "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" "$file"
-            rm -f "${file}.bak"
-          done
-
-      - name: Update lockfile
-        run: cargo generate-lockfile
-
-      - name: Commit and push version update
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
-          if git diff --staged --quiet; then
-            echo "Version already up to date"
-          else
-            git commit -m "chore: bump version to ${GITHUB_REF_NAME}"
-            git push origin main
-          fi
-
-          # Move the tag to include the version bump commit
-          git tag -f "${GITHUB_REF_NAME}"
-          git push -f origin "${GITHUB_REF_NAME}"
+          set -euo pipefail
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse HEAD)"
+          git tag --points-at HEAD | grep -Fx "$GITHUB_REF_NAME"
 
       - name: Generate release notes
         id: notes
         run: |
-          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -n 1)
+          PREV_TAG=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -n 1 || true)
           if [ -z "$PREV_TAG" ]; then
-            RANGE="HEAD"
+            RANGE="$GITHUB_SHA"
           else
-            RANGE="${PREV_TAG}..HEAD"
+            RANGE="${PREV_TAG}..${GITHUB_SHA}"
           fi
 
           print_section() {
@@ -184,7 +234,7 @@ jobs:
             echo "## Install"
             echo ""
             echo '```bash'
-            echo "cargo install --git https://github.com/leonardcser/smelt.git"
+            echo "cargo install --git https://github.com/leonardcser/smelt.git --tag ${GITHUB_REF_NAME} smelt-agent"
             echo '```'
             echo ""
             echo "Or download a prebuilt binary below."
@@ -196,18 +246,23 @@ jobs:
         with:
           path: artifacts
 
-      - name: Collect binaries
+      - name: Collect and checksum binaries
         run: |
+          set -euo pipefail
           mkdir -p release
-          for dir in artifacts/*/; do
-            cp "$dir"/*.tar.gz release/ 2>/dev/null || true
-          done
+          mapfile -t ARCHIVES < <(find artifacts -type f -name 'smelt-*.tar.gz' | sort)
+          test "${#ARCHIVES[@]}" -eq 5 || {
+            echo "expected 5 release archives, found ${#ARCHIVES[@]}" >&2
+            exit 1
+          }
+          cp "${ARCHIVES[@]}" release/
+          (cd release && sha256sum smelt-*.tar.gz > SHA256SUMS)
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           draft: false
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          prerelease: false
           body: ${{ steps.notes.outputs.body }}
           files: release/*
         env:

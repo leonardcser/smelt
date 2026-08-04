@@ -4,7 +4,7 @@
 
 **Tier:** `Mixed` - Contains both Host and UiHost functions; each function below lists its exact tier.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.
 
@@ -24,7 +24,9 @@ Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 fun(name: string): integer
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
 Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
 

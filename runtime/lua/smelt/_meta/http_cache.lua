@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Runtime-owned HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.http.cache
 local http_cache = {}
 

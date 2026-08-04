@@ -8,7 +8,7 @@ local notify = smelt.notify.scoped("inspect")
 -- return nil plus an error string on failure.
 function smelt.inspect.start()
 	local result = smelt.task.external(function(id)
-		smelt.inspect.__start(id)
+		__smelt_internal.inspect.__start(id)
 	end)
 	if result.ok then
 		return result.url
@@ -19,14 +19,14 @@ end
 -- Stop the running inspector server.
 function smelt.inspect.stop()
 	local result = smelt.task.external(function(id)
-		smelt.inspect.__stop(id)
+		__smelt_internal.inspect.__stop(id)
 	end)
 	return result.ok, result.error
 end
 
 -- Open the inspector URL in a browser when the host environment can do so.
 function smelt.inspect.open(url)
-	return smelt.inspect.__open_url(url)
+	return __smelt_internal.inspect.__open_url(url)
 end
 
 function M.setup()

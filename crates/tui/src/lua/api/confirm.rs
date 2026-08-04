@@ -33,7 +33,7 @@ pub(super) fn register(
     smelt: &mlua::Table,
     shared: &std::sync::Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let m = LuaMod::under(
+    let m = LuaMod::supported(
         lua,
         smelt,
         "confirm",

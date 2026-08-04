@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.fs
 local fs = {}
 
@@ -95,6 +96,10 @@ fs.rename = nil
 --- Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.
 ---@type fun(p: string): integer?, string?
 fs.size = nil
+
+--- Acquire an exclusive non-blocking advisory lock for `p`. Returns a lock handle on success or an error string when the file is already locked or cannot be opened.
+---@type fun(p: string): smelt.fs.Flock?, string?
+fs.try_flock = nil
 
 --- Filesystem watcher. Calls `handler(event)` for each event, where
 --- `event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;

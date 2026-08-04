@@ -235,6 +235,7 @@ with `--headless`. `--ephemeral` is for interactive sessions and conflicts with
 A successful command exits with status `0`. Runtime, storage, authentication,
 configuration, and failed health-check errors use status `1`. Invalid arguments
 and unsupported flag combinations are rejected by the CLI parser with status
-`2`. Headless provider failures after dispatch currently return `0`; inspect
-stderr or the JSON event stream as described in the
+`2`. A headless model turn that fails after dispatch returns `3`, and an
+interrupted headless turn returns `130`. Headless shell escapes propagate the
+child command's status. See the
 [Headless guide](../advanced/headless.md#exit-codes).

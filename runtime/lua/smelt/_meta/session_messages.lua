@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Session messages. `smelt.session.messages.list(opts?)` returns transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; by default this reads a bounded tail. Pass `opts.limit`, `opts.since_index`, or `opts.all = true` for an explicit full read. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.session.messages
 local session_messages = {}
 

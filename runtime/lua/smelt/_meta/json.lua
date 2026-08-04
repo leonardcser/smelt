@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Encode/decode JSON for Lua plugins. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` when an empty table must encode as an array.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.json
 local json = {}
 

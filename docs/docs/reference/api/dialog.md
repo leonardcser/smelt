@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Root-docked modal dialog primitives. UiHost-only.
 
@@ -83,7 +83,10 @@ fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smel
 
 Types: [`smelt.dialog.MenuItem`](types.md#smeltdialogmenuitem), [`smelt.dialog.MenuOpts`](types.md#smeltdialogmenuopts), [`smelt.win.Win`](types.md#smeltwinwin)
 
-
+Build a selectable menu and return `(leaf, controller)`. The controller uses
+1-based item indices for cursor, item replacement, and submission. By
+default, submitting resolves the active dialog with `{ index, item }`;
+`opts.on_submit` can replace that behavior.
 
 ## `smelt.dialog.open`
 

@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.os
 local os = {}
 

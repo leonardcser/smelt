@@ -4,7 +4,7 @@
 
 **Tier:** `Mixed` - Contains both Host and UiHost functions; each function below lists its exact tier.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Agent-mode selector. `smelt.mode.current()` reads the active mode, `smelt.mode.set(v)` sets it in a TUI session, and `smelt.mode.cycle_list()` lists the configured cycle.
 
@@ -45,9 +45,9 @@ Return the configured agent-mode cycle; falls back to the built-in default when 
 fun(name: string): table|nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Return the registered mode definition for `name`, or `nil` when unknown.
 
 ## `smelt.mode.icon`
 
@@ -55,9 +55,9 @@ fun(name: string): table|nil
 fun(name: string): string
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Return the icon for `name`, or `""` when the mode is unknown.
 
 ## `smelt.mode.list`
 
@@ -65,9 +65,9 @@ fun(name: string): string
 fun(): table[]
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Return registered mode definitions in registration order.
 
 ## `smelt.mode.note`
 
@@ -75,9 +75,9 @@ fun(): table[]
 fun(name: string): string
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Return the status note for `name`, falling back to `"now in <name> mode"`.
 
 ## `smelt.mode.permission_behaviors`
 
@@ -85,9 +85,10 @@ fun(name: string): string
 fun(): table<string, table>
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Return a map from every registered mode name to its permission behavior
+table. Modes without explicit behaviors map to an empty table.
 
 ## `smelt.mode.register`
 
@@ -95,9 +96,12 @@ fun(): table<string, table>
 fun(spec: table): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Register an agent mode from `{ name, label?, icon?, hl_group?, note?,
+permissions?, after? }`. Registering a new name appends it, or inserts it
+after an existing `after` name. Registering an existing name replaces its
+definition without changing its position. Raises when `name` is missing.
 
 ## `smelt.mode.set`
 
@@ -115,9 +119,10 @@ Set the active agent mode. The change is applied immediately to the UI and persi
 fun(name: string, icon: string): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Set a mode's icon. An unknown name is registered with the default mode
+fields and the supplied icon.
 
 ## `smelt.mode.style`
 
@@ -125,7 +130,8 @@ fun(name: string, icon: string): nil
 fun(name: string): table
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
-
+Return `{ hl_group = string }` for `name`. Unknown modes use
+`"SmeltModeDefault"`.
 

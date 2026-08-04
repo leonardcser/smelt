@@ -4,6 +4,7 @@
 -- Do not edit by hand; update the `LuaMod::fn_` call in Rust instead.
 
 --- Agent-mode selector. `smelt.mode.current()` reads the active mode, `smelt.mode.set(v)` sets it in a TUI session, and `smelt.mode.cycle_list()` lists the configured cycle.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.mode
 local mode = {}
 
@@ -22,27 +23,31 @@ mode.cycle = nil
 ---@type fun(): string[]
 mode.cycle_list = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the registered mode definition for `name`, or `nil` when unknown.
 ---@type fun(name: string): table|nil
 mode.get = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the icon for `name`, or `""` when the mode is unknown.
 ---@type fun(name: string): string
 mode.icon = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return registered mode definitions in registration order.
 ---@type fun(): table[]
 mode.list = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the status note for `name`, falling back to `"now in <name> mode"`.
 ---@type fun(name: string): string
 mode.note = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return a map from every registered mode name to its permission behavior
+--- table. Modes without explicit behaviors map to an empty table.
 ---@type fun(): table<string, table>
 mode.permission_behaviors = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Register an agent mode from `{ name, label?, icon?, hl_group?, note?,
+--- permissions?, after? }`. Registering a new name appends it, or inserts it
+--- after an existing `after` name. Registering an existing name replaces its
+--- definition without changing its position. Raises when `name` is missing.
 ---@type fun(spec: table): nil
 mode.register = nil
 
@@ -51,11 +56,13 @@ mode.register = nil
 ---@type fun(mode: string): nil
 mode.set = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Set a mode's icon. An unknown name is registered with the default mode
+--- fields and the supplied icon.
 ---@type fun(name: string, icon: string): nil
 mode.set_icon = nil
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return `{ hl_group = string }` for `name`. Unknown modes use
+--- `"SmeltModeDefault"`.
 ---@type fun(name: string): table
 mode.style = nil
 

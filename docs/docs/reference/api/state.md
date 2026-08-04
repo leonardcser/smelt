@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Per-plugin state. `smelt.state.get(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.
 
@@ -25,5 +25,8 @@ outside a module body (no scope active).
 fun(name: string, opts: { debounce_ms: integer? }?): table
 ```
 
-
+Return the JSON-backed state wrapper for `name`. Top-level assignments are
+saved after `opts.debounce_ms` (100 ms by default). Call `state.save()` after
+mutating nested values; `state.all` exposes the underlying table. Pending
+top-level writes are also flushed during runtime teardown and reload.
 

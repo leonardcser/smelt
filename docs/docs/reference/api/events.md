@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.
 

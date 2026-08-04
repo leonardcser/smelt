@@ -4,7 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
 Startup fallbacks for new sessions. `smelt.defaults.set({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.
 
