@@ -98,7 +98,7 @@ local function open(filepath)
 		title = smelt.dialog.title({
 			{ text = " diff ", fg = "green", bold = true },
 			{ text = rel .. " ", fg = "white" },
-			{ text = "(esc to close) ", fg = "grey" },
+			{ text = "(q / esc to close) ", fg = "grey" },
 		}),
 		anchor = "center",
 		width = "90%",
@@ -116,6 +116,9 @@ local function open(filepath)
 		modal = true,
 		draggable = true,
 		resizable = true,
+		keymaps = {
+			{ key = "q", on_press = close },
+		},
 	})
 
 	STATE = { overlay = overlay, left_win = left_win, right_win = right_win }

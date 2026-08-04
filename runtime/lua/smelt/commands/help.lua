@@ -187,8 +187,28 @@ local function build_layout(sections, width)
   return lines, marks
 end
 
-smelt.cmd.register("help", function()
+local active
+
+local function close()
+  local view = active
+  if not view then return end
+  active = nil
+  if view.overlay then view.overlay:close() end
+  if view.leaf then view.leaf:close() end
+  if view.task_id then smelt.task.resume(view.task_id, nil) end
+end
+
+local function toggle()
+  if active then
+    close()
+    return
+  end
+
+  local view = {}
+  active = view
   smelt.spawn(function()
+    if active ~= view then return end
+
     local sections = smelt.keymap.help()
     local size = smelt.ui.size()
     local width = overlay_content_width(size.width)
@@ -201,6 +221,7 @@ smelt.cmd.register("help", function()
       hide_cursor = true,
       vim_enabled = smelt.settings.vim and true or false,
     })
+    view.leaf = leaf
 
     local function paint()
       local content_width = leaf:content_width() or width
@@ -216,7 +237,8 @@ smelt.cmd.register("help", function()
     paint()
     leaf:on("resized", paint)
 
-    smelt.overlay.new({
+    view.task_id = smelt.task.alloc()
+    view.overlay = smelt.overlay.new({
       anchor = "center",
       border = "none",
       modal  = true,
@@ -224,19 +246,19 @@ smelt.cmd.register("help", function()
       height = "75%",
       layout = smelt.ui.layout.leaf(leaf, {
         border = { all = "Comment" },
-        title = smelt.dialog.title(" help "),
+        title = smelt.dialog.title({
+          { text = " help ", bold = true },
+          { text = "(F1 to close) ", fg = "grey" },
+        }),
       }),
     })
 
-    local task_id = smelt.task.alloc()
-    local function close() leaf:close(); smelt.task.resume(task_id, nil) end
     leaf:key("q", close)
     leaf:key("?", close)
     leaf:on("dismiss", close)
-    smelt.task.wait(task_id)
+    smelt.task.wait(view.task_id)
   end)
-end, { desc = "show keybindings" })
+end
 
-smelt.keymap.set("", "<F1>", function()
-  smelt.cmd.run("help")
-end)
+smelt.cmd.register("help", toggle, { desc = "show keybindings" })
+smelt.keymap.set("", "<F1>", toggle)

@@ -1,5 +1,5 @@
 -- F12 perf panel. Top-right overlay showing live duration percentiles.
--- Non-modal, focusable, read-only; F12 toggles it, Esc or Ctrl-C closes.
+-- Non-modal, focusable, read-only; F12 toggles it, q, Esc, or Ctrl-C closes.
 --
 -- Hot-reload contract: every resource opens with `opts.name`, so on
 -- `/reload` the runtime hands back the existing overlay/win/buf and
@@ -196,6 +196,7 @@ local function attach()
 		vim_enabled = smelt.settings.vim and true or false,
 	})
 	state.win:key("esc", close)
+	state.win:key("q", close)
 	state.win:key("c-c", close)
 	state.overlay = smelt.overlay.new({
 		name = "perf_panel",

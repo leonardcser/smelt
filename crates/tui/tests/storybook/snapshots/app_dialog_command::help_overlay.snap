@@ -4,7 +4,7 @@ expression: frame.text()
 ---
 
 
-    ┌ help ───────────────────────────────────────────┐
+    ┌ help (F1 to close) ─────────────────────────────┐
     │prefixes                                         │
     │  /command  commands (try /resume, /compact,     │
     │            /fork, /ps, /color…)                 │

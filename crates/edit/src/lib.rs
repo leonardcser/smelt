@@ -972,6 +972,7 @@ impl Ui {
                 resolved_rect: None,
             },
         ));
+        self.focus_active_modal();
         (id, modal)
     }
 
@@ -1069,7 +1070,6 @@ impl Ui {
                 owner,
             },
         ));
-        self.focus_active_modal();
         id
     }
 
@@ -1217,6 +1217,7 @@ impl Ui {
         self.overlays.push((id, overlay));
         if modal && !leaves.is_empty() {
             self.open_modal(leaves, blocks_agent, ModalOwner::Overlay(id));
+            self.focus_active_modal();
         }
         id
     }
@@ -2003,7 +2004,8 @@ impl Ui {
         false
     }
 
-    /// Focus `win`. Returns `false` if it isn't a focusable splits leaf or overlay leaf.
+    /// Focus `win`. Returns `false` unless it is a focusable split or decoration
+    /// leaf, an overlay leaf, or the keyboard owner of an active modal.
     /// Re-focusing the current window is a no-op (no history push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
         let prior = self.focus;
@@ -2016,7 +2018,13 @@ impl Ui {
         let is_decoration_leaf = self.decoration_for_leaf(win).is_some()
             && self.wins.get(&win).is_some_and(|w| w.accepts_focus());
         if !is_split_leaf && !is_overlay_leaf && !is_decoration_leaf {
-            return false;
+            let is_active_modal_leaf = self
+                .active_modal()
+                .and_then(|modal| self.modal(modal))
+                .is_some_and(|modal| modal.contains(win) && self.wins.contains_key(&win));
+            if !is_active_modal_leaf {
+                return false;
+            }
         }
         if let Some(p) = prior {
             self.focus_history.push(p);
@@ -4833,6 +4841,36 @@ mod tests {
         ui.overlay_close(low);
         assert_eq!(ui.active_modal_overlay(), Some(high));
         assert_eq!(ui.focus(), Some(high_win));
+    }
+
+    #[test]
+    fn docked_modal_focuses_a_non_focusable_leaf_for_keyboard_routing() {
+        let mut ui = make_ui();
+        let background = WinId(7);
+        let dialog = WinId(100);
+        make_split(&mut ui, background);
+        register_window(&mut ui, dialog);
+        ui.win_mut(dialog)
+            .expect("dialog window")
+            .set_surface(WindowSurface::selectable_text());
+        assert!(ui.set_focus(background));
+
+        let (_, modal) = ui.docked_surface_open(
+            LayoutTree::leaf(dialog),
+            vec![dialog],
+            DockedSurfaceConfig {
+                height: Constraint::Length(1),
+                min_height: None,
+                max_height: None,
+                resize: ResizeConfig::none(),
+                fit_reserved_rows: 0,
+                blocks_agent: false,
+            },
+        );
+
+        assert_eq!(ui.active_modal(), Some(modal));
+        assert_eq!(ui.focused_modal(), Some(modal));
+        assert_eq!(ui.focus(), Some(dialog));
     }
 
     #[test]

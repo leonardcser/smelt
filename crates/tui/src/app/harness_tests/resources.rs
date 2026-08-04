@@ -12,6 +12,67 @@ fn builds_a_fresh_test_app() {
 }
 
 #[test]
+fn function_key_overlays_toggle_and_dismiss_without_mouse_focus() {
+    let mut app = TestApp::builder().build();
+
+    app.press(KeyCode::F(1));
+    app.settle_lua();
+    assert!(app.state().active_modal.is_some(), "F1 should open help");
+    app.press(KeyCode::F(1));
+    app.settle_lua();
+    assert!(
+        app.state().active_modal.is_none(),
+        "pressing F1 again should close help"
+    );
+
+    app.press(KeyCode::F(1));
+    app.settle_lua();
+    app.type_char('q');
+    app.settle_lua();
+    assert!(
+        app.state().active_modal.is_none(),
+        "q should close help without a mouse click"
+    );
+
+    app.press(KeyCode::F(1));
+    app.settle_lua();
+    app.press(KeyCode::Esc);
+    app.settle_lua();
+    assert!(
+        app.state().active_modal.is_none(),
+        "Esc should close help without a mouse click"
+    );
+
+    assert!(app.run_lua(r#"require("smelt.examples.snake")"#));
+    for key in [KeyCode::F(3), KeyCode::F(11), KeyCode::F(12)] {
+        app.press(key);
+        assert!(
+            app.ui_probe().focused_overlay().is_some(),
+            "{key:?} should focus its overlay"
+        );
+        app.press(key);
+        assert!(
+            app.ui_probe().focused_overlay().is_none(),
+            "pressing {key:?} again should close its overlay"
+        );
+
+        app.press(key);
+        app.type_char('q');
+        assert!(
+            app.ui_probe().focused_overlay().is_none(),
+            "q should close the {key:?} overlay without a mouse click"
+        );
+
+        app.press(key);
+        app.press(KeyCode::Esc);
+        assert!(
+            app.ui_probe().focused_overlay().is_none(),
+            "Esc should close the {key:?} overlay without a mouse click"
+        );
+    }
+}
+
+#[test]
 fn no_model_state_is_explicit_and_blocks_dispatch() {
     let mut app = TestApp::builder().with_vim(false).without_model().build();
     let initial_history_len = app.session_snapshot().history.len();

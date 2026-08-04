@@ -101,6 +101,29 @@ fn root_dialog_replaces_composer_and_restores_prompt_state() {
 }
 
 #[test]
+fn dialogs_dismiss_from_the_keyboard_without_mouse_focus() {
+    let mut app = TestApp::builder().build();
+
+    open_root_test_dialog(&mut app);
+    assert!(
+        app.ui_probe().focused_modal().is_some(),
+        "opening a dialog should move keyboard focus into it"
+    );
+    app.press(KeyCode::Esc);
+    assert!(
+        app.state().active_modal.is_none(),
+        "Esc should close a dialog without a mouse click"
+    );
+
+    assert!(app.run_lua(r#"smelt.dialog.viewer({ title = "viewer", text = "read only" })"#));
+    app.type_char('q');
+    assert!(
+        app.state().active_modal.is_none(),
+        "q should close a read-only dialog without a mouse click"
+    );
+}
+
+#[test]
 fn failed_root_dialog_open_does_not_pollute_dialog_stack() {
     let mut app = TestApp::builder().build();
 

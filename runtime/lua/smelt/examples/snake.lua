@@ -257,7 +257,7 @@ local function open()
 
 	STATE.buf = smelt.buf.new()
 	STATE.buf:lines({
-		" hjkl / arrows: move    space: reset    esc / ctrl-c: close ",
+		" hjkl / arrows: move    space: reset    q / esc / ctrl-c: close ",
 	})
 	STATE.win = smelt.win.new(STATE.buf, { surface = "editable_text" })
 
@@ -292,6 +292,7 @@ local function open()
 			{ key = "<Up>", on_press = turn("up") },
 			{ key = "<Right>", on_press = turn("right") },
 			{ key = "<Space>", on_press = reset },
+			{ key = "q", on_press = close },
 			{ key = "<Esc>", on_press = close },
 			{ key = "<C-c>", on_press = close },
 		},
