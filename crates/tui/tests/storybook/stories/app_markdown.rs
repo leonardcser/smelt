@@ -40,6 +40,16 @@ app_story!(text_block_markdown_headings, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(text_block_markdown_heading_with_bold_prefix, |ctx| {
+    // Inline delimiters at the start of a heading must not be preserved as
+    // part of the visible structural prefix.
+    ctx.set_viewport(70, 8);
+    ctx.engine(EngineEvent::Text {
+        content: "### **Option 4: Keep Core but migrate from mdadm/ext4 to ZFS**".into(),
+    });
+    ctx.assert_snapshot();
+});
+
 app_story!(text_block_markdown_lists, |ctx| {
     // Bulleted, numbered, and a nested item. List prefixes (`- `,
     // `1. `, indented `- `) render dim via the shared markdown list helper.

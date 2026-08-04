@@ -493,7 +493,7 @@ fn structural_prefix_spans<'a>(
     let prefix_start = line_range.start + line.len() - trimmed.len();
     let prefix_end = events
         .iter()
-        .filter_map(|(event, range)| visible_event_start(event).then_some(range.start))
+        .filter_map(|(event, range)| structural_prefix_end(event).then_some(range.start))
         .filter(|&start| start >= prefix_start && start < line_range.end)
         .min()
         .unwrap_or(line_range.end);
@@ -510,10 +510,18 @@ fn structural_prefix_spans<'a>(
     }
 }
 
-fn visible_event_start(event: &Event<'_>) -> bool {
+fn structural_prefix_end(event: &Event<'_>) -> bool {
     matches!(
         event,
-        Event::Text(_)
+        Event::Start(
+            Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Superscript
+                | Tag::Subscript
+                | Tag::Link { .. }
+                | Tag::Image { .. }
+        ) | Event::Text(_)
             | Event::Html(_)
             | Event::InlineHtml(_)
             | Event::Code(_)
@@ -679,6 +687,33 @@ mod tests {
             vec![
                 (MarkdownTextKind::Heading, "# Title".into()),
                 (MarkdownTextKind::BlockQuote, "> - item".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_markdown_excludes_inline_markup_from_structural_prefixes() {
+        let source = concat!(
+            "### **Option 4: Keep Core but migrate from mdadm/ext4 to ZFS**\n\n",
+            "> *quoted emphasis*\n",
+        );
+        let block = parse_markdown(source);
+        let rendered_lines: Vec<String> = block
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                MarkdownNode::Text { lines, .. } => Some(lines),
+                _ => None,
+            })
+            .flatten()
+            .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+            .collect();
+
+        assert_eq!(
+            rendered_lines,
+            vec![
+                "### Option 4: Keep Core but migrate from mdadm/ext4 to ZFS",
+                "> quoted emphasis",
             ]
         );
     }

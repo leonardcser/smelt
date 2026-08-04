@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+### Option 4: Keep Core but migrate from mdadm/ext4 to ZFS
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────
+ ○ normal                                                     1:1 100%
