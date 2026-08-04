@@ -397,7 +397,7 @@ pub struct ConfirmResolved {
     pub decision: String,
 }
 
-/// Payload for the `history` signal. `kind` is `"set" | "cleared" | "forked" | "loaded"`.
+/// Payload for the `history` signal. `kind` identifies the published history operation.
 #[derive(Debug, Clone)]
 pub struct HistoryDelta {
     pub kind: String,

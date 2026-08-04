@@ -1,5 +1,5 @@
 use super::test_harness::*;
-use crate::app::AppFocus;
+use crate::app::{history::HistoryDeltaKind, AppFocus};
 use crate::smelt_edit::{VimMode, WinId};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use protocol::{AgentMode, EngineEvent};
@@ -78,7 +78,7 @@ fn publish_turn_end(app: &mut TestApp) {
     app.publish_turn_end_for_probe();
 }
 
-fn publish_history_delta(app: &mut TestApp, kind: &str) {
+fn publish_history_delta(app: &mut TestApp, kind: HistoryDeltaKind) {
     app.publish_history_delta(kind);
     app.pump_lua();
 }

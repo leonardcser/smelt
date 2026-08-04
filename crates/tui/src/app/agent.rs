@@ -1,6 +1,6 @@
 use crate::app::{
-    CommandTurnStart, PendingHistoryAppend, PendingHistoryLifecycle, PendingTool, SessionControl,
-    TuiApp, TurnState, CONFIRM_DEFER_MS,
+    history::HistoryDeltaKind, CommandTurnStart, PendingHistoryAppend, PendingHistoryLifecycle,
+    PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -604,7 +604,7 @@ impl TuiApp {
             self.truncate_to(transcript_len);
         }
         self.sync_session_snapshot();
-        self.publish_history_delta("submit_failed");
+        self.publish_history_delta(HistoryDeltaKind::SubmitFailed);
     }
 
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> Option<TurnState> {
@@ -2070,6 +2070,41 @@ mod tests {
             .collect()
     }
 
+    fn title_request_from_actions(app: &crate::app::test_harness::TestApp) -> u64 {
+        app.actions()
+            .iter()
+            .find_map(|action| match action {
+                crate::app::test_harness::Action::EngineSend(command) => match command.as_ref() {
+                    protocol::UiCommand::EngineAsk { id, .. } => Some(*id),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("submission should request a title")
+    }
+
+    fn complete_active_turn_with_assistant(
+        app: &mut crate::app::test_harness::TestApp,
+        text: &str,
+    ) {
+        let turn_id = app.current_turn_id().expect("turn is active");
+        let first_index = app.app.session_history_len();
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
+            protocol::EngineEvent::HistoryAppended {
+                turn_id,
+                delta: protocol::CanonicalHistoryDelta::new(
+                    first_index,
+                    vec![HistoryItem::assistant(protocol::AssistantStep::terminal(
+                        Some(Content::text(text)),
+                        None,
+                        Vec::new(),
+                    ))],
+                ),
+            },
+        ));
+        assert!(app.finish_turn());
+    }
+
     fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
         snapshot
             .values
@@ -2451,6 +2486,158 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn title_response_after_submit_rollback_cannot_poison_persistence_recovery() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
+                "published baseline",
+            )));
+        app.app.save_session_and_flush();
+        let session_id = app.app.conversation.session().id.clone();
+        app.type_text("retry this exact input");
+        app.app.conversation.inject_commit_failure(
+            smelt_store::SessionCommitFailure::InvalidCommand {
+                message: "injected pre-commit rejection".into(),
+            },
+        );
+        let history_epoch = app
+            .app
+            .core
+            .signals
+            .get::<u64>("history_epoch")
+            .unwrap_or_default();
+
+        app.press(crossterm::event::KeyCode::Enter);
+        assert_eq!(
+            app.app.core.signals.get::<u64>("history_epoch"),
+            Some(history_epoch.wrapping_add(1)),
+            "rolling back the staged submission must invalidate history-bound work"
+        );
+        assert!(
+            app.app.notification_win().is_some(),
+            "the rejected canonical submission should surface its persistence failure"
+        );
+        let title_request = app
+            .pending_ask_id()
+            .expect("title request remains in flight");
+        let rolled_back_history_len = app.app.session_history_len();
+
+        app.respond_ask_with_text(
+            title_request,
+            r#"{"title":"Stale retry title","slug":"stale-retry"}"#,
+        );
+
+        assert_eq!(app.app.session_history_len(), rolled_back_history_len);
+        assert_eq!(app.app.conversation.session().title, None);
+        assert!(app
+            .app
+            .conversation
+            .session()
+            .metadata_snapshots
+            .iter()
+            .all(|(index, _)| *index <= rolled_back_history_len));
+
+        assert!(
+            app.app.retry_blocked_persistence(),
+            "the failed canonical submission should be retryable"
+        );
+        app.clear_actions();
+        // The initial title response was delivered directly by id, so discard its queued request
+        // before identifying the retry's title request from newly emitted actions.
+        let _ = app.drain_engine_sends();
+        app.press(crossterm::event::KeyCode::Enter);
+        assert!(app.agent_running(), "the preserved prompt should resubmit");
+        let retry_title_request = title_request_from_actions(&app);
+        complete_active_turn_with_assistant(&mut app, "retry completed");
+        app.respond_ask_with_text(
+            retry_title_request,
+            r#"{"title":"Recovered retry","slug":"recovered-retry"}"#,
+        );
+        app.app.save_session_and_flush();
+        assert!(
+            app.app.notification_win().is_none(),
+            "durable retry should dismiss the persistence failure"
+        );
+
+        app.clear_actions();
+        app.type_text("follow up after recovery");
+        app.press(crossterm::event::KeyCode::Enter);
+        assert!(app.agent_running(), "a subsequent turn should start");
+        let follow_up_title_request = title_request_from_actions(&app);
+        complete_active_turn_with_assistant(&mut app, "follow-up completed");
+        app.respond_ask_with_text(
+            follow_up_title_request,
+            r#"{"title":"Recovered follow-up","slug":"recovered-follow-up"}"#,
+        );
+        assert_eq!(
+            app.app.conversation.session().title.as_deref(),
+            Some("Recovered follow-up")
+        );
+        app.app.save_session();
+        let outcome = app.app.flush_persist();
+        assert!(
+            matches!(
+                outcome,
+                crate::persist::PersistenceFlushOutcome::Durable { .. }
+            ),
+            "subsequent save should remain durable: {outcome:?}"
+        );
+
+        let saved = crate::app::history::materialize_full_session(
+            &app.app.core.sessions,
+            &session_id,
+            crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
+        )
+        .expect("recovered session should load from durable storage");
+        let saved_history_len = saved.history.len();
+        assert_eq!(saved.title.as_deref(), Some("Recovered follow-up"));
+        for expected in ["retry this exact input", "follow up after recovery"] {
+            assert_eq!(
+                saved
+                    .history
+                    .iter()
+                    .filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == expected))
+                    .count(),
+                1,
+                "{expected:?} should be durable exactly once"
+            );
+        }
+        assert!(saved
+            .metadata_snapshots
+            .iter()
+            .all(|(index, _)| *index <= saved_history_len));
+        assert!(saved
+            .turn_metas
+            .iter()
+            .all(|(index, _)| *index <= saved_history_len));
+        assert!(saved
+            .context_snapshots
+            .iter()
+            .all(|(index, _)| *index <= saved_history_len));
+        assert!(
+            app.app.notification_win().is_none(),
+            "no session-save failure should remain after durable recovery"
+        );
+    }
+
+    #[test]
+    fn title_target_beyond_current_history_is_rejected() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("current request")));
+        let history_len = app.app.session_history_len();
+
+        app.app.set_session_title(
+            "Future title".into(),
+            "future-title".into(),
+            Some(history_len + 1),
+        );
+
+        assert_eq!(app.app.conversation.session().title, None);
+        assert!(app.app.conversation.session().metadata_snapshots.is_empty());
     }
 
     #[test]

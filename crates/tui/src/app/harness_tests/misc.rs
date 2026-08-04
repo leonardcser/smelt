@@ -858,7 +858,7 @@ fn title_response_after_rewind_is_ignored() {
     assert_eq!(ask_ids.len(), 1, "title should issue one background ask");
     let title_id = ask_ids[0];
 
-    publish_history_delta(&mut app, "rewound");
+    publish_history_delta(&mut app, HistoryDeltaKind::Rewound);
     respond_ask_with_text(
         &mut app,
         title_id,
@@ -937,11 +937,17 @@ fn rewind_to_start_clears_session_title_snapshot() {
 fn second_title_request_supersedes_inflight_response() {
     let mut app = TestApp::builder().build();
 
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "Investigate parser panic",
+    )));
     publish_input_submit(&mut app, "Investigate parser panic");
     let first_ids = engine_ask_ids(app.drain_engine_sends());
     assert_eq!(first_ids.len(), 1);
     let first_id = first_ids[0];
 
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "Fix renderer panic instead",
+    )));
     publish_input_submit(&mut app, "Fix renderer panic instead");
     let second_ids = engine_ask_ids(app.drain_engine_sends());
     assert_eq!(second_ids.len(), 1);

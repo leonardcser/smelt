@@ -9,6 +9,44 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HistoryDeltaKind {
+    Append,
+    Checkpoint,
+    Cleared,
+    Forked,
+    Loaded,
+    Request,
+    Rewound,
+    Set,
+    SubmitFailed,
+}
+
+impl HistoryDeltaKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Checkpoint => "checkpoint",
+            Self::Cleared => "cleared",
+            Self::Forked => "forked",
+            Self::Loaded => "loaded",
+            Self::Request => "request",
+            Self::Rewound => "rewound",
+            Self::Set => "set",
+            Self::SubmitFailed => "submit_failed",
+        }
+    }
+
+    const fn invalidates_history_epoch(self) -> bool {
+        match self {
+            Self::Cleared | Self::Forked | Self::Loaded | Self::Rewound | Self::SubmitFailed => {
+                true
+            }
+            Self::Append | Self::Checkpoint | Self::Request | Self::Set => false,
+        }
+    }
+}
+
 pub(crate) struct ToolSummaryResolver<'a> {
     lua: &'a smelt_core::lua::LuaRuntime,
 }
@@ -582,6 +620,30 @@ mod tests {
 
     const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+    #[test]
+    fn history_delta_kinds_define_signal_labels_and_epoch_invalidation() {
+        let cases = [
+            (HistoryDeltaKind::Append, "append", false),
+            (HistoryDeltaKind::Checkpoint, "checkpoint", false),
+            (HistoryDeltaKind::Cleared, "cleared", true),
+            (HistoryDeltaKind::Forked, "forked", true),
+            (HistoryDeltaKind::Loaded, "loaded", true),
+            (HistoryDeltaKind::Request, "request", false),
+            (HistoryDeltaKind::Rewound, "rewound", true),
+            (HistoryDeltaKind::Set, "set", false),
+            (HistoryDeltaKind::SubmitFailed, "submit_failed", true),
+        ];
+
+        for (kind, label, invalidates_history_epoch) in cases {
+            assert_eq!(kind.as_str(), label);
+            assert_eq!(
+                kind.invalidates_history_epoch(),
+                invalidates_history_epoch,
+                "unexpected history epoch policy for {label}"
+            );
+        }
+    }
+
     fn seed_transcript(
         root: &std::path::Path,
         records: Vec<smelt_store::StoredTranscriptBlock>,
@@ -1003,7 +1065,7 @@ impl TuiApp {
             self.commit_pending_history_append(&item);
         }
         self.sync_session_snapshot();
-        self.publish_history_delta("set");
+        self.publish_history_delta(HistoryDeltaKind::Set);
     }
 
     pub(crate) fn append_engine_history_items(
@@ -1047,18 +1109,18 @@ impl TuiApp {
             self.commit_pending_history_append(item);
         }
         self.sync_session_snapshot();
-        self.publish_history_delta("append");
+        self.publish_history_delta(HistoryDeltaKind::Append);
     }
 
-    pub(crate) fn publish_history_delta(&mut self, kind: &str) {
-        if matches!(kind, "cleared" | "rewound" | "loaded" | "forked") {
+    pub(crate) fn publish_history_delta(&mut self, kind: HistoryDeltaKind) {
+        if kind.invalidates_history_epoch() {
             self.bump_epoch("history_epoch");
         }
         let count = self.session_history_len();
         self.core.signals.emit_dyn(
             "history",
             std::rc::Rc::new(smelt_core::signals::HistoryDelta {
-                kind: kind.into(),
+                kind: kind.as_str().into(),
                 count,
             }),
         );
@@ -1169,8 +1231,14 @@ impl TuiApp {
         if self.block_read_only_mutation("rename read-only session") {
             return;
         }
-        let hist_len = target_history_len.unwrap_or_else(|| self.session_history_len());
-        self.conversation.set_title(title, slug.clone(), hist_len);
+        let current_history_len = self.session_history_len();
+        let snapshot_history_len = target_history_len.unwrap_or(current_history_len);
+        if snapshot_history_len > current_history_len {
+            smelt_perf::perf::record_value("session:title:future_history_snapshot_rejected", 1);
+            return;
+        }
+        self.conversation
+            .set_title(title, slug.clone(), snapshot_history_len);
         self.set_task_label(slug);
         self.save_session();
     }
@@ -1254,7 +1322,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.conversation.session().id.clone()),
         );
-        self.publish_history_delta("forked");
+        self.publish_history_delta(HistoryDeltaKind::Forked);
         self.notify(format!("forked from {original_id}"));
         // Drain stale events so old snapshots don't overwrite the forked session.
         while self.core.engine.try_recv().is_ok() {}
@@ -1377,7 +1445,7 @@ impl TuiApp {
             return;
         }
         self.load_current_session_by_id(&forked.id);
-        self.publish_history_delta("forked");
+        self.publish_history_delta(HistoryDeltaKind::Forked);
         self.notify(format!("forked from {original_id}"));
     }
 
@@ -1421,7 +1489,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.conversation.session().id.clone()),
         );
-        self.publish_history_delta("cleared");
+        self.publish_history_delta(HistoryDeltaKind::Cleared);
         // Drain stale events so old Messages snapshots don't restore history into the fresh session.
         while self.core.engine.try_recv().is_ok() {}
     }
@@ -1575,7 +1643,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.conversation.session().id.clone()),
         );
-        self.publish_history_delta("loaded");
+        self.publish_history_delta(HistoryDeltaKind::Loaded);
         // Drain stale engine events so old snapshots don't overwrite
         // the loaded session's state.
         while self.core.engine.try_recv().is_ok() {}
@@ -1659,7 +1727,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.conversation.session().id.clone()),
         );
-        self.publish_history_delta("loaded");
+        self.publish_history_delta(HistoryDeltaKind::Loaded);
         while self.core.engine.try_recv().is_ok() {}
     }
 
@@ -2093,7 +2161,7 @@ impl TuiApp {
         self.clear_compaction_preview();
         self.reset_visible_context_tokens();
         self.refresh_compaction_marker();
-        self.publish_history_delta("checkpoint");
+        self.publish_history_delta(HistoryDeltaKind::Checkpoint);
         self.schedule_session_save();
         if follow_tail {
             self.transcript_win_mut().follow_tail();
@@ -2296,7 +2364,7 @@ impl TuiApp {
             self.restore_mode_after_rewind(mode);
         }
         self.sync_session_snapshot();
-        self.publish_history_delta("rewound");
+        self.publish_history_delta(HistoryDeltaKind::Rewound);
 
         turn_text.map(|t| (t, images))
     }
@@ -2307,7 +2375,7 @@ impl TuiApp {
         self.working.clear();
         self.clear_transcript();
         self.sync_session_snapshot();
-        self.publish_history_delta("rewound");
+        self.publish_history_delta(HistoryDeltaKind::Rewound);
     }
 
     pub(crate) fn stage_request_history_item(
@@ -2327,7 +2395,7 @@ impl TuiApp {
         let history = self.model_history_source();
         self.commit_request_history_item_to_document(item, block, first_user_message);
         self.sync_session_snapshot();
-        self.publish_history_delta("request");
+        self.publish_history_delta(HistoryDeltaKind::Request);
         history
     }
 

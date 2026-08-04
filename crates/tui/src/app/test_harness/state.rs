@@ -964,7 +964,7 @@ impl TestApp {
         self.app.publish_shared_session_state();
     }
 
-    pub(crate) fn publish_history_delta(&mut self, kind: &str) {
+    pub(crate) fn publish_history_delta(&mut self, kind: crate::app::history::HistoryDeltaKind) {
         self.app.publish_history_delta(kind);
     }
 
