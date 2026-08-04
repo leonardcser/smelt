@@ -1,6 +1,6 @@
 use crate::app::{
-    history::HistoryDeltaKind, CommandTurnStart, PendingHistoryAppend, PendingHistoryLifecycle,
-    PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
+    history::HistoryDeltaKind, CommandTurnStart, PendingHistoryAppend, PendingHistoryDelivery,
+    PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -156,6 +156,18 @@ impl TurnLifecycle {
 
     pub(crate) fn take_pending_history_appends(&mut self) -> Vec<PendingHistoryAppend> {
         std::mem::take(&mut self.pending_history_appends)
+    }
+
+    pub(crate) fn take_pending_follow_up_note(&mut self) -> Option<protocol::HistoryNote> {
+        // Earlier appends stay in chronological order as context for this trigger.
+        let index = self.pending_history_appends.iter().rposition(|append| {
+            append.delivery() == PendingHistoryDelivery::FollowUpIfUnconsumed
+        })?;
+        let append = self.pending_history_appends.remove(index);
+        match append.item {
+            HistoryItem::Note(note) => Some(note),
+            _ => unreachable!("follow-up append must contain a history note"),
+        }
     }
 
     pub(crate) fn pending_context_note(&self, name: &str) -> Option<Option<&str>> {
@@ -1208,6 +1220,18 @@ impl TuiApp {
             self.flush_streaming_text();
             self.clear_tool_drafts();
             self.finish_transcript_turn();
+        }
+
+        if matches!(end, TurnEnd::Complete) {
+            // An append with follow-up delivery still pending at the turn boundary
+            // was not included in an LLM request. Keep one as the follow-up trigger;
+            // any others are committed below as context for that same turn.
+            if let Some(note) = self.conversation.take_pending_follow_up_note() {
+                self.prompt.queue_front(
+                    crate::app::QueueStage::Turn,
+                    crate::app::QueuedInput::ProcessStatus(note),
+                );
+            }
         }
 
         let (meta, start_queued) = {

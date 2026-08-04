@@ -163,3 +163,91 @@ fn tick_event_advances_virtual_clock() {
     let after = app.core_probe().clock.instant_now();
     assert_eq!(after - before, Duration::from_millis(500));
 }
+
+#[test]
+fn process_completion_after_final_request_starts_follow_up_turn() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(7);
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted {
+        id: "4242".into(),
+        exit_code: Some(1),
+    }));
+    assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
+
+    assert!(app.finish_turn());
+
+    assert!(app.agent_running());
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(command)
+            if matches!(
+                command.as_ref(),
+                protocol::UiCommand::StartTurn(payload)
+                    if payload.input.note_ref().is_some_and(|note|
+                        note.text() == "background process 4242 exited with code 1")
+            )
+    )));
+}
+
+#[test]
+fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(7);
+    app.inject_engine(EngineEvent::TurnComplete {
+        turn_id: 7,
+        history: None,
+        meta: None,
+    })
+    .expect("queue ready turn completion");
+
+    app.app.handle_platform_event(
+        crate::app::platform_runtime::PlatformEvent::ProcessCompleted(
+            smelt_core::process::ProcessCompletion {
+                id: "4242".into(),
+                exit_code: Some(1),
+            },
+        ),
+    );
+    assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
+
+    let outcome = app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+
+    assert_eq!(
+        outcome,
+        crate::app::render_loop::EngineOutputDrainOutcome::FrameBoundary
+    );
+    assert!(app.agent_running());
+    assert!(app.drain_engine_sends().iter().any(|command| matches!(
+        command,
+        protocol::UiCommand::StartTurn(payload)
+            if payload.input.note_ref().is_some_and(|note|
+                note.text() == "background process 4242 exited with code 1")
+    )));
+}
+
+#[test]
+fn process_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(7);
+    let note = protocol::HistoryNote::process_status_event(
+        protocol::ProcessStatusEvent::background_process_completed("4242", Some(0)),
+    );
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted {
+        id: "4242".into(),
+        exit_code: Some(0),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 7,
+        delta: protocol::CanonicalHistoryDelta::new(
+            app.session_snapshot().history.len(),
+            vec![protocol::HistoryItem::note(note)],
+        ),
+    }));
+    assert_eq!(app.conversation_probe().pending_history_append_count(), 0);
+
+    assert!(app.finish_turn());
+
+    assert!(!app.agent_running());
+}

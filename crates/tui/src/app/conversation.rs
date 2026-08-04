@@ -1275,6 +1275,10 @@ impl ConversationRuntime {
         self.turn.take_pending_history_appends()
     }
 
+    pub(crate) fn take_pending_follow_up_note(&mut self) -> Option<protocol::HistoryNote> {
+        self.turn.take_pending_follow_up_note()
+    }
+
     pub(crate) fn take_matching_history_append(
         &mut self,
         item: &protocol::HistoryItem,

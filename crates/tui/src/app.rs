@@ -955,12 +955,19 @@ pub(crate) struct PendingHistoryAppend {
     coalescing_note_kind: Option<protocol::HistoryNoteKind>,
     context_name: Option<String>,
     clear_context: bool,
+    delivery: PendingHistoryDelivery,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingHistoryLifecycle {
     TurnScoped,
     SessionScoped,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingHistoryDelivery {
+    HistoryOnly,
+    FollowUpIfUnconsumed,
 }
 
 impl PendingHistoryAppend {
@@ -972,6 +979,7 @@ impl PendingHistoryAppend {
             coalescing_note_kind: Some(protocol::HistoryNoteKind::ModeChange),
             context_name: None,
             clear_context: false,
+            delivery: PendingHistoryDelivery::HistoryOnly,
         }
     }
 
@@ -984,6 +992,7 @@ impl PendingHistoryAppend {
             coalescing_note_kind: Some(protocol::HistoryNoteKind::Context),
             context_name: Some(name),
             clear_context: false,
+            delivery: PendingHistoryDelivery::HistoryOnly,
         }
     }
 
@@ -996,6 +1005,7 @@ impl PendingHistoryAppend {
             coalescing_note_kind: Some(protocol::HistoryNoteKind::Context),
             context_name: Some(name),
             clear_context: true,
+            delivery: PendingHistoryDelivery::HistoryOnly,
         }
     }
 
@@ -1005,6 +1015,7 @@ impl PendingHistoryAppend {
             coalescing_note_kind: None,
             context_name: None,
             clear_context: false,
+            delivery: PendingHistoryDelivery::FollowUpIfUnconsumed,
         }
     }
 
@@ -1051,6 +1062,10 @@ impl PendingHistoryAppend {
         } else {
             PendingHistoryLifecycle::TurnScoped
         }
+    }
+
+    pub(crate) fn delivery(&self) -> PendingHistoryDelivery {
+        self.delivery
     }
 
     pub(crate) fn history_append(
@@ -1425,6 +1440,7 @@ impl TuiApp {
                         coalescing_note_kind: append.coalescing_note_kind,
                         context_name: None,
                         clear_context: false,
+                        delivery: append.delivery,
                     }
                 } else {
                     append.clone()
@@ -2973,6 +2989,24 @@ impl TuiApp {
         }
     }
 
+    fn handle_platform_event(&mut self, event: crate::app::platform_runtime::PlatformEvent) {
+        match event {
+            crate::app::platform_runtime::PlatformEvent::App(event) => {
+                self.handle_app_event(event);
+                self.render_normal();
+            }
+            crate::app::platform_runtime::PlatformEvent::ContextWindow(update) => {
+                self.apply_context_window_update(*update);
+            }
+            crate::app::platform_runtime::PlatformEvent::ProcessCompleted(completion) => {
+                self.handle_process_completed(completion.id, completion.exit_code);
+            }
+            crate::app::platform_runtime::PlatformEvent::PublicStatusHeartbeat => {
+                self.publish_public_status();
+            }
+        }
+    }
+
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         let platform_startup = smelt_perf::perf::begin("startup:platform");
         crate::theme::detect_background(self.ui.theme_mut());
@@ -3325,21 +3359,7 @@ impl TuiApp {
                 }
 
                 event = self.platform.receive() => {
-                    match event {
-                        crate::app::platform_runtime::PlatformEvent::App(event) => {
-                            self.handle_app_event(event);
-                            self.render_normal();
-                        }
-                        crate::app::platform_runtime::PlatformEvent::ContextWindow(update) => {
-                            self.apply_context_window_update(*update);
-                        }
-                        crate::app::platform_runtime::PlatformEvent::ProcessCompleted(completion) => {
-                            self.handle_process_completed(completion.id, completion.exit_code);
-                        }
-                        crate::app::platform_runtime::PlatformEvent::PublicStatusHeartbeat => {
-                            self.publish_public_status();
-                        }
-                    }
+                    self.handle_platform_event(event);
                 }
 
                 Some(output) = self.core.engine.recv_output() => {

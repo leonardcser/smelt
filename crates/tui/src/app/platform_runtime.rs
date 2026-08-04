@@ -550,4 +550,49 @@ mod tests {
         }));
         assert_eq!(controller.status().observed_revision, new_revision);
     }
+
+    #[tokio::test]
+    async fn receive_wakes_for_successful_and_failed_background_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let env = engine::env::RuntimeEnv::scripted(
+            4242,
+            root.path().join("home"),
+            root.path().join("config"),
+            root.path().join("state"),
+            root.path().join("cache"),
+            root.path().join("data"),
+            root.path().join("runtime"),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        );
+        let (completion_tx, completion_rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = smelt_core::process::ProcessRegistry::new();
+        registry.set_completion_sender(completion_tx);
+        let mut platform = PlatformRuntime::new(
+            &env,
+            smelt_core::session::SessionStorage::from_env(&env),
+            completion_rx,
+            None,
+        );
+
+        for (command, expected_code) in [("exit 0", Some(0)), ("exit 7", Some(7))] {
+            let child = smelt_core::process::spawn_shell_child(
+                command,
+                &smelt_core::process::ShellSpec::default(),
+                root.path(),
+            )
+            .unwrap();
+            let id = registry.child_id(&child);
+            registry.spawn(id.clone(), command, child, std::time::Instant::now());
+
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), platform.receive())
+                .await
+                .expect("background process completion should wake the platform receiver");
+            assert!(matches!(
+                event,
+                PlatformEvent::ProcessCompleted(completion)
+                    if completion.id == id && completion.exit_code == expected_code
+            ));
+        }
+    }
 }
