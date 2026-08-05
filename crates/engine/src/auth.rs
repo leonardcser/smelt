@@ -20,7 +20,8 @@ where
                     "Opened authorization page in your browser. Enter code if prompted: {code}"
                 ));
             }
-            return;
+            // Fall through: always print the URL too. Auto-open is not reliable
+            // everywhere (e.g. WSL2 reports success without a visible page).
         }
         OpenResult::Unavailable(reason) => {
             (progress.on_message)(&format!("Browser auto-open unavailable ({reason})."));
@@ -534,7 +535,13 @@ mod tests {
             *opened.lock().unwrap(),
             vec!["https://example.test/auth".to_string()]
         );
-        assert!(prompts.lock().unwrap().is_empty());
+        assert_eq!(
+            *prompts.lock().unwrap(),
+            vec![(
+                "https://example.test/auth".to_string(),
+                "ABCD-1234".to_string()
+            )]
+        );
         assert_eq!(
             messages.lock().unwrap().as_slice(),
             &["Opened authorization page in your browser. Enter code if prompted: ABCD-1234"]
