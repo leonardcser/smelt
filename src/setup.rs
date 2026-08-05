@@ -358,9 +358,9 @@ async fn run_login(kind: AuthProvider) -> bool {
     };
 
     let on_prompt = |url: &str, code: &str| {
-        println!("  Open this URL in a browser:\n\n    {url}\n");
+        println!("  Authorization URL:\n\n    {url}\n");
         if !code.is_empty() {
-            println!("  Then enter code: {code}\n");
+            println!("  Enter code if prompted: {code}\n");
         }
     };
     let on_message = |msg: &str| println!("  {msg}");
