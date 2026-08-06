@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* read_file timer.rs  1.0s                                     14:37:03
+  0 lines
+
+
+
+
+
+
+─ ✿ working… 1s ────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ normal                                                       1:1 100%

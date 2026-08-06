@@ -809,14 +809,14 @@ fn parallel_pending_tool_timers_refresh_live() {
     app.render_silent();
     assert!(app.run_lua("smelt.transcript.fold_all('open')"));
     let initial = app.render_to_frame().text();
-    assert_eq!(initial.matches("2s").count(), 0);
+    assert_eq!(initial.matches("2.0s").count(), 0);
 
     app.feed_one(SourceEvent::Tick(2_000));
     let live = app.render_to_frame().text();
 
     let live_tool_timers = live
         .lines()
-        .filter(|line| line.contains("read_file") && line.contains("  2s"))
+        .filter(|line| line.contains("read_file") && line.contains("  2.0s"))
         .count();
     assert_eq!(
         live_tool_timers, 2,

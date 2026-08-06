@@ -22,7 +22,7 @@
 
 use insta::{assert_snapshot, with_settings};
 use protocol::{EngineEvent, TokenUsage, ToolOutcome};
-use tui::app::test_harness::TestApp;
+use tui::app::test_harness::{SourceEvent, TestApp};
 use tui::smelt_edit::SnapshotFrame;
 
 pub struct AppStoryCtx {
@@ -53,6 +53,10 @@ impl AppStoryCtx {
 
     pub fn set_viewport(&mut self, w: u16, h: u16) {
         self.app.set_terminal_size(w, h);
+    }
+
+    pub fn advance_time(&mut self, ms: u64) {
+        self.app.feed_one(SourceEvent::Tick(ms));
     }
 
     pub fn write_workspace_file(&self, path: &str, content: &str) {

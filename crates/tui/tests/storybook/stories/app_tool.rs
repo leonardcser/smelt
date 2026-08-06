@@ -434,6 +434,21 @@ app_story!(parallel_pending_tool_states, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(tool_elapsed_timer_preserves_decimal_padding, |ctx| {
+    ctx.set_viewport(72, 12);
+    ctx.run_lua("smelt.settings.transcript.view.groups = { explore = false }");
+    ctx.tool_started("read_file", &[("file_path", json!("timer.rs"))]);
+
+    ctx.advance_time(1000);
+    ctx.assert_snapshot_named("one_second");
+
+    ctx.advance_time(200);
+    ctx.assert_snapshot_named("fractional_second");
+
+    ctx.advance_time(7800);
+    ctx.assert_snapshot_named("nine_seconds");
+});
+
 app_story!(tool_header_wrapping_for_bash_glob_and_grep, |ctx| {
     ctx.set_viewport(62, 18);
     ctx.tool_call(

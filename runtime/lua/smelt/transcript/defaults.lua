@@ -243,8 +243,7 @@ local function elapsed_text(elapsed_ms)
   local ms = tonumber(elapsed_ms)
   if not ms or ms < 1000 then return nil end
   if ms < 10000 then
-    local text = string.format("%.1fs", ms / 1000)
-    return text:gsub("%.0s$", "s")
+    return string.format("%.1fs", ms / 1000)
   end
   local seconds = math.floor(ms / 1000)
   if seconds < 60 then return tostring(seconds) .. "s" end

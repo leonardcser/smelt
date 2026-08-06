@@ -4153,7 +4153,7 @@ pub(crate) mod tests {
         assert_eq!(second.total_rows, first.total_rows);
         assert_eq!(counters.display_layouts, 1);
         assert_eq!(counters.exact_height_measured_blocks, 1);
-        assert!(snapshot(&buf).iter().any(|row| row.line.contains("2s")));
+        assert!(snapshot(&buf).iter().any(|row| row.line.contains("2.0s")));
     }
 
     #[test]
