@@ -14,7 +14,7 @@ end
 local function yield_with_cancel(payload)
   local result = coroutine.yield(payload)
   if type(result) == "table" and result.__cancelled then
-    error("cancelled", 3)
+    error("cancelled", 0)
   end
   return result
 end

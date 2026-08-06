@@ -1208,7 +1208,7 @@ fn spawn_remove_raises_cancelled_inside_sleep() {
             UNWOUND = false
             REG = smelt.spawn(function()
                 local ok, err = pcall(function() smelt.sleep(60000) end)
-                UNWOUND = (not ok) and tostring(err):find("cancelled") ~= nil
+                UNWOUND = (not ok) and smelt.task.is_cancelled(err)
             end)
             "#,
         )

@@ -1045,12 +1045,15 @@ mod tests {
         lua.load(
             r#"
             smelt = {}
-            function smelt.sleep(ms)
-              local result = coroutine.yield({__yield = "sleep", ms = ms})
+            local function yield_with_cancel(payload)
+              local result = coroutine.yield(payload)
               if type(result) == "table" and result.__cancelled then
-                error("cancelled", 3)
+                error("cancelled", 0)
               end
               return result
+            end
+            function smelt.sleep(ms)
+              return yield_with_cancel({__yield = "sleep", ms = ms})
             end
             "#,
         )

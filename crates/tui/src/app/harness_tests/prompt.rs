@@ -361,6 +361,56 @@ fn request_queue_bindings_steer_running_turn() {
     }
 }
 
+fn start_stalled_web_search(app: &mut TestApp) {
+    assert!(app.run_lua(r#"smelt.http.__start_get = function() end"#));
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(91),
+        request_id: 91,
+        call_id: "stalled-web-search".into(),
+        tool_name: "web_search".into(),
+        args: std::collections::HashMap::from([(
+            "query".into(),
+            serde_json::json!("intentional cancellation"),
+        )]),
+    }));
+}
+
+fn assert_no_cancellation_error(app: &TestApp) {
+    let notification = app.overlays_probe().notification();
+    assert!(
+        notification.is_none(),
+        "intentional cancellation reported an error: {:?}",
+        notification.map(|notification| &notification.summary)
+    );
+}
+
+#[test]
+fn esc_esc_cancelling_web_search_does_not_report_an_error() {
+    let mut app = TestApp::builder().build();
+    start_stalled_web_search(&mut app);
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+
+    assert_no_cancellation_error(&app);
+}
+
+#[test]
+fn queued_submit_cancelling_web_search_does_not_report_an_error() {
+    let mut app = TestApp::builder().build();
+    start_stalled_web_search(&mut app);
+    app.type_text("start this next");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    assert_eq!(app.queued_message_count(), 1);
+
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+
+    assert_no_cancellation_error(&app);
+}
+
 #[test]
 fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     let mut app = TestApp::builder().build();
