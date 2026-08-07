@@ -17,9 +17,10 @@ mod session_commit;
 mod snapshot;
 
 pub use catalog::{
-    archive_corrupt_catalog, rebuild_catalog, Catalog, CatalogAvailability, CatalogCursor,
-    CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader, CatalogReconcileLock,
-    CatalogSession, CATALOG_SCHEMA_VERSION, MAX_CATALOG_PAGE_SIZE,
+    archive_corrupt_catalog, catalog_reconcile_lock_path, catalog_session_pending_token,
+    clear_catalog_session_pending, pending_catalog_session_ids, rebuild_catalog, Catalog,
+    CatalogAvailability, CatalogCursor, CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader,
+    CatalogReconcileLock, CatalogSession, CATALOG_SCHEMA_VERSION, MAX_CATALOG_PAGE_SIZE,
 };
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,

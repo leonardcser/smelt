@@ -2389,6 +2389,10 @@ impl SessionStorage {
         list_session_page_result_in(self, query)
     }
 
+    pub fn initialize_session_catalog(&self) {
+        let _ = self.catalog();
+    }
+
     pub fn request_session_catalog_reconciliation(&self) {
         if let Ok(catalog) = self.catalog() {
             catalog.request_reconciliation();
@@ -2540,6 +2544,10 @@ fn list_session_page_result_in(
             last_error: page.status.last_error,
         },
     })
+}
+
+pub fn initialize_session_catalog() {
+    process_storage().initialize_session_catalog();
 }
 
 pub fn request_session_catalog_reconciliation() {

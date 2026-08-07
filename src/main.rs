@@ -1154,7 +1154,7 @@ async fn async_main() {
     }
 
     let resolution_startup = smelt_perf::perf::begin("startup:resolution");
-    smelt_core::session::request_session_catalog_reconciliation();
+    smelt_core::session::initialize_session_catalog();
 
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));

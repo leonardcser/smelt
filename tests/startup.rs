@@ -202,6 +202,192 @@ smelt.mcp.register("stalled", {{
 }
 
 #[test]
+fn interactive_startup_reuses_completed_session_catalog() {
+    let root = tempfile::tempdir().expect("temporary runtime root");
+    let config_dir = root.path().join("config/smelt");
+    let state_home = root.path().join("state");
+    for path in [
+        root.path().join("home"),
+        state_home.clone(),
+        root.path().join("cache"),
+        root.path().join("data"),
+        config_dir.clone(),
+    ] {
+        std::fs::create_dir_all(path).expect("create startup runtime directory");
+    }
+    let config = config_dir.join("init.lua");
+    std::fs::write(
+        &config,
+        r#"
+smelt.settings.autoupgrade = "off"
+smelt.provider.register("local", {
+  type = "openai-compatible",
+  api_base = "http://127.0.0.1:9/v1",
+  models = { "test-model" },
+})
+"#,
+    )
+    .expect("write init.lua");
+
+    let catalog_path = state_home.join("smelt/catalog.db");
+    let mut catalog = smelt_store::Catalog::open(&catalog_path).expect("create session catalog");
+    let scan_id = catalog.allocate_scan().expect("allocate catalog scan");
+    catalog
+        .complete_scan(scan_id, 1_700_000_000_000)
+        .expect("complete catalog scan");
+    drop(catalog);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .args(["--config", config.to_str().unwrap(), "--ephemeral"])
+        .current_dir(root.path())
+        .env("HOME", root.path().join("home"))
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_STATE_HOME", &state_home)
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1");
+    let (mut master, mut process) = spawn_in_pty(command);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured = Vec::new();
+
+    loop {
+        drain_pty(&mut master, &mut captured);
+        if contains(&captured, b"\x1b[?1049h") && contains(&captured, b"local/test-model") {
+            break;
+        }
+        if let Some(status) = process.child.try_wait().expect("inspect smelt process") {
+            panic!(
+                "smelt exited before rendering ({status}):\n{}",
+                String::from_utf8_lossy(&captured)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "smelt did not render before catalog startup timeout:\n{}",
+            String::from_utf8_lossy(&captured)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let stable_deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < stable_deadline {
+        drain_pty(&mut master, &mut captured);
+        assert!(
+            process
+                .child
+                .try_wait()
+                .expect("inspect smelt process")
+                .is_none(),
+            "smelt exited while observing catalog stability:\n{}",
+            String::from_utf8_lossy(&captured)
+        );
+        let metadata = smelt_store::CatalogReader::open_existing(&catalog_path)
+            .expect("open session catalog during startup")
+            .expect("session catalog exists during startup")
+            .metadata()
+            .expect("read session catalog metadata during startup");
+        assert_eq!(
+            metadata.completed_scan_id, scan_id,
+            "interactive startup unexpectedly completed a catalog scan"
+        );
+        assert_eq!(
+            metadata.next_scan_id,
+            scan_id + 1,
+            "interactive startup unexpectedly allocated a catalog scan"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    master.write_all(b"\x03\x03").expect("send Ctrl-C to smelt");
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        drain_pty(&mut master, &mut captured);
+        if let Some(status) = process.child.try_wait().expect("inspect smelt shutdown") {
+            assert!(status.success(), "smelt exited with {status}");
+            break;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "smelt did not exit after catalog startup test:\n{}",
+            String::from_utf8_lossy(&captured)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let metadata = smelt_store::CatalogReader::open_existing(catalog_path)
+        .expect("open session catalog")
+        .expect("session catalog exists")
+        .metadata()
+        .expect("read session catalog metadata");
+    assert_eq!(metadata.completed_scan_id, scan_id);
+    assert_eq!(metadata.next_scan_id, scan_id + 1);
+}
+
+#[test]
+fn inspect_startup_explicitly_reconciles_the_session_catalog() {
+    let root = tempfile::tempdir().expect("temporary inspect root");
+    let state_home = root.path().join("state");
+    for path in [
+        root.path().join("home"),
+        root.path().join("config"),
+        state_home.clone(),
+        root.path().join("cache"),
+        root.path().join("data"),
+    ] {
+        std::fs::create_dir_all(path).expect("create inspect runtime directory");
+    }
+    let catalog_path = state_home.join("smelt/catalog.db");
+    let mut catalog = smelt_store::Catalog::open(&catalog_path).expect("create session catalog");
+    let scan_id = catalog.allocate_scan().expect("allocate catalog scan");
+    catalog
+        .complete_scan(scan_id, 1_700_000_000_000)
+        .expect("complete catalog scan");
+    drop(catalog);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .args(["inspect", "--no-open"])
+        .current_dir(root.path())
+        .env("HOME", root.path().join("home"))
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_STATE_HOME", &state_home)
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1");
+    let (mut master, mut process) = spawn_in_pty(command);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut captured = Vec::new();
+    loop {
+        drain_pty(&mut master, &mut captured);
+        let metadata = smelt_store::CatalogReader::open_existing(&catalog_path)
+            .expect("open inspector catalog")
+            .expect("inspector catalog exists")
+            .metadata()
+            .expect("read inspector catalog metadata");
+        if metadata.completed_scan_id != scan_id {
+            assert_eq!(metadata.completed_scan_id, scan_id + 1);
+            assert_eq!(metadata.next_scan_id, scan_id + 2);
+            break;
+        }
+        if let Some(status) = process.child.try_wait().expect("inspect inspector process") {
+            panic!(
+                "inspector exited before catalog reconciliation ({status}):\n{}",
+                String::from_utf8_lossy(&captured)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inspector did not reconcile the catalog:\n{}",
+            String::from_utf8_lossy(&captured)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn interactive_startup_applies_dynamic_lua_flags_before_the_first_frame() {
     let root = tempfile::tempdir().expect("temporary runtime root");
     let config_dir = root.path().join("config/smelt");

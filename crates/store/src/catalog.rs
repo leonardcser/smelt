@@ -1,14 +1,22 @@
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::types::Value;
 use rusqlite::{named_params, params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 
+use crate::filesystem::{
+    ensure_private_directory, ensure_private_directory_all, reject_symlink, sync_directory,
+};
+use crate::lineage::BranchId;
 use crate::{Result, StoreError};
 
-pub const CATALOG_SCHEMA_VERSION: i32 = 2;
+pub const CATALOG_SCHEMA_VERSION: i32 = 3;
 pub const MAX_CATALOG_PAGE_SIZE: u32 = 10_000;
+
+const CATALOG_PENDING_DIRECTORY: &str = ".catalog-pending";
+const CATALOG_RECONCILE_LOCK: &str = ".catalog.lock";
 
 const CATALOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -47,6 +55,132 @@ CREATE INDEX IF NOT EXISTS sessions_updated_idx ON sessions(updated_at DESC, id)
 CREATE INDEX IF NOT EXISTS sessions_cwd_updated_idx ON sessions(cwd, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS sessions_status_updated_idx ON sessions(status, updated_at DESC, id);
 "#;
+
+pub fn catalog_reconcile_lock_path(sessions_root: impl AsRef<Path>) -> PathBuf {
+    sqlite_companion_path(sessions_root.as_ref(), CATALOG_RECONCILE_LOCK)
+}
+
+pub(crate) struct CatalogPendingGuard {
+    _lock: CatalogReconcileLock,
+}
+
+pub(crate) fn mark_catalog_session_pending(
+    sessions_root: impl AsRef<Path>,
+    session_id: &str,
+) -> Result<CatalogPendingGuard> {
+    BranchId::new(session_id.to_string())?;
+    let sessions_root = sessions_root.as_ref();
+    ensure_private_directory_all(sessions_root)?;
+    let lock_path = catalog_reconcile_lock_path(sessions_root);
+    let lock = CatalogReconcileLock::acquire(lock_path)?;
+    let pending_dir = sessions_root.join(CATALOG_PENDING_DIRECTORY);
+    let created_pending_directory = match fs::create_dir(&pending_dir) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error.into()),
+    };
+    ensure_private_directory(&pending_dir)?;
+    if created_pending_directory {
+        sync_directory(sessions_root)?;
+    }
+    let path = pending_dir.join(session_id);
+    reject_symlink(&path)?;
+
+    let mut token = [0_u8; 16];
+    getrandom::fill(&mut token)
+        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)?;
+    set_private_file_permissions(&path)?;
+    file.write_all(&token)?;
+    file.sync_all()?;
+    sync_directory(&pending_dir)?;
+    Ok(CatalogPendingGuard { _lock: lock })
+}
+
+pub fn pending_catalog_session_ids(sessions_root: impl AsRef<Path>) -> Result<Vec<String>> {
+    let pending_dir = sessions_root.as_ref().join(CATALOG_PENDING_DIRECTORY);
+    match fs::symlink_metadata(&pending_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing non-directory catalog pending path {}",
+                    pending_dir.display()
+                ),
+            )))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(&pending_dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing non-file catalog pending entry {}",
+                    entry.path().display()
+                ),
+            )));
+        }
+        let id = entry.file_name().into_string().map_err(|name| {
+            StoreError::Integrity(format!("catalog pending session id is not UTF-8: {name:?}"))
+        })?;
+        BranchId::new(id.clone())?;
+        ids.push(id);
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+pub fn catalog_session_pending_token(
+    sessions_root: impl AsRef<Path>,
+    session_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    BranchId::new(session_id.to_string())?;
+    let path = sessions_root
+        .as_ref()
+        .join(CATALOG_PENDING_DIRECTORY)
+        .join(session_id);
+    reject_symlink(&path)?;
+    match fs::read(path) {
+        Ok(token) => Ok(Some(token)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn clear_catalog_session_pending(
+    sessions_root: impl AsRef<Path>,
+    session_id: &str,
+    expected_token: &[u8],
+) -> Result<bool> {
+    BranchId::new(session_id.to_string())?;
+    let sessions_root = sessions_root.as_ref();
+    let _lock = CatalogReconcileLock::acquire(catalog_reconcile_lock_path(sessions_root))?;
+    let pending_dir = sessions_root.join(CATALOG_PENDING_DIRECTORY);
+    let path = pending_dir.join(session_id);
+    reject_symlink(&path)?;
+    let current = match fs::read(&path) {
+        Ok(token) => token,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if current != expected_token {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    sync_directory(&pending_dir)?;
+    Ok(true)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogAvailability {
@@ -750,6 +884,73 @@ mod tests {
                 .to_ascii_lowercase(),
             "wal"
         );
+    }
+
+    #[test]
+    fn pending_session_markers_are_durable_and_generation_guarded() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_root = temp.path().join("sessions");
+        let id = "1".repeat(64);
+
+        mark_catalog_session_pending(&sessions_root, &id).unwrap();
+        let first = catalog_session_pending_token(&sessions_root, &id)
+            .unwrap()
+            .unwrap();
+        let pending = pending_catalog_session_ids(&sessions_root).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], id);
+
+        mark_catalog_session_pending(&sessions_root, &id).unwrap();
+        let second = catalog_session_pending_token(&sessions_root, &id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(!clear_catalog_session_pending(&sessions_root, &id, &first).unwrap());
+        assert!(clear_catalog_session_pending(&sessions_root, &id, &second).unwrap());
+        assert!(pending_catalog_session_ids(&sessions_root)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn previous_projection_version_requires_a_one_time_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        let scan_id = catalog.allocate_scan().unwrap();
+        catalog
+            .upsert_available_for_reconciliation(&row("obsolete-legacy-row", 1, 1), scan_id)
+            .unwrap();
+        catalog.complete_scan(scan_id, 1).unwrap();
+        catalog
+            .conn
+            .execute(
+                "UPDATE catalog_meta SET schema_version = 2 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        drop(catalog);
+
+        assert!(matches!(
+            CatalogReader::open_existing(&path),
+            Err(StoreError::UnsupportedSchema { found: 2, expected })
+                if expected == CATALOG_SCHEMA_VERSION
+        ));
+        assert!(archive_corrupt_catalog(&path).unwrap().is_some());
+        let mut rebuilt = Catalog::open(&path).unwrap();
+        let rebuilt_scan = rebuilt.allocate_scan().unwrap();
+        rebuilt.complete_scan(rebuilt_scan, 2).unwrap();
+        drop(rebuilt);
+
+        let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+        assert!(reader
+            .page(&CatalogQuery::default())
+            .unwrap()
+            .sessions
+            .is_empty());
+        let metadata = reader.metadata().unwrap();
+        assert_eq!(metadata.completed_scan_id, rebuilt_scan);
+        assert_eq!(metadata.next_scan_id, rebuilt_scan + 1);
     }
 
     #[test]

@@ -843,6 +843,23 @@ pub(crate) fn apply_lineage_turn_transition(
     })
 }
 
+pub(crate) fn lineage_has_nonterminal_turns(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM lineage_turns
+             WHERE lineage_id = ?1 AND session_id = ?2
+               AND turn_state IN ('ready', 'running')
+         )",
+        (lineage.as_str(), branch.as_str()),
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
 pub(crate) fn recover_lineage_nonterminal_turns(
     conn: &mut Connection,
     lineage: &LineageId,

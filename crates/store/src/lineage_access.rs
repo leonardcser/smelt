@@ -153,6 +153,9 @@ impl OwnedLineageWriter {
             lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
         }
         crate::schema::initialize_lineage_schema(&mut conn)?;
+        let _catalog_pending = lineage::lineage_has_nonterminal_turns(&conn, &lineage, &branch)?
+            .then(|| crate::catalog::mark_catalog_session_pending(root, branch.as_str()))
+            .transpose()?;
         let startup_recovery = lineage::recover_lineage_nonterminal_turns(
             &mut conn,
             &lineage,
@@ -183,6 +186,9 @@ impl OwnedLineageWriter {
         &mut self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
         let receipt = lineage::apply_lineage_session_commit(
             &mut self.conn,
             &self.lineage,
@@ -198,6 +204,9 @@ impl OwnedLineageWriter {
         &mut self,
         command: &crate::session_commit::SubmitTurn,
     ) -> std::result::Result<crate::session_commit::SubmitTurnReceipt, SessionCommitFailure> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
         let transaction_duration =
             smelt_perf::perf::begin_value_ms("persist:submit_turn:transaction_ms");
         smelt_perf::perf::record_value("persist:submit_turn:transactions", 1);
@@ -250,6 +259,9 @@ impl OwnedLineageWriter {
         command: &crate::session_commit::TurnTransition,
     ) -> std::result::Result<crate::session_commit::TurnTransitionReceipt, SessionCommitFailure>
     {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
         lineage::apply_lineage_turn_transition(
             &mut self.conn,
             &self.lineage,
@@ -345,6 +357,8 @@ impl OwnedLineageWriter {
         created_at: u64,
     ) -> Result<SaveReceipt> {
         let target = BranchId::new(target_session_id.into())?;
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, target.as_str())?;
         let source = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
         lineage::fork_branch(
             &mut self.conn,
@@ -366,6 +380,8 @@ impl OwnedLineageWriter {
     }
 
     pub fn rewind_to_sequence(&mut self, sequence: u64, updated_at: u64) -> Result<SaveReceipt> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())?;
         let previous = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
         let target = lineage::branch_revision_at_sequence(
             &self.conn,
@@ -390,6 +406,8 @@ impl OwnedLineageWriter {
     }
 
     pub fn delete_branch(self, deleted_at: u64) -> Result<()> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())?;
         lineage::delete_branch(&self.conn, &self.lineage, &self.branch, deleted_at)?;
         let live_branches: bool = self.conn.query_row(
             "SELECT EXISTS(
@@ -440,6 +458,8 @@ impl OwnedLineageWriter {
         deleted_at: u64,
     ) -> Result<()> {
         let branch = BranchId::new(session_id)?;
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.root, branch.as_str())?;
         lineage::delete_branch(&self.conn, &self.lineage, &branch, deleted_at)
     }
 
