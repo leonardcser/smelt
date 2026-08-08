@@ -134,13 +134,12 @@ impl TestApp {
             .is_some_and(|text| !text.is_empty())
     }
 
-    /// Whether a queued follow-up will append a fresh context note after
-    /// TurnComplete applies the incoming model-history snapshot. Without a
-    /// checkpoint, that snapshot replaces local history and drops any current
-    /// context note; with a checkpoint, only notes before `first_live_index`
-    /// survive the merge.
-    pub fn next_queued_input_appends_context_note(&self) -> bool {
-        if !self.next_queued_input_starts_turn() {
+    /// Whether the follow-up started after TurnComplete will append a fresh
+    /// context note. Without a checkpoint, the incoming model-history snapshot
+    /// replaces local history and drops any current context note; with a
+    /// checkpoint, only notes before `first_live_index` survive the merge.
+    pub fn next_follow_up_appends_context_note(&self) -> bool {
+        if !self.next_queued_input_starts_turn() && !self.has_pending_history_follow_up() {
             return false;
         }
         let context = self.app.current_context_note_text();
@@ -219,6 +218,18 @@ impl TestApp {
     /// active turn finishes successfully.
     pub fn pending_history_append_count(&self) -> usize {
         self.app.conversation.pending_history_append_count()
+    }
+
+    /// Whether an unconsumed deferred note will start a follow-up turn after
+    /// the active turn finishes successfully.
+    pub fn has_pending_history_follow_up(&self) -> bool {
+        self.app
+            .conversation
+            .pending_history_appends()
+            .iter()
+            .any(|append| {
+                append.delivery() == crate::app::PendingHistoryDelivery::FollowUpIfUnconsumed
+            })
     }
 
     /// Set the configured context window size used by the prompt bar's

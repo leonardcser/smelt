@@ -1159,12 +1159,13 @@ struct Snapshot {
     session_messages: usize,
     queued_messages: usize,
     queued_next_starts: bool,
-    queued_next_context_append: bool,
+    follow_up_context_append: bool,
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
     checkpoint_first_live_index: Option<usize>,
     pending_history_appends: usize,
+    pending_history_follow_up: bool,
     pending_lua_reload: bool,
     transcript_blocks: usize,
     pending_confirms: usize,
@@ -1190,12 +1191,13 @@ impl Snapshot {
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
             queued_next_starts: app.next_queued_input_starts_turn(),
-            queued_next_context_append: app.next_queued_input_appends_context_note(),
+            follow_up_context_append: app.next_follow_up_appends_context_note(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
             checkpoint_first_live_index: app.checkpoint_first_live_index(),
             pending_history_appends: app.pending_history_append_count(),
+            pending_history_follow_up: app.has_pending_history_follow_up(),
             pending_lua_reload: app.pending_lua_reload(),
             transcript_blocks: app.transcript_block_count(),
             pending_confirms: app.pending_confirm_count(),
@@ -1216,7 +1218,9 @@ fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
 }
 
 fn completed_turn_starts_queued_followup(pre: &Snapshot, targeted_active: bool) -> bool {
-    targeted_active && pre.queued_next_starts && !pre.working.busy
+    targeted_active
+        && (pre.queued_next_starts || pre.pending_history_follow_up)
+        && !pre.working.busy
 }
 
 fn expected_completed_history_len(
@@ -1225,13 +1229,7 @@ fn expected_completed_history_len(
     targeted_active: bool,
 ) -> usize {
     let queued_followup = completed_turn_starts_queued_followup(pre, targeted_active);
-    let queued_context_append = if queued_followup
-        && (pre.checkpoint_first_live_index.is_none() || pre.queued_next_context_append)
-    {
-        1
-    } else {
-        0
-    };
+    let queued_context_append = usize::from(queued_followup && pre.follow_up_context_append);
     let queued_request_append = usize::from(queued_followup);
     expected_model_history_len(pre, msg_count) + queued_context_append + queued_request_append
 }
@@ -1453,6 +1451,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 let expected = expected_completed_history_len(pre, msg_count, targeted_active);
                 let pending_appends = if targeted_active {
                     pre.pending_history_appends
+                        .saturating_sub(usize::from(pre.pending_history_follow_up))
                 } else {
                     0
                 };
@@ -1471,7 +1470,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                         pre.checkpoint_first_live_index,
                         pending_appends,
                         pre.queued_next_starts,
-                        pre.queued_next_context_append,
+                        pre.follow_up_context_append,
                         pre.working.busy,
                     );
                 } else {
@@ -1483,7 +1482,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                         pre.checkpoint_first_live_index,
                         pending_appends,
                         pre.queued_next_starts,
-                        pre.queued_next_context_append,
+                        pre.follow_up_context_append,
                         pre.working.busy,
                     );
                 }
