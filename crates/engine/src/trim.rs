@@ -222,11 +222,7 @@ mod tests {
             call_id: call_id.into(),
             name: "tool".into(),
             arguments: "{}".into(),
-            result: protocol::ToolOutcome {
-                content,
-                is_error: false,
-                metadata: None,
-            },
+            result: protocol::ToolOutcome::new(content, false, None),
             elapsed_ms: None,
             called_at_ms: None,
         }

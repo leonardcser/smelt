@@ -801,11 +801,11 @@ fn pair_invocations_in_order(
                     }),
                 );
                 (
-                    ToolOutcome {
-                        content: "interrupted: tool result missing at commit time".into(),
-                        is_error: true,
-                        metadata: None,
-                    },
+                    ToolOutcome::new(
+                        "interrupted: tool result missing at commit time".into(),
+                        true,
+                        None,
+                    ),
                     None,
                 )
             });
@@ -1918,13 +1918,13 @@ impl<'a> Turn<'a> {
     }
 
     fn blocked_tool_outcome() -> ToolOutcome {
-        ToolOutcome {
-            content: "The user's permission settings blocked this tool call. \
-                      Try a different approach or ask the user for guidance."
+        ToolOutcome::new(
+            "The user's permission settings blocked this tool call. \
+             Try a different approach or ask the user for guidance."
                 .to_string(),
-            is_error: false,
-            metadata: None,
-        }
+            false,
+            None,
+        )
     }
 
     fn classify_tools<'b>(&mut self, tool_calls: &'b [protocol::ToolCall]) -> ToolExecutionPlan<'b>
@@ -1999,11 +1999,11 @@ impl<'a> Turn<'a> {
             ) {
                 Some(evaluation) => evaluation,
                 None => {
-                    let outcome = ToolOutcome {
-                        content: format!("unknown tool: {}", call.tc.function.name),
-                        is_error: true,
-                        metadata: None,
-                    };
+                    let outcome = ToolOutcome::new(
+                        format!("unknown tool: {}", call.tc.function.name),
+                        true,
+                        None,
+                    );
                     self.emit_tool_rejected_for_call(
                         call,
                         protocol::StyledLines::empty(),
@@ -2033,11 +2033,7 @@ impl<'a> Turn<'a> {
                     plan.inline_outcomes.push((call_index, outcome));
                 }
                 Decision::Error(ref err) => {
-                    let outcome = ToolOutcome {
-                        content: err.clone(),
-                        is_error: true,
-                        metadata: None,
-                    };
+                    let outcome = ToolOutcome::new(err.clone(), true, None);
                     self.emit_tool_rejected_for_call(call, summary, outcome.clone(), None);
                     plan.inline_outcomes.push((call_index, outcome));
                 }
@@ -2205,11 +2201,7 @@ impl<'a> Turn<'a> {
                                         .to_string(),
                                 };
                                 let elapsed_ms = Some(elapsed_ms_since(call.start));
-                                let outcome = ToolOutcome {
-                                    content: denial,
-                                    is_error: false,
-                                    metadata: None,
-                                };
+                                let outcome = ToolOutcome::new(denial, false, None);
                                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                     invocation_id: call.invocation_id,
                                     call_id: call.tc.id.clone(),
@@ -2263,11 +2255,7 @@ impl<'a> Turn<'a> {
                                 Decision::Error(ref err) => {
                                     let call = &plan.calls[pending.call_index];
                                     let elapsed_ms = Some(elapsed_ms_since(call.start));
-                                    let outcome = ToolOutcome {
-                                        content: err.clone(),
-                                        is_error: true,
-                                        metadata: None,
-                                    };
+                                    let outcome = ToolOutcome::new(err.clone(), true, None);
                                     let summary = metadata.summary.clone();
                                     Self::send_tool_rejected_for_call(
                                         self.event_tx,
@@ -2316,11 +2304,7 @@ impl<'a> Turn<'a> {
                             let (_, call_index) = plan.pending_tools.swap_remove(pos);
                             let call = &plan.calls[call_index];
                             let elapsed_ms = Some(elapsed_ms_since(call.start));
-                            let outcome = ToolOutcome {
-                                content,
-                                is_error,
-                                metadata,
-                            };
+                            let outcome = ToolOutcome::new(content, is_error, metadata);
                             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                 invocation_id: call.invocation_id,
                                 call_id: call.tc.id.clone(),
@@ -2388,11 +2372,7 @@ impl<'a> Turn<'a> {
         };
 
         if cancelled {
-            let cancelled_outcome = || ToolOutcome {
-                content: "cancelled".to_string(),
-                is_error: true,
-                metadata: None,
-            };
+            let cancelled_outcome = || ToolOutcome::new("cancelled".to_string(), true, None);
             let calls = &plan.calls;
             for (_, call_index) in plan.pending_tools.drain(..) {
                 let call = &calls[call_index];
@@ -2460,11 +2440,11 @@ impl<'a> Turn<'a> {
             self.emit(EngineEvent::ToolFinished {
                 invocation_id: call.invocation_id,
                 call_id: call.tc.id.clone(),
-                result: ToolOutcome {
-                    content: outcome.content.clone(),
-                    is_error: outcome.is_error,
-                    metadata: outcome.metadata.clone(),
-                },
+                result: ToolOutcome::new(
+                    outcome.content.clone(),
+                    outcome.is_error,
+                    outcome.metadata.clone(),
+                ),
                 elapsed_ms: Some(self.elapsed_ms_since(call.start)),
             });
             completed[slot_index] = Some(outcome);
@@ -2498,11 +2478,7 @@ impl<'a> Turn<'a> {
                 }
             };
             let elapsed_ms = Some(self.elapsed_ms_since(call.start));
-            let outcome = ToolOutcome {
-                content,
-                is_error,
-                metadata,
-            };
+            let outcome = ToolOutcome::new(content, is_error, metadata);
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                 invocation_id: call.invocation_id,
                 call_id: call.tc.id.clone(),
@@ -2563,20 +2539,12 @@ impl<'a> Turn<'a> {
             self.emit(EngineEvent::ToolFinished {
                 invocation_id: call.invocation_id,
                 call_id: call.tc.id.clone(),
-                result: ToolOutcome {
-                    content: content.clone(),
-                    is_error,
-                    metadata: metadata.clone(),
-                },
+                result: ToolOutcome::new(content.clone(), is_error, metadata.clone()),
                 elapsed_ms: Some(elapsed_ms),
             });
             out.push((
                 slot.call_index,
-                ToolOutcome {
-                    content: full_content,
-                    is_error,
-                    metadata,
-                },
+                ToolOutcome::new(full_content, is_error, metadata),
                 Some(elapsed_ms),
             ));
         }
@@ -3426,11 +3394,7 @@ mod tests {
     }
 
     fn outcome(content: &str) -> ToolOutcome {
-        ToolOutcome {
-            content: content.into(),
-            is_error: false,
-            metadata: None,
-        }
+        ToolOutcome::new(content.into(), false, None)
     }
 
     #[test]

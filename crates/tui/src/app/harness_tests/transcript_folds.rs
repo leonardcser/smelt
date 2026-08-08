@@ -6,11 +6,7 @@ fn finish_tool(app: &mut TestApp, call_id: &str, name: &str, content: &str) {
     app.tool_finished(
         invocation_id,
         call_id,
-        protocol::ToolOutcome {
-            content: content.into(),
-            is_error: false,
-            metadata: None,
-        },
+        protocol::ToolOutcome::new(content.into(), false, None),
         Some(1),
     );
 }

@@ -1,13 +1,13 @@
 use crate::error::{classify_openai_error, OpenAiErrorPayload};
 use crate::sse;
 use crate::{
-    non_empty, non_empty_blocks, unix_now, CancellationToken, CompletedReasoningPart, ModelConfig,
-    ParsedResponse, ProviderError, ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent,
-    ToolDefinition,
+    non_empty, non_empty_blocks, tool::tool_result_attachment, unix_now, CancellationToken,
+    CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
+    ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
-    ToolCall,
+    ToolAttachmentModality, ToolCall,
 };
 use std::collections::HashMap;
 
@@ -93,6 +93,29 @@ fn shorthand_user_content(content: Option<&protocol::Content>) -> serde_json::Va
         Some(protocol::Content::Parts(_)) => serde_json::json!(input_content_items(content)),
         None => serde_json::json!(""),
     }
+}
+
+fn tool_result_output(message: &Message) -> serde_json::Value {
+    let text = message
+        .content
+        .as_ref()
+        .map(|content| content.as_text())
+        .unwrap_or_default();
+    let Some(attachment) = tool_result_attachment(message) else {
+        return serde_json::Value::String(text.to_string());
+    };
+    if attachment.modality != ToolAttachmentModality::Image {
+        return serde_json::Value::String(text.to_string());
+    }
+
+    serde_json::json!([
+        {"type": "input_text", "text": text},
+        {
+            "type": "input_image",
+            "image_url": attachment.data_url,
+            "detail": "high",
+        }
+    ])
 }
 
 pub fn build_body(
@@ -208,7 +231,7 @@ fn build_body_with_user_shape(
                 }
             }
             Role::Tool => {
-                let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+                let output = tool_result_output(m);
                 let call_id = match &m.tool_call_id {
                     Some(id) if !id.is_empty() => id.as_str(),
                     _ => "missing_call_id",
@@ -1075,6 +1098,38 @@ mod tests {
         assert_eq!(out["type"], "function_call_output");
         assert_eq!(out["call_id"], "call-x");
         assert_eq!(out["output"], "result");
+    }
+
+    #[test]
+    fn build_codex_body_serializes_captured_tool_result_image() {
+        let data_url = "data:image/png;base64,iVBORw0KGgppbWFnZS1ieXRlcw==";
+        let tool = Message::tool_with_metadata(
+            "call-image".into(),
+            "image file attached",
+            false,
+            Some(json!({
+                "kind": "file_attachment",
+                "modality": "image",
+                "path": "/path/that/no/longer/exists.png",
+                "mime": "image/png",
+                "data_url": data_url,
+            })),
+        );
+
+        let body = build_codex_body(&[tool], &[], "m", ReasoningEffort::Off, &cfg());
+        let output = body["input"][0]["output"].as_array().unwrap();
+        assert_eq!(
+            output[0],
+            json!({"type": "input_text", "text": "image file attached"})
+        );
+        assert_eq!(
+            output[1],
+            json!({
+                "type": "input_image",
+                "image_url": data_url,
+                "detail": "high",
+            })
+        );
     }
 
     #[test]

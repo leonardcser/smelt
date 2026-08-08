@@ -784,8 +784,8 @@ Image file detection and base64 data-URL loading.
   Return the image MIME type inferred from `p`'s extension.
 - `smelt.image.read_as_data_url` :: `fun(p: string): string?, string?`
   Read the image at `p` and encode it as a `data:` URL.
-- `smelt.image.read_as_data_url_async` :: `fun(path: string): string?, string?`
-  Read and base64-encode an image off the main thread.
+- `smelt.image.read_as_data_url_async` :: `fun(path: string, mime?: string): string?, string?`
+  Read and base64-encode a file off the main thread.
 
 #### `smelt.json`
 
@@ -1430,7 +1430,7 @@ Model selector.
 - `smelt.model.supports_input` :: `fun(modality: string): boolean?`
   Return whether the active model supports the named input modality, for example `image` or `pdf`.
 - `smelt.model.transport` :: `fun(): table?`
-  Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport.
+  Return `{ provider_type, api_base, api_key_env, multimodal_tool_results, image_tool_results, pdf_tool_results }` for the active model transport.
 
 #### `smelt.notebook`
 

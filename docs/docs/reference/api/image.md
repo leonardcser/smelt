@@ -51,9 +51,9 @@ Read the image at `p` and encode it as a `data:` URL. Returns `(url, nil)` on su
 ## `smelt.image.read_as_data_url_async`
 
 ```lua
-fun(path: string): string?, string?
+fun(path: string, mime?: string): string?, string?
 ```
 
-Read and base64-encode an image off the main thread. Same return shape as
-`smelt.image.read_as_data_url`.
+Read and base64-encode a file off the main thread. Without `mime`, the MIME
+type is inferred as for `smelt.image.read_as_data_url`.
 

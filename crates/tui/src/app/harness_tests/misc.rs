@@ -190,11 +190,7 @@ fn tool_output_paints_before_a_coalesced_tool_completion() {
     app.inject_engine(EngineEvent::ToolFinished {
         invocation_id,
         call_id,
-        result: protocol::ToolOutcome {
-            content: "done".into(),
-            is_error: false,
-            metadata: None,
-        },
+        result: protocol::ToolOutcome::new("done".into(), false, None),
         elapsed_ms: Some(10),
     })
     .expect("queue tool completion");
@@ -263,11 +259,7 @@ fn repeated_provider_call_ids_keep_distinct_live_tool_blocks() {
         app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
             invocation_id,
             call_id: "duplicate".into(),
-            result: protocol::ToolOutcome {
-                content: output.into(),
-                is_error: false,
-                metadata: None,
-            },
+            result: protocol::ToolOutcome::new(output.into(), false, None),
             elapsed_ms: Some(10),
         }));
         assert_eq!(
@@ -761,15 +753,15 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
     app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         invocation_id,
         call_id: call_id.clone(),
-        result: protocol::ToolOutcome {
-            content: format!("edited {path}"),
-            is_error: false,
-            metadata: Some(serde_json::json!({
+        result: protocol::ToolOutcome::new(
+            format!("edited {path}"),
+            false,
+            Some(serde_json::json!({
                 "path": path,
                 "old_content": old_content,
                 "new_content": new_content,
             })),
-        },
+        ),
         elapsed_ms: Some(5),
     }));
     assert!(

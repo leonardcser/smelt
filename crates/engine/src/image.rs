@@ -67,7 +67,13 @@ pub fn mime_from_path(path: &str) -> &'static str {
 /// Read an image file and return a data URL (`data:mime;base64,...`).
 pub fn read_image_as_data_url(path: &str) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let mime = mime_from_extension(path);
+    let mime = sniff_image_mime(&bytes).unwrap_or_else(|| mime_from_extension(path));
+    Ok(data_url_from_bytes(&bytes, mime))
+}
+
+/// Read a file and return a data URL with the supplied MIME type.
+pub fn read_file_as_data_url(path: &str, mime: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     Ok(data_url_from_bytes(&bytes, mime))
 }
 
@@ -217,6 +223,17 @@ mod tests {
     fn read_image_returns_err_for_missing_file() {
         let res = read_image_as_data_url("/does/not/exist/nope.png");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn read_file_uses_supplied_mime_type() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("document.bin");
+        std::fs::write(&path, b"pdf").unwrap();
+
+        let url = read_file_as_data_url(path.to_str().unwrap(), "application/pdf").unwrap();
+
+        assert_eq!(url, "data:application/pdf;base64,cGRm");
     }
 
     // ---- image_label_from_path ----

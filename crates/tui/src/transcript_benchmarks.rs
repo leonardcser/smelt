@@ -2423,15 +2423,15 @@ fn heterogeneous_hot_path_history_item(idx: usize, target_bytes: usize) -> proto
                 call_id: format!("heterogeneous-call-{idx}"),
                 name: "heterogeneous_tool".into(),
                 arguments: format!(r#"{{"row":{idx}}}"#),
-                result: protocol::ToolOutcome {
-                    content: format!("tool output for row {idx}\n{}", "output ".repeat(256)),
-                    is_error: false,
-                    metadata: Some(serde_json::json!({
+                result: protocol::ToolOutcome::new(
+                    format!("tool output for row {idx}\n{}", "output ".repeat(256)),
+                    false,
+                    Some(serde_json::json!({
                         "row": idx,
                         "payload": "metadata ".repeat(2 * 1024),
                         "paths": ["src/main.rs", "Cargo.toml"],
                     })),
-                },
+                ),
                 elapsed_ms: Some(idx as u64),
                 called_at_ms: None,
             }],

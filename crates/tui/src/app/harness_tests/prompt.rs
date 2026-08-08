@@ -433,11 +433,7 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
     assert!(app.render_to_frame().text().contains("queued follow-up"));
     assert!(!app.transcript_buffer_text().contains("queued follow-up"));
 
-    let finished = || protocol::ToolOutcome {
-        content: "done".into(),
-        is_error: false,
-        metadata: None,
-    };
+    let finished = || protocol::ToolOutcome::new("done".into(), false, None);
     app.tool_finished(tool_a, "tool-a", finished(), Some(10));
 
     assert_eq!(app.pending_tool_invocation_ids(), [tool_b]);

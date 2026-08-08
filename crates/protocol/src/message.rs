@@ -123,6 +123,51 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolAttachmentModality {
+    Image,
+    Pdf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAttachment {
+    pub modality: ToolAttachmentModality,
+    pub mime: String,
+    pub data_url: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub label: Option<String>,
+}
+
+impl ToolAttachment {
+    pub fn from_metadata(metadata: &serde_json::Value) -> Option<Self> {
+        if metadata.get("kind").and_then(serde_json::Value::as_str) != Some("file_attachment") {
+            return None;
+        }
+        let attachment: Self = serde_json::from_value(metadata.clone()).ok()?;
+        let expected_prefix = format!("data:{};base64,", attachment.mime);
+        attachment
+            .data_url
+            .starts_with(&expected_prefix)
+            .then_some(attachment)
+    }
+
+    fn write_to_metadata(&self, metadata: &mut Option<serde_json::Value>) {
+        let value = metadata.get_or_insert_with(|| serde_json::json!({}));
+        if !value.is_object() {
+            *value = serde_json::json!({});
+        }
+        let object = value.as_object_mut().expect("metadata object");
+        object.insert("kind".into(), serde_json::json!("file_attachment"));
+        object.insert("modality".into(), serde_json::json!(self.modality));
+        object.insert("mime".into(), serde_json::json!(self.mime));
+        object.insert("data_url".into(), serde_json::json!(self.data_url));
+        if let Some(label) = &self.label {
+            object.insert("label".into(), serde_json::json!(label));
+        }
+    }
+}
+
 fn is_false(v: &bool) -> bool {
     !v
 }
@@ -376,6 +421,7 @@ mod tests {
             content: "x".into(),
             is_error: false,
             metadata: None,
+            attachment: None,
         };
         let v = serde_json::to_value(&o).unwrap();
         assert!(v.get("metadata").is_none());
@@ -387,6 +433,7 @@ mod tests {
             content: "x".into(),
             is_error: false,
             metadata: Some(json!({"k": 1})),
+            attachment: None,
         };
         let v = serde_json::to_value(&o).unwrap();
         assert_eq!(v["metadata"], json!({"k": 1}));
@@ -397,6 +444,33 @@ mod tests {
         let o: ToolOutcome =
             serde_json::from_value(json!({"content": "x", "is_error": false})).unwrap();
         assert!(o.metadata.is_none());
+        assert!(o.attachment.is_none());
+    }
+
+    #[test]
+    fn tool_outcome_extracts_attachment_from_display_metadata() {
+        let outcome = ToolOutcome::new(
+            "image file attached".into(),
+            false,
+            Some(json!({
+                "kind": "file_attachment",
+                "modality": "image",
+                "mime": "image/png",
+                "data_url": "data:image/png;base64,aW1hZ2U=",
+                "label": "image.png",
+                "path": "/tmp/image.png",
+            })),
+        );
+
+        let attachment = outcome.attachment.as_ref().unwrap();
+        assert_eq!(attachment.modality, ToolAttachmentModality::Image);
+        assert_eq!(attachment.mime, "image/png");
+        assert_eq!(attachment.label.as_deref(), Some("image.png"));
+        assert!(outcome.metadata.as_ref().unwrap().get("data_url").is_none());
+        assert_eq!(
+            outcome.provider_metadata().unwrap()["data_url"],
+            "data:image/png;base64,aW1hZ2U="
+        );
     }
 }
 
@@ -405,7 +479,37 @@ pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
     /// Structured metadata for tools that need to communicate machine-readable
-    /// data alongside the human-readable content string.
+    /// display data alongside the human-readable content string.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub metadata: Option<serde_json::Value>,
+    /// Model-facing attachment captured while the tool result is produced.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub attachment: Option<ToolAttachment>,
+}
+
+impl ToolOutcome {
+    pub fn new(content: String, is_error: bool, mut metadata: Option<serde_json::Value>) -> Self {
+        let attachment = metadata.as_ref().and_then(ToolAttachment::from_metadata);
+        if attachment.is_some() {
+            metadata
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("attachment metadata object")
+                .remove("data_url");
+        }
+        Self {
+            content,
+            is_error,
+            metadata,
+            attachment,
+        }
+    }
+
+    pub fn provider_metadata(&self) -> Option<serde_json::Value> {
+        let mut metadata = self.metadata.clone();
+        if let Some(attachment) = &self.attachment {
+            attachment.write_to_metadata(&mut metadata);
+        }
+        metadata
+    }
 }

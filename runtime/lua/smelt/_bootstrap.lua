@@ -601,11 +601,13 @@ function smelt.fs.glob_async(pattern, path, opts)
   return external_or_err(function(id) smelt.fs.__start_glob(id, pattern, path or "", opts or {}) end)
 end
 
--- Read and base64-encode an image off the main thread. Same return shape as
--- `smelt.image.read_as_data_url`.
----@type fun(path: string): string?, string?
-function smelt.image.read_as_data_url_async(path)
-  local result = smelt.task.external(function(id) smelt.image.__start_read_as_data_url(id, path) end)
+-- Read and base64-encode a file off the main thread. Without `mime`, the MIME
+-- type is inferred as for `smelt.image.read_as_data_url`.
+---@type fun(path: string, mime?: string): string?, string?
+function smelt.image.read_as_data_url_async(path, mime)
+  local result = smelt.task.external(function(id)
+    smelt.image.__start_read_as_data_url(id, path, mime)
+  end)
   if result.url ~= nil then return result.url, nil end
   return nil, result.err
 end

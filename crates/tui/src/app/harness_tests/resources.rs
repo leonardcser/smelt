@@ -477,6 +477,105 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
     assert!(text.contains("smelt-provenance\n</command_output>"));
 }
 
+async fn read_file_attachment_result(
+    path: &std::path::Path,
+    provider_type: &str,
+    modalities: &[&str],
+    call_id: &str,
+) -> (String, bool, serde_json::Value) {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.use_model(smelt_core::config::ResolvedModel {
+        key: format!("{provider_type}/multimodal"),
+        provider_name: provider_type.into(),
+        model_name: "multimodal".into(),
+        display_name: None,
+        api_base: match provider_type {
+            "codex" => "https://chatgpt.com/backend-api/codex".into(),
+            _ => "https://api.anthropic.com/v1".into(),
+        },
+        api_key_env: String::new(),
+        provider_type: provider_type.into(),
+        config: protocol::ModelConfig {
+            input_modalities: Some(modalities.iter().map(|value| (*value).into()).collect()),
+            ..Default::default()
+        },
+    });
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(81),
+        request_id: 81,
+        call_id: call_id.into(),
+        tool_name: "read_file".into(),
+        args: std::collections::HashMap::from([("file_path".into(), serde_json::json!(path))]),
+    }));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            tokio::task::yield_now().await;
+            app.feed_one(SourceEvent::LuaWakeup);
+            if let Some(result) = app.actions().iter().find_map(|action| match action {
+                Action::EngineSend(command) => match command.as_ref() {
+                    protocol::UiCommand::ToolResult {
+                        call_id: completed,
+                        content,
+                        is_error,
+                        metadata,
+                        ..
+                    } if completed == call_id => Some((
+                        content.clone(),
+                        *is_error,
+                        metadata.clone().expect("attachment metadata"),
+                    )),
+                    _ => None,
+                },
+                _ => None,
+            }) {
+                return result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("read_file should complete")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn codex_read_file_returns_image_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("console.png");
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\nimage-bytes").unwrap();
+
+    let (content, is_error, metadata) =
+        read_file_attachment_result(&path, "codex", &["text", "image"], "read-image").await;
+
+    assert!(!is_error, "{content}");
+    assert_eq!(content, format!("image file attached: {}", path.display()));
+    assert_eq!(metadata["kind"], "file_attachment");
+    assert_eq!(metadata["modality"], "image");
+    assert_eq!(metadata["path"], path.to_string_lossy().as_ref());
+    assert_eq!(metadata["mime"], "image/png");
+    assert!(metadata["data_url"]
+        .as_str()
+        .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn anthropic_read_file_captures_pdf_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("document.pdf");
+    std::fs::write(&path, b"%PDF-1.4").unwrap();
+
+    let (content, is_error, metadata) =
+        read_file_attachment_result(&path, "anthropic", &["text", "pdf"], "read-pdf").await;
+
+    assert!(!is_error, "{content}");
+    assert_eq!(metadata["modality"], "pdf");
+    assert_eq!(metadata["mime"], "application/pdf");
+    assert!(metadata["data_url"]
+        .as_str()
+        .is_some_and(|url| url.starts_with("data:application/pdf;base64,")));
+}
+
 #[test]
 fn explicit_model_switch_sends_complete_context_only_for_an_active_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
@@ -647,11 +746,11 @@ fn custom_command_starts_after_replaced_synthetic_history() {
                             call_id: format!("synth-call-{i:02}"),
                             name: "synth".to_string(),
                             arguments: "{}".to_string(),
-                            result: protocol::ToolOutcome {
-                                content: format!("synth-result-{i}"),
-                                is_error: false,
-                                metadata: None,
-                            },
+                            result: protocol::ToolOutcome::new(
+                                format!("synth-result-{i}"),
+                                false,
+                                None,
+                            ),
                             elapsed_ms: None,
                             called_at_ms: Some(i as u64),
                         };

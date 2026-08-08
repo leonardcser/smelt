@@ -93,11 +93,7 @@ fn tool_history() -> Vec<HistoryItem> {
                 call_id: "call-1".into(),
                 name: "bash".into(),
                 arguments: r#"{"command":"echo persisted"}"#.into(),
-                result: ToolOutcome {
-                    content: "persisted\n".into(),
-                    is_error: false,
-                    metadata: None,
-                },
+                result: ToolOutcome::new("persisted\n".into(), false, None),
                 elapsed_ms: Some(12),
                 called_at_ms: Some(1_742_573_823_000),
             }],

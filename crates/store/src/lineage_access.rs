@@ -1557,11 +1557,11 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "test".into(),
                 arguments: "{}".into(),
-                result: protocol::ToolOutcome {
-                    content: "visible text".into(),
-                    is_error: false,
-                    metadata: Some(serde_json::json!({"payload": "x".repeat(16 * 1024)})),
-                },
+                result: protocol::ToolOutcome::new(
+                    "visible text".into(),
+                    false,
+                    Some(serde_json::json!({"payload": "x".repeat(16 * 1024)})),
+                ),
                 elapsed_ms: None,
                 called_at_ms: None,
             }],

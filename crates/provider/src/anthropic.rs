@@ -1,14 +1,13 @@
 use crate::sse;
 use crate::{
     collect_indexed_tool_calls, non_empty, non_empty_blocks, parse_claude_model_version,
-    CacheConfig, CancellationToken, ClaudeModelFamily, CompletedReasoningPart, ModelConfig,
-    ParsedResponse, ProviderError, ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent,
-    ToolDefinition,
+    tool::tool_result_attachment, CacheConfig, CancellationToken, ClaudeModelFamily,
+    CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
+    ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
-use base64::Engine;
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
-    ToolCall,
+    ToolAttachment, ToolAttachmentModality, ToolCall,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -169,51 +168,26 @@ fn anthropic_content_blocks(content: Option<&protocol::Content>) -> Vec<serde_js
     }
 }
 
-fn anthropic_file_attachment_block(metadata: &serde_json::Value) -> Option<serde_json::Value> {
-    let modality = metadata.get("modality")?.as_str()?;
-    let path = metadata.get("path")?.as_str()?;
-    let mime = metadata.get("mime")?.as_str()?;
-    let bytes = std::fs::read(path).ok()?;
-    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-    match modality {
-        "image" => Some(serde_json::json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mime,
-                "data": data,
-            },
-        })),
-        "pdf" => Some(serde_json::json!({
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": mime,
-                "data": data,
-            },
-        })),
-        _ => None,
-    }
+fn anthropic_file_attachment_block(attachment: ToolAttachment) -> serde_json::Value {
+    let block_type = match attachment.modality {
+        ToolAttachmentModality::Image => "image",
+        ToolAttachmentModality::Pdf => "document",
+    };
+    serde_json::json!({
+        "type": block_type,
+        "source": anthropic_image_source(&attachment.data_url),
+    })
 }
 
 fn anthropic_tool_result_content(m: &Message) -> serde_json::Value {
     let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-    let Some(metadata) = &m.tool_metadata else {
+    let Some(attachment) = tool_result_attachment(m) else {
         return serde_json::Value::String(output.to_string());
     };
-    if metadata.get("kind").and_then(|v| v.as_str()) != Some("file_attachment") {
-        return serde_json::Value::String(output.to_string());
-    }
-    let mut parts = vec![serde_json::json!({"type": "text", "text": output})];
-    if let Some(block) = anthropic_file_attachment_block(metadata) {
-        parts.push(block);
-    } else {
-        parts.push(serde_json::json!({
-            "type": "text",
-            "text": "attachment could not be read for provider request",
-        }));
-    }
-    serde_json::Value::Array(parts)
+    serde_json::json!([
+        {"type": "text", "text": output},
+        anthropic_file_attachment_block(attachment),
+    ])
 }
 
 pub fn build_body(
@@ -944,10 +918,7 @@ mod tests {
     // ---- build_body ----
 
     #[test]
-    fn build_body_serializes_tool_result_image_attachment() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tiny.png");
-        std::fs::write(&path, b"\x89PNG\r\n\x1a\nimage-bytes").unwrap();
+    fn build_body_serializes_captured_tool_result_image() {
         let tool = Message::tool_with_metadata(
             "toolu_1".into(),
             "image file attached",
@@ -955,8 +926,9 @@ mod tests {
             Some(json!({
                 "kind": "file_attachment",
                 "modality": "image",
-                "path": path.to_string_lossy(),
+                "path": "/path/that/no/longer/exists.png",
                 "mime": "image/png",
+                "data_url": "data:image/png;base64,iVBORw0KGgppbWFnZS1ieXRlcw==",
                 "label": "tiny.png"
             })),
         );
@@ -985,6 +957,34 @@ mod tests {
         assert_eq!(result_content[1]["type"], "image");
         assert_eq!(result_content[1]["source"]["media_type"], "image/png");
         assert_eq!(result_content[1]["source"]["type"], "base64");
+    }
+
+    #[test]
+    fn build_body_serializes_captured_tool_result_pdf() {
+        let tool = Message::tool_with_metadata(
+            "toolu_1".into(),
+            "pdf file attached",
+            false,
+            Some(json!({
+                "kind": "file_attachment",
+                "modality": "pdf",
+                "mime": "application/pdf",
+                "data_url": "data:application/pdf;base64,JVBERi0xLjQ=",
+            })),
+        );
+        let body = build_body(
+            &[tool],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+
+        let result_content = &body["messages"][0]["content"][0]["content"];
+        assert_eq!(result_content[1]["type"], "document");
+        assert_eq!(result_content[1]["source"]["media_type"], "application/pdf");
+        assert_eq!(result_content[1]["source"]["data"], "JVBERi0xLjQ=");
     }
 
     #[test]

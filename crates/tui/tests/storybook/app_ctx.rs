@@ -304,11 +304,7 @@ impl AppStoryCtx {
         self.app.tool_finished(
             invocation_id,
             call_id,
-            ToolOutcome {
-                content: content.into(),
-                is_error,
-                metadata,
-            },
+            ToolOutcome::new(content.into(), is_error, metadata),
             elapsed_ms,
         );
     }
@@ -331,11 +327,7 @@ impl AppStoryCtx {
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
             summary,
-            ToolOutcome {
-                content: content.into(),
-                is_error,
-                metadata: None,
-            },
+            ToolOutcome::new(content.into(), is_error, None),
             elapsed_ms,
         );
     }

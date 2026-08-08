@@ -212,6 +212,19 @@ pub struct ProviderDescriptor {
     pub mid_turn_reasoning_changes: bool,
 }
 
+impl ProviderDescriptor {
+    pub fn supports_image_tool_results(self) -> bool {
+        matches!(
+            self.wire_api,
+            WireApi::OpenAiResponses | WireApi::AnthropicMessages
+        )
+    }
+
+    pub fn supports_pdf_tool_results(self) -> bool {
+        self.wire_api == WireApi::AnthropicMessages
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireApi {
     ChatCompletions,
@@ -339,5 +352,20 @@ mod tests {
             ProviderKind::KimiCode.wire_api(),
             WireApi::AnthropicMessages
         );
+    }
+
+    #[test]
+    fn descriptor_reports_wire_tool_result_capabilities() {
+        let codex = ProviderKind::Codex.descriptor();
+        assert!(codex.supports_image_tool_results());
+        assert!(!codex.supports_pdf_tool_results());
+
+        let anthropic = ProviderKind::Anthropic.descriptor();
+        assert!(anthropic.supports_image_tool_results());
+        assert!(anthropic.supports_pdf_tool_results());
+
+        let compatible = ProviderKind::OpenAiCompatible.descriptor();
+        assert!(!compatible.supports_image_tool_results());
+        assert!(!compatible.supports_pdf_tool_results());
     }
 }

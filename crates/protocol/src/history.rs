@@ -989,11 +989,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                             call_id: tc.id,
                             name: tc.function.name,
                             arguments: tc.function.arguments,
-                            result: ToolOutcome {
-                                content,
-                                is_error,
-                                metadata,
-                            },
+                            result: ToolOutcome::new(content, is_error, metadata),
                             elapsed_ms: None,
                             called_at_ms: None,
                         }
@@ -1061,7 +1057,7 @@ pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
                         inv.call_id.clone(),
                         inv.result.content.clone(),
                         inv.result.is_error,
-                        inv.result.metadata.clone(),
+                        inv.result.provider_metadata(),
                     ));
                 }
             }
@@ -1218,11 +1214,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "f".into(),
             arguments: "{\"x\":1}".into(),
-            result: ToolOutcome {
-                content: "ok".into(),
-                is_error: false,
-                metadata: None,
-            },
+            result: ToolOutcome::new("ok".into(), false, None),
             elapsed_ms: Some(42),
             called_at_ms: Some(1_700_000_000_123),
         };
@@ -1254,11 +1246,16 @@ mod tests {
             call_id: "call-1".into(),
             name: "f".into(),
             arguments: "{\"x\":1}".into(),
-            result: ToolOutcome {
-                content: "ok".into(),
-                is_error: false,
-                metadata: None,
-            },
+            result: ToolOutcome::new(
+                "ok".into(),
+                false,
+                Some(serde_json::json!({
+                    "kind": "file_attachment",
+                    "modality": "image",
+                    "mime": "image/png",
+                    "data_url": "data:image/png;base64,aW1hZ2U=",
+                })),
+            ),
             elapsed_ms: None,
             called_at_ms: None,
         };

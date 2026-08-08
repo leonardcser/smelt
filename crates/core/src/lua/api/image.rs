@@ -58,10 +58,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.private_fn(
             "__start_read_as_data_url",
-            &["task_id", "path"],
-            move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+            &["task_id", "path", "mime?"],
+            move |_, (task_id, path, mime): (u64, String, Option<String>)| -> LuaResult<()> {
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
-                    match engine::image::read_image_as_data_url(&path) {
+                    let result = match mime {
+                        Some(mime) => engine::image::read_file_as_data_url(&path, &mime),
+                        None => engine::image::read_image_as_data_url(&path),
+                    };
+                    match result {
                         Ok(url) => serde_json::json!({ "url": url }),
                         Err(err) => serde_json::json!({ "err": err }),
                     }

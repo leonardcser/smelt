@@ -37,10 +37,12 @@ fn has_modality(values: &[String], modality: &str) -> bool {
         .any(|value| value.eq_ignore_ascii_case(modality))
 }
 
-fn supports_multimodal_tool_results(provider_type: &str) -> bool {
-    matches!(
-        provider_type,
-        "anthropic" | "anthropic-compatible" | "kimi-code"
+fn tool_result_capabilities(provider_type: &str, api_base: &str) -> (bool, bool) {
+    let descriptor =
+        smelt_provider::ProviderKind::from_config_and_url(provider_type, api_base).descriptor();
+    (
+        descriptor.supports_image_tool_results(),
+        descriptor.supports_pdf_tool_results(),
     )
 }
 
@@ -146,20 +148,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "transport",
-        "Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport. `api_key_env` is the environment variable name, never its value.",
+        "Return `{ provider_type, api_base, api_key_env, multimodal_tool_results, image_tool_results, pdf_tool_results }` for the active model transport. Prefer the modality-specific fields; `multimodal_tool_results` is their aggregate. `api_key_env` is the environment variable name, never its value.",
         &[],
         |lua, ()| -> LuaResult<Option<mlua::Table>> {
             let Some(active) = crate::lua::try_with_runtime_host(|host| host.active_model()).flatten()
             else {
                 return Ok(None);
             };
-            let multimodal_tool_results =
-                supports_multimodal_tool_results(&active.provider_type);
+            let (image_tool_results, pdf_tool_results) =
+                tool_result_capabilities(&active.provider_type, &active.api_base);
             let out = lua.create_table()?;
             out.set("provider_type", active.provider_type)?;
             out.set("api_base", active.api_base)?;
             out.set("api_key_env", active.api_key_env)?;
-            out.set("multimodal_tool_results", multimodal_tool_results)?;
+            out.set(
+                "multimodal_tool_results",
+                image_tool_results || pdf_tool_results,
+            )?;
+            out.set("image_tool_results", image_tool_results)?;
+            out.set("pdf_tool_results", pdf_tool_results)?;
             Ok(Some(out))
         },
     )?;
@@ -245,13 +252,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
 
             let transport = lua.create_table()?;
-            let multimodal_tool_results = supports_multimodal_tool_results(&provider_type);
+            let (image_tool_results, pdf_tool_results) =
+                tool_result_capabilities(&provider_type, &api_base);
             transport.set("provider_type", provider_type)?;
             transport.set("api_base", api_base)?;
             transport.set("api_key_env", api_key_env)?;
-            transport.set("multimodal_tool_results", multimodal_tool_results)?;
-            transport.set("image_tool_results", multimodal_tool_results)?;
-            transport.set("pdf_tool_results", multimodal_tool_results)?;
+            transport.set(
+                "multimodal_tool_results",
+                image_tool_results || pdf_tool_results,
+            )?;
+            transport.set("image_tool_results", image_tool_results)?;
+            transport.set("pdf_tool_results", pdf_tool_results)?;
             t.set("transport", transport)?;
 
             let sources = lua.create_table()?;

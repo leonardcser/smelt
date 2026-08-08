@@ -82,10 +82,11 @@ local function is_pdf_file(path)
   return type(path) == "string" and path:lower():sub(-4) == ".pdf"
 end
 
-local function active_transport_supports_multimodal_tool_results()
+local function active_transport_supports_tool_results(modality)
   if not smelt.model or not smelt.model.transport then return false end
   local transport = smelt.model.transport()
-  return transport and transport.multimodal_tool_results == true
+  if not transport then return false end
+  return transport[modality .. "_tool_results"] == true
 end
 
 local function active_model_supports(modality)
@@ -100,7 +101,7 @@ local function multimodal_error(kind, path)
       is_error = true,
     }
   end
-  if not active_transport_supports_multimodal_tool_results() then
+  if not active_transport_supports_tool_results(kind) then
     return {
       content = string.format("cannot read %s file %s: active provider transport cannot send %s tool results", kind, path, kind),
       is_error = true,
@@ -119,6 +120,14 @@ local function multimodal_result(kind, path, mime, info)
   end
   local err = multimodal_error(kind, path)
   if err then return err end
+  local data_url, read_err = smelt.image.read_as_data_url_async(path, mime)
+  if not data_url then
+    return { content = read_err or ("could not read file: " .. path), is_error = true }
+  end
+  mime = mime or data_url:match("^data:([^;,]+);base64,")
+  if not mime then
+    return { content = "could not determine file MIME type: " .. path, is_error = true }
+  end
   return {
     content = string.format("%s file attached: %s", kind, path),
     is_error = false,
@@ -127,6 +136,7 @@ local function multimodal_result(kind, path, mime, info)
       modality = kind,
       path = path,
       mime = mime,
+      data_url = data_url,
       label = smelt.image.label_from_path and smelt.image.label_from_path(path) or path,
     },
   }
@@ -200,7 +210,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     end
 
     if file_info.kind == "image" or smelt.image.is_image_file(path) then
-      return multimodal_result("image", path, smelt.image.mime_from_path(path), file_info)
+      return multimodal_result("image", path, nil, file_info)
     end
 
     if file_info.kind == "pdf" or is_pdf_file(path) then

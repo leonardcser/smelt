@@ -149,7 +149,11 @@ local function compose_lines(win)
 	cap_parts[#cap_parts + 1] = "tools=" .. fmt_bool(caps.tool_calling)
 	add_kv(lines, spans, "capabilities", table.concat(cap_parts, " "), width)
 	local transport = caps.transport or {}
-	add_kv(lines, spans, "transport", string.format("mm_tools=%s", fmt_bool(transport.multimodal_tool_results)), width)
+	add_kv(lines, spans, "transport", string.format(
+		"image_tools=%s pdf_tools=%s",
+		fmt_bool(transport.image_tool_results),
+		fmt_bool(transport.pdf_tool_results)
+	), width)
 	local sources = caps.sources or {}
 	add_kv(lines, spans, "cap_sources", string.format("mods=%s ctx=%s max=%s", sources.input_modalities or "?", sources.context_window or "?", sources.max_tokens or "?"), width)
 	add_kv(lines, spans, "auto_compact", fmt_bool(smelt.settings.auto_compact), width)

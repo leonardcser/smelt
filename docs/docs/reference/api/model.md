@@ -94,5 +94,5 @@ Return whether the active model supports the named input modality, for example `
 fun(): table?
 ```
 
-Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport. `api_key_env` is the environment variable name, never its value.
+Return `{ provider_type, api_base, api_key_env, multimodal_tool_results, image_tool_results, pdf_tool_results }` for the active model transport. Prefer the modality-specific fields; `multimodal_tool_results` is their aggregate. `api_key_env` is the environment variable name, never its value.
 

@@ -84,11 +84,7 @@ mod tests {
             call_id: call_id.into(),
             name: "f".into(),
             arguments: "{}".into(),
-            result: ToolOutcome {
-                content: content.into(),
-                is_error,
-                metadata: None,
-            },
+            result: ToolOutcome::new(content.into(), is_error, None),
             elapsed_ms: None,
             called_at_ms: None,
         }

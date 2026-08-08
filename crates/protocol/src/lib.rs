@@ -36,7 +36,10 @@ pub use history::{
     HistoryNoteKind, HistoryNoteProjection, HistoryTailBudget, ProcessStatusEvent, ToolInvocation,
     UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
-pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
+pub use message::{
+    FunctionCall, Message, ReasoningBlock, Role, ToolAttachment, ToolAttachmentModality, ToolCall,
+    ToolOutcome,
+};
 pub use mode::{AgentMode, ReasoningEffort};
 pub use model::{ModelConfig, ModelMetadata, ModelTarget, RequestAuditMode, RequestRuntimeConfig};
 pub use note::{
