@@ -1,0 +1,5 @@
+# These tests enforce wall-clock interaction budgets, so they must not compete
+# with CPU-heavy tests for runner time.
+[[profile.default.overrides]]
+filter = 'test(/^app::harness_tests::(persistence::large_sparse_fork_preserves_every_canonical_history_and_record_row|search::transcript_search_rapid_typing_cancels_stale_worker_generations)$/)'
+threads-required = "num-test-threads"
