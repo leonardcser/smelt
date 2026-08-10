@@ -1,10 +1,8 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * edit_file src/main.rs                                                14:37:03
-
-
 
 
 
@@ -15,8 +13,10 @@ expression: text
 ────────────────────────────────────────────────────────────────────────────────
  edit_file: src/main.rs
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
- 1 - println!("hello, world");
- 1 + println!("hello, smelt");
+ 1   fn main() {
+ 2 -     println!("hello, world");
+ 2 +     println!("hello, smelt");
+ 3   }
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  Allow?
   1. allow once

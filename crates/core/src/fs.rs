@@ -598,28 +598,53 @@ impl FileStateCache {
     }
 }
 
-/// `None` when safe to proceed; error string when the cache has no prior read
-/// or the file's mtime has changed. `noun` (`"file"` or `"notebook"`) phrases
-/// the message for the caller tool.
-pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
-    let Some(cached) = cache.get(path) else {
-        return Some(format!("read the {noun} with read_file before editing"));
-    };
+fn cached_state(cache: &FileStateCache, path: &str, noun: &str) -> Result<FileState, String> {
+    cache
+        .get(path)
+        .ok_or_else(|| format!("read the {noun} with read_file before editing"))
+}
+
+fn ensure_cached_state_is_current(
+    path: &str,
+    cached: &FileState,
+    noun: &str,
+) -> Result<(), String> {
     match file_mtime_ms(path) {
-        Ok(current) if current == cached.mtime_ms => None,
-        // Let a missing file / stat error fall through to run()'s real I/O error.
-        Err(_) => None,
-        Ok(_) => {
-            Some(format!(
-                "{noun} has been modified since last read; use read_file to read the current contents before editing"
-            ))
-        }
+        Ok(current) if current == cached.mtime_ms => Ok(()),
+        Err(err) => Err(err.to_string()),
+        Ok(_) => Err(format!(
+            "{noun} has been modified since last read; use read_file to read the current contents before editing"
+        )),
     }
 }
 
+fn fresh_cached_state(cache: &FileStateCache, path: &str, noun: &str) -> Result<FileState, String> {
+    let cached = cached_state(cache, path, noun)?;
+    ensure_cached_state_is_current(path, &cached, noun)?;
+    Ok(cached)
+}
+
+/// `None` when safe to proceed; error string when the cache has no prior read,
+/// the current file state cannot be inspected, or its mtime has changed. `noun`
+/// (`"file"` or `"notebook"`) phrases the message for the caller tool.
+pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
+    fresh_cached_state(cache, path, noun).err()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditFileOutcome {
     pub old_content: String,
     pub new_content: String,
+}
+
+fn validate_edit_file_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("missing required parameter: file_path".into());
+    }
+    if crate::notebook::is_notebook_path(path) {
+        return Err("cannot use edit_file on a Jupyter notebook; use edit_notebook instead".into());
+    }
+    Ok(())
 }
 
 pub fn checked_write_file(
@@ -657,23 +682,12 @@ pub fn checked_write_file(
     Ok(content.len())
 }
 
-pub fn checked_edit_file(
-    path: &str,
+fn plan_edit_file(
+    content: String,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    cache: &FileStateCache,
 ) -> Result<EditFileOutcome, String> {
-    if path.is_empty() {
-        return Err("missing required parameter: file_path".into());
-    }
-    if let Some(err) = staleness_error(cache, path, "file") {
-        return Err(err);
-    }
-
-    let _lock = try_flock(path)?;
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-
     if old_string == new_string {
         return Err("old_string and new_string are identical".into());
     }
@@ -697,14 +711,43 @@ pub fn checked_edit_file(
         content.replacen(old_string, new_string, 1)
     };
 
-    std::fs::write(path, new_content.as_bytes()).map_err(|e| e.to_string())?;
-    let mtime_ms = file_mtime_ms(path).unwrap_or(0);
-    cache.record_write_with_mtime(path, new_content.clone(), mtime_ms);
-
     Ok(EditFileOutcome {
         old_content: content,
         new_content,
     })
+}
+
+pub fn checked_plan_edit_file(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    cache: &FileStateCache,
+) -> Result<EditFileOutcome, String> {
+    validate_edit_file_path(path)?;
+    let cached = fresh_cached_state(cache, path, "file")?;
+    plan_edit_file(cached.content, old_string, new_string, replace_all)
+}
+
+pub fn checked_edit_file(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    cache: &FileStateCache,
+) -> Result<EditFileOutcome, String> {
+    validate_edit_file_path(path)?;
+    let cached = cached_state(cache, path, "file")?;
+    let _lock = try_flock(path)?;
+    ensure_cached_state_is_current(path, &cached, "file")?;
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let outcome = plan_edit_file(content, old_string, new_string, replace_all)?;
+
+    std::fs::write(path, outcome.new_content.as_bytes()).map_err(|e| e.to_string())?;
+    let mtime_ms = file_mtime_ms(path).unwrap_or(0);
+    cache.record_write_with_mtime(path, outcome.new_content.clone(), mtime_ms);
+
+    Ok(outcome)
 }
 
 // ── Advisory file locking ─────────────────────────────────────────────────
@@ -741,6 +784,60 @@ pub struct FlockGuard {
     _file: std::fs::File,
     #[cfg(not(unix))]
     _file: Option<()>,
+}
+
+#[cfg(test)]
+mod edit_file_tests {
+    use super::*;
+
+    const CONTENT: &str = "alpha\nbeta\nalpha\n";
+
+    #[test]
+    fn planner_replaces_one_unique_match() {
+        assert_eq!(
+            plan_edit_file(CONTENT.into(), "beta", "gamma", false),
+            Ok(EditFileOutcome {
+                old_content: CONTENT.into(),
+                new_content: "alpha\ngamma\nalpha\n".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn planner_replaces_all_matches() {
+        assert_eq!(
+            plan_edit_file(CONTENT.into(), "alpha", "gamma", true),
+            Ok(EditFileOutcome {
+                old_content: CONTENT.into(),
+                new_content: "gamma\nbeta\ngamma\n".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn planner_rejects_invalid_edits() {
+        for (old_string, new_string, replace_all, expected) in [
+            (
+                "alpha",
+                "alpha",
+                false,
+                "old_string and new_string are identical",
+            ),
+            ("", "gamma", false, "old_string not found in file"),
+            ("missing", "gamma", false, "old_string not found in file"),
+            (
+                "alpha",
+                "gamma",
+                false,
+                "old_string matched 2 times; make it unique or set replace_all to true",
+            ),
+        ] {
+            assert_eq!(
+                plan_edit_file(CONTENT.into(), old_string, new_string, replace_all),
+                Err(expected.into())
+            );
+        }
+    }
 }
 
 #[cfg(test)]

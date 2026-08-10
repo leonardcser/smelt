@@ -375,6 +375,17 @@ impl AppStoryCtx {
         path.to_string_lossy().into_owned()
     }
 
+    /// Record a fixture as read so edit previews exercise the same cache gate as
+    /// a real read_file followed by edit_file.
+    pub fn cache_file_read(&mut self, path: &str, contents: &str) {
+        self.run_lua(&format!(
+            "smelt.fs.file_state.record_read({}, {}, 0, {})",
+            serde_json::to_string(path).expect("serialize fixture path"),
+            serde_json::to_string(contents).expect("serialize fixture content"),
+            contents.len(),
+        ));
+    }
+
     /// Working directory the live `TuiApp` captured at construction.
     /// Stories that seed persisted-session fixtures must match this
     /// into catalog metadata so the resume dialog's default workspace filter

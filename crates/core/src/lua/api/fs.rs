@@ -499,6 +499,40 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     {
         let s = shared.clone();
         fs.private_fn(
+            "__plan_edit_file",
+            &["path", "old_string", "new_string", "replace_all"],
+            move |lua,
+                  (path, old_string, new_string, replace_all): (String, String, String, bool)|
+                  -> LuaResult<mlua::Table> {
+                let result = match crate::host::try_with_core(|core| core.files.clone()) {
+                    Some(files) => {
+                        let path = s.resolve_project_path(path);
+                        crate::fs::checked_plan_edit_file(
+                            &path.to_string_lossy(),
+                            &old_string,
+                            &new_string,
+                            replace_all,
+                            &files,
+                        )
+                    }
+                    None => Err("edit_file: no app context".into()),
+                };
+                let plan = lua.create_table()?;
+                match result {
+                    Ok(outcome) => {
+                        plan.set("old_content", outcome.old_content)?;
+                        plan.set("new_content", outcome.new_content)?;
+                    }
+                    Err(err) => plan.set("err", err)?,
+                }
+                Ok(plan)
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.private_fn(
             "__start_edit_file",
             &["task_id", "path", "old_string", "new_string", "replace_all"],
             move |_,

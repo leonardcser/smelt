@@ -1,19 +1,19 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
-* edit_file /tmp/smelt-storybook-nonexistent-session-93e422  14:37:03
-            0e873c55398e6e22ff065d617e27efc1a9b326032e323d0
-            0a522764901/plans/20260618-083946-virtual-trans
-            cript-performance/plan.md
+* edit_file smelt-storybook-session-93e4220e873c55398e6e22f  14:37:03
+            f065d617e27efc1a9b326032e323d00a522764901/plans
+            /20260618-083946-virtual-transcript-performance
+            /plan.md
 
 
 
 
 ──────────────────────────────────────────────────────────────────────
- edit_file: /tmp/smelt-storybook-nonexistent-session-93e4220e873c553
-            8e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/2
-            260618-083946-virtual-transcript-performance/plan.md
+ edit_file: smelt-storybook-session-93e4220e873c55398e6e22ff065d617e
+            7efc1a9b326032e323d00a522764901/plans/20260618-083946-vi
+            tual-transcript-performance/plan.md
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  1 - # Plan
  1 + # Updated plan

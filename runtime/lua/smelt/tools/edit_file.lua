@@ -2,39 +2,12 @@
 
 local transcript_defaults = require("smelt.transcript.defaults")
 
-local function replace_first(haystack, needle, replacement)
-  local s, e = string.find(haystack, needle, 1, true)
-  if not s then
-    return haystack
-  end
-  return haystack:sub(1, s - 1) .. replacement .. haystack:sub(e + 1)
-end
-
-local function replace_all(haystack, needle, replacement)
-  local out = {}
-  local start = 1
-  while true do
-    local s, e = string.find(haystack, needle, start, true)
-    if not s then
-      out[#out + 1] = haystack:sub(start)
-      break
-    end
-    out[#out + 1] = haystack:sub(start, s - 1)
-    out[#out + 1] = replacement
-    start = e + 1
-  end
-  return table.concat(out)
-end
-
-local function apply_edit(content, old_string, new_string, do_all)
-  if do_all then
-    return replace_all(content, old_string, new_string)
-  end
-  return replace_first(content, old_string, new_string)
-end
-
 local function edit_fields(args)
   return args.file_path or "", args.old_string or "", args.new_string or "", args.replace_all == true
+end
+
+local function plan_edit(args)
+  return smelt.fs.__plan_edit_file(edit_fields(args))
 end
 
 local function diff_from_content(path, old_content, new_content, anchor)
@@ -48,30 +21,17 @@ local function diff_from_content(path, old_content, new_content, anchor)
 end
 
 local function planned_diff(args)
-  local path, old_string, new_string, do_all = edit_fields(args)
-  local cached = path ~= "" and smelt.fs.file_state.get(path) or nil
-  local content = cached and cached.content or nil
-  if not content then
-    return smelt.layout.diff({
-      old = old_string,
-      new = new_string,
-      path = path,
-      anchor = old_string,
-    })
+  local path, old_string = edit_fields(args)
+  local plan = plan_edit(args)
+  if plan.err then
+    return nil
   end
-
-  return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
+  return diff_from_content(path, plan.old_content, plan.new_content, old_string)
 end
 
 local function planned_output(args)
-  local path, old_string, new_string, do_all = edit_fields(args)
-  if old_string == "" and new_string == "" then
-    return nil
-  end
-
-  local cached = path ~= "" and old_string ~= "" and smelt.fs.file_state.get(path) or nil
-  local content = cached and cached.content or nil
-  if not content then
+  local plan = plan_edit(args)
+  if plan.err then
     return nil
   end
 
@@ -79,9 +39,9 @@ local function planned_output(args)
     content = "",
     is_error = false,
     metadata = {
-      path = path,
-      old_content = content,
-      new_content = apply_edit(content, old_string, new_string, do_all),
+      path = args.file_path or "",
+      old_content = plan.old_content,
+      new_content = plan.new_content,
     },
   }
 end
@@ -101,18 +61,12 @@ local function draft_preview(args, block)
     return nil
   end
 
-  local path, old_string, new_string, do_all = edit_fields(args)
-  if old_string == "" and new_string == "" then
+  local path, old_string = edit_fields(args)
+  local plan = plan_edit(args)
+  if plan.err then
     return nil
   end
-
-  local cached = path ~= "" and old_string ~= "" and smelt.fs.file_state.get(path) or nil
-  local content = cached and cached.content or nil
-  if content then
-    return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
-  end
-
-  return nil
+  return diff_from_content(path, plan.old_content, plan.new_content, old_string)
 end
 
 smelt.transcript.register_tool("edit_file", {
@@ -180,11 +134,7 @@ smelt.tools.register({
     return smelt.tools.path_summary(args.file_path or "", ctx)
   end,
   preflight = function(args)
-    local path = args.file_path or ""
-    if path == "" or smelt.fs.file_state.has(path) then
-      return nil
-    end
-    return "read the file with read_file before editing"
+    return plan_edit(args).err
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
@@ -198,16 +148,6 @@ smelt.tools.register({
   end,
   execute = function(args)
     local path, old_string, new_string, do_all = edit_fields(args)
-
-    if path == "" then
-      return { content = "missing required parameter: file_path", is_error = true }
-    end
-    if smelt.notebook.is_notebook_path(path) then
-      return {
-        content = "cannot use edit_file on a Jupyter notebook; use edit_notebook instead",
-        is_error = true,
-      }
-    end
 
     local result = smelt.task.external(function(id)
       smelt.fs.__start_edit_file(id, path, old_string, new_string, do_all)

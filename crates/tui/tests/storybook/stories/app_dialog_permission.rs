@@ -284,10 +284,13 @@ app_story!(write_file_permission_dialog_with_file_view, |ctx| {
 
 app_story!(edit_file_permission_dialog_with_diff, |ctx| {
     ctx.set_viewport(80, 24);
+    let content = "fn main() {\n    println!(\"hello, world\");\n}\n";
+    let path = ctx.write_fixture("src/main.rs", content);
+    ctx.cache_file_read(&path, content);
     ctx.request_permission(
         "edit_file",
         args([
-            ("file_path", json!("src/main.rs")),
+            ("file_path", json!(path)),
             ("old_string", json!("println!(\"hello, world\");")),
             ("new_string", json!("println!(\"hello, smelt\");")),
         ]),
@@ -298,13 +301,16 @@ app_story!(edit_file_permission_dialog_with_diff, |ctx| {
 
 app_story!(edit_file_long_path_permission_dialog_wraps, |ctx| {
     ctx.set_viewport(70, 24);
+    let content = "# Plan\n";
+    let path = ctx.write_fixture(
+        "smelt-storybook-session-93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md",
+        content,
+    );
+    ctx.cache_file_read(&path, content);
     ctx.request_permission(
         "edit_file",
         args([
-            (
-                "file_path",
-                json!("/tmp/smelt-storybook-nonexistent-session-93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
-            ),
+            ("file_path", json!(path)),
             ("old_string", json!("# Plan\n")),
             ("new_string", json!("# Updated plan\n")),
         ]),
@@ -315,10 +321,13 @@ app_story!(edit_file_long_path_permission_dialog_wraps, |ctx| {
 
 app_story!(edit_file_permission_dialog_multiline_diff, |ctx| {
     ctx.set_viewport(80, 28);
+    let content = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+    let path = ctx.write_fixture("src/lib.rs", content);
+    ctx.cache_file_read(&path, content);
     ctx.request_permission(
         "edit_file",
         args([
-            ("file_path", json!("src/lib.rs")),
+            ("file_path", json!(path)),
             (
                 "old_string",
                 json!("fn add(a: i32, b: i32) -> i32 {\n    a + b\n}"),

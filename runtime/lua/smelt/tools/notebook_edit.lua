@@ -89,10 +89,8 @@ smelt.tools.register({
   end,
   preflight = function(args)
     local path = args.notebook_path or ""
-    if path == "" or smelt.fs.file_state.has(path) then
-      return nil
-    end
-    return "read the notebook with read_file before editing"
+    if path == "" then return nil end
+    return smelt.fs.file_state.staleness_error(path, "notebook")
   end,
   paths_for_workspace = function(args)
     local p = args.notebook_path or ""

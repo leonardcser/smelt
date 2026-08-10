@@ -666,21 +666,24 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
 
     let call_id = "edit-file-flicker-call".to_string();
     let stream_id = "edit-file-flicker-stream".to_string();
-    let path = "/tmp/smelt-edit-file-flicker.rs";
+    let dir = tempfile::tempdir().expect("create edit preview fixture directory");
+    let file = dir.path().join("preview.rs");
+    let path = file.to_string_lossy().into_owned();
     let old_content = "fn main() {\n    println!(\"flicker-old\");\n}\n";
     let new_content = "fn main() {\n    println!(\"flicker-new\");\n}\n";
     let old_string = "println!(\"flicker-old\");";
     let new_string = "println!(\"flicker-new\");";
+    std::fs::write(&file, old_content).expect("write edit preview fixture");
 
     assert!(app.run_lua(&format!(
-        "smelt.fs.file_state.record_read_with_mtime({}, {}, 1, 1000, 1)",
-        serde_json::to_string(path).unwrap(),
+        "smelt.fs.file_state.record_read({}, {}, 1, 1000)",
+        serde_json::to_string(path.as_str()).unwrap(),
         serde_json::to_string(old_content).unwrap()
     )));
     assert!(app
         .eval_lua::<bool>(&format!(
             "return smelt.fs.file_state.has({})",
-            serde_json::to_string(path).unwrap()
+            serde_json::to_string(path.as_str()).unwrap()
         ))
         .unwrap());
     assert!(app
@@ -690,13 +693,13 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         .unwrap());
 
     let args = std::collections::HashMap::from([
-        ("file_path".to_string(), serde_json::json!(path)),
+        ("file_path".to_string(), serde_json::json!(path.as_str())),
         ("old_string".to_string(), serde_json::json!(old_string)),
         ("new_string".to_string(), serde_json::json!(new_string)),
         ("replace_all".to_string(), serde_json::json!(false)),
     ]);
     let arguments = serde_json::to_string(&serde_json::json!({
-        "file_path": path,
+        "file_path": path.as_str(),
         "old_string": old_string,
         "new_string": new_string,
         "replace_all": false,
@@ -744,7 +747,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
 
     assert!(app.run_lua(&format!(
         "smelt.fs.file_state.record_write({}, {})",
-        serde_json::to_string(path).unwrap(),
+        serde_json::to_string(path.as_str()).unwrap(),
         serde_json::to_string(new_content).unwrap()
     )));
     let after_write_frame = app.render_to_frame().text();
@@ -757,7 +760,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
             format!("edited {path}"),
             false,
             Some(serde_json::json!({
-                "path": path,
+                "path": path.as_str(),
                 "old_content": old_content,
                 "new_content": new_content,
             })),
@@ -780,6 +783,237 @@ fn assert_edit_file_diff_visible(frame: &str, stage: &str) {
     assert!(
         frame.contains("flicker-old") && frame.contains("flicker-new"),
         "edit_file diff not visible at {stage}:\n{frame}"
+    );
+}
+
+fn evaluate_tool_decision(
+    app: &mut TestApp,
+    request_id: u64,
+    call_id: &str,
+    tool_name: &str,
+    args: &std::collections::HashMap<String, serde_json::Value>,
+) -> protocol::Decision {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolEvaluationRequest {
+        request_id,
+        invocation_id: protocol::InvocationId::new(request_id),
+        call_id: call_id.into(),
+        tool_name: tool_name.into(),
+        args: args.clone(),
+        mode: protocol::AgentMode::parse("apply").unwrap(),
+    }));
+    app.actions()
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::ToolEvaluationResponse {
+                    request_id: response_id,
+                    evaluation,
+                } if *response_id == request_id => Some(evaluation.decision.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("tool evaluation response")
+}
+
+#[derive(Clone, Copy)]
+enum EditFileReadState {
+    Unread,
+    Fresh,
+    Stale,
+}
+
+struct InvalidEditFileCase {
+    name: &'static str,
+    content: &'static str,
+    old_string: &'static str,
+    new_string: &'static str,
+    read_state: EditFileReadState,
+    error: &'static str,
+}
+
+#[test]
+fn invalid_edit_files_are_rejected_without_a_speculative_diff() {
+    let cases = [
+        InvalidEditFileCase {
+            name: "unread",
+            content: "const BEFORE_UNREAD: i32 = 1;\n",
+            old_string: "BEFORE_UNREAD",
+            new_string: "AFTER_UNREAD",
+            read_state: EditFileReadState::Unread,
+            error: "read the file with read_file before editing",
+        },
+        InvalidEditFileCase {
+            name: "stale",
+            content: "const BEFORE_STALE: i32 = 1;\n",
+            old_string: "BEFORE_STALE",
+            new_string: "AFTER_STALE",
+            read_state: EditFileReadState::Stale,
+            error: "file has been modified since last read; use read_file to read the current contents before editing",
+        },
+        InvalidEditFileCase {
+            name: "missing-string",
+            content: "const PRESENT_ONLY: i32 = 1;\n",
+            old_string: "MISSING_TARGET",
+            new_string: "MISSING_REPLACEMENT",
+            read_state: EditFileReadState::Fresh,
+            error: "old_string not found in file",
+        },
+        InvalidEditFileCase {
+            name: "duplicate-match",
+            content: "DUPLICATE_TARGET\nDUPLICATE_TARGET\n",
+            old_string: "DUPLICATE_TARGET",
+            new_string: "DUPLICATE_REPLACEMENT",
+            read_state: EditFileReadState::Fresh,
+            error: "old_string matched 2 times; make it unique or set replace_all to true",
+        },
+        InvalidEditFileCase {
+            name: "identical-replacement",
+            content: "const IDENTICAL_TARGET: i32 = 1;\n",
+            old_string: "IDENTICAL_TARGET",
+            new_string: "IDENTICAL_TARGET",
+            read_state: EditFileReadState::Fresh,
+            error: "old_string and new_string are identical",
+        },
+    ];
+
+    for (index, case) in cases.iter().enumerate() {
+        assert_invalid_edit_file_lifecycle(case, 100 + index as u64);
+    }
+}
+
+fn assert_invalid_edit_file_lifecycle(case: &InvalidEditFileCase, request_id: u64) {
+    let dir = tempfile::tempdir().expect("create edit fixture directory");
+    let file = dir.path().join(format!("{}.rs", case.name));
+    let path = file.to_string_lossy();
+    std::fs::write(&file, case.content).expect("write edit fixture");
+
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.start_turn(7);
+    match case.read_state {
+        EditFileReadState::Unread => {}
+        EditFileReadState::Fresh => assert!(app.run_lua(&format!(
+            "smelt.fs.file_state.record_read({}, {}, 0, {})",
+            serde_json::to_string(path.as_ref()).unwrap(),
+            serde_json::to_string(case.content).unwrap(),
+            case.content.len(),
+        ))),
+        EditFileReadState::Stale => assert!(app.run_lua(&format!(
+            "smelt.fs.file_state.record_read_with_mtime({}, {}, 0, {}, 0)",
+            serde_json::to_string(path.as_ref()).unwrap(),
+            serde_json::to_string(case.content).unwrap(),
+            case.content.len(),
+        ))),
+    }
+
+    let call_id = format!("invalid-edit-file-{}", case.name);
+    let stream_id = format!("{call_id}-stream");
+    let args = std::collections::HashMap::from([
+        ("file_path".to_string(), serde_json::json!(path.as_ref())),
+        ("old_string".to_string(), serde_json::json!(case.old_string)),
+        ("new_string".to_string(), serde_json::json!(case.new_string)),
+        ("replace_all".to_string(), serde_json::json!(false)),
+    ]);
+    let arguments = serde_json::to_string(&args).unwrap();
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: stream_id.clone(),
+        call_id: Some(call_id.clone()),
+        tool_name: Some("edit_file".into()),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
+        stream_id,
+        call_id: call_id.clone(),
+        tool_name: "edit_file".into(),
+        arguments,
+    }));
+
+    let draft_frame = app.render_to_frame().text();
+    assert!(draft_frame.contains("* edit_file"), "frame: {draft_frame}");
+    assert_no_speculative_edit(&draft_frame, case, "draft");
+
+    let invocation_id = protocol::InvocationId::new(request_id);
+    let decision = evaluate_tool_decision(&mut app, request_id, &call_id, "edit_file", &args);
+    assert_eq!(
+        decision,
+        protocol::Decision::Error(case.error.into()),
+        "case: {}",
+        case.name
+    );
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolRejected {
+        invocation_id,
+        call_id,
+        tool_name: "edit_file".into(),
+        args,
+        summary: protocol::StyledLines::empty(),
+        result: protocol::ToolOutcome::new(case.error.into(), true, None),
+        elapsed_ms: Some(1),
+        called_at_ms: 0,
+    }));
+    let error_frame = app.render_to_frame().text();
+    assert!(
+        error_frame.contains(case.error),
+        "case: {}; frame: {error_frame}",
+        case.name
+    );
+    assert_no_speculative_edit(&error_frame, case, "rejected");
+    let block_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("rejected edit block");
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .tool_state(block_id)
+            .map(|state| state.status),
+        Some(smelt_core::ToolStatus::Err),
+        "case: {}",
+        case.name
+    );
+}
+
+fn assert_no_speculative_edit(frame: &str, case: &InvalidEditFileCase, stage: &str) {
+    assert!(
+        !frame.contains(case.old_string) && !frame.contains(case.new_string),
+        "{} edit rendered speculative content at {stage}:\n{frame}",
+        case.name
+    );
+}
+
+#[test]
+fn stale_edit_notebook_is_rejected_in_preflight() {
+    let dir = tempfile::tempdir().expect("create notebook fixture directory");
+    let file = dir.path().join("stale.ipynb");
+    let path = file.to_string_lossy();
+    let content = r#"{"cells":[]}"#;
+    std::fs::write(&file, content).expect("write notebook fixture");
+
+    let mut app = TestApp::builder().build();
+    app.start_turn(7);
+    assert!(app.run_lua(&format!(
+        "smelt.fs.file_state.record_read_with_mtime({}, {}, 0, {}, 0)",
+        serde_json::to_string(path.as_ref()).unwrap(),
+        serde_json::to_string(content).unwrap(),
+        content.len(),
+    )));
+
+    let args = std::collections::HashMap::from([(
+        "notebook_path".into(),
+        serde_json::json!(path.as_ref()),
+    )]);
+    let decision =
+        evaluate_tool_decision(&mut app, 92, "stale-edit-notebook", "edit_notebook", &args);
+    assert_eq!(
+        decision,
+        protocol::Decision::Error(
+            "notebook has been modified since last read; use read_file to read the current contents before editing".into()
+        )
     );
 }
 
