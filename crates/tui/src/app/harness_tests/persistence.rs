@@ -1377,6 +1377,115 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
 }
 
 #[test]
+fn resumed_rewind_restores_prior_turn_context_before_next_request() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for (turn_id, prompt, reply, context_tokens) in [
+            (1, "first prompt", "first reply", 100),
+            (2, "second prompt", "second reply", 250),
+        ] {
+            app.commit_request_history_item(
+                HistoryItem::user(Content::text(prompt)),
+                Some(Block::User {
+                    text: prompt.into(),
+                    image_labels: Vec::new(),
+                    command: false,
+                }),
+            );
+            app.commit_request_history_item(
+                HistoryItem::assistant(AssistantStep::terminal(
+                    Some(Content::text(reply)),
+                    None,
+                    Vec::new(),
+                )),
+                Some(Block::Text {
+                    content: reply.into(),
+                }),
+            );
+            app.start_turn(turn_id);
+            app.feed_one(SourceEvent::engine(EngineEvent::TokenUsage {
+                usage: TokenUsage {
+                    context_tokens: Some(context_tokens),
+                    ..Default::default()
+                },
+                tokens_per_sec: None,
+                cost_usd: None,
+                background: false,
+            }));
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+                turn_id,
+                history: None,
+                meta: None,
+            }));
+        }
+        app.save_session_and_flush();
+        app.session_snapshot().id.clone()
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.load_session_by_id(&session_id);
+    resumed.set_terminal_size(80, 24);
+    resumed.set_context_window(Some(1_000));
+    assert!(resumed.conversation_probe().has_live_session());
+
+    resumed.rewind_to_block(Some(2), false);
+    assert_eq!(resumed.session_message_count(), 2);
+    assert_eq!(resumed.session_snapshot().context_tokens, Some(100));
+    assert_eq!(
+        resumed.session_snapshot().context_tokens_history_len,
+        Some(2)
+    );
+    assert_eq!(
+        resumed.session_snapshot().display_context_tokens(),
+        Some(100)
+    );
+    assert!(resumed.run_lua("assert(smelt.session.context_tokens() == 100)"));
+    let rewound_frame = resumed.render_to_frame().text();
+    assert!(
+        rewound_frame.contains("100 (10%)"),
+        "rewound context pill is missing:\n{rewound_frame}"
+    );
+
+    resumed.type_text("replacement prompt");
+    resumed.press(crossterm::event::KeyCode::Enter);
+    assert_eq!(
+        resumed.session_snapshot().display_context_tokens(),
+        Some(100)
+    );
+    let submitted_frame = resumed.render_to_frame().text();
+    assert!(
+        submitted_frame.contains("100 (10%)"),
+        "context pill disappeared after submission:\n{submitted_frame}"
+    );
+
+    let mut settings = resumed.core_probe().config.settings.clone();
+    settings.auto_compact = true;
+    settings.compact_threshold = 0.8;
+    resumed.set_settings_for_harness(settings);
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    resumed.dispatch_host_call(engine::HostCall::PrepareRequest {
+        messages: engine::PreparedRequestMessages::model_only(protocol::history_to_messages(
+            &resumed.model_history(),
+        )),
+        estimated_tokens: 2_000,
+        reply: tx,
+    });
+
+    let sends = resumed.drain_engine_sends();
+    assert!(
+        sends
+            .iter()
+            .all(|command| !matches!(command, protocol::UiCommand::EngineAsk { .. })),
+        "restored context below the threshold should prevent compaction: {sends:?}"
+    );
+    assert!(matches!(
+        rx.try_recv().expect("prepare request reply"),
+        engine::HostRequestDecision::Continue
+    ));
+}
+
+#[test]
 fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
     let guard = test_home_guard();
     let session_id = {
