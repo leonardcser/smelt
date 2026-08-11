@@ -8,7 +8,7 @@ use syntect::parsing::SyntaxReference;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::buffer::SpanMeta;
-use crate::content::builder::{display_width, LineBuilder};
+use crate::content::builder::{display_width, wrapped_segments, LineBuilder};
 use crate::content::code_block::CodeBlock;
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
@@ -68,50 +68,44 @@ pub fn render_code_block(
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
         let visual_rows = split_regions_into_rows(out, &regions, text_w);
-        if visual_rows.len() > 1 {
-            out.mark_wrapped();
-        }
-        for (vi, vrow) in visual_rows.iter().enumerate() {
-            out.save_style();
-            if vi == 0 {
-                let mut external_src = String::new();
-                if fence && line_idx == 0 {
-                    external_src.push_str("```");
-                    external_src.push_str(block.lang());
-                    external_src.push('\n');
-                }
-                external_src.push_str(line);
-                if fence && line_idx == last_idx {
-                    external_src.push_str("\n```");
-                }
-                out.set_source_text(line);
-                if fence {
+        for segment in wrapped_segments(out, &visual_rows) {
+            segment.emit_with_source(out, line, |out, vrow, kind| {
+                out.save_style();
+                if !kind.is_continuation() && fence {
+                    let mut external_src = String::new();
+                    if line_idx == 0 {
+                        external_src.push_str("```");
+                        external_src.push_str(block.lang());
+                        external_src.push('\n');
+                    }
+                    external_src.push_str(line);
+                    if line_idx == last_idx {
+                        external_src.push_str("\n```");
+                    }
                     out.set_external_source_text(&external_src);
                 }
-            } else {
-                out.mark_soft_wrap_continuation();
-            }
-            if let Some(b) = bctx {
-                b.print_left(out);
-            }
-            if dim {
-                out.set_dim();
-            }
-            let cols = print_split_regions(out, vrow, Some(bg));
-            let pad = content_width.saturating_sub(cols);
-            if pad > 0 {
-                out.set_bg(bg);
-                if bctx.is_some() {
-                    out.print_with_meta(&" ".repeat(pad), SpanMeta::unselectable());
-                } else {
-                    out.fill_line_bg(bg);
+                if let Some(b) = bctx {
+                    b.print_left(out);
                 }
-            }
-            if let Some(b) = bctx {
-                out.set_hl(b.group);
-                out.print(b.right);
-            }
-            out.pop_style();
+                if dim {
+                    out.set_dim();
+                }
+                let cols = print_split_regions(out, vrow, Some(bg));
+                let pad = content_width.saturating_sub(cols);
+                if pad > 0 {
+                    out.set_bg(bg);
+                    if bctx.is_some() {
+                        out.print_with_meta(&" ".repeat(pad), SpanMeta::unselectable());
+                    } else {
+                        out.fill_line_bg(bg);
+                    }
+                }
+                if let Some(b) = bctx {
+                    out.set_hl(b.group);
+                    out.print(b.right);
+                }
+                out.pop_style();
+            });
             out.newline();
         }
         rows += visual_rows.len() as u16;

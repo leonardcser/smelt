@@ -15,7 +15,7 @@ use smelt_core::transcript_model::{Block, BlockHistory, ViewState};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 11;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 12;
 
 pub(crate) fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
@@ -817,6 +817,7 @@ fn compile_layout_ir_with_cache(
                 Ok(HboxItem {
                     constraint: item.constraint,
                     layout: compile_layout_ir_with_cache(&item.layout, cache)?,
+                    copy_owner: item.copy_owner,
                 })
             })
             .collect::<Result<Vec<_>, _>>()

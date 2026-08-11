@@ -214,6 +214,93 @@ fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {
     app
 }
 
+fn drag_transcript_text(
+    app: &mut TestApp,
+    start_text: &str,
+    end_text: &str,
+) -> std::ops::RangeInclusive<usize> {
+    let (start, end, selected_rows) = {
+        let win = app.transcript_window();
+        let viewport = win.viewport.expect("transcript viewport");
+        let scroll_top = win.scroll_top();
+        let materialized = win.materialized_rows();
+        let buf = app.ui_probe().buf(win.buf).expect("transcript buffer");
+        let first_row = buf
+            .lines()
+            .iter()
+            .position(|line| line.contains(start_text))
+            .unwrap_or_else(|| panic!("start text {start_text:?}: {:?}", buf.lines()));
+        let last_row = buf
+            .lines()
+            .iter()
+            .rposition(|line| line.contains(end_text))
+            .unwrap_or_else(|| panic!("end text {end_text:?}: {:?}", buf.lines()));
+        assert!(first_row <= last_row, "transcript drag range is inverted");
+
+        let screen_position = |local_row: usize, byte_col: usize| {
+            let absolute_row = materialized
+                .map_or(local_row as crate::smelt_edit::RowIndex, |rows| {
+                    rows.absolute_row(local_row as crate::smelt_edit::RowIndex)
+                });
+            let viewport_row = absolute_row.saturating_sub(scroll_top);
+            assert!(
+                viewport_row < crate::smelt_edit::RowIndex::from(viewport.rect.height),
+                "transcript row {absolute_row} is outside the viewport"
+            );
+            (
+                viewport.rect.top + viewport_row as u16,
+                viewport
+                    .rect
+                    .left
+                    .saturating_add(viewport.gutter_width)
+                    .saturating_add(win.gutter_pad_left)
+                    .saturating_add(smelt_buffer::text::byte_to_cell(
+                        &buf.lines()[local_row],
+                        byte_col,
+                    ) as u16),
+            )
+        };
+        let first_byte = buf.lines()[first_row]
+            .find(start_text)
+            .expect("start text byte");
+        let last_byte = buf.lines()[last_row]
+            .rfind(end_text)
+            .expect("end text byte")
+            + end_text.len();
+        (
+            screen_position(first_row, first_byte),
+            screen_position(last_row, last_byte),
+            first_row..=last_row,
+        )
+    };
+
+    for (kind, (row, column)) in [
+        (
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            start,
+        ),
+        (
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            end,
+        ),
+        (
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            end,
+        ),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                row,
+                column,
+                modifiers: KeyModifiers::empty(),
+            },
+        )));
+    }
+
+    selected_rows
+}
+
 fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
     app.transcript_window()
         .row_cursor

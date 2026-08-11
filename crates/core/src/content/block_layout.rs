@@ -203,6 +203,10 @@ pub enum Constraint {
 pub struct HboxItem<L = LuaLeaf> {
     pub constraint: Constraint,
     pub layout: BlockLayout<L>,
+    /// Owns row-level copy and source metadata for the composed row. Lua hboxes
+    /// default this to the first item and reject multiple owners.
+    #[serde(default)]
+    pub copy_owner: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -348,6 +352,7 @@ mod tests {
         HboxItem {
             constraint,
             layout: BlockLayout::Leaf(()),
+            copy_owner: false,
         }
     }
 
@@ -376,10 +381,12 @@ mod tests {
             HboxItem {
                 constraint: Constraint::Length(10),
                 layout: leaf(5),
+                copy_owner: true,
             },
             HboxItem {
                 constraint: Constraint::Fill(1),
                 layout: leaf(6),
+                copy_owner: false,
             },
         ]);
         let ids: Vec<u64> = layout.leaves().into_iter().copied().collect();
@@ -394,10 +401,12 @@ mod tests {
                 HboxItem {
                     constraint: Constraint::Length(5),
                     layout: leaf(2),
+                    copy_owner: true,
                 },
                 HboxItem {
                     constraint: Constraint::Fill(1),
                     layout: BlockLayout::Vbox(vec![leaf(3), leaf(4)]),
+                    copy_owner: false,
                 },
             ]),
             leaf(5),

@@ -17,6 +17,7 @@ use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_edit::BufId;
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
+use smelt_core::content::builder::{wrapped_segments, LineBuilder};
 use smelt_core::content::highlight::SplitSide;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
@@ -63,6 +64,30 @@ pub struct LuaRenderDiffSplitOpts {
     pub path: Option<String>,
 }
 
+fn render_text_content(
+    sink: &mut LineBuilder<'_>,
+    content: &str,
+    width: u16,
+    hl_group: Option<&str>,
+) {
+    let max_cols = (width as usize).saturating_sub(3).max(1);
+    match hl_group.map(intern) {
+        Some(group) => sink.push_hl(group),
+        None => sink.push_dim(),
+    }
+    for line in content.lines() {
+        let expanded = line.replace('\t', "    ");
+        let (spans, ranges, boundaries) = smelt_core::content::ansi::wrap_ansi(&expanded, max_cols);
+        for segment in wrapped_segments(sink, &ranges) {
+            segment.emit(sink, |sink, &(start, end), _| {
+                smelt_core::content::ansi::emit_ansi_row(sink, &spans, &boundaries, start, end);
+            });
+            sink.newline();
+        }
+    }
+    sink.pop_style();
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -84,27 +109,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let width = width_opt.unwrap_or_else(|| crate::content::term_width() as u16);
                 if let Some(buf) = ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
-                        let max_cols = (width as usize).saturating_sub(3);
-                        let hl = hl_group.map(intern);
-                        match hl {
-                            Some(g) => sink.push_hl(g),
-                            None => sink.push_dim(),
-                        }
-                        for line in content.lines() {
-                            let expanded = line.replace('\t', "    ");
-                            let (spans, ranges, boundaries) =
-                                smelt_core::content::ansi::wrap_ansi(&expanded, max_cols);
-                            if ranges.len() > 1 {
-                                sink.mark_wrapped();
-                            }
-                            for &(ws, we) in &ranges {
-                                smelt_core::content::ansi::emit_ansi_row(
-                                    sink, &spans, &boundaries, ws, we,
-                                );
-                                sink.newline();
-                            }
-                        }
-                        sink.pop_style();
+                        render_text_content(sink, &content, width, hl_group);
                     });
                 }
             }));
@@ -213,5 +218,26 @@ fn render_split_into_pair(
         render_into_buffer(buf, width, &theme, |sink| {
             print_split_diff_side(sink, &plan, ext, SplitSide::Right);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smelt_edit::{BufCreateOpts, Buffer, Theme};
+
+    #[test]
+    fn text_render_copy_omits_soft_wraps_and_preserves_hard_newlines() {
+        let source = "alpha beta gamma delta\nsecond logical line";
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        render_into_buffer(&mut buf, 12, &Theme::default(), |sink| {
+            render_text_content(sink, source, 12, None);
+        });
+
+        assert!(buf.line_count() > 2);
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(&buf, 0, buf.text().len()),
+            source
+        );
     }
 }

@@ -13,6 +13,90 @@ pub fn display_width(s: &str) -> usize {
     cell_width::text_width(s)
 }
 
+/// Position of a visual segment within one logical source line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WrappedSegmentKind {
+    First,
+    Continuation,
+}
+
+impl WrappedSegmentKind {
+    pub fn from_index(index: usize) -> Self {
+        if index == 0 {
+            Self::First
+        } else {
+            Self::Continuation
+        }
+    }
+
+    pub fn is_continuation(self) -> bool {
+        matches!(self, Self::Continuation)
+    }
+
+    pub fn apply(self, out: &mut LineBuilder<'_>) {
+        if self.is_continuation() {
+            out.mark_soft_wrap_continuation();
+        }
+    }
+}
+
+/// A visual row whose hard or soft relationship to the previous row is explicit.
+pub struct WrappedSegment<'a, T> {
+    value: &'a T,
+    kind: WrappedSegmentKind,
+}
+
+impl<'a, T> WrappedSegment<'a, T> {
+    pub fn emit<F>(self, out: &mut LineBuilder<'_>, emit: F)
+    where
+        F: FnOnce(&mut LineBuilder<'_>, &'a T, WrappedSegmentKind),
+    {
+        self.kind.apply(out);
+        emit(out, self.value, self.kind);
+    }
+
+    pub fn emit_with_source<F>(self, out: &mut LineBuilder<'_>, source: &str, emit: F)
+    where
+        F: FnOnce(&mut LineBuilder<'_>, &'a T, WrappedSegmentKind),
+    {
+        if self.kind.is_continuation() {
+            self.kind.apply(out);
+        } else {
+            out.set_source_text(source);
+        }
+        emit(out, self.value, self.kind);
+    }
+}
+
+pub struct WrappedSegments<'a, T> {
+    iter: std::iter::Enumerate<std::slice::Iter<'a, T>>,
+}
+
+impl<'a, T> Iterator for WrappedSegments<'a, T> {
+    type Item = WrappedSegment<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(index, value)| WrappedSegment {
+            value,
+            kind: WrappedSegmentKind::from_index(index),
+        })
+    }
+}
+
+/// Mark a logical line as wrapped and iterate its visual segments with explicit
+/// hard/soft row semantics.
+pub fn wrapped_segments<'a, T>(
+    out: &mut LineBuilder<'_>,
+    segments: &'a [T],
+) -> WrappedSegments<'a, T> {
+    if segments.len() > 1 {
+        out.mark_wrapped();
+    }
+    WrappedSegments {
+        iter: segments.iter().enumerate(),
+    }
+}
+
 /// Outcome returned by [`LineBuilder::finish`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Outcome {
@@ -869,6 +953,22 @@ mod tests {
         let mut lb = LineBuilder::new(&mut buf, &theme, 80);
         lb.mark_soft_wrap_continuation();
         assert!(lb.cur_decoration.soft_wrapped);
+    }
+
+    #[test]
+    fn wrapped_segments_stamp_continuations_during_emission() {
+        let block = test_util::render_test(80, |out| {
+            let segments = ["first", "second"];
+            for segment in wrapped_segments(out, &segments) {
+                segment.emit(out, |out, text, _| out.print(text));
+                out.newline();
+            }
+        });
+
+        assert!(block.outcome.was_wrapped);
+        assert!(!block.lines[0].soft_wrapped);
+        assert!(block.lines[1].soft_wrapped);
+        assert!(block.lines[1].copy_continuation);
     }
 
     #[test]

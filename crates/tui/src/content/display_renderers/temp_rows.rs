@@ -11,6 +11,9 @@ pub(super) fn apply_temp_decoration(
     if let Some(source) = dec.source_text.as_deref() {
         out.set_source_text(source);
     }
+    if let Some(source) = dec.external_source_text.as_deref() {
+        out.set_external_source_text(source);
+    }
     if let Some(source_line) = dec.source_line {
         out.set_source_line(source_line);
     }
@@ -164,4 +167,40 @@ fn emit_clipped(
         out.print(&acc);
     }
     acc_w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
+    use smelt_core::buffer::LineDecoration;
+
+    #[test]
+    fn temp_decoration_preserves_both_copy_sources() {
+        let mut source = Buffer::new(BufId(1), BufCreateOpts::default());
+        source.set_decoration(
+            0,
+            LineDecoration {
+                source_text: Some("line source".into()),
+                external_source_text: Some("external source".into()),
+                ..LineDecoration::default()
+            },
+        );
+        let mut destination = Buffer::new(BufId(2), BufCreateOpts::default());
+        let theme = Theme::default();
+        {
+            let mut out = LineBuilder::new(&mut destination, &theme, 80);
+            apply_temp_decoration(&mut out, &source, 0, false);
+            out.print("rendered");
+            out.newline();
+            out.finish();
+        }
+
+        let decoration = destination.decoration_at(0);
+        assert_eq!(decoration.source_text.as_deref(), Some("line source"));
+        assert_eq!(
+            decoration.external_source_text.as_deref(),
+            Some("external source")
+        );
+    }
 }

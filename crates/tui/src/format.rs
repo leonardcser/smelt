@@ -8,7 +8,7 @@
 use crate::smelt_edit::{Buffer, BufferParser};
 use std::sync::Arc;
 
-use crate::content::builder::LineBuilder;
+use crate::content::builder::{wrapped_segments, LineBuilder};
 use crate::content::highlight::{print_inline_diff_ext, print_syntax_file_ext, GutterStyle};
 use crate::content::to_buffer::render_into_buffer;
 
@@ -132,16 +132,8 @@ where
     F: FnMut(&mut LineBuilder, &str),
 {
     let wrapped = crate::smelt_edit::text::wrap_line(line, width);
-    if wrapped.len() > 1 {
-        out.mark_wrapped();
-    }
-    for (i, segment) in wrapped.iter().enumerate() {
-        if i == 0 {
-            out.set_source_text(line);
-        } else {
-            out.mark_soft_wrap_continuation();
-        }
-        emit(out, segment);
+    for segment in wrapped_segments(out, &wrapped) {
+        segment.emit_with_source(out, line, |out, segment, _| emit(out, segment));
         out.newline();
     }
 }

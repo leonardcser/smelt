@@ -55,7 +55,7 @@ local function tool_group_header(name, count, hl, suffix, called_at_ms, ctx)
   local called_at, refresh_after = defaults.tool_called_at(called_at_ms, ctx and ctx.now_ms)
   if called_at then
     header = layout.hbox({
-      { header, weight = 1 },
+      { header, weight = 1, copy_owner = true },
       {
         layout.line({ { text = "  " .. called_at, dim = true, selectable = false } }),
         fit = true,

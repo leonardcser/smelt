@@ -271,7 +271,7 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts, presenta
   local called_at, called_at_refresh = M.tool_called_at(block.called_at_ms, ctx.now_ms)
   if called_at then
     header = layout.hbox({
-      { header, weight = 1 },
+      { header, weight = 1, copy_owner = true },
       {
         layout.line({ { text = "  " .. called_at, selectable = false, dim = true } }),
         fit = true,

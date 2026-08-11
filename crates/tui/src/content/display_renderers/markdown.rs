@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
-use smelt_core::content::builder::{display_width, LineBuilder};
+use smelt_core::content::builder::{display_width, wrapped_segments, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
     emit_inline_spans, inline_spans_width, measure_markdown_table_with_options,
@@ -1116,24 +1116,18 @@ fn render_markdown_line(
     state: &mut RenderState,
 ) {
     let wrapped = wrap_inline_spans(spans, ctx.max_cols);
-    if wrapped.len() > 1 {
-        out.mark_wrapped();
-    }
-    for (si, row_spans) in wrapped.iter().enumerate() {
+    for segment in wrapped_segments(out, &wrapped) {
         if should_emit(ctx.clip, state.rows) {
-            if si == 0 {
-                out.set_source_text(line);
-            } else {
-                out.mark_soft_wrap_continuation();
-            }
-            if let Some(b) = ctx.bctx {
-                b.print_left(out);
-                emit_inline_spans(out, row_spans);
-                b.print_right(out, inline_spans_width(row_spans));
-            } else {
-                out.print(ctx.indent);
-                emit_inline_spans(out, row_spans);
-            }
+            segment.emit_with_source(out, line, |out, row_spans, _| {
+                if let Some(b) = ctx.bctx {
+                    b.print_left(out);
+                    emit_inline_spans(out, row_spans);
+                    b.print_right(out, inline_spans_width(row_spans));
+                } else {
+                    out.print(ctx.indent);
+                    emit_inline_spans(out, row_spans);
+                }
+            });
             out.newline();
         }
         state.rows = state.rows.saturating_add(1);

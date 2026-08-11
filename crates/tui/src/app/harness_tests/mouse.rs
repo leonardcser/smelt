@@ -294,6 +294,33 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
 }
 
 #[test]
+fn transcript_drag_copy_preserves_bash_command_hard_newlines_only() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(52, 16);
+    app.start_turn(42);
+    let command = "printf 'first-logical-line alpha beta gamma delta epsilon zeta eta theta'\nprintf 'second-logical-line iota kappa lambda mu nu xi omicron pi'";
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id: protocol::InvocationId::new(1),
+        call_id: "wrapped-bash-copy".into(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::from([("command".into(), serde_json::json!(command))]),
+        called_at_ms: 0,
+    }));
+    app.render_silent();
+
+    let selected_rows = drag_transcript_text(&mut app, "printf", "pi'");
+    assert!(
+        selected_rows.clone().count() >= 3,
+        "command must span at least three visual rows"
+    );
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
+        Some(command)
+    );
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), command);
+}
+
+#[test]
 fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -304,7 +331,7 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
             content: format!("filler row {i:02}"),
         });
     }
-    let expected = "This paragraph includes markdown and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.";
+    let expected = "This paragraph includes **markdown** and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.";
     app
         .push_transcript_block(smelt_core::transcript_model::Block::Text {
             content: "This paragraph includes **markdown** and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.".into(),
@@ -364,9 +391,10 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
     }
 
     let copied = app.core_probe().clipboard.kill_ring.current();
+    assert_eq!(copied, expected);
     assert_eq!(
-        copied.split_whitespace().collect::<Vec<_>>().join(" "),
-        expected
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
+        Some(expected)
     );
     assert!(
         copied.contains("quote before beta"),

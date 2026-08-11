@@ -3777,9 +3777,7 @@ impl TranscriptProjection {
             return CopyOutput::default();
         }
 
-        let mut kill_ring = String::new();
-        let mut first_raw_row = true;
-        let mut clipboard = CopyRangeAccumulator::new(range.start.row, end_row);
+        let mut copied = CopyRangeAccumulator::new(range.start.row, end_row);
         let renderer_env = TranscriptRenderEnv::with_renderer(
             lua,
             self.measurements.active.renderer_generation,
@@ -3805,30 +3803,18 @@ impl TranscriptProjection {
                 start..end,
                 Some(chunk_start_row..chunk_end_row),
             );
-            append_copy_chunk(
-                &mut kill_ring,
-                &mut clipboard,
-                materialized,
-                range,
-                end_row,
-                &mut first_raw_row,
-            );
+            append_copy_chunk(&mut copied, materialized, range, end_row);
             start = end;
         }
-        CopyOutput {
-            kill_ring,
-            clipboard: clipboard.finish(),
-        }
+        CopyOutput::same(copied.finish())
     }
 }
 
 fn append_copy_chunk(
-    kill_ring: &mut String,
-    clipboard: &mut CopyRangeAccumulator,
+    copied: &mut CopyRangeAccumulator,
     materialized: MaterializedTranscriptRange,
     range: DocRange,
     end_row: RowIndex,
-    first_raw_row: &mut bool,
 ) {
     let row_count = materialized.texts.len();
     if row_count == 0 {
@@ -3870,12 +3856,6 @@ fn append_copy_chunk(
         } else {
             text.len()
         };
-        if !*first_raw_row {
-            kill_ring.push('\n');
-        }
-        kill_ring.push_str(smelt_buffer::text::slice(text, start_col..end_col));
-        *first_raw_row = false;
-
         let start_byte = smelt_buffer::text::snap(text, start_col.min(text.len()));
         let end_byte = smelt_buffer::text::snap(text, end_col.min(text.len()));
         let cell_start = smelt_buffer::text::byte_to_cell(text, start_byte);
@@ -3884,7 +3864,7 @@ fn append_copy_chunk(
         let Some(decoration) = decorations.get(local) else {
             continue;
         };
-        clipboard.push_row(
+        copied.push_row(
             abs_row,
             CopyRow {
                 text,
@@ -3934,24 +3914,18 @@ fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
     }
 }
 
-/// Yank transform for the transcript. `kill_ring` keeps the raw source bytes;
-/// `clipboard` walks the buffer's cells so `copy_as` substitutions, soft-wrap
-/// merging, and `source_text` row overrides are honored on external paste.
+/// Yank transform for the transcript. Both destinations use logical copy text
+/// so render-only wraps and non-selectable chrome never leak into a paste.
 pub(crate) struct TranscriptCopier;
 
 impl smelt_core::buffer::BufferCopy for TranscriptCopier {
     fn copy(
         &self,
         buf: &Buffer,
-        src: &str,
+        _src: &str,
         range: std::ops::Range<usize>,
     ) -> smelt_core::buffer::CopyOutput {
-        let raw = smelt_buffer::text::slice(src, range.start..range.end).to_string();
-        let clipboard = copy_byte_range(buf, range.start, range.end);
-        smelt_core::buffer::CopyOutput {
-            kill_ring: raw,
-            clipboard,
-        }
+        smelt_core::buffer::CopyOutput::same(copy_byte_range(buf, range.start, range.end))
     }
 }
 
@@ -3974,6 +3948,25 @@ pub(crate) mod tests {
 
     fn test_lua() -> smelt_core::lua::runtime::LuaRuntime {
         smelt_core::lua::runtime::LuaRuntime::new()
+    }
+
+    #[test]
+    fn transcript_copier_uses_logical_text_for_both_destinations() {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha ".into(), "beta".into(), "gamma".into()]);
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                soft_wrapped: true,
+                copy_continuation: true,
+                ..LineDecoration::default()
+            },
+        );
+        buf.set_copier(std::sync::Arc::new(TranscriptCopier));
+
+        let copied = buf.copy_range(0..buf.text().len());
+
+        assert_eq!(copied, CopyOutput::same("alpha beta\ngamma".into()));
     }
 
     fn register_terminal_tool_group(lua: &smelt_core::lua::runtime::LuaRuntime, min: usize) {

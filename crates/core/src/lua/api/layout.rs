@@ -43,6 +43,7 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
                 HboxItem {
                     constraint: Constraint::Fill(1),
                     layout: layout.0.clone(),
+                    copy_owner: false,
                 }
             }
             mlua::Value::Table(t) => {
@@ -51,6 +52,7 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
                 let cols: Option<u16> = t.get("cols").ok();
                 let fit: bool = t.get("fit").unwrap_or(false);
                 let weight: Option<u16> = t.get("weight").ok();
+                let copy_owner = t.get::<Option<bool>>("copy_owner")?.unwrap_or(false);
                 let constraint = if let Some(n) = cols {
                     Constraint::Length(n)
                 } else if fit {
@@ -58,16 +60,31 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
                 } else {
                     Constraint::Fill(weight.unwrap_or(1))
                 };
-                HboxItem { constraint, layout }
+                HboxItem {
+                    constraint,
+                    layout,
+                    copy_owner,
+                }
             }
             other => {
                 return Err(mlua::Error::external(format!(
-                    "smelt.layout.hbox: expected layout userdata or {{ layout, weight=N | cols=N | fit=true }} table, got {}",
+                    "smelt.layout.hbox: expected layout userdata or {{ layout, weight=N | cols=N | fit=true, copy_owner=bool }} table, got {}",
                     other.type_name()
                 )));
             }
         };
         out.push(item);
+    }
+    let owner_count = out.iter().filter(|item| item.copy_owner).count();
+    if owner_count > 1 {
+        return Err(mlua::Error::external(
+            "smelt.layout.hbox: only one item may set copy_owner=true",
+        ));
+    }
+    if owner_count == 0 {
+        if let Some(first) = out.first_mut() {
+            first.copy_owner = true;
+        }
     }
     Ok(out)
 }
@@ -453,7 +470,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "hbox",
-        "Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` / `{ layout, fit=true }` for a fixed, weighted, or renderer-defined intrinsic-width slot. `fit=true` uses unwrapped content width when available, capped by the parent; fixed and fit slots are allocated before fill slots.",
+        "Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` / `{ layout, fit=true }` for a fixed, weighted, or renderer-defined intrinsic-width slot. `fit=true` uses unwrapped content width when available, capped by the parent; fixed and fit slots are allocated before fill slots. The first item owns row-level copy metadata by default; set `copy_owner=true` on exactly one item when another column contains the primary copyable content.",
         &["items"],
         |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Hbox(collect_hbox_items(
@@ -462,4 +479,72 @@ pub(super) fn register(
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hbox_entry(lua: &Lua, copy_owner: Option<bool>) -> mlua::Table {
+        let entry = lua.create_table().expect("hbox entry");
+        entry
+            .set(
+                1,
+                lua.create_userdata(LuaBlockLayout(BlockLayout::Empty))
+                    .expect("layout userdata"),
+            )
+            .expect("entry layout");
+        if let Some(copy_owner) = copy_owner {
+            entry
+                .set("copy_owner", copy_owner)
+                .expect("copy_owner flag");
+        }
+        entry
+    }
+
+    #[test]
+    fn hbox_defaults_copy_owner_to_first_item() {
+        let lua = Lua::new();
+        let items = lua.create_table().expect("items");
+        items.set(1, hbox_entry(&lua, None)).expect("first item");
+        items.set(2, hbox_entry(&lua, None)).expect("second item");
+
+        let items = collect_hbox_items(items).expect("hbox items");
+
+        assert!(items[0].copy_owner);
+        assert!(!items[1].copy_owner);
+    }
+
+    #[test]
+    fn hbox_accepts_one_explicit_copy_owner() {
+        let lua = Lua::new();
+        let items = lua.create_table().expect("items");
+        items
+            .set(1, hbox_entry(&lua, Some(false)))
+            .expect("first item");
+        items
+            .set(2, hbox_entry(&lua, Some(true)))
+            .expect("second item");
+
+        let items = collect_hbox_items(items).expect("hbox items");
+
+        assert!(!items[0].copy_owner);
+        assert!(items[1].copy_owner);
+    }
+
+    #[test]
+    fn hbox_rejects_multiple_copy_owners() {
+        let lua = Lua::new();
+        let items = lua.create_table().expect("items");
+        items
+            .set(1, hbox_entry(&lua, Some(true)))
+            .expect("first item");
+        items
+            .set(2, hbox_entry(&lua, Some(true)))
+            .expect("second item");
+
+        let err = collect_hbox_items(items).expect_err("multiple owners must fail");
+
+        assert!(err.to_string().contains("only one item"));
+    }
 }

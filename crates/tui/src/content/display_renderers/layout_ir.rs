@@ -12,7 +12,9 @@ use smelt_core::content::block_layout::{
     solve_hbox_widths_with_fit, BlockLayout, CodeSpec, GutterSpec, IrLeaf, LayoutIr, LineSpec,
     MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
-use smelt_core::content::builder::{display_width, LineBuilder};
+use smelt_core::content::builder::{
+    display_width, wrapped_segments, LineBuilder, WrappedSegmentKind,
+};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
     emit_inline_spans, parse_inline_spans_with_options, render_code_block, wrap_inline_spans,
@@ -428,20 +430,17 @@ fn render_text_spec(
             ranges
         } else {
             let line_rows = count_plain_line_ranges(&expanded, width);
-            if line_rows > 1 {
-                out.mark_wrapped();
-            }
             if seen.saturating_add(line_rows) <= row_start {
+                if line_rows > 1 {
+                    out.mark_wrapped();
+                }
                 seen = seen.saturating_add(line_rows);
                 continue;
             }
             plain_ranges = wrap_plain_line_ranges(&expanded, width);
             &plain_ranges
         };
-        if ranges.len() > 1 {
-            out.mark_wrapped();
-        }
-        for &(ws, we) in ranges {
+        for segment in wrapped_segments(out, ranges) {
             if seen < row_start {
                 seen = seen.saturating_add(1);
                 continue;
@@ -449,22 +448,24 @@ fn render_text_spec(
             if rows >= row_count {
                 break 'outer;
             }
-            if let Some(gutter) = gutter.filter(|g| !g.styled) {
-                out.print_gutter(&gutter.text);
-            }
-            match hl {
-                Some(group) => out.push_hl(group),
-                None => out.push_dim(),
-            }
-            if let Some(gutter) = gutter.filter(|g| g.styled) {
-                out.print_gutter(&gutter.text);
-            }
-            if let Some((spans, _, boundaries)) = &ansi_wrapped {
-                emit_ansi_row(out, spans, boundaries, ws, we);
-            } else {
-                out.print(smelt_buffer::text::slice(&expanded, ws..we));
-            }
-            out.pop_style();
+            segment.emit(out, |out, &(ws, we), _| {
+                if let Some(gutter) = gutter.filter(|g| !g.styled) {
+                    out.print_gutter(&gutter.text);
+                }
+                match hl {
+                    Some(group) => out.push_hl(group),
+                    None => out.push_dim(),
+                }
+                if let Some(gutter) = gutter.filter(|g| g.styled) {
+                    out.print_gutter(&gutter.text);
+                }
+                if let Some((spans, _, boundaries)) = &ansi_wrapped {
+                    emit_ansi_row(out, spans, boundaries, ws, we);
+                } else {
+                    out.print(smelt_buffer::text::slice(&expanded, ws..we));
+                }
+                out.pop_style();
+            });
             out.newline();
             rows = rows.saturating_add(1);
             seen = seen.saturating_add(1);
@@ -540,10 +541,7 @@ fn render_runs_spec(
     let mut rows = 0u16;
     'outer: for spans in &spec.lines.0 {
         let wrapped = wrap_styled_runs(spans, width, continuation_indent);
-        if wrapped.len() > 1 {
-            out.mark_wrapped();
-        }
-        for (seg_idx, row_fragments) in wrapped.iter().enumerate() {
+        for segment in wrapped_segments(out, &wrapped) {
             if seen < row_start {
                 seen = seen.saturating_add(1);
                 continue;
@@ -551,24 +549,23 @@ fn render_runs_spec(
             if rows >= row_count {
                 break 'outer;
             }
-            if let Some(gutter) = gutter {
-                out.print_gutter(&gutter.text);
-            }
-            if seg_idx > 0 {
-                out.mark_soft_wrap_continuation();
-                if continuation_indent > 0 {
+            segment.emit(out, |out, row_fragments, kind| {
+                if let Some(gutter) = gutter {
+                    out.print_gutter(&gutter.text);
+                }
+                if kind.is_continuation() && continuation_indent > 0 {
                     out.print_with_meta(
                         &" ".repeat(continuation_indent as usize),
                         SpanMeta::unselectable(),
                     );
                 }
-            }
-            for fragment in row_fragments {
-                let Some(span) = spans.get(fragment.run_index) else {
-                    continue;
-                };
-                print_styled_span_range(out, span, default_hl, fragment.range.clone());
-            }
+                for fragment in row_fragments {
+                    let Some(span) = spans.get(fragment.run_index) else {
+                        continue;
+                    };
+                    print_styled_span_range(out, span, default_hl, fragment.range.clone());
+                }
+            });
             out.newline();
             rows = rows.saturating_add(1);
             seen = seen.saturating_add(1);
@@ -744,10 +741,7 @@ fn render_inline_markdown_spec(
     'outer: for line in spec.content.lines() {
         let spans = inline_markdown_spans(line, spec.dim, spec.italic, inline_options);
         let wrapped = wrap_inline_spans(&spans, max_cols);
-        if wrapped.len() > 1 {
-            out.mark_wrapped();
-        }
-        for row_spans in &wrapped {
+        for segment in wrapped_segments(out, &wrapped) {
             if seen < row_start {
                 seen = seen.saturating_add(1);
                 continue;
@@ -755,22 +749,24 @@ fn render_inline_markdown_spec(
             if rows >= row_count {
                 break 'outer;
             }
-            if let Some(gutter) = gutter {
-                if gutter.styled {
-                    out.save_style();
-                    if spec.dim {
-                        out.set_dim();
+            segment.emit(out, |out, row_spans, _| {
+                if let Some(gutter) = gutter {
+                    if gutter.styled {
+                        out.save_style();
+                        if spec.dim {
+                            out.set_dim();
+                        }
+                        if spec.italic {
+                            out.set_italic();
+                        }
+                        out.print_gutter(&gutter.text);
+                        out.pop_style();
+                    } else {
+                        out.print_gutter(&gutter.text);
                     }
-                    if spec.italic {
-                        out.set_italic();
-                    }
-                    out.print_gutter(&gutter.text);
-                    out.pop_style();
-                } else {
-                    out.print_gutter(&gutter.text);
                 }
-            }
-            emit_inline_spans(out, row_spans);
+                emit_inline_spans(out, row_spans);
+            });
             out.newline();
             rows = rows.saturating_add(1);
             seen = seen.saturating_add(1);
@@ -971,7 +967,7 @@ fn row_prefix_child_widths(spec: &RowPrefixSpec, width: u16) -> (u16, u16) {
 struct RowPrefixRunRow<'a> {
     spans: &'a [protocol::StyledSpan],
     fragments: Vec<WrappedRun<usize>>,
-    soft_wrap: bool,
+    segment_kind: WrappedSegmentKind,
 }
 
 fn row_prefix_runs_wrapped_rows(
@@ -991,7 +987,7 @@ fn row_prefix_runs_wrapped_rows(
             rows.push(RowPrefixRunRow {
                 spans: spans.as_slice(),
                 fragments,
-                soft_wrap: idx > 0,
+                segment_kind: WrappedSegmentKind::from_index(idx),
             });
         }
     }
@@ -1055,9 +1051,7 @@ fn render_row_prefix_runs(
             (&prefix.rest, rest_width)
         };
         print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
-        if row.soft_wrap {
-            out.mark_soft_wrap_continuation();
-        }
+        row.segment_kind.apply(out);
         for fragment in &row.fragments {
             let Some(span) = row.spans.get(fragment.run_index) else {
                 continue;
@@ -1852,6 +1846,7 @@ fn render_ir_hbox(
         .max()
         .unwrap_or(0);
     let end = row_start.saturating_add(row_count).min(total_rows);
+    let copy_owner = items.iter().position(|item| item.copy_owner).unwrap_or(0);
     let mut written = 0u16;
     let theme = out.theme().clone();
     for row in row_start..end {
@@ -1867,7 +1862,7 @@ fn render_ir_hbox(
                 smelt_core::buffer::BufId(idx as u64 + 1),
                 Default::default(),
             );
-            {
+            let outcome = {
                 let mut col = LineBuilder::new(&mut buf, &theme, col_w);
                 render_layout_ir_range(
                     &mut col,
@@ -1879,7 +1874,13 @@ fn render_ir_hbox(
                     history,
                     inline_options,
                 );
-                col.finish();
+                col.finish()
+            };
+            if outcome.was_wrapped {
+                out.mark_wrapped();
+            }
+            if idx == copy_owner && outcome.line_count > 0 {
+                apply_temp_decoration(out, &buf, 0, false);
             }
             let emitted = emit_buffer_row_clipped(&buf, 0, col_w, out, None);
             if emitted < col_w {
@@ -1918,11 +1919,11 @@ mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
     use smelt_core::content::block_layout::{
-        CapKeep, CapMarker, CapSpec, GutterSpec, LayoutLeaf, LineSpec, MarkdownSpec, RowPrefixSpec,
-        TextSpec,
+        CapKeep, CapMarker, CapSpec, Constraint, GutterSpec, HboxItem, LayoutLeaf, LineSpec,
+        MarkdownSpec, RowPrefixSpec, TextSpec,
     };
 
-    fn render_lines(layout: &LayoutIr, width: u16) -> Vec<String> {
+    fn render_buffer(layout: &LayoutIr, width: u16) -> Buffer {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         {
@@ -1930,9 +1931,17 @@ mod tests {
             render_layout_ir_into(&mut out, layout, width);
             out.finish();
         }
-        (0..buf.line_count())
-            .filter_map(|row| buf.get_line(row).map(str::to_string))
-            .collect()
+        buf
+    }
+
+    fn render_lines(layout: &LayoutIr, width: u16) -> Vec<String> {
+        render_buffer(layout, width).lines().to_vec()
+    }
+
+    fn copy_rendered_text(layout: &LayoutIr, width: u16) -> String {
+        let buf = render_buffer(layout, width);
+        let text = buf.text();
+        smelt_buffer::coords::copy_byte_range(&buf, 0, text.len())
     }
 
     #[test]
@@ -2143,6 +2152,76 @@ mod tests {
             render_lines(&layout, 80),
             vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaa界界x"]
         );
+    }
+
+    #[test]
+    fn text_copy_omits_soft_wraps_and_preserves_source_newlines() {
+        let source = "alpha beta gamma delta\nsecond logical line";
+        let layout = BlockLayout::Leaf(LayoutLeaf::Text(TextSpec {
+            content: source.into(),
+            hl_group: None,
+            ansi: false,
+        }));
+
+        assert!(render_lines(&layout, 10).len() > 2);
+        assert_eq!(copy_rendered_text(&layout, 10), source);
+    }
+
+    #[test]
+    fn inline_markdown_copy_omits_soft_wraps_and_preserves_source_newlines() {
+        let layout = BlockLayout::Leaf(LayoutLeaf::Markdown(MarkdownSpec {
+            content: "alpha **beta** gamma delta\nsecond *logical* line".into(),
+            dim: false,
+            italic: false,
+            inline: true,
+        }));
+
+        assert!(render_lines(&layout, 10).len() > 2);
+        assert_eq!(
+            copy_rendered_text(&layout, 10),
+            "alpha beta gamma delta\nsecond logical line"
+        );
+    }
+
+    #[test]
+    fn hbox_copy_preserves_owner_soft_wraps() {
+        let source = "alpha beta gamma delta\nsecond logical line";
+        let layout = BlockLayout::Hbox(vec![
+            HboxItem {
+                constraint: Constraint::Length(4),
+                layout: BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                    spans: vec![protocol::StyledSpan {
+                        text: "time".into(),
+                        selectable: false,
+                        ..Default::default()
+                    }],
+                    hl_group: None,
+                })),
+                copy_owner: false,
+            },
+            HboxItem {
+                constraint: Constraint::Fill(1),
+                layout: BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                    lines: protocol::StyledLines(
+                        source
+                            .lines()
+                            .map(|line| {
+                                vec![protocol::StyledSpan {
+                                    text: line.into(),
+                                    ..Default::default()
+                                }]
+                            })
+                            .collect(),
+                    ),
+                    hl_group: None,
+                    continuation_indent: 0,
+                })),
+                copy_owner: true,
+            },
+        ]);
+
+        assert!(render_lines(&layout, 16).len() > 2);
+        assert_eq!(copy_rendered_text(&layout, 16), source);
     }
 
     #[test]
