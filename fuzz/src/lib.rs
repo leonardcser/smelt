@@ -1129,11 +1129,11 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
                         call_id: format!("synth-call-{i:02}"),
                         name: "synth".to_string(),
                         arguments: "{}".to_string(),
-                        result: ToolOutcome {
-                            content: format!("synth-result-{i}"),
-                            is_error: false,
-                            metadata: None,
-                        },
+                        result: ToolOutcome::new(
+                            format!("synth-result-{i}"),
+                            false,
+                            None,
+                        ),
                         elapsed_ms: None,
                         called_at_ms: Some(i as u64),
                     };
@@ -1903,11 +1903,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let ev = SourceEvent::engine(EngineEvent::ToolFinished {
                 invocation_id,
                 call_id: cid,
-                result: ToolOutcome {
-                    content,
-                    is_error,
-                    metadata: None,
-                },
+                result: ToolOutcome::new(content, is_error, None),
                 elapsed_ms: Some(0),
             });
             (Some(ev), PostCheck::ToolFinished { invocation_id })

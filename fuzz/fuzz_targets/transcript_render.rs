@@ -109,11 +109,7 @@ fn run_with_app(input: Input) {
                 app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
                     invocation_id: protocol::InvocationId::new(u64::from(id)),
                     call_id: call_id(id),
-                    result: protocol::ToolOutcome {
-                        content: text,
-                        is_error,
-                        metadata: None,
-                    },
+                    result: protocol::ToolOutcome::new(text, is_error, None),
                     elapsed_ms: None,
                 }))
             }
@@ -179,11 +175,7 @@ fn known_tool_round_trip(app: &mut TestApp, id: u8, kind: u8, is_error: bool) {
     app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         invocation_id,
         call_id,
-        result: protocol::ToolOutcome {
-            content,
-            is_error,
-            metadata,
-        },
+        result: protocol::ToolOutcome::new(content, is_error, metadata),
         elapsed_ms: Some(123),
     }));
 }

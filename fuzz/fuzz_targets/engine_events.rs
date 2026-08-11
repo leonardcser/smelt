@@ -458,11 +458,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                 EngineEvent::ToolFinished {
                     invocation_id,
                     call_id: call_id.clone(),
-                    result: ToolOutcome {
-                        content: small_text(output),
-                        is_error,
-                        metadata: None,
-                    },
+                    result: ToolOutcome::new(small_text(output), is_error, None),
                     elapsed_ms: Some(model.sequence),
                 },
             );
@@ -484,11 +480,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     tool_name: name,
                     args: HashMap::new(),
                     summary: protocol::style::StyledLines::from_plain(message.clone()),
-                    result: ToolOutcome {
-                        content: message,
-                        is_error,
-                        metadata: None,
-                    },
+                    result: ToolOutcome::new(message, is_error, None),
                     elapsed_ms: Some(model.sequence),
                     called_at_ms: model.sequence,
                 },
