@@ -16,7 +16,7 @@ use smelt_provider::{
     ChatRequestOptions, ChatResponse, FunctionSchema, ProviderError, ProviderStreamEvent,
     ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat, ToolCallStreamEvent, ToolDefinition,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -885,6 +885,72 @@ struct PendingToolCall {
     is_sequential: bool,
 }
 
+// A provider can evade call-ID replay detection by issuing fresh IDs forever.
+const MAX_TOOL_ROUNDS_PER_TURN: usize = 64;
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolLoopViolation {
+    ReplayedCall { call_id: String },
+    RoundLimit { limit: usize },
+}
+
+impl ToolLoopViolation {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::ReplayedCall { .. } => "replayed_tool_call",
+            Self::RoundLimit { .. } => "tool_round_limit",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::ReplayedCall { call_id } => format!(
+                "Provider repeated tool call ID `{call_id}`. Stopped to prevent duplicate execution."
+            ),
+            Self::RoundLimit { limit } => format!(
+                "Stopped after {limit} tool rounds in one turn. Start a new turn to continue."
+            ),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ToolLoopGuard {
+    completed_call_ids: HashSet<String>,
+    rounds: usize,
+}
+
+impl ToolLoopGuard {
+    fn begin_round(&mut self, calls: &[protocol::ToolCall]) -> Result<(), ToolLoopViolation> {
+        let mut round_call_ids = HashSet::with_capacity(calls.len());
+        for call in calls {
+            if self.completed_call_ids.contains(&call.id)
+                || !round_call_ids.insert(call.id.as_str())
+            {
+                return Err(ToolLoopViolation::ReplayedCall {
+                    call_id: call.id.clone(),
+                });
+            }
+        }
+
+        if calls.is_empty() {
+            return Ok(());
+        }
+        if self.rounds >= MAX_TOOL_ROUNDS_PER_TURN {
+            return Err(ToolLoopViolation::RoundLimit {
+                limit: MAX_TOOL_ROUNDS_PER_TURN,
+            });
+        }
+        self.rounds += 1;
+        Ok(())
+    }
+
+    fn finish_round(&mut self, calls: &[protocol::ToolCall]) {
+        self.completed_call_ids
+            .extend(calls.iter().map(|call| call.id.clone()));
+    }
+}
+
 struct Turn<'a> {
     provider: EngineProvider,
     dispatcher: &'a dyn ToolDispatcher,
@@ -1502,6 +1568,7 @@ impl<'a> Turn<'a> {
 
         let mut first = true;
         let mut empty_retries: u8 = 0;
+        let mut tool_loop_guard = ToolLoopGuard::default();
         const MAX_EMPTY_RETRIES: u8 = 2;
 
         loop {
@@ -1815,6 +1882,25 @@ impl<'a> Turn<'a> {
             let post_hook_reasoning_blocks = hooked.reasoning_details.unwrap_or_default();
             let dispatched_calls = hooked.tool_calls.unwrap_or_default();
 
+            if let Err(violation) = tool_loop_guard.begin_round(&dispatched_calls) {
+                let message = violation.message();
+                log::entry(
+                    log::Level::Warn,
+                    "agent_stop",
+                    &serde_json::json!({
+                        "reason": violation.reason(),
+                        "error": &message,
+                    }),
+                );
+                self.emit(EngineEvent::TurnError {
+                    message,
+                    kind: None,
+                    retry_at_ms: None,
+                });
+                self.emit_turn_complete(false);
+                return;
+            }
+
             let mut plan = self.classify_tools(&dispatched_calls);
             let mut completed: Vec<Option<ToolResult>> =
                 (0..plan.slots.len()).map(|_| None).collect();
@@ -1849,6 +1935,7 @@ impl<'a> Turn<'a> {
                 post_hook_reasoning_blocks,
                 invocations,
             ));
+            tool_loop_guard.finish_round(&dispatched_calls);
             self.emit_history_appended_from(first_index);
             if !cancelled {
                 self.apply_deferred_turn_cmds(deferred_turn_cmds);
@@ -3381,6 +3468,52 @@ mod tests {
                 arguments: "{}".into(),
             },
         )
+    }
+
+    #[test]
+    fn tool_loop_guard_rejects_completed_call_ids() {
+        let calls = vec![tc("call-1")];
+        let mut guard = ToolLoopGuard::default();
+
+        guard.begin_round(&calls).unwrap();
+        guard.finish_round(&calls);
+
+        assert_eq!(
+            guard.begin_round(&calls),
+            Err(ToolLoopViolation::ReplayedCall {
+                call_id: "call-1".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_loop_guard_rejects_duplicate_ids_before_execution() {
+        let calls = vec![tc("call-1"), tc("call-1")];
+        let mut guard = ToolLoopGuard::default();
+
+        assert_eq!(
+            guard.begin_round(&calls),
+            Err(ToolLoopViolation::ReplayedCall {
+                call_id: "call-1".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_loop_guard_bounds_rounds_with_fresh_ids() {
+        let mut guard = ToolLoopGuard::default();
+        for index in 0..MAX_TOOL_ROUNDS_PER_TURN {
+            let calls = vec![tc(&format!("call-{index}"))];
+            guard.begin_round(&calls).unwrap();
+            guard.finish_round(&calls);
+        }
+
+        assert_eq!(
+            guard.begin_round(&[tc("one-too-many")]),
+            Err(ToolLoopViolation::RoundLimit {
+                limit: MAX_TOOL_ROUNDS_PER_TURN,
+            })
+        );
     }
 
     fn classified_call(tc: &protocol::ToolCall, called_at_ms: u64) -> ClassifiedToolCall<'_> {
