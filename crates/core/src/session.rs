@@ -357,6 +357,13 @@ impl<T: Clone> HistorySnapshots<T> {
     }
 }
 
+#[derive(Debug, Default)]
+struct SessionSideTableState {
+    turn_metas: HistorySnapshots<TurnMeta>,
+    metadata_snapshots: HistorySnapshots<SessionMetadataSnapshot>,
+    context_snapshots: HistorySnapshots<ContextSnapshot>,
+}
+
 impl<'a, T> IntoIterator for &'a HistorySnapshots<T> {
     type Item = &'a (usize, T);
     type IntoIter = std::slice::Iter<'a, (usize, T)>;
@@ -789,23 +796,21 @@ impl Session {
 
     pub fn snapshot_context_at(&mut self, hist_idx: usize) {
         let snapshot = ContextSnapshot::from_session(self);
-        self.context_snapshots.push((hist_idx, snapshot));
+        self.context_snapshots
+            .upsert_truncating_after(hist_idx, snapshot);
     }
 
     pub fn finish_turn_state(
         &mut self,
         history_len: usize,
         meta: TurnMeta,
-        snapshot_context: bool,
         update_context_token_history_len: bool,
     ) {
-        self.turn_metas.push((history_len, meta));
-        if snapshot_context {
-            if update_context_token_history_len && self.context_tokens.is_some() {
-                self.context_tokens_history_len = Some(history_len);
-            }
-            self.snapshot_context_at(history_len);
+        self.turn_metas.upsert_truncating_after(history_len, meta);
+        if update_context_token_history_len && self.context_tokens.is_some() {
+            self.context_tokens_history_len = Some(history_len);
         }
+        self.snapshot_context_at(history_len);
     }
 
     pub fn snapshot_metadata_at(&mut self, hist_idx: usize) {
@@ -1385,6 +1390,7 @@ pub struct SessionHeader {
 #[derive(Clone, Debug)]
 pub struct SessionStoreResume {
     pub header: SessionHeader,
+    pub session: Session,
     pub store_ref: SessionStoreRef,
     pub head: smelt_store::StoreHead,
     pub transcript_record_tail: smelt_store::TranscriptRecordSlice,
@@ -1856,33 +1862,37 @@ impl SessionStorage {
             .map_err(|error| {
                 crate::session_store::store_error("read lineage transcript", &dir, error)
             })?;
-        session_from_full_store(smelt_store::FullSession {
-            session: smelt_store::StoredSession {
-                identity: state.identity,
-                metadata: state.metadata,
-                head: state.head,
+        session_from_full_store(
+            &dir,
+            state.history_text_bytes,
+            smelt_store::FullSession {
+                session: smelt_store::StoredSession {
+                    identity: state.identity,
+                    metadata: state.metadata,
+                    head: state.head,
+                },
+                history,
+                turn_metas: state
+                    .side_tables
+                    .turn_metas
+                    .into_iter()
+                    .map(|(index, value)| (index.get(), value))
+                    .collect(),
+                metadata_snapshots: state
+                    .side_tables
+                    .metadata_snapshots
+                    .into_iter()
+                    .map(|(index, value)| (index.get(), value))
+                    .collect(),
+                context_snapshots: state
+                    .side_tables
+                    .context_snapshots
+                    .into_iter()
+                    .map(|(index, value)| (index.get(), value))
+                    .collect(),
+                transcript_records,
             },
-            history,
-            turn_metas: state
-                .side_tables
-                .turn_metas
-                .into_iter()
-                .map(|(index, value)| (index.get(), value))
-                .collect(),
-            metadata_snapshots: state
-                .side_tables
-                .metadata_snapshots
-                .into_iter()
-                .map(|(index, value)| (index.get(), value))
-                .collect(),
-            context_snapshots: state
-                .side_tables
-                .context_snapshots
-                .into_iter()
-                .map(|(index, value)| (index.get(), value))
-                .collect(),
-            transcript_records,
-        })
+        )
         .map(Some)
     }
 
@@ -2103,8 +2113,14 @@ fn load_lineage_resume_from_resolved(
         })?;
     let head = snapshot.head;
     let (header, store_ref) = lineage_header_from_snapshot(&resolved, root, &snapshot)?;
+    let session = session_from_store_state(
+        header.meta.clone(),
+        session_side_table_state_from_store(snapshot.side_tables)?,
+        &snapshot.metadata,
+    );
     Ok(SessionStoreResume {
         header,
+        session,
         store_ref,
         head,
         transcript_record_tail,
@@ -2156,92 +2172,160 @@ pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
     load_meta_for_dir_result(dir).ok().flatten()
 }
 
-fn session_from_full_store(snapshot: smelt_store::FullSession) -> SessionStoreResult<Session> {
-    let identity = snapshot.session.identity;
-    let metadata = snapshot.session.metadata;
-    crate::session_id::SessionId::parse(&identity.id).map_err(|err| {
-        SessionStoreError::Corrupt {
-            context: format!("invalid persisted session id: {err}"),
-        }
-    })?;
-    let turn_metas =
-        snapshots_from_values(snapshot.turn_metas).map_err(|err| SessionStoreError::Corrupt {
-            context: format!("invalid turn metadata: {err}"),
-        })?;
-    let metadata_snapshots = snapshots_from_values(snapshot.metadata_snapshots).map_err(|err| {
-        SessionStoreError::Corrupt {
-            context: format!("invalid metadata snapshot: {err}"),
-        }
-    })?;
-    let context_snapshots = snapshots_from_values(snapshot.context_snapshots).map_err(|err| {
-        SessionStoreError::Corrupt {
-            context: format!("invalid accounting snapshot: {err}"),
-        }
-    })?;
-    let context_state = context_snapshot_state_from_json(metadata.accounting_json.clone());
-    let session_usage = context_state.session_usage.clone();
-    let context_token_identity = context_state.context_token_identity;
-    let display_context_token_identity = context_state
-        .display_context_token_identity
-        .or_else(|| context_token_identity.clone());
-    let checkpoint = checkpoint_from_json(metadata.checkpoint_json.clone(), snapshot.history.len());
-    let checkpoint_events = checkpoint_events_from_json(
-        metadata.checkpoint_events_json.clone(),
-        snapshot.history.len(),
-    );
-    let context_tokens = metadata
-        .context_tokens
-        .and_then(|tokens| u32::try_from(tokens).ok());
-    let created_at_ms =
-        u64::try_from(identity.created_at).map_err(|_| SessionStoreError::Corrupt {
-            context: "negative session creation time".into(),
-        })?;
-    let updated_at_ms =
-        u64::try_from(metadata.updated_at).map_err(|_| SessionStoreError::Corrupt {
-            context: "negative session update time".into(),
-        })?;
-    Ok(Session {
-        id: identity.id,
-        title: metadata.title,
-        slug: metadata.slug,
-        first_user_message: metadata.first_user_message,
+fn session_from_store_state(
+    meta: SessionMeta,
+    side_tables: SessionSideTableState,
+    metadata: &smelt_store::SessionMetadata,
+) -> Session {
+    let session_cost_usd = metadata.session_cost_usd.get();
+    let session_usage =
+        context_snapshot_state_from_json(metadata.accounting_json.clone()).session_usage;
+    let SessionMeta {
+        id,
+        title,
+        slug,
+        first_user_message,
+        created_at_ms,
+        updated_at_ms,
+        mode,
+        reasoning_effort,
+        model,
+        fast_mode,
+        cwd,
+        parent_id,
+        authoritative_context_tokens,
+        display_context_tokens,
+        history_len: _,
+        checkpoint,
+        checkpoint_events,
+        text_bytes: _,
+    } = meta;
+    let SessionSideTableState {
+        turn_metas,
+        metadata_snapshots,
+        context_snapshots,
+    } = side_tables;
+    let (context_tokens, context_tokens_history_len, context_token_identity) =
+        match authoritative_context_tokens {
+            Some(context) => (
+                Some(context.tokens),
+                Some(context.history_len),
+                Some(context.identity),
+            ),
+            None => (None, None, None),
+        };
+    let (display_context_tokens, display_context_token_identity) = match display_context_tokens {
+        Some(context) => (Some(context.tokens), context.identity),
+        None => (None, None),
+    };
+
+    Session {
+        id,
+        title,
+        slug,
+        first_user_message,
         metadata_snapshots,
         created_at_ms,
         updated_at_ms,
-        mode: metadata.mode,
-        reasoning_effort: metadata
-            .reasoning_effort
-            .as_deref()
-            .and_then(ReasoningEffort::parse),
-        model: metadata.model,
-        fast_mode: metadata.fast_mode,
-        cwd: metadata.cwd,
-        parent_id: identity.parent_id,
-        history: snapshot.history,
+        mode,
+        reasoning_effort,
+        model,
+        fast_mode,
+        cwd,
+        parent_id,
+        history: Vec::new(),
         checkpoint,
         checkpoint_events,
         context_tokens,
-        context_tokens_history_len: metadata
-            .context_tokens_history_len
-            .and_then(|len| usize::try_from(len).ok()),
+        context_tokens_history_len,
         context_token_identity,
-        display_context_tokens: metadata
-            .display_context_tokens
-            .and_then(|tokens| u32::try_from(tokens).ok())
-            .or(context_tokens),
+        display_context_tokens,
         display_context_token_identity,
         turn_metas,
         context_snapshots,
-        session_cost_usd: metadata.session_cost_usd.get(),
+        session_cost_usd,
         session_usage,
+    }
+}
+
+fn session_from_full_store(
+    path: &Path,
+    text_bytes: u64,
+    snapshot: smelt_store::FullSession,
+) -> SessionStoreResult<Session> {
+    let smelt_store::FullSession {
+        session: stored,
+        history,
+        turn_metas,
+        metadata_snapshots,
+        context_snapshots,
+        transcript_records: _,
+    } = snapshot;
+    let metadata = stored.metadata.clone();
+    let meta = session_meta_from_stored_session(path, stored, text_bytes, history.len())?;
+    let side_tables =
+        session_side_table_state_from_values(turn_metas, metadata_snapshots, context_snapshots)?;
+    let mut session = session_from_store_state(meta, side_tables, &metadata);
+    session.history = history;
+    Ok(session)
+}
+
+fn session_side_table_state_from_store(
+    side_tables: smelt_store::SideTableSuffixes,
+) -> SessionStoreResult<SessionSideTableState> {
+    session_side_table_state_from_values(
+        side_tables
+            .turn_metas
+            .into_iter()
+            .map(|(index, value)| (index.get(), value))
+            .collect(),
+        side_tables
+            .metadata_snapshots
+            .into_iter()
+            .map(|(index, value)| (index.get(), value))
+            .collect(),
+        side_tables
+            .context_snapshots
+            .into_iter()
+            .map(|(index, value)| (index.get(), value))
+            .collect(),
+    )
+}
+
+fn session_side_table_state_from_values(
+    turn_metas: Vec<(u64, Value)>,
+    metadata_snapshots: Vec<(u64, Value)>,
+    context_snapshots: Vec<(u64, Value)>,
+) -> SessionStoreResult<SessionSideTableState> {
+    Ok(SessionSideTableState {
+        turn_metas: snapshots_from_values(turn_metas).map_err(|err| {
+            SessionStoreError::Corrupt {
+                context: format!("invalid turn metadata: {err}"),
+            }
+        })?,
+        metadata_snapshots: snapshots_from_values(metadata_snapshots).map_err(|err| {
+            SessionStoreError::Corrupt {
+                context: format!("invalid metadata snapshot: {err}"),
+            }
+        })?,
+        context_snapshots: snapshots_from_values(context_snapshots).map_err(|err| {
+            SessionStoreError::Corrupt {
+                context: format!("invalid context snapshot: {err}"),
+            }
+        })?,
     })
 }
 
 fn snapshots_from_values<T: for<'de> Deserialize<'de>>(
     rows: Vec<(u64, Value)>,
-) -> Result<HistorySnapshots<T>, serde_json::Error> {
+) -> Result<HistorySnapshots<T>, String> {
     rows.into_iter()
-        .map(|(idx, value)| serde_json::from_value(value).map(|value| (idx as usize, value)))
+        .map(|(index, value)| {
+            let index = usize::try_from(index)
+                .map_err(|_| "history snapshot index exceeds platform limits".to_string())?;
+            let value = serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok((index, value))
+        })
         .collect::<Result<Vec<_>, _>>()
         .map(HistorySnapshots::from_vec)
 }
@@ -2985,6 +3069,63 @@ mod tests {
     }
 
     #[test]
+    fn store_resume_and_full_load_share_complete_session_hydration() {
+        let state = tempfile::tempdir().expect("state dir");
+        let storage = SessionStorage::new(state.path().to_path_buf());
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.id = TEST_SESSION_ID.into();
+        session.title = Some("Title".into());
+        session.slug = Some("title".into());
+        session.first_user_message = Some("hello".into());
+        session.history = vec![user_item("hello"), assistant_text_item("reply")];
+        session.record_context_tokens(42, 2, test_context_identity());
+        session.session_cost_usd = 1.25;
+        session.session_usage.prompt_tokens = Some(30);
+        session.session_usage.completion_tokens = Some(10);
+        session.snapshot_metadata_at(2);
+        session.finish_turn_state(
+            2,
+            TurnMeta {
+                elapsed_ms: 10,
+                avg_tps: Some(2.0),
+                display_tps: Some(2.0),
+                interrupted: false,
+            },
+            false,
+        );
+        storage.save_result(&session).expect("save session");
+
+        let resumed = storage
+            .load_store_resume_result(TEST_SESSION_ID, 80, 24)
+            .expect("load resume state")
+            .expect("saved session exists")
+            .session;
+        let full = storage
+            .load_full_result(TEST_SESSION_ID)
+            .expect("load full state")
+            .expect("saved session exists");
+
+        assert!(resumed.history.is_empty());
+        assert_eq!(full.history, session.history);
+        assert_eq!(resumed.title, full.title);
+        assert_eq!(resumed.context_tokens, full.context_tokens);
+        assert_eq!(
+            resumed.context_tokens_history_len,
+            full.context_tokens_history_len
+        );
+        assert_eq!(resumed.context_token_identity, full.context_token_identity);
+        assert_eq!(resumed.turn_metas, full.turn_metas);
+        assert_eq!(resumed.metadata_snapshots, full.metadata_snapshots);
+        assert_eq!(resumed.context_snapshots, full.context_snapshots);
+        assert_eq!(resumed.session_cost_usd, full.session_cost_usd);
+        assert_eq!(resumed.session_usage, full.session_usage);
+        assert_eq!(resumed.session_cost_usd, 1.25);
+        assert_eq!(resumed.session_usage.prompt_tokens, Some(30));
+        assert_eq!(resumed.session_usage.completion_tokens, Some(10));
+        assert_eq!(resumed.context_snapshots.len(), 1);
+    }
+
+    #[test]
     fn finish_turn_state_records_turn_meta_and_rewindable_context() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![user_item("hello")];
@@ -2996,7 +3137,7 @@ mod tests {
             interrupted: true,
         };
 
-        session.finish_turn_state(7, meta, true, true);
+        session.finish_turn_state(7, meta, true);
 
         assert_eq!(session.turn_metas.len(), 1);
         assert_eq!(session.turn_metas[0].0, 7);
@@ -3014,7 +3155,10 @@ mod tests {
             display_tps: Some(2.0),
             interrupted: false,
         };
-        session.finish_turn_state(session.history.len(), meta.clone(), false, false);
+        session.finish_turn_state(session.history.len(), meta.clone(), false);
+        assert_eq!(session.context_snapshots.len(), 1);
+        assert_eq!(session.context_snapshots[0].0, session.history.len());
+        assert_eq!(session.context_snapshots[0].1.context_tokens, None);
 
         let suffix = store_side_table_suffixes_from_session(&session, session.history.len())
             .expect("serialize final-boundary turn metadata");

@@ -2773,23 +2773,25 @@ mod checkpoint_tests {
         let loaded_transcript =
             load_transcript_tail_from_sqlite_id(&app.app.core.sessions, &id, 80, 24)
                 .expect("display-only transcript tail should load");
-        let (header, store_ref) = app
+        let smelt_core::session::SessionStoreResume {
+            header,
+            session,
+            store_ref,
+            head,
+            ..
+        } = app
             .app
             .core
             .sessions
-            .load_store_header(&id)
-            .expect("stored session header should load");
-        let store_head = lineage_reader(&app, &id)
-            .snapshot()
-            .expect("stored lineage state should load")
-            .head;
+            .load_store_resume_result(&id, 80, 24)
+            .expect("stored session resume should load")
+            .expect("stored session should exist");
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
+            session,
             store_ref,
-            store_head,
+            head,
             loaded_transcript,
-            app.app.core.env.pid(),
-            app.app.core.env.cwd(),
         );
 
         app.app

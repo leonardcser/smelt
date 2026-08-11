@@ -128,12 +128,8 @@ impl TurnLifecycle {
         self.context_tokens_updated = false;
     }
 
-    pub(crate) fn take_context_tokens_updated(&mut self, enabled: bool) -> bool {
-        let updated = enabled && self.context_tokens_updated;
-        if updated {
-            self.context_tokens_updated = false;
-        }
-        updated
+    pub(crate) fn take_context_tokens_updated(&mut self) -> bool {
+        std::mem::take(&mut self.context_tokens_updated)
     }
 
     pub(crate) fn pending_history_appends(&self) -> &[PendingHistoryAppend] {
@@ -1043,16 +1039,9 @@ impl TuiApp {
             meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
         }
         let history_len = self.session_history_len();
-        let snapshot_context = !self.session_is_read_only();
-        let update_context_token_history_len = self
-            .conversation
-            .take_context_tokens_updated(snapshot_context);
-        self.conversation.finish_turn_state(
-            history_len,
-            meta,
-            snapshot_context,
-            update_context_token_history_len,
-        );
+        let update_context_token_history_len = self.conversation.take_context_tokens_updated();
+        self.conversation
+            .finish_turn_state(history_len, meta, update_context_token_history_len);
     }
 
     fn cancel_turn_lua_tasks(&mut self) {

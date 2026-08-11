@@ -839,13 +839,11 @@ impl ConversationRuntime {
         &mut self,
         history_len: usize,
         meta: protocol::TurnMeta,
-        snapshot_context: bool,
         update_context_token_history_len: bool,
     ) -> bool {
         self.apply_turn_state_mutation(super::session_document::TurnStateMutation::Finish {
             history_len,
             meta,
-            snapshot_context,
             update_context_token_history_len,
         })
         .applied
@@ -1306,8 +1304,8 @@ impl ConversationRuntime {
         self.turn.mark_context_tokens_updated();
     }
 
-    pub(crate) fn take_context_tokens_updated(&mut self, enabled: bool) -> bool {
-        self.turn.take_context_tokens_updated(enabled)
+    pub(crate) fn take_context_tokens_updated(&mut self) -> bool {
+        self.turn.take_context_tokens_updated()
     }
 
     pub(crate) fn begin_dispatch(&mut self) -> Option<super::agent::DispatchingTurn> {

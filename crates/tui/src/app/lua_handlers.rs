@@ -947,6 +947,7 @@ impl TuiApp {
             };
         let smelt_core::session::SessionStoreResume {
             header,
+            session,
             store_ref,
             head,
             transcript_record_tail: record_tail,
@@ -984,12 +985,7 @@ impl TuiApp {
                 }
             };
         let document = crate::app::session_document::SessionDocument::from_store(
-            header,
-            store_ref,
-            head,
-            transcript,
-            self.core.env.pid(),
-            self.core.env.cwd(),
+            header, session, store_ref, head, transcript,
         );
         let mut document = document.into_store_backed();
         if repair_records {

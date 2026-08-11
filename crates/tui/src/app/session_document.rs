@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use protocol::{HistoryItem, ReasoningEffort, TokenUsage, TurnMeta};
 use smelt_core::content::stream_parser::{StreamParser, ToolDraftUpdate, ToolStart};
 use smelt_core::session::{
-    ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionMeta, SessionStoreRef,
+    ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionStoreRef,
 };
 use smelt_core::session_runtime::LiveSession;
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
@@ -770,7 +770,6 @@ pub(crate) enum TurnStateMutation {
     Finish {
         history_len: usize,
         meta: TurnMeta,
-        snapshot_context: bool,
         update_context_token_history_len: bool,
     },
     InstallCheckpoint {
@@ -871,13 +870,11 @@ impl SessionDocument {
 
     pub(crate) fn from_store(
         header: SessionHeader,
+        session: Session,
         store_ref: SessionStoreRef,
         store_head: smelt_store::StoreHead,
         transcript: crate::app::transcript::LoadedTranscript,
-        pid: u32,
-        cwd: std::path::PathBuf,
     ) -> Self {
-        let session = session_from_meta(header.meta.clone(), pid, cwd);
         let live_session = smelt_core::session_runtime::LiveSession::from_store(header, store_ref);
         Self {
             session,
@@ -1163,18 +1160,12 @@ impl SessionDocument {
             TurnStateMutation::Finish {
                 history_len,
                 meta,
-                snapshot_context,
                 update_context_token_history_len,
             } => {
                 let before_turn_metas = session.turn_metas.clone();
                 let before_context_snapshots = session.context_snapshots.clone();
                 let before_context_tokens_history_len = session.context_tokens_history_len;
-                session.finish_turn_state(
-                    history_len,
-                    meta,
-                    snapshot_context,
-                    update_context_token_history_len,
-                );
+                session.finish_turn_state(history_len, meta, update_context_token_history_len);
                 let changed = session.turn_metas != before_turn_metas
                     || session.context_snapshots != before_context_snapshots
                     || session.context_tokens_history_len != before_context_tokens_history_len;
@@ -1511,40 +1502,12 @@ fn history_suffix_contains_matching_record_origin(
         })
 }
 
-fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Session {
-    let mut session = Session::new(pid, cwd);
-    session.id = meta.id;
-    session.title = meta.title;
-    session.slug = meta.slug;
-    session.first_user_message = meta.first_user_message;
-    session.created_at_ms = meta.created_at_ms;
-    session.updated_at_ms = meta.updated_at_ms;
-    session.mode = meta.mode;
-    session.reasoning_effort = meta.reasoning_effort;
-    session.model = meta.model;
-    session.fast_mode = meta.fast_mode;
-    session.cwd = meta.cwd;
-    session.parent_id = meta.parent_id;
-    session.checkpoint = meta.checkpoint;
-    session.checkpoint_events = meta.checkpoint_events;
-    if let Some(context) = meta.authoritative_context_tokens {
-        session.context_tokens = Some(context.tokens);
-        session.context_tokens_history_len = Some(context.history_len);
-        session.context_token_identity = Some(context.identity);
-    }
-    if let Some(context) = meta.display_context_tokens {
-        session.display_context_tokens = Some(context.tokens);
-        session.display_context_token_identity = context.identity;
-    }
-    session
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol::{Content, ReasoningEffort, StyledLines};
     use smelt_core::session::{
-        AuthoritativeContextTokens, ContextTokenIdentity, DisplayContextTokens,
+        AuthoritativeContextTokens, ContextTokenIdentity, DisplayContextTokens, SessionMeta,
     };
     use std::collections::HashMap;
 
@@ -1639,24 +1602,6 @@ mod tests {
         mutation: StreamMutation,
     ) -> DocumentChange {
         SessionDocument::apply_stream(parser, transcript, mutation)
-    }
-
-    #[test]
-    fn session_from_meta_restores_typed_context_readings() {
-        let session = session_from_meta(
-            meta_with_token_identity(),
-            1,
-            std::path::PathBuf::from("/tmp"),
-        );
-
-        assert_eq!(session.id, "session-a");
-        assert_eq!(session.context_tokens, Some(42));
-        assert_eq!(session.context_tokens_history_len, Some(3));
-        assert_eq!(session.display_context_tokens(), Some(42));
-        assert_eq!(
-            session.display_context_token_identity,
-            session.context_token_identity
-        );
     }
 
     #[test]
@@ -1978,7 +1923,6 @@ mod tests {
             TurnStateMutation::Finish {
                 history_len: 7,
                 meta,
-                snapshot_context: true,
                 update_context_token_history_len: true,
             },
         );
