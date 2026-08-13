@@ -436,7 +436,7 @@ struct LatestIntentState {
 
 fn reserve_bytes(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
     counter
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(bytes).filter(|next| *next <= limit)
         })
         .is_ok()
