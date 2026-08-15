@@ -689,7 +689,7 @@ impl TuiApp {
                         message: message.clone(),
                     }),
                 );
-                self.notify_error_sticky(message);
+                self.notify_turn_error_sticky(message);
                 SessionControl::Error { kind, retry_at_ms }
             }
             EngineEvent::Shutdown { .. } => SessionControl::Error {
@@ -788,7 +788,7 @@ impl TuiApp {
             }
             EngineEvent::TurnError { message, .. } => {
                 self.working.finish(TurnOutcome::Errored);
-                self.notify_error_sticky(message);
+                self.notify_turn_error_sticky(message);
             }
             EngineEvent::RequestAuditError { message } => {
                 self.notify_warn(message);

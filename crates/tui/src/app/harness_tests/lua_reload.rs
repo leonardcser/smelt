@@ -2153,6 +2153,42 @@ fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
 }
 
 #[test]
+fn cwd_change_replaces_workspace_but_preserves_application_notification() {
+    let environment_guard = test_environment_guard();
+    let first_target = tempfile::TempDir::new().expect("create first cwd tempdir");
+    let second_target = tempfile::TempDir::new().expect("create second cwd tempdir");
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+
+    app.notify_workspace_error_sticky("old workspace failure".into());
+    app.set_lua_string_global(
+        "__first_cwd_target",
+        first_target.path().to_string_lossy().into_owned(),
+    )
+    .unwrap();
+    assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__first_cwd_target).pending == true)"));
+    assert!(app.drain_idle_work());
+    assert!(app.overlays_probe().notification().is_none());
+
+    app.notify_application_error_sticky("application failure".into());
+    app.set_lua_string_global(
+        "__second_cwd_target",
+        second_target.path().to_string_lossy().into_owned(),
+    )
+    .unwrap();
+    assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__second_cwd_target).pending == true)"));
+    assert!(app.drain_idle_work());
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Application
+            ) && notification.summary == "application failure"
+        }));
+}
+
+#[test]
 fn failed_cwd_candidate_preserves_the_complete_project_context() {
     let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create failed cwd tempdir");
@@ -2177,6 +2213,17 @@ fn failed_cwd_candidate_preserves_the_complete_project_context() {
     assert_eq!(app.core_probe().env.cwd(), original_runtime_cwd);
     assert_eq!(app.lua_probe().id, original_generation);
     assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Operation(
+                    crate::app::NotificationOperation::CwdChange
+                )
+            )
+        }));
 
     std::fs::write(
         &init,
@@ -2314,7 +2361,21 @@ fn loading_session_restores_persisted_cwd() {
     assert!(app
         .overlays_probe()
         .notification()
-        .is_some_and(|n| n.summary.contains("session cwd unavailable")));
+        .is_some_and(|notification| {
+            notification.summary.contains("session cwd unavailable")
+                && matches!(
+                    &notification.scope,
+                    crate::app::NotificationScope::Operation(
+                        crate::app::NotificationOperation::CwdChange
+                    )
+                )
+        }));
+
+    app.set_lua_string_global("__fallback_cwd", fallback)
+        .unwrap();
+    assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__fallback_cwd).pending == true)"));
+    assert!(app.drain_idle_work());
+    assert!(app.overlays_probe().notification().is_none());
 }
 
 #[test]

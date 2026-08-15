@@ -318,7 +318,7 @@ fn root_dialog_pauses_notification_visibility_and_ttl() {
 }
 
 #[test]
-fn root_dialog_preserves_notification_ownership() {
+fn root_dialog_preserves_notification_scope() {
     let mut app = TestApp::builder().build();
     let session_id = app.session_snapshot().id.clone();
     app.notify_session_save_failure(&session_id, "database busy");
@@ -330,9 +330,10 @@ fn root_dialog_preserves_notification_ownership() {
         .suspended_notification()
         .is_some_and(|notification| {
             matches!(
-                notification.owner.as_ref(),
-                Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
-                    if owner_session_id == &session_id
+                &notification.scope,
+                crate::app::NotificationScope::Operation(
+                    crate::app::NotificationOperation::SessionPersistence(owner_session_id)
+                ) if owner_session_id == &session_id
             )
         }));
 
@@ -343,10 +344,53 @@ fn root_dialog_preserves_notification_ownership() {
         .notification()
         .is_some_and(|notification| {
             matches!(
-                notification.owner.as_ref(),
-                Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
-                    if owner_session_id == &session_id
+                &notification.scope,
+                crate::app::NotificationScope::Operation(
+                    crate::app::NotificationOperation::SessionPersistence(owner_session_id)
+                ) if owner_session_id == &session_id
             )
+        }));
+}
+
+#[test]
+fn reset_dismisses_suspended_session_notification_and_keeps_audit_log() {
+    let mut app = TestApp::builder().build();
+    app.notify_session_error_sticky("stale session failure".into());
+    open_root_test_dialog(&mut app);
+    assert!(app.overlays_probe().suspended_notification().is_some());
+
+    app.reset_session();
+
+    assert!(app.overlays_probe().suspended_notification().is_none());
+    assert!(app.overlays_probe().notification().is_none());
+    assert!(app.lua_messages_contain("stale session failure"));
+}
+
+#[test]
+fn reset_preserves_suspended_application_notification() {
+    let mut app = TestApp::builder().build();
+    app.notify_application_error_sticky("application failure".into());
+    open_root_test_dialog(&mut app);
+    assert!(app
+        .overlays_probe()
+        .suspended_notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Application
+            )
+        }));
+
+    app.reset_session();
+
+    assert!(app
+        .overlays_probe()
+        .suspended_notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Application
+            ) && notification.summary == "application failure"
         }));
 }
 

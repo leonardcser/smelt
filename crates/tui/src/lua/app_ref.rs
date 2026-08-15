@@ -4,7 +4,7 @@
 //! zero-state bridge that enters the TUI slot only for a synchronous Core
 //! callback, so no overlapping mutable frontend and Core borrows are installed.
 
-use crate::app::TuiApp;
+use crate::app::{NotificationOperation, TuiApp};
 use scoped_tls_hkt::scoped_thread_local;
 
 pub(crate) struct PermissionSnapshot {
@@ -814,8 +814,10 @@ impl AgentLuaHost<'_> {
         ) {
             Ok(model) => model.clone(),
             Err(error) => {
-                self.app
-                    .notify_error_sticky(format!("smelt.engine: {error}"));
+                self.app.notify_operation_error_sticky(
+                    NotificationOperation::TurnStart,
+                    format!("smelt.engine: {error}"),
+                );
                 return None;
             }
         };

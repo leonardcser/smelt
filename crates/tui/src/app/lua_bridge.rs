@@ -121,7 +121,7 @@ impl TuiApp {
             if overflowed || remaining == 0 {
                 let queued_more = !self.lua.shared().drain_commands().is_empty();
                 if overflowed || queued_more {
-                    self.notify_error_sticky(format!(
+                    self.notify_workspace_error_sticky(format!(
                         "deferred Lua commands exceeded {} in one flush",
                         crate::lua::MAX_PENDING_LUA_COMMANDS
                     ));

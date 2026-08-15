@@ -10697,7 +10697,9 @@ impl TuiApp {
                     Ok(mode) => Some(mode),
                     Err(err) => {
                         smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
-                        self.notify_error_sticky(format!("failed to read session mode: {err}"));
+                        self.notify_session_error_sticky(format!(
+                            "failed to read session mode: {err}"
+                        ));
                         self.conversation
                             .replace_or_push_history_append(append)
                             .expect("mode append coalescing does not read context history");

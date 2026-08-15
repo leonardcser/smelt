@@ -150,7 +150,7 @@ impl TuiApp {
                 lifetime,
                 kind: notification.kind,
                 summary: notification.summary,
-                owner: notification.owner,
+                scope: notification.scope,
             });
     }
 
@@ -173,7 +173,7 @@ impl TuiApp {
             notification.kind,
             &notification.summary,
             lifetime,
-            notification.owner,
+            notification.scope,
         );
     }
 }

@@ -1,4 +1,4 @@
-use crate::app::TuiApp;
+use crate::app::{NotificationOperation, TuiApp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionCwdRestore {
@@ -284,15 +284,10 @@ impl TuiApp {
                     self.workspace.cwd()
                 )
             };
-            self.notify_error_sticky(message.clone());
+            self.notify_operation_error_sticky(NotificationOperation::CwdChange, message.clone());
             return Err(message);
         }
-        if self.overlays.notification().is_some_and(|notification| {
-            notification.summary.starts_with("cwd change:")
-                || notification.summary.starts_with("session cwd unavailable:")
-        }) {
-            self.dismiss_notification();
-        }
+        self.dismiss_operation_notification(&NotificationOperation::CwdChange);
         Ok(true)
     }
 

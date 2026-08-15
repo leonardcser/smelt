@@ -1,4 +1,4 @@
-use crate::app::TuiApp;
+use crate::app::{NotificationOperation, TuiApp};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::transcript_model::BlockHistory;
@@ -985,7 +985,7 @@ impl TuiApp {
         }
         let current_len = self.session_history_len();
         if first_index > current_len {
-            self.notify_error_sticky(format!(
+            self.notify_session_error_sticky(format!(
                 "invalid canonical history update: start {first_index} exceeds length {current_len}"
             ));
             return;
@@ -1080,7 +1080,7 @@ impl TuiApp {
         smelt_perf::perf::record_value("tui:history_appended:first_index", first_index as u64);
         let current_len = self.session_history_len();
         if first_index > current_len {
-            self.notify_error_sticky(format!(
+            self.notify_session_error_sticky(format!(
                 "invalid canonical history append: start {first_index} exceeds length {current_len}"
             ));
             return;
@@ -1158,7 +1158,9 @@ impl TuiApp {
             }
             Err(err) => {
                 smelt_perf::perf::record_value("live_session:history_append_plan_error", 1);
-                self.notify_error_sticky(format!("failed to update session history: {err}"));
+                self.notify_session_error_sticky(format!(
+                    "failed to update session history: {err}"
+                ));
                 protocol::HistoryAppendResult::Unchanged
             }
         }
@@ -1180,7 +1182,7 @@ impl TuiApp {
         self.core.config.model_selection.requested_key.clone()
     }
 
-    fn restore_session_model(&mut self, model_key: &str) {
+    fn restore_session_model(&mut self, session_id: &str, model_key: &str) {
         let resolved_key =
             smelt_core::config::resolve_model_ref(&self.core.config.available_models, model_key)
                 .ok()
@@ -1212,9 +1214,10 @@ impl TuiApp {
                 self.core.config.context_window = None;
             }
         } else {
-            self.notify_error_sticky(format!(
-                "session model '{model_key}' is no longer available"
-            ));
+            self.notify_session_error_sticky_for(
+                session_id,
+                format!("session model '{model_key}' is no longer available"),
+            );
         }
     }
 
@@ -1285,6 +1288,17 @@ impl TuiApp {
         self.lua.cancel_tasks();
     }
 
+    fn close_current_session_for_replacement(
+        &mut self,
+        policy: crate::persist::ClosePolicy,
+    ) -> bool {
+        if !self.close_session_persistence(policy) {
+            return false;
+        }
+        self.dismiss_notification_for_session_change();
+        true
+    }
+
     pub(crate) fn fork_session(&mut self) {
         if self.conversation.has_live_session() {
             self.fork_live_session();
@@ -1303,7 +1317,7 @@ impl TuiApp {
             } else {
                 crate::persist::ClosePolicy::RequireDurable
             };
-        if !self.close_session_persistence(close_policy) {
+        if !self.close_current_session_for_replacement(close_policy) {
             return;
         }
         self.stop_background_processes();
@@ -1343,13 +1357,13 @@ impl TuiApp {
             {
                 Ok(Some(intent)) => intent,
                 Ok(None) => {
-                    self.notify_error_sticky(
+                    self.notify_session_error_sticky(
                         "failed to prepare fork: dirty session produced no save intent".into(),
                     );
                     return;
                 }
                 Err(err) => {
-                    self.notify_error_sticky(format!("failed to prepare fork: {err}"));
+                    self.notify_session_error_sticky(format!("failed to prepare fork: {err}"));
                     return;
                 }
             };
@@ -1389,7 +1403,9 @@ impl TuiApp {
             match smelt_store::OwnedLineageWriter::open_existing(&fork_root, &original_id) {
                 Ok(source) => source,
                 Err(err) => {
-                    self.notify_error_sticky(format!("failed to open source session store: {err}"));
+                    self.notify_session_error_sticky(format!(
+                        "failed to open source session store: {err}"
+                    ));
                     return;
                 }
             };
@@ -1397,13 +1413,13 @@ impl TuiApp {
             match source.store_head() {
                 Ok(source_head) if source_head == acknowledged_head => {}
                 Ok(source_head) => {
-                    self.notify_error_sticky(format!(
+                    self.notify_session_error_sticky(format!(
                         "failed to fork unsaved session: source head changed from {acknowledged_head:?} to {source_head:?}"
                     ));
                     return;
                 }
                 Err(err) => {
-                    self.notify_error_sticky(format!(
+                    self.notify_session_error_sticky(format!(
                         "failed to inspect unsaved session source head: {err}"
                     ));
                     return;
@@ -1413,13 +1429,15 @@ impl TuiApp {
         let imported = match source.fork_current(&forked.id, forked.created_at_ms) {
             Ok(receipt) => receipt,
             Err(err) => {
-                self.notify_error_sticky(format!("failed to fork session store: {err}"));
+                self.notify_session_error_sticky(format!("failed to fork session store: {err}"));
                 return;
             }
         };
         if let Some(intent) = preserved_intent {
             if let Err(err) = source.switch_branch(&forked.id) {
-                self.notify_error_sticky(format!("failed to select fork destination: {err}"));
+                self.notify_session_error_sticky(format!(
+                    "failed to select fork destination: {err}"
+                ));
                 return;
             }
             let command = smelt_store::SessionCommit {
@@ -1432,12 +1450,14 @@ impl TuiApp {
                 transcript_records: intent.records,
             };
             if let Err(err) = source.commit_session(&command) {
-                self.notify_error_sticky(format!("failed to preserve unsaved fork state: {err:?}"));
+                self.notify_session_error_sticky(format!(
+                    "failed to preserve unsaved fork state: {err:?}"
+                ));
                 return;
             }
         }
         if let Err(err) = source.release() {
-            self.notify_error_sticky(format!("failed to release lineage writer: {err}"));
+            self.notify_session_error_sticky(format!("failed to release lineage writer: {err}"));
             return;
         }
         self.load_current_session_by_id(&forked.id);
@@ -1455,7 +1475,8 @@ impl TuiApp {
         }
         self.cancel_session_bound_work();
         self.save_session_and_flush();
-        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+        if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
+        {
             return;
         }
         self.clear_session_scoped_permissions_for_session_boundary();
@@ -1498,16 +1519,17 @@ impl TuiApp {
             error,
         } = self.restore_session_cwd(session_cwd.as_deref())
         {
-            self.notify_error(format!(
-                "session cwd unavailable: {requested}: {error}; using {fallback}"
-            ));
+            self.notify_operation_error(
+                NotificationOperation::CwdChange,
+                format!("session cwd unavailable: {requested}: {error}; using {fallback}"),
+            );
         }
     }
 
     fn claim_writer_access_for_current_session(&mut self) {
         if let Err(reason) = self.conversation.claim_writer_access() {
             self.conversation.mark_read_only(reason.clone());
-            self.notify_error_sticky(format!("opened session read-only: {reason}"));
+            self.notify_session_error_sticky(format!("opened session read-only: {reason}"));
         }
     }
 
@@ -1584,7 +1606,8 @@ impl TuiApp {
         self.cancel_session_bound_work();
         let old_id = self.conversation.session().id.clone();
         self.save_session_and_flush();
-        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+        if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
+        {
             return;
         }
         self.conversation.clear_live_session();
@@ -1602,7 +1625,7 @@ impl TuiApp {
         // Only restore model/API settings if not overridden by CLI.
         if !self.core.startup_overrides.fixes_model_selection() {
             if let Some(ref model_key) = loaded.model {
-                self.restore_session_model(model_key);
+                self.restore_session_model(&loaded.id, model_key);
             }
         }
 
@@ -1659,7 +1682,8 @@ impl TuiApp {
         self.cancel_session_bound_work();
         let old_id = self.conversation.session().id.clone();
         self.save_session_and_flush();
-        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+        if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
+        {
             return;
         }
 
@@ -1675,7 +1699,7 @@ impl TuiApp {
         }
         if !self.core.startup_overrides.fixes_model_selection() {
             if let Some(ref model_key) = loaded.model {
-                self.restore_session_model(model_key);
+                self.restore_session_model(&loaded.id, model_key);
             }
         }
 
@@ -2106,7 +2130,7 @@ impl TuiApp {
             Ok(Some(index)) => index,
             Ok(None) => return false,
             Err(err) => {
-                self.notify_error_sticky(format!("failed to install checkpoint: {err}"));
+                self.notify_session_error_sticky(format!("failed to install checkpoint: {err}"));
                 return false;
             }
         };
@@ -2323,7 +2347,7 @@ impl TuiApp {
                     Ok(mode) => AgentMode::parse(&mode),
                     Err(err) => {
                         smelt_perf::perf::record_value("rewind:live_mode_error", 1);
-                        self.notify_error_sticky(format!(
+                        self.notify_session_error_sticky(format!(
                             "failed to read mode after rewind: {err}"
                         ));
                         None
@@ -2331,7 +2355,7 @@ impl TuiApp {
                 },
                 Err(err) => {
                     smelt_perf::perf::record_value("rewind:live_visible_scan_error", 1);
-                    self.notify_error_sticky(format!(
+                    self.notify_session_error_sticky(format!(
                         "failed to read history before rewind: {err}"
                     ));
                     None
@@ -2476,7 +2500,9 @@ mod checkpoint_tests {
         let revision = app.app.core.config.revision;
         app.app.core.config.context_window = Some(128_000);
 
-        app.app.restore_session_model("managed/future-model");
+        let session_id = app.app.conversation.session().id.clone();
+        app.app
+            .restore_session_model(&session_id, "managed/future-model");
 
         assert_eq!(
             app.app.core.config.model_selection.requested_key.as_deref(),
@@ -2505,11 +2531,18 @@ mod checkpoint_tests {
         let previous = app.app.core.config.model_selection.clone();
         let revision = app.app.core.config.revision;
 
-        app.app.restore_session_model("removed/model");
+        let session_id = app.app.conversation.session().id.clone();
+        app.app.restore_session_model(&session_id, "removed/model");
 
         assert_eq!(app.app.core.config.model_selection, previous);
         assert_eq!(app.app.core.config.revision, revision);
-        assert!(app.app.notification_win().is_some());
+        assert!(app.app.overlays.notification().is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Session(owner_session_id)
+                    if owner_session_id == &session_id
+            )
+        }));
     }
 
     fn perf_value_max(label: &str) -> u64 {

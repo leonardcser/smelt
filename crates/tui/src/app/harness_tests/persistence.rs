@@ -40,9 +40,10 @@ fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
         .is_some_and(|notification| {
             notification.lifetime.is_sticky()
                 && matches!(
-                    notification.owner.as_ref(),
-                    Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
-                        if owner_session_id == session_id
+                    &notification.scope,
+                    crate::app::NotificationScope::Operation(
+                        crate::app::NotificationOperation::SessionPersistence(owner_session_id)
+                    ) if owner_session_id == session_id
                 )
         })
 }
@@ -144,17 +145,17 @@ fn assert_model_history_tool_messages(messages: &[protocol::Message]) {
 }
 
 #[test]
-fn session_save_notification_dismissal_uses_typed_ownership() {
+fn session_save_notification_dismissal_uses_typed_scope() {
     let mut app = TestApp::builder().build();
     let session_id = app.session_snapshot().id.clone();
 
-    app.notify_error_sticky(format!(
+    app.notify_application_error_sticky(format!(
         "failed to save session {session_id}: unrelated diagnostic"
     ));
     app.dismiss_session_save_failure_notification(&session_id);
     assert!(
         app.overlays_probe().notification().is_some(),
-        "matching copy without persistence ownership must remain visible"
+        "matching copy without persistence scope must remain visible"
     );
 
     app.notify_session_save_failure(&session_id, "database busy");
@@ -1700,6 +1701,20 @@ fn resuming_session_with_active_writer_is_read_only() {
     assert_eq!(reader.session_snapshot().id, session_id);
     assert!(reader.session_is_read_only());
     assert_eq!(reader.session_message_count(), 1);
+    assert!(reader
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            notification.lifetime.is_sticky()
+                && notification
+                    .summary
+                    .starts_with("opened session read-only:")
+                && matches!(
+                    &notification.scope,
+                    crate::app::NotificationScope::Session(owner_session_id)
+                        if owner_session_id == &session_id
+                )
+        }));
 
     let result = reader.apply_history_append_to_history(&HistoryAppend::append(HistoryItem::user(
         Content::text("read-only mutation"),
@@ -1718,6 +1733,158 @@ fn resuming_session_with_active_writer_is_read_only() {
             .len(),
         1
     );
+}
+
+#[test]
+fn loading_writable_session_clears_prior_ownership_conflict_notification() {
+    let guard = test_home_guard();
+    let writable_session_id = saved_one_row_session(&guard);
+    let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("owned history")));
+    owner.save_session_and_flush();
+    let owned_session_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+
+    reader
+        .set_lua_string_global("__owned_session_id", owned_session_id)
+        .unwrap();
+    assert!(reader.run_lua("smelt.session.load(_G.__owned_session_id)"));
+    assert!(reader
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            notification
+                .summary
+                .starts_with("opened session read-only:")
+        }));
+    assert!(reader.lua_messages_contain("opened session read-only:"));
+
+    reader
+        .set_lua_string_global("__writable_session_id", writable_session_id.clone())
+        .unwrap();
+    assert!(reader.run_lua("smelt.session.load(_G.__writable_session_id)"));
+
+    assert_eq!(reader.session_snapshot().id, writable_session_id);
+    assert!(!reader.session_is_read_only());
+    assert!(reader.overlays_probe().notification().is_none());
+    assert!(reader.lua_messages_contain("opened session read-only:"));
+}
+
+#[test]
+fn successful_session_load_clears_load_failure_notification() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+
+    app.load_session_by_id("missing-session");
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Operation(
+                    crate::app::NotificationOperation::SessionLoad
+                )
+            )
+        }));
+
+    app.load_session_by_id(&session_id);
+
+    assert_eq!(app.session_snapshot().id, session_id);
+    assert!(app.overlays_probe().notification().is_none());
+}
+
+#[test]
+fn successful_session_load_preserves_workspace_notification() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.notify_workspace_error_sticky("workspace failure".into());
+
+    app.load_session_by_id(&session_id);
+
+    assert_eq!(app.session_snapshot().id, session_id);
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Workspace
+            ) && notification.summary == "workspace failure"
+        }));
+}
+
+#[test]
+fn session_switch_dismisses_suspended_ownership_conflict_notification() {
+    let guard = test_home_guard();
+    let writable_session_id = saved_one_row_session(&guard);
+    let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("owned history")));
+    owner.save_session_and_flush();
+    let owned_session_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    reader.load_session_by_id(&owned_session_id);
+    assert!(reader.run_lua(
+        r#"
+        local leaf = smelt.dialog.content({ text = "Review this action" })
+        smelt.dialog.open_handle({
+          panels = { { leaf = leaf, height = "fit" } },
+          blocks_agent = true,
+        })
+        "#,
+    ));
+    assert!(reader
+        .overlays_probe()
+        .suspended_notification()
+        .is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Session(owner_session_id)
+                    if owner_session_id == &owned_session_id
+            )
+        }));
+
+    reader.load_session_by_id(&writable_session_id);
+
+    assert_eq!(reader.session_snapshot().id, writable_session_id);
+    assert!(!reader.session_is_read_only());
+    assert!(reader.overlays_probe().notification().is_none());
+    assert!(reader.overlays_probe().suspended_notification().is_none());
+}
+
+#[test]
+fn loading_another_owned_session_replaces_warning_with_target_session_scope() {
+    let guard = test_home_guard();
+    let mut first_owner = TestApp::builder().build_with_test_home_guard(&guard);
+    first_owner.session_append_history(HistoryItem::user(Content::text("first owned history")));
+    first_owner.save_session_and_flush();
+    let first_id = first_owner.session_snapshot().id.clone();
+    let mut second_owner = TestApp::builder().build_without_test_home_reset(&guard);
+    second_owner.session_append_history(HistoryItem::user(Content::text("second owned history")));
+    second_owner.save_session_and_flush();
+    let second_id = second_owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+
+    reader.load_session_by_id(&first_id);
+    reader.load_session_by_id(&second_id);
+
+    assert_eq!(reader.session_snapshot().id, second_id);
+    assert!(reader.session_is_read_only());
+    assert!(reader
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            notification
+                .summary
+                .starts_with("opened session read-only:")
+                && matches!(
+                    &notification.scope,
+                    crate::app::NotificationScope::Session(owner_session_id)
+                        if owner_session_id == &second_id
+                )
+        }));
 }
 
 #[test]

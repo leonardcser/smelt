@@ -1,6 +1,6 @@
 //! Application operations exposed through the scoped Lua capability host.
 
-use crate::app::{LuaBringUpError, TuiApp};
+use crate::app::{LuaBringUpError, NotificationOperation, TuiApp};
 use smelt_core::transcript_model::ConfirmChoice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +220,7 @@ impl TuiApp {
                     .failure()
                     .is_none_or(|failure| failure.message != message)
                 {
-                    self.notify_error_sticky(message.clone());
+                    self.notify_workspace_error_sticky(message.clone());
                 }
                 self.lua.set_failure(LuaBringUpError {
                     message,
@@ -298,7 +298,7 @@ impl TuiApp {
             return false;
         }
         if let Err(error) = self.reconcile_committed_lua_runtime() {
-            self.notify_error_sticky(error);
+            self.notify_workspace_error_sticky(error);
         }
         true
     }
@@ -397,7 +397,7 @@ impl TuiApp {
                     let lua_shared = std::sync::Arc::clone(self.lua.shared());
                     if let Err(error) = crate::lua::api::terminal::commit_staged_title(&lua_shared)
                     {
-                        self.notify_error_sticky(format!("terminal title: {error}"));
+                        self.notify_workspace_error_sticky(format!("terminal title: {error}"));
                     }
                     for (kind, source, message) in
                         crate::lua::api::notify::take_staged_notices(&lua_shared)
@@ -553,6 +553,7 @@ impl TuiApp {
         self.core.timers.clear_generation(retired_generation);
         self.lua.commit_generation(candidate);
         self.commit_lua_tui_candidate(candidate_tui);
+        self.dismiss_notification_for_workspace_change();
         self.command_catalog
             .activate(self.lua.command_names_handle());
         if let Some(prompt) = self.ui.buf_mut(crate::app::PROMPT_EDIT_BUF) {
@@ -561,7 +562,7 @@ impl TuiApp {
         self.core.lua_generation = self.lua.id;
         let lua_shared = std::sync::Arc::clone(self.lua.shared());
         if let Err(error) = crate::lua::api::terminal::commit_staged_title(&lua_shared) {
-            self.notify_error_sticky(format!("terminal title: {error}"));
+            self.notify_workspace_error_sticky(format!("terminal title: {error}"));
         }
         for (kind, source, message) in crate::lua::api::notify::take_staged_notices(&lua_shared) {
             self.record_notice(kind, source, message);
@@ -613,7 +614,7 @@ impl TuiApp {
                 function.call(table)
             });
             if let Err(error) = result {
-                self.notify_error_sticky(format!("lifecycle.ready: {error}"));
+                self.notify_workspace_error_sticky(format!("lifecycle.ready: {error}"));
             }
         }
     }
@@ -638,7 +639,7 @@ impl TuiApp {
         let outcome = self.prompt_inputs.refresh(&cwd);
         self.core.skills = Some(outcome.loader);
         if let Some(err) = outcome.system_prompt_read_error {
-            self.notify_error_sticky(err);
+            self.notify_workspace_error_sticky(err);
         }
     }
 
@@ -937,11 +938,17 @@ impl TuiApp {
             {
                 Ok(Some(resume)) => resume,
                 Ok(None) => {
-                    self.notify_error_sticky(format!("session {id:?} has no stored state"));
+                    self.notify_operation_error_sticky(
+                        NotificationOperation::SessionLoad,
+                        format!("session {id:?} has no stored state"),
+                    );
                     return;
                 }
                 Err(err) => {
-                    self.notify_error_sticky(format!("failed to load session: {err}"));
+                    self.notify_operation_error_sticky(
+                        NotificationOperation::SessionLoad,
+                        format!("failed to load session: {err}"),
+                    );
                     return;
                 }
             };
@@ -970,15 +977,17 @@ impl TuiApp {
                     match materialized {
                         Ok(Some(transcript)) => (transcript, true),
                         Ok(None) => {
-                            self.notify_error_sticky(format!(
-                                "session {id:?} has no readable transcript state"
-                            ));
+                            self.notify_operation_error_sticky(
+                                NotificationOperation::SessionLoad,
+                                format!("session {id:?} has no readable transcript state"),
+                            );
                             return;
                         }
                         Err(err) => {
-                            self.notify_error_sticky(format!(
-                                "failed to load session transcript: {err}"
-                            ));
+                            self.notify_operation_error_sticky(
+                                NotificationOperation::SessionLoad,
+                                format!("failed to load session transcript: {err}"),
+                            );
                             return;
                         }
                     }
@@ -993,7 +1002,7 @@ impl TuiApp {
         }
         self.load_store_backed_session(document);
         if !degraded_warnings.is_empty() {
-            self.notify_error_sticky(format!(
+            self.notify_session_error_sticky(format!(
                 "session loaded with unavailable attachments: {}",
                 degraded_warnings.join("; ")
             ));

@@ -1268,7 +1268,7 @@ fn timed_notification_expires_after_ttl() {
 fn sticky_notification_waits_for_escape() {
     let mut app = TestApp::builder().with_vim(false).build();
 
-    app.notify_error_sticky("quota reached".into());
+    app.notify_application_error_sticky("quota reached".into());
     let notification = app.state().notification;
     assert!(notification.is_some());
 

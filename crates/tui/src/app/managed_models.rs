@@ -194,7 +194,7 @@ impl TuiApp {
             return;
         }
         if let Err(error) = self.reconcile_runtime_snapshot() {
-            self.notify_error_sticky(error);
+            self.notify_workspace_error_sticky(error);
         }
     }
 
@@ -276,7 +276,7 @@ impl TuiApp {
         }
         if catalog_changed {
             if let Err(error) = self.reconcile_runtime_snapshot() {
-                self.notify_error_sticky(error);
+                self.notify_workspace_error_sticky(error);
                 return;
             }
         }

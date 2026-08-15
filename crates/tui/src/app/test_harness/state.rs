@@ -874,8 +874,16 @@ impl TestApp {
         self.app.notify_error(message);
     }
 
-    pub(crate) fn notify_error_sticky(&mut self, message: String) {
-        self.app.notify_error_sticky(message);
+    pub(crate) fn notify_application_error_sticky(&mut self, message: String) {
+        self.app.notify_application_error_sticky(message);
+    }
+
+    pub(crate) fn notify_workspace_error_sticky(&mut self, message: String) {
+        self.app.notify_workspace_error_sticky(message);
+    }
+
+    pub(crate) fn notify_session_error_sticky(&mut self, message: String) {
+        self.app.notify_session_error_sticky(message);
     }
 
     pub(crate) fn dismiss_expired_notification(&mut self) -> bool {

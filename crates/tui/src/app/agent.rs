@@ -1,6 +1,7 @@
 use crate::app::{
-    history::HistoryDeltaKind, CommandTurnStart, PendingHistoryAppend, PendingHistoryDelivery,
-    PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
+    history::HistoryDeltaKind, CommandTurnStart, NotificationOperation, PendingHistoryAppend,
+    PendingHistoryDelivery, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp,
+    TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -471,7 +472,7 @@ impl TuiApp {
     }
 
     fn prepare_user_visible_turn(&mut self) {
-        self.dismiss_notification();
+        self.dismiss_notification_for_turn_start();
         self.clear_prompt_prediction();
         self.platform.set_sleep_inhibited(true);
         self.begin_turn();
@@ -490,7 +491,7 @@ impl TuiApp {
         match self.conversation.last_terminal_turn_id() {
             Some(turn_id) => Some(smelt_store::TurnId::new(turn_id)),
             None => {
-                self.notify_error_sticky(
+                self.notify_turn_error_sticky(
                     "cannot continue: this session has no durable prior turn; submit a new request first"
                         .into(),
                 );
@@ -707,7 +708,9 @@ impl TuiApp {
             }
             self.platform.set_sleep_inhibited(false);
             self.working.finish(TurnOutcome::Errored);
-            self.notify_error_sticky("engine stopped before accepting the request".into());
+            self.notify_application_error_sticky(
+                "engine stopped before accepting the request".into(),
+            );
             return None;
         }
         if let Some(durable_receipt_at) = durable_receipt_at {
@@ -864,7 +867,10 @@ impl TuiApp {
         let resolved = match resolved {
             Ok(model) => model.clone(),
             Err(error) => {
-                self.notify_error_sticky(error.to_string());
+                self.notify_operation_error_sticky(
+                    NotificationOperation::TurnStart,
+                    error.to_string(),
+                );
                 return None;
             }
         };
@@ -1367,7 +1373,8 @@ impl TuiApp {
 
     pub(crate) fn resolve_model_target(&mut self) -> Option<protocol::ModelTarget> {
         let Some(active) = self.core.config.active_model().cloned() else {
-            self.notify_error_sticky(
+            self.notify_operation_error_sticky(
+                NotificationOperation::TurnStart,
                 "no model is available; configure a provider or wait for model refresh".into(),
             );
             return None;
@@ -1383,7 +1390,10 @@ impl TuiApp {
             smelt_core::ModelAvailability::Unavailable { .. }
         ) && !retry_missing_credentials
         {
-            self.notify_error_sticky(format!("model '{}' is unavailable", active.key));
+            self.notify_operation_error_sticky(
+                NotificationOperation::TurnStart,
+                format!("model '{}' is unavailable", active.key),
+            );
             return None;
         }
         let Some(api_key) = self.resolve_api_key_for_env(&active.api_key_env) else {
@@ -1408,7 +1418,7 @@ impl TuiApp {
         match lookup_api_key(key_env, |v| std::env::var(v)) {
             Ok(key) => Some(key),
             Err(err) => {
-                self.notify_error_sticky(err.message());
+                self.notify_operation_error_sticky(NotificationOperation::TurnStart, err.message());
                 None
             }
         }
@@ -2214,7 +2224,7 @@ mod tests {
     fn starting_user_turn_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app
-            .notify_error_sticky("rate limit exceeded".to_string());
+            .notify_turn_error_sticky("rate limit exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
         let turn = app
@@ -2227,6 +2237,65 @@ mod tests {
     }
 
     #[test]
+    fn starting_user_turn_dismisses_turn_start_failure() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.notify_operation_error_sticky(
+            crate::app::NotificationOperation::TurnStart,
+            "missing credentials".to_string(),
+        );
+
+        let turn = app
+            .app
+            .begin_agent_turn("try again", Content::text("try again"))
+            .expect("test app has a usable model");
+        app.app.conversation.set_active(Some(turn));
+
+        assert!(app.app.notification_win().is_none());
+    }
+
+    #[test]
+    fn starting_user_turn_preserves_session_notification() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let session_id = app.app.conversation.session().id.clone();
+        app.app
+            .notify_session_error_sticky("session failure".to_string());
+
+        let turn = app
+            .app
+            .begin_agent_turn("try again", Content::text("try again"))
+            .expect("test app has a usable model");
+        app.app.conversation.set_active(Some(turn));
+
+        assert!(app.app.overlays.notification().is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Session(owner_session_id)
+                    if owner_session_id == &session_id
+            ) && notification.summary == "session failure"
+        }));
+    }
+
+    #[test]
+    fn starting_user_turn_preserves_application_notification() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .notify_application_error_sticky("application failure".to_string());
+
+        let turn = app
+            .app
+            .begin_agent_turn("try again", Content::text("try again"))
+            .expect("test app has a usable model");
+        app.app.conversation.set_active(Some(turn));
+
+        assert!(app.app.overlays.notification().is_some_and(|notification| {
+            matches!(
+                &notification.scope,
+                crate::app::NotificationScope::Application
+            ) && notification.summary == "application failure"
+        }));
+    }
+
+    #[test]
     fn starting_command_continuation_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let previous = app
@@ -2235,7 +2304,8 @@ mod tests {
             .expect("previous turn starts");
         app.app.conversation.set_active(Some(previous));
         app.app.discard_turn(crate::app::TurnEnd::Complete);
-        app.app.notify_error_sticky("quota exceeded".to_string());
+        app.app
+            .notify_turn_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
         let turn = app

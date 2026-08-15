@@ -449,8 +449,38 @@ pub enum AppEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum NotificationOwner {
+pub(crate) enum NotificationOperation {
+    CwdChange,
+    SessionLoad,
     SessionPersistence(String),
+    TurnStart,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NotificationScope {
+    Application,
+    Workspace,
+    Transient,
+    Session(String),
+    Turn,
+    Operation(NotificationOperation),
+}
+
+impl NotificationScope {
+    fn is_replaced_by_workspace(&self) -> bool {
+        matches!(self, Self::Workspace)
+    }
+
+    fn is_replaced_by_session(&self) -> bool {
+        !matches!(self, Self::Application | Self::Workspace)
+    }
+
+    fn is_replaced_by_turn(&self) -> bool {
+        matches!(
+            self,
+            Self::Transient | Self::Turn | Self::Operation(NotificationOperation::TurnStart)
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -458,7 +488,7 @@ pub(crate) struct SuspendedNotification {
     pub(crate) lifetime: SuspendedNotificationLifetime,
     pub(crate) kind: smelt_core::messages::MessageKind,
     pub(crate) summary: String,
-    pub(crate) owner: Option<NotificationOwner>,
+    pub(crate) scope: NotificationScope,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -473,7 +503,7 @@ pub(crate) struct Notification {
     pub(crate) lifetime: NotificationLifetime,
     pub(crate) kind: smelt_core::messages::MessageKind,
     pub(crate) summary: String,
-    pub(crate) owner: Option<NotificationOwner>,
+    pub(crate) scope: NotificationScope,
     pub(crate) rendered_width: usize,
 }
 
@@ -1211,7 +1241,7 @@ impl TuiApp {
             Ok(visible) => visible,
             Err(err) => {
                 smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
-                self.notify_error_sticky(format!("failed to read session history: {err}"));
+                self.notify_session_error_sticky(format!("failed to read session history: {err}"));
                 false
             }
         }
@@ -1396,7 +1426,9 @@ impl TuiApp {
                 Ok(visible) => visible,
                 Err(err) => {
                     smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
-                    self.notify_error_sticky(format!("failed to read session history: {err}"));
+                    self.notify_session_error_sticky(format!(
+                        "failed to read session history: {err}"
+                    ));
                     return;
                 }
             }
@@ -1405,7 +1437,7 @@ impl TuiApp {
             self.queue_history_append(append);
         } else if let Err(err) = self.conversation.replace_or_push_history_append(append) {
             smelt_perf::perf::record_value("live_session:history_append_plan_error", 1);
-            self.notify_error_sticky(format!("failed to update session context: {err}"));
+            self.notify_session_error_sticky(format!("failed to update session context: {err}"));
         }
     }
 
@@ -1423,7 +1455,7 @@ impl TuiApp {
                 Ok(mode) => Some(mode),
                 Err(err) => {
                     smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
-                    self.notify_error_sticky(format!("failed to read session mode: {err}"));
+                    self.notify_session_error_sticky(format!("failed to read session mode: {err}"));
                     return;
                 }
             },
@@ -1453,7 +1485,7 @@ impl TuiApp {
                 },
             ) {
                 smelt_perf::perf::record_value("live_session:history_append_plan_error", 1);
-                self.notify_error_sticky(format!("failed to queue session history: {err}"));
+                self.notify_session_error_sticky(format!("failed to queue session history: {err}"));
                 return;
             }
             self.core
@@ -1477,7 +1509,7 @@ impl TuiApp {
             Ok(false) => {}
             Err(err) => {
                 smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
-                self.notify_error_sticky(format!("failed to read session history: {err}"));
+                self.notify_session_error_sticky(format!("failed to read session history: {err}"));
             }
         }
     }
@@ -2621,13 +2653,56 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn notify_error_sticky(&mut self, message: String) {
+    fn notify_error_sticky(&mut self, scope: NotificationScope, message: String) {
         self.record_notice_with_lifetime(
             smelt_core::messages::MessageKind::Error,
             "smelt".into(),
             message,
             NotificationLifetime::Sticky,
-            None,
+            scope,
+        );
+    }
+
+    pub(crate) fn notify_application_error_sticky(&mut self, message: String) {
+        self.notify_error_sticky(NotificationScope::Application, message);
+    }
+
+    pub(crate) fn notify_workspace_error_sticky(&mut self, message: String) {
+        self.notify_error_sticky(NotificationScope::Workspace, message);
+    }
+
+    pub(crate) fn notify_session_error_sticky_for(&mut self, session_id: &str, message: String) {
+        self.notify_error_sticky(NotificationScope::Session(session_id.to_string()), message);
+    }
+
+    pub(crate) fn notify_session_error_sticky(&mut self, message: String) {
+        let session_id = self.conversation.session().id.clone();
+        self.notify_session_error_sticky_for(&session_id, message);
+    }
+
+    pub(crate) fn notify_turn_error_sticky(&mut self, message: String) {
+        self.notify_error_sticky(NotificationScope::Turn, message);
+    }
+
+    pub(crate) fn notify_operation_error_sticky(
+        &mut self,
+        operation: NotificationOperation,
+        message: String,
+    ) {
+        self.notify_error_sticky(NotificationScope::Operation(operation), message);
+    }
+
+    pub(crate) fn notify_operation_error(
+        &mut self,
+        operation: NotificationOperation,
+        message: String,
+    ) {
+        self.record_notice_with_lifetime(
+            smelt_core::messages::MessageKind::Error,
+            "smelt".into(),
+            message,
+            NotificationLifetime::timed(self.core.clock.instant_now()),
+            NotificationScope::Operation(operation),
         );
     }
 
@@ -2637,7 +2712,7 @@ impl TuiApp {
             "smelt".into(),
             format!("failed to save session {session_id}: {message}"),
             NotificationLifetime::Sticky,
-            Some(NotificationOwner::SessionPersistence(
+            NotificationScope::Operation(NotificationOperation::SessionPersistence(
                 session_id.to_string(),
             )),
         );
@@ -2692,7 +2767,7 @@ impl TuiApp {
             source,
             body,
             NotificationLifetime::timed(self.core.clock.instant_now()),
-            None,
+            NotificationScope::Transient,
         );
     }
 
@@ -2702,12 +2777,12 @@ impl TuiApp {
         source: String,
         body: String,
         lifetime: NotificationLifetime,
-        owner: Option<NotificationOwner>,
+        scope: NotificationScope,
     ) {
         if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
             messages.append(kind, source, body.clone());
         }
-        self.open_notification(kind, &body, lifetime, owner);
+        self.open_notification(kind, &body, lifetime, scope);
     }
 
     fn open_notification(
@@ -2715,7 +2790,7 @@ impl TuiApp {
         kind: smelt_core::messages::MessageKind,
         body: &str,
         lifetime: NotificationLifetime,
-        owner: Option<NotificationOwner>,
+        scope: NotificationScope,
     ) {
         if let Some(notification) = self.overlays.take_notification() {
             self.close_overlay_leaf(notification.win);
@@ -2735,7 +2810,7 @@ impl TuiApp {
                     lifetime,
                     kind,
                     summary: summary.to_string(),
-                    owner,
+                    scope,
                 });
             return;
         }
@@ -2782,7 +2857,7 @@ impl TuiApp {
             lifetime,
             kind,
             summary: summary.to_string(),
-            owner,
+            scope,
             rendered_width: width,
         });
     }
@@ -2864,25 +2939,56 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn dismiss_session_save_failure_notification(&mut self, session_id: &str) {
-        let belongs_to_session = |owner: Option<&NotificationOwner>| {
-            matches!(
-                owner,
-                Some(NotificationOwner::SessionPersistence(owner_session_id))
-                    if owner_session_id == session_id
-            )
-        };
-        let active_failure = self
+    fn dismiss_notification_if(&mut self, predicate: impl Fn(&NotificationScope) -> bool) -> bool {
+        let active_matches = self
             .overlays
             .notification()
-            .is_some_and(|notification| belongs_to_session(notification.owner.as_ref()));
-        let suspended_failure = self
+            .is_some_and(|notification| predicate(&notification.scope));
+        let suspended_matches = self
             .overlays
             .suspended_notification()
-            .is_some_and(|notification| belongs_to_session(notification.owner.as_ref()));
-        if active_failure || suspended_failure {
-            self.dismiss_notification();
+            .is_some_and(|notification| predicate(&notification.scope));
+        if suspended_matches {
+            self.overlays.clear_suspended_notification();
         }
+        if active_matches {
+            if let Some(notification) = self.overlays.take_notification() {
+                self.close_overlay_leaf(notification.win);
+            }
+        }
+        active_matches || suspended_matches
+    }
+
+    pub(crate) fn dismiss_notification_for_workspace_change(&mut self) -> bool {
+        self.dismiss_notification_if(NotificationScope::is_replaced_by_workspace)
+    }
+
+    pub(crate) fn dismiss_notification_for_session_change(&mut self) -> bool {
+        self.dismiss_notification_if(NotificationScope::is_replaced_by_session)
+    }
+
+    pub(crate) fn dismiss_notification_for_turn_start(&mut self) -> bool {
+        self.dismiss_notification_if(NotificationScope::is_replaced_by_turn)
+    }
+
+    pub(crate) fn dismiss_operation_notification(
+        &mut self,
+        operation: &NotificationOperation,
+    ) -> bool {
+        self.dismiss_notification_if(
+            |scope| matches!(scope, NotificationScope::Operation(active) if active == operation),
+        )
+    }
+
+    pub(crate) fn dismiss_session_save_failure_notification(&mut self, session_id: &str) {
+        self.dismiss_notification_if(|scope| {
+            matches!(
+                scope,
+                NotificationScope::Operation(NotificationOperation::SessionPersistence(
+                    owner_session_id
+                )) if owner_session_id == session_id
+            )
+        });
     }
 
     pub(crate) fn dismiss_expired_notification(&mut self) -> bool {
@@ -3026,7 +3132,7 @@ impl TuiApp {
         let lua_launch_error = self.finish_lua_launch(true);
         drop(lua_launch_startup);
         if let Some(error) = lua_launch_error {
-            self.notify_error_sticky(format!("lua init: {error}"));
+            self.notify_workspace_error_sticky(format!("lua init: {error}"));
         }
 
         let mut pre_first_frame_startup = smelt_perf::perf::begin("startup:pre_first_frame");
@@ -3045,7 +3151,7 @@ impl TuiApp {
             self.transcript_win_mut().follow_tail();
         }
         if let Some(message) = self.startup_auth_error.take() {
-            self.notify_error_sticky(message);
+            self.notify_workspace_error_sticky(message);
         }
         self.warn_if_api_base_normalized();
 
