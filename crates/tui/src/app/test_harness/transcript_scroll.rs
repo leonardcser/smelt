@@ -452,7 +452,7 @@ impl TestApp {
         assert_transcript_scroll_probe_frames(&mut self.transcript_scroll_probe, &frames);
         if let Some(pending) = pending_wheel_movement {
             let viewport_after = self.transcript_viewport_lines();
-            assert_wheel_movement_visible(&pending, &viewport_after);
+            assert_wheel_movement_visible(&pending, &viewport_after, &frames);
         }
         self.assert_invariants();
     }
@@ -720,7 +720,11 @@ impl TestApp {
     }
 }
 
-fn assert_wheel_movement_visible(pending: &PendingWheelMovement, viewport_after: &[String]) {
+fn assert_wheel_movement_visible(
+    pending: &PendingWheelMovement,
+    viewport_after: &[String],
+    frames: &[TranscriptScrollTraceFrame],
+) {
     assert_eq!(
         viewport_after.len(),
         pending.viewport_before.len(),
@@ -734,10 +738,14 @@ fn assert_wheel_movement_visible(pending: &PendingWheelMovement, viewport_after:
         return;
     }
 
-    let max_rows = pending.rows.unsigned_abs();
-    if max_rows >= viewport_after.len() {
+    let max_rows = pending
+        .rows
+        .unsigned_abs()
+        .saturating_add(max_leading_rows_before_content(frames));
+    if pending.rows.unsigned_abs() >= viewport_after.len() {
         return;
     }
+    let max_rows = max_rows.min(viewport_after.len().saturating_sub(1));
     let movement = (1..=max_rows).find(|&rows| {
         let overlap = viewport_after.len() - rows;
         if pending.rows < 0 {
@@ -748,8 +756,27 @@ fn assert_wheel_movement_visible(pending: &PendingWheelMovement, viewport_after:
     });
     assert!(
         movement.is_some(),
-        "wheel movement teleported or reversed visible transcript content: pending={pending:?}, after={viewport_after:?}"
+        "wheel movement teleported or reversed visible transcript content: pending={pending:?}, after={viewport_after:?}, frames={frames:?}"
     );
+}
+
+fn max_leading_rows_before_content(frames: &[TranscriptScrollTraceFrame]) -> usize {
+    frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::UserDelta { .. }
+            )
+        })
+        .filter_map(|frame| match frame.viewport_anchor_before {
+            Some(TranscriptTraceAnchor::Content { virtual_row, .. }) => virtual_row
+                .checked_sub(frame.window_scroll_before)
+                .and_then(|rows| usize::try_from(rows).ok()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or_default()
 }
 
 fn assert_transcript_scroll_probe_frames(
