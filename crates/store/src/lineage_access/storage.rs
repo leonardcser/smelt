@@ -49,7 +49,48 @@ pub(super) fn create_lineage_database(root: &Path) -> Result<LineageId> {
     }
 }
 
+fn catalog_lineage_hint(root: &Path, branch: &BranchId) -> Option<LineageId> {
+    if root.file_name()? != std::ffi::OsStr::new("sessions") {
+        return None;
+    }
+    if crate::catalog::catalog_session_pending_token(root, branch.as_str())
+        .ok()?
+        .is_some()
+    {
+        return None;
+    }
+    let catalog_path = root.parent()?.join("catalog.db");
+    let catalog = crate::catalog::CatalogReader::open_existing(catalog_path).ok()??;
+    if !catalog.metadata().ok()?.is_reconciled() {
+        return None;
+    }
+    let session = catalog.session(branch.as_str()).ok()??;
+    if session.availability != crate::catalog::CatalogAvailability::Available {
+        return None;
+    }
+    LineageId::from_hex(session.lineage_id?).ok()
+}
+
+fn branch_exists_in_lineage(root: &Path, lineage: &LineageId, branch: &BranchId) -> Result<bool> {
+    let path = lineage_database_path(root, lineage);
+    reject_symlink(&path)?;
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    branch_exists(&conn, lineage, branch)
+}
+
 pub(super) fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<LineageId>> {
+    if let Some(lineage) = catalog_lineage_hint(root, branch) {
+        if branch_exists_in_lineage(root, &lineage, branch)? {
+            return Ok(Some(lineage));
+        }
+    }
+
     let lineages = root.join(LINEAGES_DIRECTORY);
     if lineages.exists() {
         ensure_private_directory(&lineages)?;

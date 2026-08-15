@@ -302,6 +302,13 @@ pub struct CatalogMetadata {
     pub reconciled_at: Option<i64>,
 }
 
+impl CatalogMetadata {
+    pub fn is_reconciled(self) -> bool {
+        self.reconciled_at.is_some()
+            && self.completed_scan_id.checked_add(1) == Some(self.next_scan_id)
+    }
+}
+
 pub struct Catalog {
     path: PathBuf,
     conn: Connection,

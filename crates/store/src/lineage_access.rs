@@ -1131,9 +1131,9 @@ fn public_snapshot(
 mod tests {
     use super::*;
     use crate::{
-        HistoryIndex, HistoryLen, HistorySuffix, NewTurn, RequestAuditPayloadMode,
-        RequestAuditQuery, SessionCostUsd, SideTableSuffixes, SubmitTurn, TranscriptRecordCount,
-        TurnKind, TurnState, TurnTransition,
+        Catalog, CatalogAvailability, CatalogSession, HistoryIndex, HistoryLen, HistorySuffix,
+        NewTurn, RequestAuditPayloadMode, RequestAuditQuery, SessionCostUsd, SideTableSuffixes,
+        SubmitTurn, TranscriptRecordCount, TurnKind, TurnState, TurnTransition,
     };
 
     fn session_id(digit: char) -> String {
@@ -1178,6 +1178,50 @@ mod tests {
             },
             side_tables: SideTableSuffixes::default(),
             transcript_records: None,
+        }
+    }
+
+    fn install_reconciled_catalog_hint(
+        state_root: &Path,
+        sessions_root: &Path,
+        id: &str,
+        lineage_id: &str,
+    ) {
+        let mut catalog = Catalog::open(state_root.join("catalog.db")).unwrap();
+        let scan_id = catalog.allocate_scan().unwrap();
+        catalog
+            .upsert_available_for_reconciliation(
+                &CatalogSession {
+                    id: id.into(),
+                    lineage_id: Some(lineage_id.into()),
+                    title: Some("catalog hint".into()),
+                    slug: None,
+                    first_user_message: None,
+                    cwd: Some("/workspace".into()),
+                    mode: Some("agent".into()),
+                    reasoning_effort: None,
+                    model: Some("test-model".into()),
+                    fast_mode: Some(false),
+                    parent_id: None,
+                    context_tokens: None,
+                    history_len: Some(1),
+                    text_bytes: Some(5),
+                    created_at: 1,
+                    updated_at: 1,
+                    source_revision: 1,
+                    availability: CatalogAvailability::Available,
+                    error_kind: None,
+                    error_summary: None,
+                    last_seen_scan: 0,
+                },
+                scan_id,
+            )
+            .unwrap();
+        catalog.complete_scan(scan_id, 1).unwrap();
+        drop(catalog);
+
+        if let Some(token) = crate::catalog_session_pending_token(sessions_root, id).unwrap() {
+            assert!(crate::clear_catalog_session_pending(sessions_root, id, &token).unwrap());
         }
     }
 
@@ -1291,6 +1335,77 @@ mod tests {
         candidates.truncate(limit);
         candidates.sort_unstable_by_key(|candidate| candidate.block_idx);
         candidates
+    }
+
+    #[test]
+    fn reconciled_catalog_hint_avoids_scanning_unrelated_lineages() {
+        let state = tempfile::tempdir().unwrap();
+        let sessions_root = state.path().join("sessions");
+        let id = session_id('1');
+        let mut writer = OwnedLineageWriter::open(&sessions_root, &id).unwrap();
+        writer.commit_session(&initial_commit(&id)).unwrap();
+        let lineage_id = writer.lineage_id().to_owned();
+        writer.release().unwrap();
+        install_reconciled_catalog_hint(state.path(), &sessions_root, &id, &lineage_id);
+
+        let decoy = LineageId::random().unwrap();
+        let decoy_dir = sessions_root.join(LINEAGES_DIRECTORY).join(decoy.as_str());
+        fs::create_dir_all(&decoy_dir).unwrap();
+        fs::write(
+            decoy_dir.join(LINEAGE_DB_FILENAME),
+            b"not a sqlite database",
+        )
+        .unwrap();
+
+        let reader = LineageSessionReader::open_existing(&sessions_root, &id).unwrap();
+        assert_eq!(reader.lineage_id(), lineage_id);
+    }
+
+    #[test]
+    fn stale_catalog_hint_falls_back_to_canonical_lineage_scan() {
+        let state = tempfile::tempdir().unwrap();
+        let sessions_root = state.path().join("sessions");
+        let id = session_id('2');
+        let other_id = session_id('3');
+
+        let mut target = OwnedLineageWriter::open(&sessions_root, &id).unwrap();
+        target.commit_session(&initial_commit(&id)).unwrap();
+        let target_lineage = target.lineage_id().to_owned();
+        target.release().unwrap();
+
+        let mut other = OwnedLineageWriter::open(&sessions_root, &other_id).unwrap();
+        other.commit_session(&initial_commit(&other_id)).unwrap();
+        let stale_lineage = other.lineage_id().to_owned();
+        other.release().unwrap();
+
+        install_reconciled_catalog_hint(state.path(), &sessions_root, &id, &stale_lineage);
+
+        let reader = LineageSessionReader::open_existing(&sessions_root, &id).unwrap();
+        assert_eq!(reader.lineage_id(), target_lineage);
+    }
+
+    #[test]
+    fn pending_catalog_projection_preserves_duplicate_lineage_detection() {
+        let state = tempfile::tempdir().unwrap();
+        let sessions_root = state.path().join("sessions");
+        let id = session_id('4');
+        let other_id = session_id('5');
+
+        let mut target = OwnedLineageWriter::open(&sessions_root, &id).unwrap();
+        target.commit_session(&initial_commit(&id)).unwrap();
+        let target_lineage = target.lineage_id().to_owned();
+        target.release().unwrap();
+
+        let mut other = OwnedLineageWriter::open(&sessions_root, &other_id).unwrap();
+        other.commit_session(&initial_commit(&other_id)).unwrap();
+        install_reconciled_catalog_hint(state.path(), &sessions_root, &id, &target_lineage);
+        other.fork_current(&id, 2).unwrap();
+
+        let error = LineageSessionReader::open_existing(&sessions_root, &id).unwrap_err();
+        assert!(
+            matches!(&error, StoreError::Integrity(message) if message.contains("belongs to multiple lineages")),
+            "unexpected duplicate-lineage error: {error}"
+        );
     }
 
     #[test]

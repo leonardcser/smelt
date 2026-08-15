@@ -416,6 +416,8 @@ impl SqliteTranscriptStore {
 #[derive(Default)]
 struct TranscriptStoreCache {
     store: Option<(PathBuf, SqliteTranscriptStore)>,
+    #[cfg(test)]
+    open_attempt_count: usize,
 }
 
 impl TranscriptStoreCache {
@@ -436,6 +438,10 @@ impl TranscriptStoreCache {
             .as_ref()
             .is_none_or(|(open_dir, _)| open_dir != &session_dir);
         if needs_open {
+            #[cfg(test)]
+            {
+                self.open_attempt_count = self.open_attempt_count.saturating_add(1);
+            }
             let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
             self.store = Some((session_dir, store));
         }
@@ -1331,6 +1337,13 @@ impl TranscriptRecordState {
         self.session_dir.as_ref()
     }
 
+    fn extent_session_dir(&self) -> Option<&PathBuf> {
+        if self.total_count()? == 0 {
+            return None;
+        }
+        self.session_dir()
+    }
+
     fn total_count(&self) -> Option<usize> {
         self.sparse.total_count()
     }
@@ -1362,6 +1375,8 @@ impl TranscriptRecordState {
 struct TranscriptViewportRuntime {
     state: TranscriptViewportState,
     trace: Option<TranscriptScrollTrace>,
+    #[cfg(test)]
+    projection_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3239,7 +3254,7 @@ impl TranscriptDocument {
     fn approximate_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
         let store = self
             .store_cache
-            .store_for_session(self.records.session_dir());
+            .store_for_session(self.records.extent_session_dir());
         self.extent_index.approximate_sparse_prefix_rows(
             &self.records.sparse,
             self.records.active_range(),
@@ -3257,7 +3272,7 @@ impl TranscriptDocument {
     fn scrollbar_total_rows(&mut self, width: u16, exact_loaded_rows: RowIndex) -> RowIndex {
         let store = self
             .store_cache
-            .store_for_session(self.records.session_dir());
+            .store_for_session(self.records.extent_session_dir());
         self.extent_index.scrollbar_total_rows(
             &self.records.sparse,
             self.records.active_range(),
@@ -3315,6 +3330,16 @@ impl TranscriptDocument {
             .store
             .as_ref()
             .map_or(0, |(_, store)| store.extent_read_count())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store_open_attempt_count_for_harness(&self) -> usize {
+        self.store_cache.open_attempt_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn projection_count_for_harness(&self) -> usize {
+        self.viewport.projection_count
     }
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
@@ -4174,7 +4199,7 @@ impl TranscriptDocument {
     ) -> Option<(usize, RowIndex)> {
         let store = self
             .store_cache
-            .store_for_session(self.records.session_dir());
+            .store_for_session(self.records.extent_session_dir());
         let model = self.extent_index.record_extent_model(
             &self.records.sparse,
             self.records.active_range(),
@@ -5360,6 +5385,10 @@ impl TranscriptDocument {
         input: TranscriptViewportProjectionInput,
         viewport_rows: u16,
     ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
+        #[cfg(test)]
+        {
+            self.viewport.projection_count = self.viewport.projection_count.saturating_add(1);
+        }
         let previous_top_anchor = self.viewport.state.resolved_anchor.map(|anchor| anchor.top);
         let active_record_range_before = Self::trace_record_range(self.records.active_range());
         let pending_intent = self.take_viewport_intent(input);

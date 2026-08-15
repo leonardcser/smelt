@@ -51,9 +51,7 @@ fn reusable_catalog(path: &Path, sessions_root: &Path) -> Option<ReusableCatalog
     let reader = CatalogReader::open_existing(path).ok()??;
     let metadata = reader.metadata().ok()?;
     // Scan IDs are allocated before scanning. A larger gap means the last rebuild was interrupted.
-    let completed_scan = metadata.reconciled_at.is_some()
-        && metadata.completed_scan_id.checked_add(1) == Some(metadata.next_scan_id);
-    if !completed_scan {
+    if !metadata.is_reconciled() {
         return None;
     }
     Some(ReusableCatalog {

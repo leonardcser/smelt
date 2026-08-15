@@ -50,6 +50,32 @@ fn lua_paint_callback_uses_scoped_tui_host_after_ui_paint() {
 }
 
 #[test]
+fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
+    let mut app = TestApp::builder().build();
+    let session_dir = app.app.conversation.current_session_dir();
+    assert!(
+        !session_dir.exists(),
+        "fresh session should not be persisted before its first message"
+    );
+
+    for _ in 0..3 {
+        app.render_silent();
+    }
+
+    let transcript = app.app.conversation.transcript();
+    assert_eq!(
+        transcript.projection_count_for_harness(),
+        3,
+        "test must exercise transcript projection"
+    );
+    assert_eq!(
+        transcript.store_open_attempt_count_for_harness(),
+        0,
+        "rendering a fresh session must not probe a transcript store that cannot exist yet"
+    );
+}
+
+#[test]
 fn empty_engine_output_is_a_transcript_noop() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);
