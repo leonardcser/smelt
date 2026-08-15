@@ -1129,11 +1129,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
                         call_id: format!("synth-call-{i:02}"),
                         name: "synth".to_string(),
                         arguments: "{}".to_string(),
-                        result: ToolOutcome::new(
-                            format!("synth-result-{i}"),
-                            false,
-                            None,
-                        ),
+                        result: ToolOutcome::new(format!("synth-result-{i}"), false, None),
                         elapsed_ms: None,
                         called_at_ms: Some(i as u64),
                     };

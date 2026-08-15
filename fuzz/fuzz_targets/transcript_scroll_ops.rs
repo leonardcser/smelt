@@ -25,6 +25,8 @@ struct Input {
 #[derive(Arbitrary, Debug)]
 enum Op {
     Wheel { down: bool, row: u8, ticks: u8 },
+    WheelBurst { down: bool, row: u8, ticks: u8 },
+    MixedWheelBurst { down: bool, row: u8, ticks: u8 },
     Click { row: u8, col: u8 },
     DragSelect { from_row: u8, to_row: u8, col: u8 },
     StartEdgeDrag { bottom: bool },
@@ -65,6 +67,25 @@ fn run_with_app(input: Input) {
                     app.transcript_scroll_probe_wheel(down, u16::from(row));
                     app.transcript_scroll_probe_render();
                 }
+                continue;
+            }
+            Op::WheelBurst { down, row, ticks } => {
+                for _ in 0..ticks.clamp(1, 2) {
+                    app.transcript_scroll_probe_wheel(down, u16::from(row));
+                }
+                app.transcript_scroll_probe_render();
+                continue;
+            }
+            Op::MixedWheelBurst {
+                mut down,
+                row,
+                ticks,
+            } => {
+                for _ in 0..ticks.clamp(2, 4) {
+                    app.transcript_scroll_probe_wheel(down, u16::from(row));
+                    down = !down;
+                }
+                app.transcript_scroll_probe_render();
                 continue;
             }
             Op::Click { row, col } => {

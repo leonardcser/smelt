@@ -389,13 +389,7 @@ fn transcript_viewport_top_line(app: &TestApp) -> String {
 }
 
 fn transcript_viewport_lines(app: &TestApp) -> Vec<String> {
-    let win = app.transcript_window();
-    let buf = app.ui_probe().buf(win.buf).expect("transcript buffer");
-    let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0) as usize;
-    let start = win.local_visual_row(win.scroll_top()) as usize;
-    (start..start.saturating_add(viewport_rows).min(buf.line_count()))
-        .map(|i| buf.get_line(i).unwrap_or_default().to_string())
-        .collect()
+    app.transcript_viewport_lines()
 }
 
 fn transcript_buffer_lines(app: &TestApp, count: usize) -> Vec<String> {

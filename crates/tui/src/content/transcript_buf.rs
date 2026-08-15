@@ -755,7 +755,7 @@ impl MeasurementIndexStore {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum ProjectionAnchor {
     Node {
@@ -776,6 +776,28 @@ enum ProjectionAnchor {
 impl ProjectionAnchor {
     fn rendered_block_row(id: BlockId, row_offset: RowIndex) -> Self {
         Self::RenderedBlockRow { id, row_offset }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StableRowAnchor(ProjectionAnchor);
+
+impl StableRowAnchor {
+    pub(crate) fn block_id(self) -> Option<BlockId> {
+        match self.0 {
+            ProjectionAnchor::Node { id, .. } => id.as_block_id(),
+            ProjectionAnchor::RenderedBlockRow { id, .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. } => Some(id),
+        }
+    }
+}
+
+impl From<TranscriptRowAnchor> for StableRowAnchor {
+    fn from(anchor: TranscriptRowAnchor) -> Self {
+        Self(ProjectionAnchor::Node {
+            id: anchor.id,
+            row_offset: anchor.row_offset,
+        })
     }
 }
 
@@ -847,18 +869,23 @@ pub(crate) struct ExactRowTapeHandle {
 #[derive(Clone, Copy)]
 pub(crate) struct ExactRowTapeState {
     pub(crate) rows: MaterializedRows,
-    pub(crate) top_anchor: Option<TranscriptRowAnchor>,
+    pub(crate) top_anchor: Option<StableRowAnchor>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExactRowTapeProjection {
     key: ProjectKey,
     rows: MaterializedRows,
+    top_anchor: Option<StableRowAnchor>,
 }
 
 impl ExactRowTapeProjection {
     pub(crate) fn rows(self) -> MaterializedRows {
         self.rows
+    }
+
+    pub(crate) fn top_anchor(self) -> Option<StableRowAnchor> {
+        self.top_anchor
     }
 }
 
@@ -952,7 +979,7 @@ pub(crate) enum ScrollAnchor {
     ReflowStableRow(RowIndex),
     StableRowDelta {
         row: RowIndex,
-        anchor: Option<TranscriptRowAnchor>,
+        anchor: Option<StableRowAnchor>,
         delta: isize,
     },
     Tail,
@@ -986,6 +1013,14 @@ impl ScrollTarget {
     pub(crate) fn visible_stable_row_delta(
         row: RowIndex,
         anchor: Option<TranscriptRowAnchor>,
+        delta: isize,
+    ) -> Self {
+        Self::visible_stable_anchor_delta(row, anchor.map(StableRowAnchor::from), delta)
+    }
+
+    pub(crate) fn visible_stable_anchor_delta(
+        row: RowIndex,
+        anchor: Option<StableRowAnchor>,
         delta: isize,
     ) -> Self {
         Self::Visible(ScrollAnchor::StableRowDelta { row, anchor, delta })
@@ -1876,10 +1911,13 @@ impl TranscriptProjection {
         delta: isize,
         viewport_rows: u16,
     ) -> Option<std::ops::Range<usize>> {
-        let ProjectionAnchor::Node { id, .. } = anchor else {
-            return None;
-        };
-        let anchor_index = self.measurements.active.node_index(id)?;
+        let anchor_index = match anchor {
+            ProjectionAnchor::Node { id, .. } => self.measurements.active.node_index(id),
+            ProjectionAnchor::RenderedBlockRow { id, .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. } => {
+                self.measurements.active.block_index(id)
+            }
+        }?;
         let distance = delta.unsigned_abs();
         let viewport_nodes = usize::from(viewport_rows.max(1));
         let (start, end) = if delta < 0 {
@@ -1905,10 +1943,14 @@ impl TranscriptProjection {
         anchor: ProjectionAnchor,
         delta: isize,
     ) {
-        let ProjectionAnchor::Node { id, .. } = anchor else {
-            return;
+        let anchor_index = match anchor {
+            ProjectionAnchor::Node { id, .. } => self.measurements.active.node_index(id),
+            ProjectionAnchor::RenderedBlockRow { id, .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. } => {
+                self.measurements.active.block_index(id)
+            }
         };
-        let Some(anchor_index) = self.measurements.active.node_index(id) else {
+        let Some(anchor_index) = anchor_index else {
             return;
         };
         let distance = delta.unsigned_abs();
@@ -2386,24 +2428,11 @@ impl TranscriptProjection {
             })
     }
 
-    fn exact_materialized_row_anchor(&self, row: RowIndex) -> Option<TranscriptRowAnchor> {
-        let anchor = row
-            .checked_sub(self.visible.row_base)
+    fn stable_materialized_row_anchor(&self, row: RowIndex) -> Option<StableRowAnchor> {
+        row.checked_sub(self.visible.row_base)
             .and_then(|local| usize::try_from(local).ok())
             .and_then(|local| self.visible.row_identities.get(local))
-            .map(|identity| identity.exact)?;
-        match anchor {
-            ProjectionAnchor::Node { id, row_offset } => {
-                Some(TranscriptRowAnchor { id, row_offset })
-            }
-            ProjectionAnchor::RenderedBlockRow { id, row_offset }
-            | ProjectionAnchor::RenderedBlockDisplayOffset { id, row_offset, .. } => {
-                Some(TranscriptRowAnchor {
-                    id: RenderNodeId::Block(id),
-                    row_offset,
-                })
-            }
-        }
+            .map(|identity| StableRowAnchor(identity.content.unwrap_or(identity.exact)))
     }
 
     pub(crate) fn representative_block_id_for_node_index(&self, index: usize) -> Option<BlockId> {
@@ -2421,6 +2450,18 @@ impl TranscriptProjection {
         self.measurements
             .active
             .row_for_node_anchor(anchor.id, anchor.row_offset)
+    }
+
+    pub(crate) fn row_for_stable_anchor(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        theme: &Theme,
+        anchor: StableRowAnchor,
+    ) -> Option<RowIndex> {
+        self.prepare_layout(lua, history, width);
+        self.scroll_top_for_anchor(history, theme, anchor.0)
     }
 
     pub(crate) fn row_anchor_for_block(
@@ -2583,10 +2624,7 @@ impl TranscriptProjection {
                 self.stable_row_anchor_for(history, theme, row)
             }
             ScrollTarget::Visible(ScrollAnchor::StableRowDelta { row, anchor, .. }) => anchor
-                .map(|anchor| ProjectionAnchor::Node {
-                    id: anchor.id,
-                    row_offset: anchor.row_offset,
-                })
+                .map(|anchor| anchor.0)
                 .or_else(|| self.exact_row_anchor_for(row)),
             ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::Tail) => None,
         };
@@ -2687,10 +2725,7 @@ impl TranscriptProjection {
                 self.stable_row_anchor_for(history, theme, row)
             }
             ScrollTarget::Visible(ScrollAnchor::StableRowDelta { row, anchor, .. }) => anchor
-                .map(|anchor| ProjectionAnchor::Node {
-                    id: anchor.id,
-                    row_offset: anchor.row_offset,
-                })
+                .map(|anchor| anchor.0)
                 .or_else(|| self.exact_row_anchor_for(row)),
             ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::Tail) => None,
         };
@@ -2957,7 +2992,7 @@ impl TranscriptProjection {
         }
         Some(ExactRowTapeState {
             rows: handle.rows,
-            top_anchor: self.exact_materialized_row_anchor(handle.rows.clamped_scroll),
+            top_anchor: self.stable_materialized_row_anchor(handle.rows.clamped_scroll),
         })
     }
 
@@ -3012,6 +3047,7 @@ impl TranscriptProjection {
                 total_rows: self.visible.total_rows,
                 materialized_rows,
             },
+            top_anchor: self.stable_materialized_row_anchor(target),
         })
     }
 

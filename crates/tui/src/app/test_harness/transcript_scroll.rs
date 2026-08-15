@@ -39,10 +39,17 @@ struct UserDeltaAnchor {
     row_offset: crate::smelt_edit::RowIndex,
 }
 
+#[derive(Debug)]
+struct PendingWheelMovement {
+    rows: isize,
+    viewport_before: Vec<String>,
+}
+
 #[derive(Default)]
 pub(super) struct TranscriptScrollProbeState {
     drag_edge: Option<TranscriptScrollProbeEdge>,
     last_user_delta_anchor: Option<UserDeltaAnchor>,
+    pending_wheel_movement: Option<PendingWheelMovement>,
     fixture: Option<SparseTranscriptFixture>,
 }
 
@@ -436,12 +443,17 @@ impl TestApp {
 
     pub fn transcript_scroll_probe_render(&mut self) {
         self.transcript_scroll_probe.keep_fixture_alive();
+        let pending_wheel_movement = self.transcript_scroll_probe.pending_wheel_movement.take();
         self.render_silent();
         let frames = self
             .app
             .conversation
             .take_transcript_scroll_trace_frames_for_harness();
         assert_transcript_scroll_probe_frames(&mut self.transcript_scroll_probe, &frames);
+        if let Some(pending) = pending_wheel_movement {
+            let viewport_after = self.transcript_viewport_lines();
+            assert_wheel_movement_visible(&pending, &viewport_after);
+        }
         self.assert_invariants();
     }
 
@@ -456,6 +468,22 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_wheel(&mut self, down: bool, rel_row: u16) {
+        let effective_rows = if down && self.transcript_window().following_tail {
+            0
+        } else if down {
+            3
+        } else {
+            -3
+        };
+        if let Some(pending) = &mut self.transcript_scroll_probe.pending_wheel_movement {
+            pending.rows = pending.rows.saturating_add(effective_rows);
+        } else {
+            self.transcript_scroll_probe.pending_wheel_movement = Some(PendingWheelMovement {
+                rows: effective_rows,
+                viewport_before: self.transcript_viewport_lines(),
+            });
+        }
+
         let (row, col) = self.transcript_scroll_probe_content_point(rel_row, 1);
         let kind = if down {
             MouseEventKind::ScrollDown
@@ -660,6 +688,19 @@ impl TestApp {
         self.app.transcript_win_mut().follow_tail();
     }
 
+    pub(crate) fn transcript_viewport_lines(&self) -> Vec<String> {
+        let window = self.transcript_window();
+        let buffer = self.app.ui.buf(window.buf).expect("transcript buffer");
+        let viewport_rows = window
+            .viewport
+            .map(|viewport| usize::from(viewport.rect.height))
+            .unwrap_or(0);
+        let start = window.local_visual_row(window.scroll_top) as usize;
+        (start..start.saturating_add(viewport_rows).min(buffer.line_count()))
+            .map(|row| buffer.get_line(row).unwrap_or_default().to_string())
+            .collect()
+    }
+
     fn transcript_scroll_probe_content_point(&self, rel_row: u16, rel_col: u16) -> (u16, u16) {
         let vp = self
             .app
@@ -677,6 +718,38 @@ impl TestApp {
             .saturating_add(rel_col.min(vp.content_width.saturating_sub(1)));
         (row, col)
     }
+}
+
+fn assert_wheel_movement_visible(pending: &PendingWheelMovement, viewport_after: &[String]) {
+    assert_eq!(
+        viewport_after.len(),
+        pending.viewport_before.len(),
+        "wheel movement changed the visible transcript height: pending={pending:?}, after={viewport_after:?}"
+    );
+    if viewport_after == pending.viewport_before || pending.rows == 0 {
+        assert_eq!(
+            viewport_after, pending.viewport_before,
+            "wheel events with no net movement changed visible transcript content: pending={pending:?}, after={viewport_after:?}"
+        );
+        return;
+    }
+
+    let max_rows = pending.rows.unsigned_abs();
+    if max_rows >= viewport_after.len() {
+        return;
+    }
+    let movement = (1..=max_rows).find(|&rows| {
+        let overlap = viewport_after.len() - rows;
+        if pending.rows < 0 {
+            viewport_after[rows..] == pending.viewport_before[..overlap]
+        } else {
+            viewport_after[..overlap] == pending.viewport_before[rows..]
+        }
+    });
+    assert!(
+        movement.is_some(),
+        "wheel movement teleported or reversed visible transcript content: pending={pending:?}, after={viewport_after:?}"
+    );
 }
 
 fn assert_transcript_scroll_probe_frames(
@@ -703,6 +776,7 @@ fn assert_transcript_scroll_probe_frames(
                     "local transcript movement lost its visible content anchor: {frame:?}"
                 );
                 assert_record_ranges_overlap(state, frame);
+                assert_user_delta_from_frame_start(*rows, frame);
                 assert_user_delta_direction(state, *rows, frame);
             }
             TranscriptScrollIntent::SearchJump { .. }
@@ -766,6 +840,40 @@ fn assert_record_ranges_overlap(
 
 fn ranges_overlap(a: TranscriptRecordTraceRange, b: TranscriptRecordTraceRange) -> bool {
     a.start <= b.end && b.start <= a.end
+}
+
+fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTraceFrame) {
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: before_record,
+        block_id: before_block,
+        row_offset: before_row,
+        ..
+    }) = frame.viewport_anchor_before
+    else {
+        return;
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: after_record,
+        block_id: after_block,
+        row_offset: after_row,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
+        panic!("local movement lost its semantic viewport anchor: {frame:?}");
+    };
+    let movement =
+        (after_record, after_block, after_row).cmp(&(before_record, before_block, before_row));
+    if rows < 0 {
+        assert!(
+            !movement.is_gt(),
+            "first upward local movement moved the semantic viewport anchor downward: {frame:?}"
+        );
+    } else if rows > 0 {
+        assert!(
+            !movement.is_lt(),
+            "first downward local movement moved the semantic viewport anchor upward: {frame:?}"
+        );
+    }
 }
 
 fn assert_user_delta_direction(

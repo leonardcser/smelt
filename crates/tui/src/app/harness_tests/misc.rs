@@ -3180,6 +3180,107 @@ fn resumed_sparse_near_tail_scroll_down_stays_incremental() {
 }
 
 #[test]
+fn resumed_sparse_first_wheel_after_tail_jumps_stays_incremental() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.install_sparse_transcript_scroll_fixture(111, 55, 21);
+
+    for _ in 0..12 {
+        app.type_char('G');
+        app.render_silent();
+    }
+
+    app.take_transcript_scroll_trace_frames_for_harness();
+    let before = transcript_viewport_lines(&app);
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    let after = transcript_viewport_lines(&app);
+    let frames = app.take_transcript_scroll_trace_frames_for_harness();
+    assert_eq!(
+        &after[3..],
+        &before[..before.len() - 3],
+        "first wheel-up tick did not move by exactly three visible rows: before={before:?}, after={after:?}, frames={frames:#?}"
+    );
+}
+
+#[test]
+fn resumed_sparse_wheel_bursts_preserve_visible_movement_before_and_after_top() {
+    let count = 320;
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
+    let loaded = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .block_records()
+        .len();
+    assert!(
+        loaded < count / 2,
+        "resume test must stay sparse, loaded={loaded}, count={count}"
+    );
+
+    for step in 0..70 {
+        let before = transcript_viewport_lines(&app);
+        for _ in 0..2 {
+            wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        }
+        app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        assert_viewport_shifted_up_rows(step, &before, &after, 6);
+    }
+    assert!(
+        !app.transcript_window().following_tail,
+        "wheel bursts should leave tail-follow mode"
+    );
+
+    let before_down = transcript_viewport_lines(&app);
+    for _ in 0..2 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+    }
+    app.render_silent();
+    let after_down = transcript_viewport_lines(&app);
+    assert_viewport_shifted_down_rows(0, &before_down, &after_down, 6);
+
+    app.render_silent();
+    assert_eq!(
+        transcript_viewport_lines(&app),
+        after_down,
+        "idle render moved the transcript after a direction change"
+    );
+
+    for step in 70..400 {
+        if app.transcript_window().scroll_top == 0 {
+            break;
+        }
+        let before = transcript_viewport_lines(&app);
+        for _ in 0..2 {
+            wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        }
+        app.render_silent();
+        let after = transcript_viewport_lines(&app);
+        if before != after {
+            assert_viewport_shifted_up_at_most_rows(step, &before, &after, 6);
+        }
+    }
+    assert_eq!(
+        app.transcript_window().scroll_top,
+        0,
+        "wheel bursts did not reach the top of the sparse transcript"
+    );
+    assert_eq!(
+        first_visible_record_index(&app),
+        Some(0),
+        "the top viewport did not reveal the first sparse transcript record"
+    );
+    let at_top = transcript_viewport_lines(&app);
+
+    for _ in 0..2 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+    }
+    app.render_silent();
+    let after_top = transcript_viewport_lines(&app);
+    assert_viewport_shifted_down_rows(1, &at_top, &after_top, 6);
+}
+
+#[test]
 fn resumed_sparse_scroll_down_after_scroll_up_does_not_snap_to_tail() {
     let count = 260;
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
@@ -5389,6 +5490,27 @@ fn assert_viewport_shifted_down_rows(
         "wheel-down step {step} did not shift by exactly {rows} visible rows: before={before:?}, after={after:?}, expected_overlap={:?}, actual_overlap={:?}",
         &before[rows..rows + overlap],
         &after[..overlap],
+    );
+}
+
+fn assert_viewport_shifted_up_at_most_rows(
+    step: usize,
+    before: &[String],
+    after: &[String],
+    max_rows: usize,
+) {
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "wheel-up step {step} changed viewport line count: before={before:?}, after={after:?}"
+    );
+    let actual_rows = (1..=max_rows).find(|&rows| {
+        let overlap = before.len().saturating_sub(rows);
+        overlap > 0 && after[rows..rows + overlap] == before[..overlap]
+    });
+    assert!(
+        actual_rows.is_some(),
+        "wheel-up step {step} did not shift upward by 1..={max_rows} visible rows: before={before:?}, after={after:?}"
     );
 }
 
