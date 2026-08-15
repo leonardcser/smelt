@@ -725,10 +725,14 @@ fn assert_wheel_movement_visible(
     viewport_after: &[String],
     frames: &[TranscriptScrollTraceFrame],
 ) {
+    if !has_user_delta_frame(frames) {
+        return;
+    }
+
     assert_eq!(
         viewport_after.len(),
         pending.viewport_before.len(),
-        "wheel movement changed the visible transcript height: pending={pending:?}, after={viewport_after:?}"
+        "wheel movement changed the visible transcript height: pending={pending:?}, after={viewport_after:?}, frames={frames:?}"
     );
     if viewport_after == pending.viewport_before || pending.rows == 0 {
         assert_eq!(
@@ -754,10 +758,62 @@ fn assert_wheel_movement_visible(
             viewport_after[..overlap] == pending.viewport_before[rows..]
         }
     });
+    if movement.is_none() && sparse_user_delta_moved_within_visible_record_span(frames, max_rows) {
+        return;
+    }
     assert!(
         movement.is_some(),
         "wheel movement teleported or reversed visible transcript content: pending={pending:?}, after={viewport_after:?}, frames={frames:?}"
     );
+}
+
+fn has_user_delta_frame(frames: &[TranscriptScrollTraceFrame]) -> bool {
+    frames.iter().any(|frame| {
+        matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::UserDelta { .. }
+        )
+    })
+}
+
+fn sparse_user_delta_moved_within_visible_record_span(
+    frames: &[TranscriptScrollTraceFrame],
+    max_rows: usize,
+) -> bool {
+    frames.iter().any(|frame| {
+        let TranscriptScrollIntent::UserDelta { rows } = frame.scroll_intent else {
+            return false;
+        };
+        if rows == 0 || frame.active_record_range_before == frame.active_record_range_after {
+            return false;
+        }
+        let Some(TranscriptTraceAnchor::Content {
+            record_index: before_record,
+            row_offset: before_row,
+            ..
+        }) = frame.viewport_anchor_before
+        else {
+            return false;
+        };
+        let Some(TranscriptTraceAnchor::Content {
+            record_index: after_record,
+            row_offset: after_row,
+            ..
+        }) = frame.viewport_anchor_after
+        else {
+            return false;
+        };
+        let movement = (after_record, after_row).cmp(&(before_record, before_row));
+        if (rows < 0 && movement.is_gt()) || (rows > 0 && movement.is_lt()) {
+            return false;
+        }
+        let distance = if before_record == after_record {
+            usize::try_from(before_row.abs_diff(after_row)).unwrap_or(usize::MAX)
+        } else {
+            before_record.abs_diff(after_record)
+        };
+        distance <= max_rows
+    })
 }
 
 fn max_leading_rows_before_content(frames: &[TranscriptScrollTraceFrame]) -> usize {

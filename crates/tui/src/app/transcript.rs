@@ -5000,6 +5000,14 @@ impl TranscriptDocument {
             }
         }
         let exact_anchor = exact_viewport.and_then(|(_, tape)| tape.top_anchor);
+        let (semantic_anchor, semantic_offset_rows) = match self.viewport.state.resolved_anchor {
+            Some(TranscriptResolvedViewportAnchor {
+                top: TranscriptScrollAnchor::Content(anchor),
+                offset_rows,
+                ..
+            }) if semantic_viewport_matches => (Some(anchor), offset_rows),
+            _ => (None, 0),
+        };
         let base = exact_viewport
             .map(|(exact, tape)| tape.rows.clamped_scroll.saturating_add(exact.row_offset))
             .or_else(|| {
@@ -5010,15 +5018,13 @@ impl TranscriptDocument {
                     .flatten()
             })
             .unwrap_or(fallback_scroll_top);
-        let anchor_record = match self.viewport.state.resolved_anchor {
-            Some(TranscriptResolvedViewportAnchor {
-                top: TranscriptScrollAnchor::Content(anchor),
-                ..
-            }) if semantic_viewport_matches => Some(anchor.record_index),
-            _ => exact_anchor
-                .and_then(|anchor| anchor.block_id())
-                .and_then(|block_id| self.record_index_for_block_id(block_id)),
-        };
+        let anchor_record = semantic_anchor
+            .map(|anchor| anchor.record_index)
+            .or_else(|| {
+                exact_anchor
+                    .and_then(|anchor| anchor.block_id())
+                    .and_then(|block_id| self.record_index_for_block_id(block_id))
+            });
         let needs_record_expansion = self.local_delta_needs_record_expansion(
             exact_viewport.map(|(_, tape)| tape),
             viewport_rows,
@@ -5035,10 +5041,48 @@ impl TranscriptDocument {
                 );
             }
         }
+        let reanchored_semantic_anchor = semantic_anchor.and_then(|anchor| {
+            let block_id = self
+                .records
+                .sparse
+                .record(smelt_store::TranscriptRecordOffset::new(
+                    anchor.record_index,
+                ))
+                .map(|record| record.block_id)
+                .unwrap_or(anchor.block_id);
+            self.content
+                .projection
+                .row_anchor_for_block(
+                    lua,
+                    &mut self.content.transcript.history,
+                    width,
+                    block_id,
+                    anchor.intra_block_row,
+                )
+                .map(Into::into)
+        });
+        let content_exact_anchor = exact_anchor.filter(|anchor| anchor.block_id().is_some());
+        let present_exact_anchor = content_exact_anchor.and_then(|anchor| {
+            self.content
+                .projection
+                .stable_anchor_is_present(lua, &mut self.content.transcript.history, width, anchor)
+                .then_some(anchor)
+        });
+        let semantic_stable_anchor = reanchored_semantic_anchor
+            .or_else(|| semantic_anchor.map(|anchor| anchor.row_anchor.into()));
+        let stable_anchor = present_exact_anchor
+            .or(semantic_stable_anchor)
+            .or(content_exact_anchor)
+            .or(exact_anchor);
+        let stable_delta = if present_exact_anchor.is_none() && semantic_stable_anchor.is_some() {
+            rows.saturating_add(semantic_offset_rows)
+        } else {
+            rows
+        };
         crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
             base,
-            exact_anchor,
-            rows,
+            stable_anchor,
+            stable_delta,
         )
     }
 

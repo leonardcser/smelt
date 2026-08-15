@@ -2464,6 +2464,23 @@ impl TranscriptProjection {
         self.scroll_top_for_anchor(history, theme, anchor.0)
     }
 
+    pub(crate) fn stable_anchor_is_present(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        anchor: StableRowAnchor,
+    ) -> bool {
+        self.prepare_layout(lua, history, width);
+        match anchor.0 {
+            ProjectionAnchor::Node { id, .. } => self.measurements.active.node_index(id).is_some(),
+            ProjectionAnchor::RenderedBlockRow { id, .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. } => {
+                self.measurements.active.block_index(id).is_some()
+            }
+        }
+    }
+
     pub(crate) fn row_anchor_for_block(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
