@@ -885,63 +885,42 @@ struct PendingToolCall {
     is_sequential: bool,
 }
 
-// A provider can evade call-ID replay detection by issuing fresh IDs forever.
-const MAX_TOOL_ROUNDS_PER_TURN: usize = 64;
-
 #[derive(Debug, PartialEq, Eq)]
-enum ToolLoopViolation {
-    ReplayedCall { call_id: String },
-    RoundLimit { limit: usize },
+struct ReplayedToolCall {
+    call_id: String,
 }
 
-impl ToolLoopViolation {
+impl ReplayedToolCall {
     fn reason(&self) -> &'static str {
-        match self {
-            Self::ReplayedCall { .. } => "replayed_tool_call",
-            Self::RoundLimit { .. } => "tool_round_limit",
-        }
+        "replayed_tool_call"
     }
 
     fn message(&self) -> String {
-        match self {
-            Self::ReplayedCall { call_id } => format!(
-                "Provider repeated tool call ID `{call_id}`. Stopped to prevent duplicate execution."
-            ),
-            Self::RoundLimit { limit } => format!(
-                "Stopped after {limit} tool rounds in one turn. Start a new turn to continue."
-            ),
-        }
+        let call_id = &self.call_id;
+        format!(
+            "Provider repeated tool call ID `{call_id}`. Stopped to prevent duplicate execution."
+        )
     }
 }
 
 #[derive(Default)]
-struct ToolLoopGuard {
+struct ToolReplayGuard {
     completed_call_ids: HashSet<String>,
-    rounds: usize,
 }
 
-impl ToolLoopGuard {
-    fn begin_round(&mut self, calls: &[protocol::ToolCall]) -> Result<(), ToolLoopViolation> {
+impl ToolReplayGuard {
+    fn begin_round(&mut self, calls: &[protocol::ToolCall]) -> Result<(), ReplayedToolCall> {
         let mut round_call_ids = HashSet::with_capacity(calls.len());
         for call in calls {
             if self.completed_call_ids.contains(&call.id)
                 || !round_call_ids.insert(call.id.as_str())
             {
-                return Err(ToolLoopViolation::ReplayedCall {
+                return Err(ReplayedToolCall {
                     call_id: call.id.clone(),
                 });
             }
         }
 
-        if calls.is_empty() {
-            return Ok(());
-        }
-        if self.rounds >= MAX_TOOL_ROUNDS_PER_TURN {
-            return Err(ToolLoopViolation::RoundLimit {
-                limit: MAX_TOOL_ROUNDS_PER_TURN,
-            });
-        }
-        self.rounds += 1;
         Ok(())
     }
 
@@ -1568,7 +1547,7 @@ impl<'a> Turn<'a> {
 
         let mut first = true;
         let mut empty_retries: u8 = 0;
-        let mut tool_loop_guard = ToolLoopGuard::default();
+        let mut tool_replay_guard = ToolReplayGuard::default();
         const MAX_EMPTY_RETRIES: u8 = 2;
 
         loop {
@@ -1882,13 +1861,13 @@ impl<'a> Turn<'a> {
             let post_hook_reasoning_blocks = hooked.reasoning_details.unwrap_or_default();
             let dispatched_calls = hooked.tool_calls.unwrap_or_default();
 
-            if let Err(violation) = tool_loop_guard.begin_round(&dispatched_calls) {
-                let message = violation.message();
+            if let Err(replayed) = tool_replay_guard.begin_round(&dispatched_calls) {
+                let message = replayed.message();
                 log::entry(
                     log::Level::Warn,
                     "agent_stop",
                     &serde_json::json!({
-                        "reason": violation.reason(),
+                        "reason": replayed.reason(),
                         "error": &message,
                     }),
                 );
@@ -1935,7 +1914,7 @@ impl<'a> Turn<'a> {
                 post_hook_reasoning_blocks,
                 invocations,
             ));
-            tool_loop_guard.finish_round(&dispatched_calls);
+            tool_replay_guard.finish_round(&dispatched_calls);
             self.emit_history_appended_from(first_index);
             if !cancelled {
                 self.apply_deferred_turn_cmds(deferred_turn_cmds);
@@ -3471,49 +3450,42 @@ mod tests {
     }
 
     #[test]
-    fn tool_loop_guard_rejects_completed_call_ids() {
+    fn tool_replay_guard_rejects_completed_call_ids() {
         let calls = vec![tc("call-1")];
-        let mut guard = ToolLoopGuard::default();
+        let mut guard = ToolReplayGuard::default();
 
         guard.begin_round(&calls).unwrap();
         guard.finish_round(&calls);
 
         assert_eq!(
             guard.begin_round(&calls),
-            Err(ToolLoopViolation::ReplayedCall {
+            Err(ReplayedToolCall {
                 call_id: "call-1".into(),
             })
         );
     }
 
     #[test]
-    fn tool_loop_guard_rejects_duplicate_ids_before_execution() {
+    fn tool_replay_guard_rejects_duplicate_ids_before_execution() {
         let calls = vec![tc("call-1"), tc("call-1")];
-        let mut guard = ToolLoopGuard::default();
+        let mut guard = ToolReplayGuard::default();
 
         assert_eq!(
             guard.begin_round(&calls),
-            Err(ToolLoopViolation::ReplayedCall {
+            Err(ReplayedToolCall {
                 call_id: "call-1".into(),
             })
         );
     }
 
     #[test]
-    fn tool_loop_guard_bounds_rounds_with_fresh_ids() {
-        let mut guard = ToolLoopGuard::default();
-        for index in 0..MAX_TOOL_ROUNDS_PER_TURN {
+    fn tool_replay_guard_allows_many_fresh_call_ids() {
+        let mut guard = ToolReplayGuard::default();
+        for index in 0..2_048 {
             let calls = vec![tc(&format!("call-{index}"))];
             guard.begin_round(&calls).unwrap();
             guard.finish_round(&calls);
         }
-
-        assert_eq!(
-            guard.begin_round(&[tc("one-too-many")]),
-            Err(ToolLoopViolation::RoundLimit {
-                limit: MAX_TOOL_ROUNDS_PER_TURN,
-            })
-        );
     }
 
     fn classified_call(tc: &protocol::ToolCall, called_at_ms: u64) -> ClassifiedToolCall<'_> {

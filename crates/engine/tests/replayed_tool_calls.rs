@@ -28,9 +28,9 @@ fn sse(events: &[&str]) -> String {
     body
 }
 
-fn tool_call_sse() -> String {
+fn tool_call_sse_for(call_id: &str) -> String {
     let block_start = format!(
-        r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"tool_use","id":"{TOOL_CALL_ID}","name":"{TOOL_NAME}","input":{{}}}}}}"#
+        r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"tool_use","id":"{call_id}","name":"{TOOL_NAME}","input":{{}}}}}}"#
     );
     let events: Vec<&str> = vec![
         r#"{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}"#,
@@ -41,6 +41,10 @@ fn tool_call_sse() -> String {
         r#"{"type":"message_stop"}"#,
     ];
     sse(&events)
+}
+
+fn tool_call_sse() -> String {
+    tool_call_sse_for(TOOL_CALL_ID)
 }
 
 fn terminal_sse() -> String {
@@ -97,7 +101,13 @@ async fn write_sse_response(sock: &mut tokio::net::TcpStream, body: &str) {
     sock.flush().await.unwrap();
 }
 
-async fn run_server(listener: TcpListener, requests: Arc<Mutex<Vec<serde_json::Value>>>) {
+async fn run_server<F>(
+    listener: TcpListener,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    mut response_for_request: F,
+) where
+    F: FnMut(usize) -> String + Send + 'static,
+{
     let mut request_index = 0;
     loop {
         let (mut sock, _) = match listener.accept().await {
@@ -106,11 +116,7 @@ async fn run_server(listener: TcpListener, requests: Arc<Mutex<Vec<serde_json::V
         };
         let request = read_json_request(&mut sock).await;
         requests.lock().unwrap().push(request);
-        let body = if request_index < 2 {
-            tool_call_sse()
-        } else {
-            terminal_sse()
-        };
+        let body = response_for_request(request_index);
         request_index += 1;
         write_sse_response(&mut sock, &body).await;
     }
@@ -179,15 +185,22 @@ fn count_tool_results(value: &serde_json::Value) -> usize {
     }
 }
 
-fn count_committed_invocations(items: &[HistoryItem]) -> usize {
+fn committed_invocations(items: &[HistoryItem]) -> impl Iterator<Item = &protocol::ToolInvocation> {
     items
         .iter()
         .filter_map(|item| match item {
-            HistoryItem::Assistant(step) => Some(&step.invocations),
+            HistoryItem::Assistant(step) => Some(step.invocations.iter()),
             _ => None,
         })
         .flatten()
-        .filter(|invocation| invocation.call_id == TOOL_CALL_ID)
+}
+
+fn count_committed_invocations(
+    items: &[HistoryItem],
+    matches_invocation: impl Fn(&protocol::ToolInvocation) -> bool,
+) -> usize {
+    committed_invocations(items)
+        .filter(|&invocation| matches_invocation(invocation))
         .count()
 }
 
@@ -196,7 +209,17 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let server = tokio::spawn(run_server(listener, Arc::clone(&requests)));
+    let server = tokio::spawn(run_server(
+        listener,
+        Arc::clone(&requests),
+        |request_index| {
+            if request_index < 2 {
+                tool_call_sse()
+            } else {
+                terminal_sse()
+            }
+        },
+    ));
     let executions = Arc::new(AtomicUsize::new(0));
 
     let config = EngineConfig {
@@ -250,7 +273,10 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
         loop {
             match handle.recv().await {
                 Some(EngineEvent::HistoryAppended { delta, .. }) => {
-                    committed_invocations += count_committed_invocations(&delta.items);
+                    committed_invocations +=
+                        count_committed_invocations(&delta.items, |invocation| {
+                            invocation.call_id == TOOL_CALL_ID
+                        });
                 }
                 Some(EngineEvent::TurnError { message, .. }) => turn_error = Some(message),
                 Some(EngineEvent::TurnComplete { .. }) => break,
@@ -275,4 +301,94 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
             .is_some_and(|message| message.contains(TOOL_CALL_ID)),
         "expected replay error naming {TOOL_CALL_ID}, got {turn_error:?}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
+    const ROUNDS: usize = 70;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let server = tokio::spawn(run_server(
+        listener,
+        Arc::clone(&requests),
+        |request_index| {
+            if request_index < ROUNDS {
+                tool_call_sse_for(&format!("fresh-call-{request_index}"))
+            } else {
+                terminal_sse()
+            }
+        },
+    ));
+    let executions = Arc::new(AtomicUsize::new(0));
+
+    let config = EngineConfig {
+        system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
+        ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
+    };
+    let target = ModelTarget {
+        model: "test-model".into(),
+        api_base: format!("http://{addr}"),
+        api_key: "test-key".into(),
+        provider_type: "anthropic-compatible".into(),
+        config: ModelConfig {
+            max_tokens: Some(4096),
+            ..ModelConfig::default()
+        },
+    };
+    let dispatcher = CountingDispatcher {
+        executions: Arc::clone(&executions),
+    };
+    let mut handle = engine::start(config, Box::new(dispatcher));
+
+    loop {
+        match handle.recv().await {
+            Some(EngineEvent::Ready) => break,
+            Some(_) => {}
+            None => panic!("engine closed before Ready"),
+        }
+    }
+
+    handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
+        turn_id: 1,
+        input: protocol::StartTurnInput::user(Content::text("go")),
+        mode: AgentMode::normal(),
+        model_target: target,
+        request_config: RequestRuntimeConfig::default(),
+        reasoning_effort: ReasoningEffort::Off,
+        fast_mode: false,
+        history: protocol::ModelHistorySource::items(Vec::new()),
+        session_id: "sess".into(),
+        session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
+        permission_overrides: None,
+        system_prompt: Some("test system".into()),
+        tools: Vec::new(),
+    })));
+
+    let mut turn_error = None;
+    let mut committed_invocations = 0;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::HistoryAppended { delta, .. }) => {
+                    committed_invocations += count_committed_invocations(&delta.items, |_| true);
+                }
+                Some(EngineEvent::TurnError { message, .. }) => turn_error = Some(message),
+                Some(EngineEvent::TurnComplete { .. }) => break,
+                Some(_) => {}
+                None => panic!("engine stopped before turn completion"),
+            }
+        }
+    })
+    .await
+    .expect("turn did not complete");
+    server.abort();
+
+    assert_eq!(turn_error, None);
+    assert_eq!(executions.load(Ordering::SeqCst), ROUNDS);
+    assert_eq!(committed_invocations, ROUNDS);
+    assert_eq!(requests.lock().unwrap().len(), ROUNDS + 1);
 }
