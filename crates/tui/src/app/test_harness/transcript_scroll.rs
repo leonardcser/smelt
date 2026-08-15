@@ -34,6 +34,7 @@ static SPARSE_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 #[derive(Clone, Copy, Debug)]
 struct UserDeltaAnchor {
     sign: i8,
+    virtual_row: crate::smelt_edit::RowIndex,
     record_index: usize,
     block_id: smelt_core::transcript_model::BlockId,
     row_offset: crate::smelt_edit::RowIndex,
@@ -696,7 +697,7 @@ impl TestApp {
             .map(|viewport| usize::from(viewport.rect.height))
             .unwrap_or(0);
         let start = window.local_visual_row(window.scroll_top) as usize;
-        (start..start.saturating_add(viewport_rows).min(buffer.line_count()))
+        (start..start.saturating_add(viewport_rows))
             .map(|row| buffer.get_line(row).unwrap_or_default().to_string())
             .collect()
     }
@@ -758,7 +759,10 @@ fn assert_wheel_movement_visible(
             viewport_after[..overlap] == pending.viewport_before[rows..]
         }
     });
-    if movement.is_none() && sparse_user_delta_moved_within_visible_record_span(frames, max_rows) {
+    if movement.is_none()
+        && viewport_after.iter().any(|line| !line.is_empty())
+        && sparse_user_delta_moved_within_visible_record_span(frames, max_rows)
+    {
         return;
     }
     assert!(
@@ -927,6 +931,7 @@ fn ranges_overlap(a: TranscriptRecordTraceRange, b: TranscriptRecordTraceRange) 
 
 fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTraceFrame) {
     let Some(TranscriptTraceAnchor::Content {
+        virtual_row: before_virtual_row,
         record_index: before_record,
         block_id: before_block,
         row_offset: before_row,
@@ -936,6 +941,7 @@ fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTrace
         return;
     };
     let Some(TranscriptTraceAnchor::Content {
+        virtual_row: after_virtual_row,
         record_index: after_record,
         block_id: after_block,
         row_offset: after_row,
@@ -944,18 +950,33 @@ fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTrace
     else {
         panic!("local movement lost its semantic viewport anchor: {frame:?}");
     };
-    let movement =
+    let semantic_movement =
         (after_record, after_block, after_row).cmp(&(before_record, before_block, before_row));
+    let virtual_movement = after_virtual_row.cmp(&before_virtual_row);
     if rows < 0 {
         assert!(
-            !movement.is_gt(),
+            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
             "first upward local movement moved the semantic viewport anchor downward: {frame:?}"
         );
     } else if rows > 0 {
         assert!(
-            !movement.is_lt(),
+            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
             "first downward local movement moved the semantic viewport anchor upward: {frame:?}"
         );
+    }
+}
+
+fn local_delta_moved_against_direction(
+    rows: isize,
+    semantic_movement: std::cmp::Ordering,
+    virtual_movement: std::cmp::Ordering,
+) -> bool {
+    if rows < 0 {
+        semantic_movement.is_gt() && !virtual_movement.is_lt()
+    } else if rows > 0 {
+        semantic_movement.is_lt() && !virtual_movement.is_gt()
+    } else {
+        false
     }
 }
 
@@ -966,6 +987,7 @@ fn assert_user_delta_direction(
 ) {
     let sign = rows.signum() as i8;
     let Some(TranscriptTraceAnchor::Content {
+        virtual_row,
         record_index,
         block_id,
         row_offset,
@@ -977,6 +999,7 @@ fn assert_user_delta_direction(
     };
     let current = UserDeltaAnchor {
         sign,
+        virtual_row,
         record_index,
         block_id,
         row_offset,
@@ -985,19 +1008,20 @@ fn assert_user_delta_direction(
         state.last_user_delta_anchor = Some(current);
         return;
     };
-    let movement = (current.record_index, current.block_id, current.row_offset).cmp(&(
+    let semantic_movement = (current.record_index, current.block_id, current.row_offset).cmp(&(
         previous.record_index,
         previous.block_id,
         previous.row_offset,
     ));
+    let virtual_movement = current.virtual_row.cmp(&previous.virtual_row);
     if previous.sign == sign && sign < 0 {
         assert!(
-            !movement.is_gt(),
+            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
             "upward local movement moved the semantic viewport anchor downward: previous={previous:?}, current={current:?}, frame={frame:?}"
         );
     } else if previous.sign == sign && sign > 0 {
         assert!(
-            !movement.is_lt(),
+            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
             "downward local movement moved the semantic viewport anchor upward: previous={previous:?}, current={current:?}, frame={frame:?}"
         );
     }
