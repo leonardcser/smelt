@@ -4715,6 +4715,10 @@ impl TranscriptDocument {
         row_offset: RowIndex,
         local_total_rows: RowIndex,
     ) -> bool {
+        let visible_rows = RowIndex::from(viewport_rows.max(1));
+        if rows.clamped_scroll.saturating_add(visible_rows) < rows.total_rows {
+            return false;
+        }
         if let Some(total) = self.records.total_count() {
             if !self.semantic_tail_record_is_materialized() {
                 return false;
@@ -4724,12 +4728,10 @@ impl TranscriptDocument {
             };
             let local_scroll = rows.clamped_scroll.saturating_sub(row_offset);
             if active.end.get() < total
-                || local_scroll.saturating_add(RowIndex::from(viewport_rows.max(1)))
-                    < local_total_rows
+                || local_scroll.saturating_add(visible_rows) < local_total_rows
             {
                 return false;
             }
-            let visible_rows = RowIndex::from(viewport_rows.max(1));
             return (0..visible_rows).rev().any(|offset| {
                 self.content_anchor_at_row_with_offset(
                     lua,
@@ -4754,9 +4756,7 @@ impl TranscriptDocument {
             width,
         );
         let tail_row = row_offset.saturating_add(loaded_rows);
-        rows.clamped_scroll
-            .saturating_add(RowIndex::from(viewport_rows.max(1)))
-            >= tail_row
+        rows.clamped_scroll.saturating_add(visible_rows) >= tail_row
     }
 
     fn projected_scroll_state(&self, reached_semantic_tail: bool) -> VerticalScroll {
