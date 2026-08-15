@@ -2246,6 +2246,66 @@ fn first_resumed_wheel_after_tiny_initial_layout_moves_exact_rows() {
 }
 
 #[test]
+fn resumed_sparse_width_resize_keeps_content_anchor_identity() {
+    let count = 260;
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 120, 32);
+    let loaded = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .block_records()
+        .len();
+    assert!(loaded < count, "resize regression must start sparse");
+    app.set_transcript_scroll_trace_for_harness(true);
+
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    app.set_terminal_size(32, 32);
+    app.render_silent();
+    let frame = app
+        .take_transcript_scroll_trace_frames_for_harness()
+        .into_iter()
+        .find(|frame| {
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::ResizeReflow { .. }
+            )
+        })
+        .expect("resize reflow trace frame");
+    assert!(
+        matches!(
+            frame.projection_target,
+            TranscriptProjectionTargetTrace::StableRowDelta { .. }
+        ),
+        "sparse resize must carry the semantic anchor directly: {frame:?}"
+    );
+
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: before_record,
+        block_id: before_block,
+        ..
+    }) = frame.viewport_anchor_before
+    else {
+        panic!("resize setup did not start from a content anchor: {frame:?}");
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: after_record,
+        block_id: after_block,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
+        panic!("resize lost the content anchor: {frame:?}");
+    };
+    assert_eq!(
+        (after_record, after_block),
+        (before_record, before_block),
+        "resize reflow moved to a different content identity: {frame:?}"
+    );
+}
+
+#[test]
 fn resumed_sparse_page_delta_uses_exact_tape_without_extent_reads() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(700, 78, 18);
     app.set_transcript_scroll_trace_for_harness(true);
