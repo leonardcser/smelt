@@ -14,10 +14,15 @@ use smelt_core::lua::{
     LuaRuntime, LuaShared, TaskDriveOutput, ToolCallIds, ToolEnv, ToolExecResult, ToolVisibility,
 };
 use smelt_core::permissions::ToolEffectKind;
+use smelt_provider::{
+    CacheConfig, CancellationToken, ChatOptions, ChatProvider, ChatRequest, FunctionSchema,
+    ProviderClient, ProviderKind, ToolDefinition,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Inlined copy of `runtime/lua/smelt/_bootstrap.lua` so the host-only
 /// runtime tests can evaluate it directly. Loading the full bundled
@@ -103,6 +108,51 @@ fn get_global<T: mlua::FromLua>(rt: &LuaRuntime, name: &str) -> T {
         .unwrap_or_else(|e| panic!("global `{name}`: {e}"))
 }
 
+async fn spawn_openai_compatible_capture() -> (String, tokio::task::JoinHandle<serde_json::Value>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .expect("request content-length");
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended before body");
+            request.extend_from_slice(&chunk[..read]);
+        }
+        let body =
+            serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+
+        let response = r#"{"choices":[{"message":{"content":"ok"}}],"usage":{}}"#;
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(response.as_bytes()).await.unwrap();
+        body
+    });
+    (format!("http://{addr}/v1"), server)
+}
+
 // -- time ---------------------------------------------------------------
 
 #[test]
@@ -143,6 +193,13 @@ fn json_api_round_trips_tables_and_reports_decode_errors() {
             assert(decoded.kind == "smelt.plan")
             assert(decoded.title == 'quote " ok')
             assert(decoded.items[2] == "b")
+            assert(smelt.json.encode({}) == "{}")
+            assert(smelt.json.encode(smelt.json.array()) == "[]")
+            local empty = assert(smelt.json.decode("[]"))
+            assert(smelt.json.encode(empty) == "[]")
+            local cleared = assert(smelt.json.decode("[1]"))
+            cleared[1] = nil
+            assert(smelt.json.encode(cleared) == "[]")
             local bad, bad_err = smelt.json.decode("{")
             assert(bad == nil)
             assert(type(bad_err) == "string" and #bad_err > 0)
@@ -230,6 +287,78 @@ fn tools_patch_updates_and_restores_metadata() {
         .expect("restored tool def");
     assert_eq!(def.description, "before");
     assert!(def.parameters["properties"].get("query").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lua_tool_schema_reaches_openai_compatible_request_with_array_required_fields() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "ollama_schema_probe",
+                description = "schema probe",
+                parameters = {
+                    type = "object",
+                    properties = {
+                        progress = {
+                            type = "object",
+                            properties = { label = { type = "string" } },
+                            required = smelt.json.array(),
+                        },
+                    },
+                    required = smelt.json.array(),
+                },
+                execute = function() return "ok" end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register schema probe");
+
+    let tools: Vec<_> = rt
+        .tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive)
+        .into_iter()
+        .map(|tool| {
+            ToolDefinition::new(FunctionSchema {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+            })
+        })
+        .collect();
+    let (api_base, captured_request) = spawn_openai_compatible_capture().await;
+    let messages = [protocol::Message::user(protocol::Content::text("test"))];
+    let config = protocol::ModelConfig::default();
+    let cancel = CancellationToken::new();
+    let options = ChatOptions::new(&cancel);
+
+    ProviderClient::new(reqwest::Client::new())
+        .chat(
+            ChatRequest {
+                provider: ChatProvider::api_key(ProviderKind::OpenAiCompatible, "test-key"),
+                api_base: &api_base,
+                model: "test-model",
+                messages: &messages,
+                tools: &tools,
+                effort: protocol::ReasoningEffort::Off,
+                config: &config,
+                cache: CacheConfig::default(),
+                response_format: None,
+                fast_mode: false,
+            },
+            &options,
+        )
+        .await
+        .expect("OpenAI-compatible request");
+
+    let request = captured_request.await.unwrap();
+    let tool = &request["tools"][0]["function"]["parameters"];
+    assert_eq!(tool["required"], serde_json::json!([]));
+    assert_eq!(
+        tool["properties"]["progress"]["required"],
+        serde_json::json!([])
+    );
 }
 
 #[test]

@@ -1431,6 +1431,12 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
         protocol::AgentMode::normal(),
         smelt_core::lua::ToolVisibility::Interactive,
     );
+    let get = tools
+        .iter()
+        .find(|tool| tool.name == "get_goal")
+        .expect("get_goal should be registered");
+    assert_eq!(get.parameters["required"], serde_json::json!([]));
+
     let create = tools
         .iter()
         .find(|tool| tool.name == "create_goal")
@@ -1462,6 +1468,10 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
     assert!(status.parameters["properties"]["progress"]
         .get("properties")
         .is_some());
+    assert_eq!(
+        status.parameters["properties"]["progress"]["required"],
+        serde_json::json!([])
+    );
     assert_eq!(
         status.parameters["required"],
         serde_json::json!(["progress"])

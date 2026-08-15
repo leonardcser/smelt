@@ -265,6 +265,7 @@ pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
         serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
         serde_json::Value::Array(arr) => {
             let t = lua.create_table()?;
+            crate::lua::api::mark_json_array(lua, &t)?;
             for (i, elem) in arr.iter().enumerate() {
                 t.set(i + 1, json_to_lua(lua, elem)?)?;
             }

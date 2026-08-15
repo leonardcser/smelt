@@ -341,7 +341,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     meta.set("description", description)?;
                 }
                 if let Ok(Some(parameters)) = patch.get::<Option<mlua::Table>>("parameters") {
-                    if let Ok(json_str) = serde_json::to_string(&lua_table_to_json(lua, &parameters)) {
+                    let parameters = tool_parameters_json(lua, &parameters);
+                    if let Ok(json_str) = serde_json::to_string(&parameters) {
                         meta.set("parameters_json", json_str)?;
                     }
                 }

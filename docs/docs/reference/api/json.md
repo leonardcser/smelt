@@ -6,7 +6,15 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Encode/decode JSON for Lua plugins. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects.
+Encode/decode JSON for Lua plugins. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` when an empty table must encode as an array.
+
+## `smelt.json.array`
+
+```lua
+fun(): table
+```
+
+Create an empty JSON array table. Unlike `{}`, it encodes as `[]` while empty.
 
 ## `smelt.json.decode`
 
@@ -22,5 +30,5 @@ Decode JSON into a Lua value. Returns `(value, nil)` on success or `(nil, err_st
 fun(value: any, opts: table?): string
 ```
 
-Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects.
+Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array.
 

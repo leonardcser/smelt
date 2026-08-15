@@ -791,6 +791,8 @@ Image file detection and base64 data-URL loading.
 
 Encode/decode JSON for Lua plugins.
 
+- `smelt.json.array` :: `fun(): table`
+  Create an empty JSON array table.
 - `smelt.json.decode` :: `fun(text: string): any, string?`
   Decode JSON into a Lua value.
 - `smelt.json.encode` :: `fun(value: any, opts: table?): string`

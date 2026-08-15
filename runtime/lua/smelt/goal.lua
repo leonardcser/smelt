@@ -584,7 +584,7 @@ local function register_tools()
   smelt.tools.register({
     name = "get_goal",
     description = "Return the current session goal, including lifecycle state, progress, auto-continue, id, and timestamps.",
-    parameters = { type = "object", properties = {}, required = {} },
+    parameters = { type = "object", properties = {}, required = smelt.json.array() },
     summary = function() return "get goal" end,
     execute = function()
       return { content = M.describe() }
@@ -633,7 +633,7 @@ local function register_tools()
             total = { type = "number", description = "Optional numeric total progress." },
             percent = { type = "number", description = "Optional percent complete. Do not invent percentages." },
           },
-          required = {},
+          required = smelt.json.array(),
         },
       },
       required = { "progress" },

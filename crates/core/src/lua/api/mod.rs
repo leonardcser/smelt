@@ -61,8 +61,40 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+const JSON_ARRAY_REGISTRY_KEY: &str = "__smelt_json_arrays";
+
+fn json_array_registry(lua: &Lua) -> LuaResult<mlua::Table> {
+    if let Ok(registry) = lua.named_registry_value::<mlua::Table>(JSON_ARRAY_REGISTRY_KEY) {
+        return Ok(registry);
+    }
+
+    let registry = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__mode", "k")?;
+    registry.set_metatable(Some(metatable))?;
+    lua.set_named_registry_value(JSON_ARRAY_REGISTRY_KEY, registry.clone())?;
+    Ok(registry)
+}
+
+pub(super) fn new_json_array(lua: &Lua) -> LuaResult<mlua::Table> {
+    let table = lua.create_table()?;
+    mark_json_array(lua, &table)?;
+    Ok(table)
+}
+
+pub(super) fn mark_json_array(lua: &Lua, table: &mlua::Table) -> LuaResult<()> {
+    json_array_registry(lua)?.raw_set(table.clone(), true)
+}
+
+fn is_json_array(lua: &Lua, table: &mlua::Table) -> bool {
+    json_array_registry(lua)
+        .and_then(|registry| registry.raw_get::<bool>(table.clone()))
+        .unwrap_or(false)
+}
+
 /// Convert a Lua table to a `serde_json::Value`. Tables with contiguous
-/// 1..N integer keys become JSON arrays; anything else becomes an object.
+/// 1..N integer keys become JSON arrays; tagged empty arrays stay arrays;
+/// anything else becomes an object.
 pub fn lua_table_to_json(lua: &Lua, table: &mlua::Table) -> serde_json::Value {
     let mut pairs: Vec<(mlua::Value, mlua::Value)> = Vec::new();
     for pair in table.pairs::<mlua::Value, mlua::Value>() {
@@ -70,21 +102,22 @@ pub fn lua_table_to_json(lua: &Lua, table: &mlua::Table) -> serde_json::Value {
         pairs.push(kv);
     }
 
-    let is_array = !pairs.is_empty()
-        && pairs
-            .iter()
-            .all(|(k, _)| matches!(k, mlua::Value::Integer(_)))
-        && {
-            let mut ints: Vec<i64> = pairs
+    let is_array = (pairs.is_empty() && is_json_array(lua, table))
+        || (!pairs.is_empty()
+            && pairs
                 .iter()
-                .filter_map(|(k, _)| match k {
-                    mlua::Value::Integer(i) => Some(*i),
-                    _ => None,
-                })
-                .collect();
-            ints.sort_unstable();
-            ints.first().copied() == Some(1) && ints.windows(2).all(|w| w[1] == w[0] + 1)
-        };
+                .all(|(k, _)| matches!(k, mlua::Value::Integer(_)))
+            && {
+                let mut ints: Vec<i64> = pairs
+                    .iter()
+                    .filter_map(|(k, _)| match k {
+                        mlua::Value::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .collect();
+                ints.sort_unstable();
+                ints.first().copied() == Some(1) && ints.windows(2).all(|w| w[1] == w[0] + 1)
+            });
 
     if is_array {
         let len = table.raw_len();
