@@ -4640,6 +4640,11 @@ impl TranscriptDocument {
         total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)))
     }
 
+    fn clamp_viewport_anchor_offset(offset_rows: isize, viewport_rows: u16) -> isize {
+        let max_offset = viewport_rows.saturating_sub(1) as isize;
+        offset_rows.clamp(-max_offset, max_offset)
+    }
+
     fn semantic_far_seek_for_intent(
         &mut self,
         lua: &LuaRuntime,
@@ -4862,7 +4867,12 @@ impl TranscriptDocument {
             }
             TranscriptScrollAnchor::EstimatedRow(row) => Some(row),
         }
-        .map(|row| add_signed_row(row, anchor.offset_rows))
+        .map(|row| {
+            add_signed_row(
+                row,
+                Self::clamp_viewport_anchor_offset(anchor.offset_rows, viewport_rows),
+            )
+        })
     }
 
     fn approximate_scrollbar_total_for_viewport(
@@ -5169,12 +5179,10 @@ impl TranscriptDocument {
                         ..
                     }) => match self.row_for_content_anchor(lua, width, viewport_rows, anchor) {
                         Some(row) => {
-                            let offset_rows =
-                                clamp_viewport_anchor_offset(offset_rows, viewport_rows);
                             crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
                                 row,
                                 Some(anchor.row_anchor),
-                                offset_rows,
+                                Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
                             )
                         }
                         None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
@@ -5775,17 +5783,15 @@ impl TranscriptDocument {
             &mut self.content.transcript.history,
             width,
         );
-        if let Some(far_seek) = options.semantic_far_seek {
-            row_offset = far_seek.scroll_top.saturating_sub(inner.scroll_top());
-        } else if let (Some(requested), Some(total_rows)) =
-            (stable_requested_scroll, stable_total_rows)
-        {
-            let requested = requested.min(Self::max_scroll_for_total(total_rows, viewport_rows));
-            row_offset = requested.saturating_sub(inner.scroll_top());
-        }
         let preserve_total_rows = self.records.total_count().is_some();
         let mut total_rows =
             stable_total_rows.unwrap_or_else(|| self.scrollbar_total_rows(width, loaded_rows));
+        if let Some(far_seek) = options.semantic_far_seek {
+            row_offset = far_seek.scroll_top.saturating_sub(inner.scroll_top());
+        } else if let Some(requested) = stable_requested_scroll {
+            let requested = requested.min(Self::max_scroll_for_total(total_rows, viewport_rows));
+            row_offset = requested.saturating_sub(inner.scroll_top());
+        }
         let target_reaches_tail = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,

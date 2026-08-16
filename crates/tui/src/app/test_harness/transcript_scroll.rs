@@ -1119,3 +1119,18 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
     }
     source.history.block_records()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparse_search_resize_reflow_preserves_viewport_anchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(128, 129, 27);
+        app.transcript_scroll_probe_search_record(37779);
+        app.transcript_scroll_probe_render();
+        app.set_terminal_size(32, 8);
+        app.transcript_scroll_probe_render();
+    }
+}
