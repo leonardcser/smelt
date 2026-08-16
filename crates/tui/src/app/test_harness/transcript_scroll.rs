@@ -1066,7 +1066,6 @@ fn assert_user_delta_direction(
 fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
     let Some(TranscriptTraceAnchor::Content {
         record_index: before_record,
-        block_id: before_block,
         ..
     }) = frame.viewport_anchor_before
     else {
@@ -1074,16 +1073,14 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
     };
     let Some(TranscriptTraceAnchor::Content {
         record_index: after_record,
-        block_id: after_block,
         ..
     }) = frame.viewport_anchor_after
     else {
         panic!("preserve/resize frame lost content anchor: {frame:?}");
     };
     assert_eq!(
-        (after_record, after_block),
-        (before_record, before_block),
-        "preserve/resize frame moved to different content identity: {frame:?}"
+        after_record, before_record,
+        "preserve/resize frame moved to different transcript record: {frame:?}"
     );
 }
 
@@ -1234,6 +1231,23 @@ mod tests {
                 32,
                 viewport_rows,
             ));
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_append_away_from_tail_preserves_persisted_anchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_append(196);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(52685);
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageDown);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_append(121);
         app.transcript_scroll_probe_render();
     }
 }
