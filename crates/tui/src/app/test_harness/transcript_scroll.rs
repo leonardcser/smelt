@@ -1133,4 +1133,18 @@ mod tests {
         app.set_terminal_size(32, 8);
         app.transcript_scroll_probe_render();
     }
+
+    #[test]
+    fn sparse_bottom_edge_drag_resize_wheel_moves_downward() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(96, 129, 15);
+        app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_render();
+        app.set_terminal_size(95, 39);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_wheel(true, 255);
+        app.transcript_scroll_probe_render();
+    }
 }

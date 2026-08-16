@@ -5015,15 +5015,20 @@ impl TranscriptDocument {
                 top: TranscriptScrollAnchor::Content(anchor),
                 offset_rows,
                 ..
-            }) if semantic_viewport_matches => (Some(anchor), offset_rows),
+            }) if semantic_viewport_matches => (
+                Some(anchor),
+                Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
+            ),
             _ => (None, 0),
         };
+        let semantic_anchor_row = semantic_anchor
+            .and_then(|anchor| self.row_for_content_anchor(lua, width, viewport_rows, anchor));
         let base = exact_viewport
             .map(|(exact, tape)| tape.rows.clamped_scroll.saturating_add(exact.row_offset))
             .or_else(|| {
                 semantic_viewport_matches
                     .then(|| {
-                        self.row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
+                        semantic_anchor_row.map(|row| add_signed_row(row, semantic_offset_rows))
                     })
                     .flatten()
             })
@@ -5051,7 +5056,7 @@ impl TranscriptDocument {
                 );
             }
         }
-        let reanchored_semantic_anchor = semantic_anchor.and_then(|anchor| {
+        let reanchored_semantic_anchor = semantic_anchor.map(|anchor| {
             let block_id = self
                 .records
                 .sparse
@@ -5060,16 +5065,11 @@ impl TranscriptDocument {
                 ))
                 .map(|record| record.block_id)
                 .unwrap_or(anchor.block_id);
-            self.content
-                .projection
-                .row_anchor_for_block(
-                    lua,
-                    &mut self.content.transcript.history,
-                    width,
-                    block_id,
-                    anchor.intra_block_row,
-                )
-                .map(Into::into)
+            TranscriptRowAnchor {
+                id: crate::content::render_plan::RenderNodeId::Block(block_id),
+                row_offset: anchor.intra_block_row,
+            }
+            .into()
         });
         let content_exact_anchor = exact_anchor.filter(|anchor| anchor.block_id().is_some());
         let present_exact_anchor = content_exact_anchor.and_then(|anchor| {
@@ -5084,13 +5084,17 @@ impl TranscriptDocument {
             .or(semantic_stable_anchor)
             .or(content_exact_anchor)
             .or(exact_anchor);
-        let stable_delta = if present_exact_anchor.is_none() && semantic_stable_anchor.is_some() {
-            rows.saturating_add(semantic_offset_rows)
-        } else {
-            rows
-        };
+        let (stable_row, stable_delta) =
+            if present_exact_anchor.is_none() && semantic_stable_anchor.is_some() {
+                (
+                    semantic_anchor_row.unwrap_or(base),
+                    rows.saturating_add(semantic_offset_rows),
+                )
+            } else {
+                (base, rows)
+            };
         crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
-            base,
+            stable_row,
             stable_anchor,
             stable_delta,
         )
@@ -5516,6 +5520,11 @@ impl TranscriptDocument {
             }
             _ => None,
         };
+        let preserve_previous_content_anchor = preserve_anchor_intent
+            || matches!(
+                intent,
+                TranscriptScrollIntent::UserDelta { .. } | TranscriptScrollIntent::PageDelta { .. }
+            );
         if let Some(rows) = local_delta_rows {
             if let Some(mut plan) = self.plan_exact_local_delta(
                 lua,
@@ -5524,7 +5533,7 @@ impl TranscriptDocument {
                 input.fallback_scroll_top,
                 rows,
             ) {
-                if preserve_anchor_intent && self.records.total_count().is_some() {
+                if preserve_previous_content_anchor && self.records.total_count().is_some() {
                     if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
                         plan.scroll_anchor = anchor;
                     }
@@ -5583,7 +5592,7 @@ impl TranscriptDocument {
                 semantic_far_seek,
             },
         )?;
-        if preserve_anchor_intent && self.records.total_count().is_some() {
+        if preserve_previous_content_anchor && self.records.total_count().is_some() {
             if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
                 plan.scroll_anchor = anchor;
             }
