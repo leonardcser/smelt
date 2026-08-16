@@ -298,12 +298,9 @@ local function right_spans(opts)
 
   if smelt.settings.show_tokens then
     local context = status.context or {}
-    local ctx
-    if context.state ~= "recalculating" then
-      ctx = context.tokens
-      if ctx == nil then
-        ctx = smelt.session.context_tokens()
-      end
+    local ctx = context.tokens
+    if ctx == nil then
+      ctx = smelt.session.context_tokens()
     end
     if ctx then
       if #spans > 0 then

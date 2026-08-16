@@ -1490,11 +1490,7 @@ impl SessionLuaHost<'_> {
     pub(crate) fn session_status(&self) -> SessionStatusSnapshot {
         let session = self.app.conversation.session();
         let context_recalculating = self.context_recalculating();
-        let context_tokens = if context_recalculating {
-            None
-        } else {
-            session.display_context_tokens()
-        };
+        let context_tokens = session.display_context_tokens();
         SessionStatusSnapshot {
             active_model: self.app.core.config.active_model().cloned(),
             cost: session.session_cost_usd,

@@ -54,7 +54,7 @@ fn compact_command_shows_preview_before_first_delta() {
         assert(smelt.session.context_tokens() == nil)
         local context = smelt.session.status().context
         assert(context.state == "recalculating")
-        assert(context.tokens == nil)
+        assert(context.tokens == 500)
         "#,
     ));
     let frame = app.render_to_frame().text();
@@ -902,8 +902,8 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
         "foreground usage should restore authoritative context:\n{final_frame}"
     );
     assert!(
-        !waiting_frame.contains("10%"),
-        "stale context usage remained visible while compacting:\n{waiting_frame}"
+        waiting_frame.contains("20 (10%)"),
+        "context usage disappeared while compacting:\n{waiting_frame}"
     );
 }
 

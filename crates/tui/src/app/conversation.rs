@@ -1409,6 +1409,10 @@ impl ConversationRuntime {
     pub(crate) fn set_context_token_baseline_for_harness(&mut self, tokens: Option<u32>) {
         self.session.context_tokens = tokens;
         self.session.context_tokens_history_len = tokens.map(|_| self.session.history.len());
+        if tokens.is_none() {
+            self.session.display_context_tokens = None;
+            self.session.display_context_token_identity = None;
+        }
     }
 
     #[cfg(any(test, feature = "harness"))]

@@ -1168,9 +1168,16 @@ impl TestApp {
 
     #[cfg(test)]
     pub(crate) fn set_context_token_baseline_for_harness(&mut self, tokens: Option<u32>) {
-        self.app
-            .conversation
-            .set_context_token_baseline_for_harness(tokens);
+        if let Some(tokens) = tokens {
+            let identity = self.app.active_context_token_identity();
+            self.app
+                .conversation
+                .record_context_tokens_for_harness(tokens, identity);
+        } else {
+            self.app
+                .conversation
+                .set_context_token_baseline_for_harness(None);
+        }
     }
 
     pub(crate) fn replace_history_for_harness(&mut self, history: Vec<protocol::HistoryItem>) {

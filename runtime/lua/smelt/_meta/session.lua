@@ -115,7 +115,7 @@ session.set_fast_mode = nil
 ---@type fun(title: string, slug: string, history_len: integer): nil
 session.set_title_for_history = nil
 
---- Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { state, tokens, window, stale, marker }, cost }`. Context state is `ready` or `recalculating`; tokens are `nil` while recalculating. Markers are `*` for pending config and `?` for stale readings.
+--- Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { state, tokens, window, stale, marker }, cost }`. Context state is `ready` or `recalculating`; tokens are the latest display reading and can remain visible while recalculating. Markers are `*` for pending config and `?` for stale readings.
 ---@type fun(): table
 session.status = nil
 
