@@ -1209,4 +1209,31 @@ mod tests {
             app.transcript_scroll_probe_render();
         }
     }
+
+    #[test]
+    fn sparse_preserve_reanchors_after_record_window_rotation() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(113, 89, 15);
+        app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
+        let viewport_rows = app
+            .app
+            .transcript_win()
+            .viewport
+            .map(|viewport| viewport.rect.height)
+            .unwrap_or(1);
+        assert!(app
+            .app
+            .conversation
+            .activate_transcript_search_record_window(
+                app.app.transcript_width() as u16,
+                32,
+                viewport_rows,
+            ));
+        app.transcript_scroll_probe_render();
+    }
 }
