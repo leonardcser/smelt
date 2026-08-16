@@ -335,9 +335,9 @@ app_story!(prompt_stash_row_truncates, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(prompt_compacting_hides_stale_token_counter, |ctx| {
-    // Compaction rewrites model history, so the previous provider reading is
-    // hidden until the checkpointed foreground request reports fresh usage.
+app_story!(prompt_compacting_keeps_context_token_counter, |ctx| {
+    // Compaction recalculates the active context, but the latest provider
+    // reading stays visible as a display-only usage indicator.
     ctx.set_viewport(28, 8);
     ctx.set_context_window(Some(25_000));
     ctx.set_context_tokens(19_500);
