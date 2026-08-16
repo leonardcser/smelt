@@ -1978,8 +1978,7 @@ impl TuiApp {
         turn_id: smelt_store::TurnId,
         state: smelt_store::TurnState,
         terminal_reason: Option<String>,
-    ) -> Result<crate::persist::TurnTransitionAcknowledgement, crate::persist::PersistenceCause>
-    {
+    ) -> Result<crate::persist::TurnTransitionOutcome, crate::persist::PersistenceCause> {
         let metadata = self.runtime_session_metadata();
         self.conversation.commit_canonical_turn_transition(
             metadata,

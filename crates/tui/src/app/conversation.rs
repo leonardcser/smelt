@@ -10,6 +10,7 @@ use super::{
 
 pub(crate) struct PersistenceReport {
     pub(crate) acknowledged_session_id: Option<String>,
+    pub(crate) terminal_turn_id: Option<u64>,
     pub(crate) failure: Option<(String, String)>,
     pub(crate) audit_warning: Option<String>,
 }
@@ -1902,17 +1903,14 @@ impl ConversationRuntime {
         self.observed_persistence_status = Some(status.clone());
 
         let mut acknowledged_session_id = None;
+        let mut terminal_turn_id = None;
         if let Some(acknowledgement) = status.acknowledgement.as_ref() {
-            if self.document.acknowledge_convergence(
-                acknowledgement,
-                &self.session.id,
-                self.history_len(),
-                self.session.checkpoint.as_ref(),
-            ) {
-                if let Some(persistence) = self.persistence.as_ref() {
-                    persistence.confirm_acknowledgement(acknowledgement);
-                }
+            if self.apply_persistence_acknowledgement(acknowledgement) {
                 acknowledged_session_id = Some(acknowledgement.receipt.session_id.clone());
+                terminal_turn_id = status.latest_terminal_turn_id.map(smelt_store::TurnId::get);
+                if let Some(turn_id) = terminal_turn_id {
+                    self.turn.mark_terminal(turn_id);
+                }
             }
         }
 
@@ -1932,6 +1930,7 @@ impl ConversationRuntime {
         };
         Some(PersistenceReport {
             acknowledged_session_id,
+            terminal_turn_id,
             failure: cause.map(|cause| (self.session.id.clone(), cause.message.clone())),
             audit_warning: status.latest_audit_warning.map(|warning| warning.message),
         })
@@ -2160,14 +2159,13 @@ impl ConversationRuntime {
         turn_id: smelt_store::TurnId,
         state: smelt_store::TurnState,
         terminal_reason: Option<String>,
-    ) -> Result<crate::persist::TurnTransitionAcknowledgement, crate::persist::PersistenceCause>
-    {
+    ) -> Result<crate::persist::TurnTransitionOutcome, crate::persist::PersistenceCause> {
         let intent = self
             .document
             .prepare_turn_update(&mut self.session, metadata)
             .map_err(crate::persist::PersistenceCause::invariant)?;
         self.publish_shared_state();
-        let acknowledgement = self
+        let outcome = self
             .persistence
             .as_ref()
             .ok_or_else(|| {
@@ -2183,12 +2181,14 @@ impl ConversationRuntime {
                 },
                 std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             )?;
-        if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
-            return Err(crate::persist::PersistenceCause::invariant(
-                "turn transition receipt did not match the session document",
-            ));
+        if let crate::persist::TurnTransitionOutcome::Durable(acknowledgement) = &outcome {
+            if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
+                return Err(crate::persist::PersistenceCause::invariant(
+                    "turn transition receipt did not match the session document",
+                ));
+            }
         }
-        Ok(acknowledgement)
+        Ok(outcome)
     }
 
     fn apply_persistence_acknowledgement(

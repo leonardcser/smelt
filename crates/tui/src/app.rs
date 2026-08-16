@@ -2592,6 +2592,9 @@ impl TuiApp {
         if let Some(warning) = report.audit_warning {
             self.notify_warn(warning);
         }
+        if report.terminal_turn_id.is_some() {
+            self.start_next_queued_input_if_idle();
+        }
     }
 
     pub(crate) fn handle_app_event(&mut self, event: AppEvent) {

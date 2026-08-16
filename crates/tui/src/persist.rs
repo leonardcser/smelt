@@ -204,6 +204,7 @@ pub(crate) struct SessionPersistenceStatus {
     pub(crate) epoch: SessionEpoch,
     pub(crate) state: PersistenceState,
     pub(crate) acknowledgement: Option<PersistenceAcknowledgement>,
+    pub(crate) latest_terminal_turn_id: Option<smelt_store::TurnId>,
     pub(crate) latest_audit_warning: Option<PersistenceCause>,
 }
 
@@ -296,6 +297,12 @@ pub(crate) struct TurnTransitionAcknowledgement {
     pub(crate) receipt: smelt_store::TurnTransitionReceipt,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TurnTransitionOutcome {
+    Durable(TurnTransitionAcknowledgement),
+    Pending { generation: PersistenceGeneration },
+}
+
 enum PersistenceControl {
     WakeDesired,
     AppendRequestAudit(Box<QueuedAudit>),
@@ -309,7 +316,7 @@ enum PersistenceControl {
     },
     TransitionTurn {
         intent: Box<TurnTransitionIntent>,
-        deadline: Option<Instant>,
+        queued_at: Instant,
         reply: Option<mpsc::Sender<Result<TurnTransitionAcknowledgement, PersistenceCause>>>,
     },
     DeleteBranch {
@@ -517,6 +524,7 @@ impl SessionPersistence {
                 head: acknowledged_head,
             },
             acknowledgement: None,
+            latest_terminal_turn_id: None,
             latest_audit_warning: None,
         }));
         let pending_audits = Arc::new(AtomicUsize::new(0));
@@ -804,7 +812,7 @@ impl SessionPersistence {
         };
         match control.try_send(PersistenceControl::TransitionTurn {
             intent: Box::new(intent),
-            deadline: None,
+            queued_at: Instant::now(),
             reply: None,
         }) {
             Ok(()) => Ok(()),
@@ -822,14 +830,15 @@ impl SessionPersistence {
         &self,
         intent: TurnTransitionIntent,
         deadline: Instant,
-    ) -> Result<TurnTransitionAcknowledgement, PersistenceCause> {
+    ) -> Result<TurnTransitionOutcome, PersistenceCause> {
         if intent.session.identity.id != self.session_id.as_str() {
             return Err(PersistenceCause::invariant(format!(
                 "turn transition session {} does not match actor session {}",
                 intent.session.identity.id, self.session_id
             )));
         }
-        let superseded = self.supersede_queued_intent(intent.session.generation)?;
+        let generation = intent.session.generation;
+        let superseded = self.supersede_queued_intent(generation)?;
         let Some(control) = &self.control else {
             self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(
@@ -841,7 +850,7 @@ impl SessionPersistence {
             control,
             PersistenceControl::TransitionTurn {
                 intent: Box::new(intent),
-                deadline: Some(deadline),
+                queued_at: Instant::now(),
                 reply: Some(reply),
             },
             deadline,
@@ -857,22 +866,18 @@ impl SessionPersistence {
             }));
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(PersistenceCause::unavailable(
-                "persistence deadline elapsed before turn transition completed",
-            )
-            .with_unknown_commit());
+            return Ok(TurnTransitionOutcome::Pending { generation });
         };
-        result.recv_timeout(remaining).unwrap_or_else(|error| {
-            Err(PersistenceCause::unavailable(match error {
-                mpsc::RecvTimeoutError::Timeout => {
-                    "persistence deadline elapsed before turn transition completed"
-                }
-                mpsc::RecvTimeoutError::Disconnected => {
-                    "persistence actor stopped before turn transition completed"
-                }
-            })
-            .with_unknown_commit())
-        })
+        match result.recv_timeout(remaining) {
+            Ok(result) => result.map(TurnTransitionOutcome::Durable),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Ok(TurnTransitionOutcome::Pending { generation })
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(PersistenceCause::unavailable(
+                "persistence actor stopped before turn transition completed",
+            )
+            .with_unknown_commit()),
+        }
     }
 
     pub(crate) fn delete_branch(
@@ -1079,6 +1084,7 @@ impl SessionPersistence {
                 false
             } else {
                 status.acknowledgement = None;
+                status.latest_terminal_turn_id = None;
                 true
             }
         };
@@ -1452,6 +1458,7 @@ impl StatusPublisher {
         generation: PersistenceGeneration,
         record_projection: SessionRecordSaveProjection,
         receipt: smelt_store::SaveReceipt,
+        latest_terminal_turn_id: Option<smelt_store::TurnId>,
     ) -> PersistenceAcknowledgement {
         let mut status = self
             .status
@@ -1467,6 +1474,7 @@ impl StatusPublisher {
                 );
                 current.previous
             });
+        status.latest_terminal_turn_id = latest_terminal_turn_id.or(status.latest_terminal_turn_id);
         let acknowledgement = PersistenceAcknowledgement {
             epoch: status.epoch,
             generation,
@@ -1747,17 +1755,15 @@ impl PersistenceActor {
                 }
                 PersistenceControl::TransitionTurn {
                     intent,
-                    deadline,
+                    queued_at,
                     reply,
                 } => {
+                    smelt_perf::perf::record_value(
+                        "persist:turn_transition:queue_wait_ms",
+                        queued_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    );
                     let generation = intent.session.generation;
-                    let result = if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                        Err(PersistenceCause::unavailable(
-                            "persistence deadline elapsed before turn transition started",
-                        ))
-                    } else {
-                        self.transition_turn_intent(&intent)
-                    };
+                    let result = self.transition_turn_intent(&intent);
                     if let Err(cause) = &result {
                         self.block_canonical(generation, cause.clone());
                     }
@@ -1990,6 +1996,7 @@ impl PersistenceActor {
                     intent.generation,
                     intent.record_projection,
                     receipt,
+                    None,
                 );
             }
             Err(cause) => self.block_canonical(intent.generation, cause),
@@ -2287,6 +2294,7 @@ impl PersistenceActor {
             intent.session.generation,
             intent.session.record_projection,
             receipt.session.clone(),
+            None,
         );
         Ok(SubmitTurnAcknowledgement {
             persistence,
@@ -2406,6 +2414,7 @@ impl PersistenceActor {
             intent.session.generation,
             intent.session.record_projection,
             receipt.session.clone(),
+            intent.state.is_terminal().then_some(intent.turn_id),
         );
         Ok(TurnTransitionAcknowledgement {
             persistence,
@@ -2953,6 +2962,21 @@ mod tests {
         }
     }
 
+    fn transition_intent(
+        generation: u64,
+        history: &[&str],
+        turn_id: smelt_store::TurnId,
+        state: smelt_store::TurnState,
+    ) -> TurnTransitionIntent {
+        TurnTransitionIntent {
+            session: intent(generation, history),
+            turn_id,
+            state,
+            at_ms: generation,
+            terminal_reason: None,
+        }
+    }
+
     fn wait_until_finished(actor: &SessionPersistence) {
         let deadline = deadline();
         while !actor.is_finished() {
@@ -3260,6 +3284,70 @@ mod tests {
             ClosePolicy::AllowUnsaved,
         );
         assert_eq!(closed.omitted, Some(PersistenceGeneration::new(1)));
+    }
+
+    #[test]
+    fn queued_turn_transition_timeout_still_commits_after_actor_resumes() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let submitted = actor
+            .submit_turn(submit_intent(1, &["queued transition"]), deadline())
+            .unwrap();
+        actor
+            .enqueue_turn_transition(transition_intent(
+                2,
+                &["queued transition"],
+                submitted.receipt.turn_id,
+                smelt_store::TurnState::Running,
+            ))
+            .unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(2)
+        ));
+        let release = actor.pause();
+
+        let outcome = actor
+            .transition_turn(
+                transition_intent(
+                    3,
+                    &["queued transition"],
+                    submitted.receipt.turn_id,
+                    smelt_store::TurnState::Completed,
+                ),
+                Instant::now() + Duration::from_millis(20),
+            )
+            .expect("caller sees queued transition as pending while the actor is paused");
+
+        assert_eq!(
+            outcome,
+            TurnTransitionOutcome::Pending {
+                generation: PersistenceGeneration::new(3)
+            }
+        );
+        release.send(()).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(3), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(3)
+        ));
+        let status = actor.take_status();
+        assert_eq!(
+            status.latest_terminal_turn_id,
+            Some(submitted.receipt.turn_id)
+        );
+        let reader = lineage_reader();
+        assert_eq!(
+            lineage_turn(&reader, submitted.receipt.turn_id).state,
+            smelt_store::TurnState::Completed
+        );
+        let closed = actor.close(
+            PersistenceGeneration::new(3),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(closed.cause.is_none());
     }
 
     #[test]

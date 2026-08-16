@@ -1071,10 +1071,11 @@ impl TuiApp {
             state,
             reason,
         ) {
-            Ok(_) => {
+            Ok(crate::persist::TurnTransitionOutcome::Durable(_)) => {
                 self.conversation.mark_terminal(turn_id);
                 true
             }
+            Ok(crate::persist::TurnTransitionOutcome::Pending { .. }) => false,
             Err(cause) => {
                 self.notify_session_save_failure(
                     &self.conversation.session().id.clone(),
