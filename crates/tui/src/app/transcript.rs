@@ -1491,11 +1491,6 @@ fn signed_row_delta(before: RowIndex, after: RowIndex) -> isize {
     }
 }
 
-fn clamp_viewport_anchor_offset(offset_rows: isize, viewport_rows: u16) -> isize {
-    let max = viewport_rows.max(1).saturating_sub(1) as isize;
-    offset_rows.clamp(-max, max)
-}
-
 fn transcript_screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
     let rel = row.checked_sub(scroll_top);
     rel.and_then(|rel| (rel < RowIndex::from(viewport_rows)).then_some(rel as u16))
