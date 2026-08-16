@@ -299,7 +299,7 @@ pub(crate) struct TurnTransitionAcknowledgement {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TurnTransitionOutcome {
-    Durable(TurnTransitionAcknowledgement),
+    Durable(Box<TurnTransitionAcknowledgement>),
     Pending { generation: PersistenceGeneration },
 }
 
@@ -869,7 +869,8 @@ impl SessionPersistence {
             return Ok(TurnTransitionOutcome::Pending { generation });
         };
         match result.recv_timeout(remaining) {
-            Ok(result) => result.map(TurnTransitionOutcome::Durable),
+            Ok(result) => result
+                .map(|acknowledgement| TurnTransitionOutcome::Durable(Box::new(acknowledgement))),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 Ok(TurnTransitionOutcome::Pending { generation })
             }
