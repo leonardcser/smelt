@@ -5098,6 +5098,15 @@ impl TranscriptDocument {
             TranscriptScrollIntent::ResizeReflow { .. } => {
                 let target = match self.viewport.state.resolved_anchor {
                     Some(TranscriptResolvedViewportAnchor {
+                        top: TranscriptScrollAnchor::Content(_),
+                        scroll_top,
+                        ..
+                    }) if self.records.total_count().is_none() => {
+                        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                            scroll_top,
+                        )
+                    }
+                    Some(TranscriptResolvedViewportAnchor {
                         top: TranscriptScrollAnchor::Content(anchor),
                         offset_rows,
                         ..
