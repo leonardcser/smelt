@@ -160,7 +160,7 @@ fn failure_fingerprint(output: &str) -> String {
         if line.contains("panicked at") {
             // Source line and column are part of the identity. Normalizing them
             // would collapse unrelated assertions in the same target file.
-            panic_identity.push(line.trim().to_string());
+            panic_identity.push(normalize_panic_line(line));
             if let Some(message) = lines[index + 1..]
                 .iter()
                 .map(|line| line.trim())
@@ -190,6 +190,18 @@ fn failure_fingerprint(output: &str) -> String {
         die("failing fuzz replay did not contain a recognizable crash fingerprint");
     }
     relevant.join(" | ")
+}
+
+fn normalize_panic_line(line: &str) -> String {
+    let trimmed = line.trim();
+    let Some((thread, rest)) = trimmed.split_once(" panicked at ") else {
+        return trimmed.to_string();
+    };
+    let thread = thread
+        .strip_suffix(')')
+        .and_then(|prefix| prefix.rsplit_once(" (").map(|(prefix, _)| prefix))
+        .unwrap_or(thread);
+    format!("{thread} panicked at {rest}")
 }
 
 fn normalize_numbers(line: &str) -> String {
@@ -268,10 +280,10 @@ mod tests {
     #[test]
     fn panic_fingerprint_preserves_location_and_normalizes_message_numbers() {
         let first = failure_fingerprint(
-            "thread '<unnamed>' panicked at fuzz_targets/example.rs:42:7:\nvalue 123 failed",
+            "thread '<unnamed>' (1234) panicked at fuzz_targets/example.rs:42:7:\nvalue 123 failed",
         );
         let minimized = failure_fingerprint(
-            "thread '<unnamed>' panicked at fuzz_targets/example.rs:42:7:\nvalue 9 failed",
+            "thread '<unnamed>' (9) panicked at fuzz_targets/example.rs:42:7:\nvalue 9 failed",
         );
         let other_location = failure_fingerprint(
             "thread '<unnamed>' panicked at fuzz_targets/example.rs:43:7:\nvalue 9 failed",
