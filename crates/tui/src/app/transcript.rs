@@ -1491,6 +1491,11 @@ fn signed_row_delta(before: RowIndex, after: RowIndex) -> isize {
     }
 }
 
+fn clamp_viewport_anchor_offset(offset_rows: isize, viewport_rows: u16) -> isize {
+    let max = viewport_rows.max(1).saturating_sub(1) as isize;
+    offset_rows.clamp(-max, max)
+}
+
 fn transcript_screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
     let rel = row.checked_sub(scroll_top);
     rel.and_then(|rel| (rel < RowIndex::from(viewport_rows)).then_some(rel as u16))
@@ -5091,24 +5096,37 @@ impl TranscriptDocument {
                 (target, None)
             }
             TranscriptScrollIntent::ResizeReflow { .. } => {
-                let target = if self.records.total_count().is_some() {
-                    match self.row_for_viewport_anchor(
-                        lua,
-                        width,
-                        viewport_rows,
-                        fallback_scroll_top,
-                    ) {
+                let target = match self.viewport.state.resolved_anchor {
+                    Some(TranscriptResolvedViewportAnchor {
+                        top: TranscriptScrollAnchor::Content(anchor),
+                        offset_rows,
+                        ..
+                    }) => match self.row_for_content_anchor(lua, width, viewport_rows, anchor) {
                         Some(row) => {
-                            crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                            let offset_rows =
+                                clamp_viewport_anchor_offset(offset_rows, viewport_rows);
+                            crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
                                 row,
+                                Some(anchor.row_anchor),
+                                offset_rows,
                             )
                         }
                         None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                    },
+                    _ if self.records.total_count().is_some() => {
+                        match self.row_for_viewport_anchor(
+                            lua,
+                            width,
+                            viewport_rows,
+                            fallback_scroll_top,
+                        ) {
+                            Some(row) => crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row),
+                            None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        }
                     }
-                } else {
-                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                    _ => crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
                         fallback_scroll_top,
-                    )
+                    ),
                 };
                 (target, None)
             }
