@@ -40,6 +40,15 @@ struct UserDeltaAnchor {
     row_offset: crate::smelt_edit::RowIndex,
 }
 
+impl UserDeltaAnchor {
+    fn same_position(self, other: Self) -> bool {
+        self.virtual_row == other.virtual_row
+            && self.record_index == other.record_index
+            && self.block_id == other.block_id
+            && self.row_offset == other.row_offset
+    }
+}
+
 #[derive(Debug)]
 struct PendingWheelMovement {
     rows: isize,
@@ -986,6 +995,22 @@ fn assert_user_delta_direction(
     frame: &TranscriptScrollTraceFrame,
 ) {
     let sign = rows.signum() as i8;
+    let frame_start = match frame.viewport_anchor_before {
+        Some(TranscriptTraceAnchor::Content {
+            virtual_row,
+            record_index,
+            block_id,
+            row_offset,
+            ..
+        }) => Some(UserDeltaAnchor {
+            sign,
+            virtual_row,
+            record_index,
+            block_id,
+            row_offset,
+        }),
+        _ => None,
+    };
     let Some(TranscriptTraceAnchor::Content {
         virtual_row,
         record_index,
@@ -1008,6 +1033,16 @@ fn assert_user_delta_direction(
         state.last_user_delta_anchor = Some(current);
         return;
     };
+    if previous.sign == sign {
+        let Some(frame_start) = frame_start else {
+            state.last_user_delta_anchor = Some(current);
+            return;
+        };
+        if !previous.same_position(frame_start) {
+            state.last_user_delta_anchor = Some(current);
+            return;
+        }
+    }
     let semantic_movement = (current.record_index, current.block_id, current.row_offset).cmp(&(
         previous.record_index,
         previous.block_id,
@@ -1146,5 +1181,32 @@ mod tests {
         app.transcript_scroll_probe_render();
         app.transcript_scroll_probe_wheel(true, 255);
         app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_command_scroll_keeps_upward_anchor_direction() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 13);
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_wheel(true, 45);
+        app.transcript_scroll_probe_wheel(true, 45);
+        app.transcript_scroll_probe_render();
+        let mut down = true;
+        for _ in 0..4 {
+            app.transcript_scroll_probe_wheel(down, 121);
+            down = !down;
+        }
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
     }
 }
