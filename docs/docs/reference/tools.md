@@ -13,11 +13,11 @@ default; writes and edits prompt for confirmation.
 
 ### `read_file`
 
-Reads a file from the local filesystem. Supports text, images (png, jpg, gif,
-webp, bmp, tiff, svg), and PDFs when the active model/provider accepts that
-media. Jupyter notebooks (`.ipynb`) are rendered as numbered cells with their
-type, source, and outputs. Use `offset` and `limit` to read a window of a large
-text file.
+Reads a file from the local filesystem. Supports text, provider-compatible
+images (png, jpg/jpeg, gif, webp), SVG as text, and PDFs when the active
+model/provider accepts that media. Jupyter notebooks (`.ipynb`) are rendered as
+numbered cells with their type, source, and outputs. Use `offset` and `limit` to
+read a window of a large text file.
 
 | Parameter    | Description                               |
 | ------------ | ----------------------------------------- |

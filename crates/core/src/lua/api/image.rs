@@ -29,6 +29,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     m.fn_(
+        "is_supported_image_tool_result_mime",
+        "Return `true` if image MIME type `mime` can be sent as a tool result image.",
+        &["mime"],
+        |_, mime: String| Ok(engine::image::is_supported_image_tool_result_mime(&mime)),
+    )?;
+
+    m.fn_(
         "label_from_path",
         "Return a display label for an image path.",
         &["p"],

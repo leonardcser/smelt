@@ -15,6 +15,10 @@ image.data_url_from_bytes = nil
 ---@type fun(p: string): boolean
 image.is_image_file = nil
 
+--- Return `true` if image MIME type `mime` can be sent as a tool result image.
+---@type fun(mime: string): boolean
+image.is_supported_image_tool_result_mime = nil
+
 --- Return a display label for an image path.
 ---@type fun(p: string): string
 image.label_from_path = nil

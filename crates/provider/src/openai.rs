@@ -1,9 +1,10 @@
 use crate::error::{classify_openai_error, OpenAiErrorPayload};
 use crate::sse;
 use crate::{
-    non_empty, non_empty_blocks, tool::tool_result_attachment, unix_now, CancellationToken,
-    CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
-    ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
+    non_empty, non_empty_blocks,
+    tool::{tool_result_attachment, unsupported_attachment_note},
+    unix_now, CancellationToken, CompletedReasoningPart, ModelConfig, ParsedResponse,
+    ProviderError, ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
@@ -101,8 +102,15 @@ fn tool_result_output(message: &Message) -> serde_json::Value {
         .as_ref()
         .map(|content| content.as_text())
         .unwrap_or_default();
-    let Some(attachment) = tool_result_attachment(message) else {
-        return serde_json::Value::String(text.to_string());
+    let attachment = match tool_result_attachment(message) {
+        Ok(Some(attachment)) => attachment,
+        Ok(None) => return serde_json::Value::String(text.to_string()),
+        Err(err) => {
+            return serde_json::Value::String(format!(
+                "{text}\n\n[{}]",
+                unsupported_attachment_note(&err)
+            ));
+        }
     };
     if attachment.modality != ToolAttachmentModality::Image {
         return serde_json::Value::String(text.to_string());

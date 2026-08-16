@@ -24,6 +24,14 @@ fun(p: string): boolean
 
 Return `true` if `p` looks like an image file (matched by extension/sniffing).
 
+## `smelt.image.is_supported_image_tool_result_mime`
+
+```lua
+fun(mime: string): boolean
+```
+
+Return `true` if image MIME type `mime` can be sent as a tool result image.
+
 ## `smelt.image.label_from_path`
 
 ```lua

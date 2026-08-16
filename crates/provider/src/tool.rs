@@ -2,33 +2,80 @@ use base64::Engine;
 use protocol::{Message, ToolAttachment, ToolAttachmentModality};
 use serde::Serialize;
 
-pub(crate) fn tool_result_attachment(message: &Message) -> Option<ToolAttachment> {
-    let metadata = message.tool_metadata.as_ref()?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnsupportedToolAttachment {
+    modality: ToolAttachmentModality,
+    mime: String,
+}
+
+impl UnsupportedToolAttachment {
+    fn new(attachment: &ToolAttachment) -> Self {
+        Self {
+            modality: attachment.modality,
+            mime: attachment.mime.clone(),
+        }
+    }
+
+    fn modality_label(&self) -> &'static str {
+        match self.modality {
+            ToolAttachmentModality::Image => "image",
+            ToolAttachmentModality::Pdf => "pdf",
+        }
+    }
+}
+
+pub(crate) fn unsupported_attachment_note(err: &UnsupportedToolAttachment) -> String {
+    format!(
+        "unsupported {} attachment omitted: {}",
+        err.modality_label(),
+        err.mime
+    )
+}
+
+fn supported_tool_attachment(
+    attachment: ToolAttachment,
+) -> Result<ToolAttachment, UnsupportedToolAttachment> {
+    if attachment.is_supported_tool_result() {
+        Ok(attachment)
+    } else {
+        Err(UnsupportedToolAttachment::new(&attachment))
+    }
+}
+
+pub(crate) fn tool_result_attachment(
+    message: &Message,
+) -> Result<Option<ToolAttachment>, UnsupportedToolAttachment> {
+    let Some(metadata) = message.tool_metadata.as_ref() else {
+        return Ok(None);
+    };
     if let Some(attachment) = ToolAttachment::from_metadata(metadata) {
-        return Some(attachment);
+        return supported_tool_attachment(attachment).map(Some);
     }
     if metadata.get("data_url").is_some() {
-        return None;
+        return Ok(None);
     }
 
     // COMPAT(tool-attachment-path-metadata): sessions created before tool
     // attachments captured their payload retain only the original file path.
     if metadata.get("kind").and_then(serde_json::Value::as_str) != Some("file_attachment") {
-        return None;
+        return Ok(None);
     }
-    let modality = match metadata
-        .get("modality")
-        .and_then(serde_json::Value::as_str)?
-    {
-        "image" => ToolAttachmentModality::Image,
-        "pdf" => ToolAttachmentModality::Pdf,
-        _ => return None,
+    let modality = match metadata.get("modality").and_then(serde_json::Value::as_str) {
+        Some("image") => ToolAttachmentModality::Image,
+        Some("pdf") => ToolAttachmentModality::Pdf,
+        _ => return Ok(None),
     };
-    let path = metadata.get("path").and_then(serde_json::Value::as_str)?;
-    let mime = metadata.get("mime").and_then(serde_json::Value::as_str)?;
-    let bytes = std::fs::read(path).ok()?;
+    let Some(path) = metadata.get("path").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(mime) = metadata.get("mime").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(None);
+    };
     let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Some(ToolAttachment {
+    supported_tool_attachment(ToolAttachment {
         modality,
         mime: mime.to_string(),
         data_url: format!("data:{mime};base64,{data}"),
@@ -37,6 +84,7 @@ pub(crate) fn tool_result_attachment(message: &Message) -> Option<ToolAttachment
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     })
+    .map(Some)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +140,9 @@ mod tests {
             })),
         );
 
-        let attachment = tool_result_attachment(&message).unwrap();
+        let attachment = tool_result_attachment(&message)
+            .expect("supported attachment")
+            .expect("attachment");
 
         assert_eq!(attachment.modality, ToolAttachmentModality::Image);
         assert_eq!(attachment.data_url, "data:image/png;base64,aW1hZ2U=");
@@ -116,6 +166,27 @@ mod tests {
             })),
         );
 
-        assert!(tool_result_attachment(&message).is_none());
+        assert_eq!(tool_result_attachment(&message).unwrap(), None);
+    }
+
+    #[test]
+    fn unsupported_image_attachment_reports_omission() {
+        let message = Message::tool_with_metadata(
+            "call-1".into(),
+            "attached",
+            false,
+            Some(serde_json::json!({
+                "kind": "file_attachment",
+                "modality": "image",
+                "mime": "image/svg+xml",
+                "data_url": "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+            })),
+        );
+
+        let err = tool_result_attachment(&message).expect_err("unsupported attachment");
+        assert_eq!(
+            unsupported_attachment_note(&err),
+            "unsupported image attachment omitted: image/svg+xml"
+        );
     }
 }

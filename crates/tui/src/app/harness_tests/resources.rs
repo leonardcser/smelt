@@ -477,12 +477,12 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
     assert!(text.contains("smelt-provenance\n</command_output>"));
 }
 
-async fn read_file_attachment_result(
+async fn read_file_result(
     path: &std::path::Path,
     provider_type: &str,
     modalities: &[&str],
     call_id: &str,
-) -> (String, bool, serde_json::Value) {
+) -> (String, bool, Option<serde_json::Value>) {
     let mut app = TestApp::builder().with_vim(false).build();
     app.use_model(smelt_core::config::ResolvedModel {
         key: format!("{provider_type}/multimodal"),
@@ -521,11 +521,9 @@ async fn read_file_attachment_result(
                         is_error,
                         metadata,
                         ..
-                    } if completed == call_id => Some((
-                        content.clone(),
-                        *is_error,
-                        metadata.clone().expect("attachment metadata"),
-                    )),
+                    } if completed == call_id => {
+                        Some((content.clone(), *is_error, metadata.clone()))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -537,6 +535,17 @@ async fn read_file_attachment_result(
     })
     .await
     .expect("read_file should complete")
+}
+
+async fn read_file_attachment_result(
+    path: &std::path::Path,
+    provider_type: &str,
+    modalities: &[&str],
+    call_id: &str,
+) -> (String, bool, serde_json::Value) {
+    let (content, is_error, metadata) =
+        read_file_result(path, provider_type, modalities, call_id).await;
+    (content, is_error, metadata.expect("attachment metadata"))
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -557,6 +566,28 @@ async fn codex_read_file_returns_image_attachment() {
     assert!(metadata["data_url"]
         .as_str()
         .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn codex_read_file_reads_svg_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relay-gate.schematic.svg");
+    std::fs::write(
+        &path,
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><text>relay</text></svg>"#,
+    )
+    .unwrap();
+
+    let (content, is_error, metadata) =
+        read_file_result(&path, "codex", &["text", "image"], "read-svg").await;
+
+    assert!(!is_error, "{content}");
+    assert!(metadata.is_none(), "unexpected metadata: {metadata:?}");
+    assert!(
+        content
+            .contains("   1\t<svg xmlns=\"http://www.w3.org/2000/svg\"><text>relay</text></svg>"),
+        "{content}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

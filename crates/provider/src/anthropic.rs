@@ -1,9 +1,10 @@
 use crate::sse;
 use crate::{
     collect_indexed_tool_calls, non_empty, non_empty_blocks, parse_claude_model_version,
-    tool::tool_result_attachment, CacheConfig, CancellationToken, ClaudeModelFamily,
-    CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
-    ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
+    tool::{tool_result_attachment, unsupported_attachment_note},
+    CacheConfig, CancellationToken, ClaudeModelFamily, CompletedReasoningPart, ModelConfig,
+    ParsedResponse, ProviderError, ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent,
+    ToolDefinition,
 };
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
@@ -181,8 +182,15 @@ fn anthropic_file_attachment_block(attachment: ToolAttachment) -> serde_json::Va
 
 fn anthropic_tool_result_content(m: &Message) -> serde_json::Value {
     let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-    let Some(attachment) = tool_result_attachment(m) else {
-        return serde_json::Value::String(output.to_string());
+    let attachment = match tool_result_attachment(m) {
+        Ok(Some(attachment)) => attachment,
+        Ok(None) => return serde_json::Value::String(output.to_string()),
+        Err(err) => {
+            return serde_json::Value::String(format!(
+                "{output}\n\n[{}]",
+                unsupported_attachment_note(&err)
+            ));
+        }
     };
     serde_json::json!([
         {"type": "text", "text": output},

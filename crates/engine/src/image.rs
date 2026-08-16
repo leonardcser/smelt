@@ -14,6 +14,14 @@ pub fn is_image_file(path: &str) -> bool {
     IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
+pub fn is_supported_image_tool_result_mime(mime: &str) -> bool {
+    protocol::supports_image_tool_attachment_mime(mime)
+}
+
+pub fn is_supported_image_tool_result_file(path: &str) -> bool {
+    is_image_file(path) && is_supported_image_tool_result_mime(mime_from_path(path))
+}
+
 pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some("image/png");
@@ -172,6 +180,19 @@ mod tests {
         assert!(!is_image_file("notes.txt"));
         assert!(!is_image_file("a.rs"));
         assert!(!is_image_file("png_not_at_end.png.txt"));
+    }
+
+    #[test]
+    fn supported_image_tool_result_file_excludes_unsupported_image_mimes() {
+        let dir = tempdir().unwrap();
+        let svg = dir.path().join("relay.svg");
+        std::fs::write(&svg, r#"<svg><text>relay</text></svg>"#).unwrap();
+        let png = dir.path().join("relay.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nimage").unwrap();
+
+        assert!(!is_supported_image_tool_result_mime("image/svg+xml"));
+        assert!(!is_supported_image_tool_result_file(svg.to_str().unwrap()));
+        assert!(is_supported_image_tool_result_file(png.to_str().unwrap()));
     }
 
     // ---- mime_from_extension ----

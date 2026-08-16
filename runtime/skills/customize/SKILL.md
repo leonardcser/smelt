@@ -778,6 +778,8 @@ Image file detection and base64 data-URL loading.
   Encode raw `bytes` as a base64 `data:` URL with the given `mime` type.
 - `smelt.image.is_image_file` :: `fun(p: string): boolean`
   Return `true` if `p` looks like an image file (matched by extension/sniffing).
+- `smelt.image.is_supported_image_tool_result_mime` :: `fun(mime: string): boolean`
+  Return `true` if image MIME type `mime` can be sent as a tool result image.
 - `smelt.image.label_from_path` :: `fun(p: string): string`
   Return a display label for an image path.
 - `smelt.image.mime_from_path` :: `fun(p: string): string`

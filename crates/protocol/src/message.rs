@@ -130,6 +130,22 @@ pub enum ToolAttachmentModality {
     Pdf,
 }
 
+pub const IMAGE_TOOL_ATTACHMENT_MIME_TYPES: &[&str] =
+    &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+pub fn supports_image_tool_attachment_mime(mime: &str) -> bool {
+    IMAGE_TOOL_ATTACHMENT_MIME_TYPES
+        .iter()
+        .any(|supported| mime.eq_ignore_ascii_case(supported))
+}
+
+pub fn supports_tool_attachment_mime(modality: ToolAttachmentModality, mime: &str) -> bool {
+    match modality {
+        ToolAttachmentModality::Image => supports_image_tool_attachment_mime(mime),
+        ToolAttachmentModality::Pdf => mime.eq_ignore_ascii_case("application/pdf"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolAttachment {
     pub modality: ToolAttachmentModality,
@@ -150,6 +166,10 @@ impl ToolAttachment {
             .data_url
             .starts_with(&expected_prefix)
             .then_some(attachment)
+    }
+
+    pub fn is_supported_tool_result(&self) -> bool {
+        supports_tool_attachment_mime(self.modality, &self.mime)
     }
 
     fn write_to_metadata(&self, metadata: &mut Option<serde_json::Value>) {

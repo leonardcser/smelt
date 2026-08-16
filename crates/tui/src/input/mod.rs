@@ -1154,7 +1154,9 @@ impl PromptState {
             self.save_undo(ctx);
             self.replace_selection_for_insert(ctx);
             if let Some(path) = engine::image::normalize_pasted_path(&data) {
-                if engine::image::is_image_file(&path) && std::path::Path::new(&path).exists() {
+                if std::path::Path::new(&path).exists()
+                    && engine::image::is_supported_image_tool_result_file(&path)
+                {
                     match engine::image::read_image_as_data_url(&path) {
                         Ok(url) => {
                             let label = engine::image::image_label_from_path(&path);
@@ -1782,6 +1784,32 @@ mod tests {
             "Carriage returns should be normalized"
         );
         assert_eq!(input.buf.source(), "!line1\nline2\nline3");
+    }
+
+    #[test]
+    fn pasted_svg_path_inserts_text_not_image_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.svg");
+        std::fs::write(&path, r#"<svg><text>relay</text></svg>"#).unwrap();
+        let pasted = path.to_string_lossy().into_owned();
+        let mut input = Harness::new();
+        let mut clipboard = crate::smelt_edit::Clipboard::null();
+        let mut ctx = PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        };
+
+        let action = input.state.handle_event(
+            &mut ctx,
+            Event::Paste(pasted.clone()),
+            None,
+            &mut clipboard,
+            std::time::Instant::now(),
+        );
+
+        assert!(matches!(action, Action::Redraw));
+        assert_eq!(input.buf.source(), pasted);
+        assert!(input.buf.attachment_ids.is_empty());
     }
 
     #[test]

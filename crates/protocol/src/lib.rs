@@ -37,8 +37,9 @@ pub use history::{
     UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
 pub use message::{
-    FunctionCall, Message, ReasoningBlock, Role, ToolAttachment, ToolAttachmentModality, ToolCall,
-    ToolOutcome,
+    supports_image_tool_attachment_mime, supports_tool_attachment_mime, FunctionCall, Message,
+    ReasoningBlock, Role, ToolAttachment, ToolAttachmentModality, ToolCall, ToolOutcome,
+    IMAGE_TOOL_ATTACHMENT_MIME_TYPES,
 };
 pub use mode::{AgentMode, ReasoningEffort};
 pub use model::{ModelConfig, ModelMetadata, ModelTarget, RequestAuditMode, RequestRuntimeConfig};

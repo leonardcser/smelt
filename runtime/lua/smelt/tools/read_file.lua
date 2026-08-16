@@ -1,4 +1,4 @@
--- Built-in read_file tool. Supports text, notebooks (.ipynb), images, and PDFs.
+-- Built-in read_file tool. Supports text, notebooks (.ipynb), provider-compatible images, and PDFs.
 -- Returns a stub for unchanged files at the same range to save prompt-cache tokens.
 
 local transcript_defaults = require("smelt.transcript.defaults")
@@ -80,6 +80,36 @@ end
 
 local function is_pdf_file(path)
   return type(path) == "string" and path:lower():sub(-4) == ".pdf"
+end
+
+local TEXT_READABLE_IMAGE_MIME = {
+  ["image/svg+xml"] = true,
+}
+
+local function image_mime(path)
+  if not smelt.image or not smelt.image.mime_from_path then return nil end
+  local ok, mime = pcall(smelt.image.mime_from_path, path)
+  if not ok or type(mime) ~= "string" then return nil end
+  return mime:lower()
+end
+
+local function is_supported_image_mime(mime)
+  if not smelt.image or not smelt.image.is_supported_image_tool_result_mime then return false end
+  local ok, supported = pcall(smelt.image.is_supported_image_tool_result_mime, mime or "")
+  return ok and supported == true
+end
+
+local function is_text_readable_image_mime(mime)
+  return TEXT_READABLE_IMAGE_MIME[mime or ""] == true
+end
+
+local function unsupported_image_format_result(path, mime)
+  local detail = mime and (" (" .. mime .. ")") or ""
+  return {
+    content = "cannot read image file " .. path .. detail
+      .. ": supported image tool result formats are png, jpg/jpeg, gif, and webp",
+    is_error = true,
+  }
 end
 
 local function active_transport_supports_tool_results(modality)
@@ -165,7 +195,7 @@ smelt.transcript.register_tool("read_file", {
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "read_file",
-  description = "Reads a file from the local filesystem. Supports text files, image files (png, jpg, gif, webp, bmp, tiff, svg), and PDFs when the active model/provider can accept them.",
+  description = "Reads a file from the local filesystem. Supports text files, provider-compatible image files (png, jpg/jpeg, gif, webp), SVG as text, and PDFs when the active model/provider can accept them.",
   override = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   effect = "read",
@@ -210,7 +240,14 @@ smelt.tools.register(smelt.tools._with_watchdog({
     end
 
     if file_info.kind == "image" or smelt.image.is_image_file(path) then
-      return multimodal_result("image", path, nil, file_info)
+      local mime = image_mime(path)
+      if is_text_readable_image_mime(mime) then
+        -- Fall through to the text reader.
+      elseif is_supported_image_mime(mime) then
+        return multimodal_result("image", path, mime, file_info)
+      else
+        return unsupported_image_format_result(path, mime)
+      end
     end
 
     if file_info.kind == "pdf" or is_pdf_file(path) then
