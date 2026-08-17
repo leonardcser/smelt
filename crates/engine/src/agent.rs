@@ -1636,9 +1636,13 @@ impl<'a> Turn<'a> {
             let prepared_messages =
                 (self.history_revision == prepared.history_revision).then_some(prepared.messages);
 
-            let (result, partial_text, partial_reasoning) =
-                self.call_llm(&tool_defs, prepared_messages).await;
-            let (resp, had_injected) = match result {
+            let LlmCallOutcome {
+                result,
+                partial_text,
+                partial_reasoning,
+                deferred_turn_cmds: mut provider_turn_cmds,
+            } = self.call_llm(&tool_defs, prepared_messages).await;
+            let resp = match result {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
                     if let Some(first_index) =
@@ -1766,9 +1770,16 @@ impl<'a> Turn<'a> {
             let reasoning_parts = resp.reasoning_parts;
             let reasoning_details = resp.reasoning_details;
 
-            // Injected message arrived during the LLM call; loop so the model can respond.
-            if had_injected && tool_calls.is_empty() {
-                continue;
+            let had_injected = provider_turn_cmds
+                .iter()
+                .any(|cmd| matches!(cmd, UiCommand::Steer { .. }));
+            if tool_calls.is_empty() {
+                self.apply_deferred_turn_cmds(std::mem::take(&mut provider_turn_cmds));
+                // An injected message arrived during the LLM call. Discard this
+                // response and loop so the model can respond to the new input.
+                if had_injected {
+                    continue;
+                }
             }
 
             // Streaming already delivered deltas; only emit batch events for non-streaming.
@@ -1917,7 +1928,8 @@ impl<'a> Turn<'a> {
             tool_replay_guard.finish_round(&dispatched_calls);
             self.emit_history_appended_from(first_index);
             if !cancelled {
-                self.apply_deferred_turn_cmds(deferred_turn_cmds);
+                provider_turn_cmds.extend(deferred_turn_cmds);
+                self.apply_deferred_turn_cmds(provider_turn_cmds);
             }
         }
     }
@@ -2623,13 +2635,13 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Call the LLM. Returns `(result, partial_text, partial_reasoning)`.
-    /// `had_injected` in the result is true when a Steer arrived mid-call.
+    /// Call the LLM while retaining steer/unsteer commands for the response's
+    /// canonical commit boundary.
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
         prepared_messages: Option<crate::host::PreparedRequestMessages>,
-    ) -> (Result<(ChatResponse, bool), ProviderError>, String, String) {
+    ) -> LlmCallOutcome {
         // Config updates received while the provider is borrowed are replayed
         // in channel order after the request resolves.
         let mut deferred_config_updates: Vec<UiCommand> = Vec::new();
@@ -2755,13 +2767,12 @@ impl<'a> Turn<'a> {
         for append in deferred_appends {
             self.queue_history_item(append);
         }
-        let had_injected = deferred_turn_cmds
-            .iter()
-            .any(|c| matches!(c, UiCommand::Steer { .. }));
-        if result.is_ok() {
-            self.apply_deferred_turn_cmds(deferred_turn_cmds);
+        LlmCallOutcome {
+            result,
+            partial_text: pt,
+            partial_reasoning: pr,
+            deferred_turn_cmds,
         }
-        (result.map(|r| (r, had_injected)), pt, pr)
     }
 
     async fn wait_for_tool_result(
@@ -2800,6 +2811,13 @@ impl<'a> Turn<'a> {
             }
         }
     }
+}
+
+struct LlmCallOutcome {
+    result: Result<ChatResponse, ProviderError>,
+    partial_text: String,
+    partial_reasoning: String,
+    deferred_turn_cmds: Vec<UiCommand>,
 }
 
 #[derive(Default)]

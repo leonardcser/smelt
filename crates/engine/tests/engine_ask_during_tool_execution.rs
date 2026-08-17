@@ -398,6 +398,167 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_finishes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (draft_streamed_tx, draft_streamed_rx) = tokio::sync::oneshot::channel();
+    let (finish_response_tx, finish_response_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut first).await;
+        let body = primary_turn_sse();
+        let split = body
+            .find("data: {\"type\":\"message_delta\"")
+            .expect("primary response message delta");
+        first
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let prefix = &body[..split];
+        first
+            .write_all(format!("{:X}\r\n{prefix}\r\n", prefix.len()).as_bytes())
+            .await
+            .unwrap();
+        first.flush().await.unwrap();
+        draft_streamed_tx.send(()).unwrap();
+
+        let (mut barrier, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut barrier).await;
+        write_sse_response(&mut barrier, &aux_text_sse()).await;
+
+        finish_response_rx.await.unwrap();
+        let suffix = &body[split..];
+        first
+            .write_all(format!("{:X}\r\n{suffix}\r\n0\r\n\r\n", suffix.len()).as_bytes())
+            .await
+            .unwrap();
+        first.flush().await.unwrap();
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut second).await;
+        write_sse_response(&mut second, &aux_text_sse()).await;
+    });
+
+    let release_tool = Arc::new(Semaphore::new(0));
+    let dispatcher = BlockingDispatcher {
+        releases: HashMap::from([(TOOL_NAME.to_string(), Arc::clone(&release_tool))]),
+    };
+    let config = EngineConfig {
+        system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
+        ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
+    };
+    let target = ModelTarget {
+        model: "test-model".into(),
+        api_base: format!("http://{addr}"),
+        api_key: "test-key".into(),
+        provider_type: "anthropic-compatible".into(),
+        config: ModelConfig::default(),
+    };
+    let mut handle = engine::start(config, Box::new(dispatcher));
+    while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
+
+    handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
+        turn_id: 1,
+        input: protocol::StartTurnInput::user(Content::text("read it")),
+        mode: AgentMode::normal(),
+        model_target: target.clone(),
+        request_config: RequestRuntimeConfig::default(),
+        reasoning_effort: ReasoningEffort::Off,
+        fast_mode: false,
+        history: protocol::ModelHistorySource::items(Vec::new()),
+        session_id: "sess".into(),
+        session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
+        permission_overrides: None,
+        system_prompt: Some("test system".into()),
+        tools: Vec::new(),
+    })));
+
+    draft_streamed_rx.await.unwrap();
+    handle.send(UiCommand::Steer {
+        input: protocol::StartTurnInput::user(Content::text("queued follow-up")),
+    });
+    let barrier_id = 0xA11CE;
+    handle.send(UiCommand::EngineAsk {
+        id: barrier_id,
+        system: "command barrier".into(),
+        messages: vec![Message::user(Content::text("ack"))],
+        target: Box::new(target),
+        request_config: RequestRuntimeConfig::default(),
+        response_format: None,
+        reasoning_effort: ReasoningEffort::Off,
+        fast_mode: false,
+        tools: Vec::new(),
+        session_id: "sess".into(),
+        session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
+        stream: false,
+        visible_retries: false,
+    });
+    tokio::time::timeout(TEST_DEADLINE, async {
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::EngineAskResponse { id, .. }) if id == barrier_id => break,
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before processing the command barrier"),
+            }
+        }
+    })
+    .await
+    .expect("engine should consume steering before the provider response completes");
+    finish_response_tx.send(()).unwrap();
+
+    let mut lifecycle = Vec::new();
+    tokio::time::timeout(TEST_DEADLINE, async {
+        while lifecycle.len() < 2 {
+            match handle.recv().await {
+                Some(EngineEvent::ToolStarted { call_id, .. }) if call_id == TOOL_CALL_ID => {
+                    lifecycle.push("tool_started");
+                    release_tool.add_permits(1);
+                }
+                Some(EngineEvent::ToolFinished { call_id, .. }) if call_id == TOOL_CALL_ID => {
+                    lifecycle.push("tool_finished");
+                }
+                Some(EngineEvent::Steered { text, count }) => {
+                    assert_eq!(text, "queued follow-up");
+                    assert_eq!(count, 1);
+                    lifecycle.push("steered");
+                }
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before queued message was acknowledged"),
+            }
+        }
+    })
+    .await
+    .expect("streamed tool and queued-message acknowledgement");
+
+    assert_eq!(
+        lifecycle,
+        ["tool_started", "tool_finished"],
+        "queued input must not be acknowledged between a streamed tool draft and its execution"
+    );
+
+    tokio::time::timeout(TEST_DEADLINE, async {
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::Steered { .. }) => break,
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before queued message was acknowledged"),
+            }
+        }
+    })
+    .await
+    .expect("queued message acknowledgement after tool completion");
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

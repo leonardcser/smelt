@@ -464,6 +464,59 @@ fn queued_request_stays_out_of_transcript_until_all_tools_finish() {
 }
 
 #[test]
+fn steering_during_streamed_tool_call_leaves_one_completed_transcript_row() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: "stream-1".into(),
+        call_id: Some("read-1".into()),
+        tool_name: Some("read_file".into()),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
+        stream_id: "stream-1".into(),
+        call_id: "read-1".into(),
+        tool_name: "read_file".into(),
+        arguments: r#"{"file_path":"src/main.rs"}"#.into(),
+    }));
+
+    app.type_text("queued follow-up");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    let invocation_id = app.tool_started(
+        "read-1",
+        "read_file",
+        std::collections::HashMap::from([(
+            "file_path".to_string(),
+            serde_json::json!("src/main.rs"),
+        )]),
+    );
+    app.tool_finished(
+        invocation_id,
+        "read-1",
+        protocol::ToolOutcome::new(
+            "fn main() {}\n".into(),
+            false,
+            Some(serde_json::json!({
+                "display_count": { "value": 1, "unit": "line" }
+            })),
+        ),
+        Some(10),
+    );
+    app.feed_one(SourceEvent::engine(EngineEvent::Steered {
+        text: "queued follow-up".into(),
+        count: 1,
+    }));
+
+    let transcript = app.render_to_frame().text();
+    assert_eq!(
+        transcript.matches("read_file").count(),
+        1,
+        "streaming draft was not reconciled with the completed tool:\n{transcript}"
+    );
+    assert!(!transcript.contains("0 lines"), "{transcript}");
+    assert!(transcript.contains("1 line"), "{transcript}");
+}
+
+#[test]
 fn stale_prompt_prediction_response_after_submit_is_ignored() {
     let mut app = TestApp::builder().build();
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
