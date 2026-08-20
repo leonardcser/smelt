@@ -145,6 +145,8 @@ jobs:
     name: Windows install smoke test
     if: github.event_name != 'pull_request_target'
     runs-on: windows-latest
+    env:
+      RUSTFLAGS: -D warnings
 
     steps:
       - name: Checkout code
@@ -174,8 +176,10 @@ jobs:
         shell: pwsh
         run: |
           $installRoot = Join-Path $env:RUNNER_TEMP "smelt install"
+          $binDir = Join-Path $installRoot "bin"
+          $env:PATH = "$binDir;$env:PATH"
           cargo install --path . --locked --debug --root $installRoot
-          & (Join-Path $installRoot "bin\smelt.exe") --version
+          & (Join-Path $binDir "smelt.exe") --version
 
   fuzz-regression:
     name: Fuzz regression replay

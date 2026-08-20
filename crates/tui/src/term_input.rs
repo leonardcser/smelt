@@ -7,13 +7,17 @@
 //! before deciding that a lone ESC is a real key.
 
 use std::io;
+#[cfg(any(unix, test))]
 use std::time::Duration;
 
+use crossterm::event::Event;
+#[cfg(any(unix, test))]
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
 
+#[cfg(unix)]
 const ESC_TIMEOUT: Duration = Duration::from_millis(40);
 
 pub(crate) struct TerminalInput {
@@ -300,6 +304,7 @@ mod platform {
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
 struct Parser {
     buf: Vec<u8>,
@@ -309,6 +314,7 @@ struct Parser {
     drop_bytes: usize,
 }
 
+#[cfg(any(unix, test))]
 impl Parser {
     fn new() -> Self {
         Self {
@@ -391,6 +397,7 @@ impl Parser {
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug)]
 enum ParseResult {
     Event { event: Event, consumed: usize },
@@ -398,6 +405,7 @@ enum ParseResult {
     Invalid { consumed: usize },
 }
 
+#[cfg(any(unix, test))]
 fn parse_one(buf: &[u8]) -> ParseResult {
     if buf.is_empty() {
         return ParseResult::NeedMore;
@@ -426,6 +434,7 @@ fn parse_one(buf: &[u8]) -> ParseResult {
     }
 }
 
+#[cfg(any(unix, test))]
 fn parse_escape(buf: &[u8]) -> ParseResult {
     if buf.len() == 1 {
         return ParseResult::NeedMore;
@@ -454,6 +463,7 @@ fn parse_escape(buf: &[u8]) -> ParseResult {
     }
 }
 
+#[cfg(any(unix, test))]
 fn parse_ss3(buf: &[u8]) -> ParseResult {
     if buf.len() < 3 {
         return ParseResult::NeedMore;
@@ -471,6 +481,7 @@ fn parse_ss3(buf: &[u8]) -> ParseResult {
     event(key(code, KeyModifiers::empty()), 3)
 }
 
+#[cfg(any(unix, test))]
 fn parse_csi(buf: &[u8]) -> ParseResult {
     if buf.len() < 3 {
         return ParseResult::NeedMore;
@@ -529,6 +540,7 @@ fn parse_csi(buf: &[u8]) -> ParseResult {
     }
 }
 
+#[cfg(any(unix, test))]
 fn parse_linux_console_fkey(buf: &[u8]) -> ParseResult {
     if buf.len() < 4 {
         return ParseResult::NeedMore;
@@ -539,6 +551,7 @@ fn parse_linux_console_fkey(buf: &[u8]) -> ParseResult {
     }
 }
 
+#[cfg(any(unix, test))]
 fn parse_string_control(buf: &[u8]) -> ParseResult {
     let mut prev_esc = false;
     for (i, &b) in buf.iter().enumerate().skip(2) {
@@ -550,6 +563,7 @@ fn parse_string_control(buf: &[u8]) -> ParseResult {
     ParseResult::NeedMore
 }
 
+#[cfg(any(unix, test))]
 fn parse_sgr_mouse(buf: &[u8]) -> ParseResult {
     let Some(final_idx) = buf.iter().position(|&b| b == b'M' || b == b'm') else {
         return ParseResult::NeedMore;
@@ -588,6 +602,7 @@ fn parse_sgr_mouse(buf: &[u8]) -> ParseResult {
     )
 }
 
+#[cfg(any(unix, test))]
 fn parse_normal_mouse(buf: &[u8]) -> ParseResult {
     if buf.len() < 6 {
         return ParseResult::NeedMore;
@@ -609,6 +624,7 @@ fn parse_normal_mouse(buf: &[u8]) -> ParseResult {
     )
 }
 
+#[cfg(any(unix, test))]
 fn parse_rxvt_mouse(params: &[u8], consumed: usize) -> ParseResult {
     let s = match std::str::from_utf8(params) {
         Ok(s) => s,
@@ -641,6 +657,7 @@ fn parse_rxvt_mouse(params: &[u8], consumed: usize) -> ParseResult {
     )
 }
 
+#[cfg(any(unix, test))]
 fn parse_special_key(params: &[u8], consumed: usize) -> ParseResult {
     let s = match std::str::from_utf8(params) {
         Ok(s) => s,
@@ -671,6 +688,7 @@ fn parse_special_key(params: &[u8], consumed: usize) -> ParseResult {
     event(key(code, mods), consumed)
 }
 
+#[cfg(any(unix, test))]
 fn parse_csi_u(params: &[u8], consumed: usize) -> ParseResult {
     let s = match std::str::from_utf8(params) {
         Ok(s) => s,
@@ -709,6 +727,7 @@ fn parse_csi_u(params: &[u8], consumed: usize) -> ParseResult {
     event(key(code, mods), consumed)
 }
 
+#[cfg(any(unix, test))]
 fn parse_mouse_cb(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
     let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
     let dragging = cb & 0b0010_0000 == 0b0010_0000;
@@ -740,6 +759,7 @@ fn parse_mouse_cb(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
     Some((kind, modifiers))
 }
 
+#[cfg(any(unix, test))]
 fn parse_utf8_key(buf: &[u8]) -> ParseResult {
     let width = utf8_width(buf[0]);
     if width == 0 {
@@ -763,6 +783,7 @@ fn parse_utf8_key(buf: &[u8]) -> ParseResult {
     event(key(KeyCode::Char(ch), mods), width)
 }
 
+#[cfg(any(unix, test))]
 fn utf8_width(first: u8) -> usize {
     match first {
         0x00..=0x7f => 1,
@@ -773,6 +794,7 @@ fn utf8_width(first: u8) -> usize {
     }
 }
 
+#[cfg(any(unix, test))]
 fn csi_final_index(buf: &[u8]) -> Option<usize> {
     buf.iter()
         .enumerate()
@@ -780,10 +802,12 @@ fn csi_final_index(buf: &[u8]) -> Option<usize> {
         .find_map(|(i, &b)| csi_final_byte(b).then_some(i))
 }
 
+#[cfg(any(unix, test))]
 fn csi_final_byte(b: u8) -> bool {
     (0x40..=0x7e).contains(&b)
 }
 
+#[cfg(any(unix, test))]
 fn csi_trailing_modifier(params: &[u8]) -> KeyModifiers {
     std::str::from_utf8(params)
         .ok()
@@ -792,6 +816,7 @@ fn csi_trailing_modifier(params: &[u8]) -> KeyModifiers {
         .unwrap_or_else(KeyModifiers::empty)
 }
 
+#[cfg(any(unix, test))]
 fn parse_modifier(s: &str) -> Option<KeyModifiers> {
     let n = s.parse::<u8>().ok()?;
     let mut out = KeyModifiers::empty();
@@ -811,10 +836,12 @@ fn parse_modifier(s: &str) -> Option<KeyModifiers> {
     Some(out)
 }
 
+#[cfg(any(unix, test))]
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+#[cfg(any(unix, test))]
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent {
         code,
@@ -824,10 +851,12 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     })
 }
 
+#[cfg(any(unix, test))]
 fn event(event: Event, consumed: usize) -> ParseResult {
     ParseResult::Event { event, consumed }
 }
 
+#[cfg(any(unix, test))]
 fn invalid(consumed: usize) -> ParseResult {
     ParseResult::Invalid { consumed }
 }

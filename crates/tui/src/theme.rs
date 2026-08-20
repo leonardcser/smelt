@@ -569,6 +569,7 @@ fn osc_background_luma() -> Option<f32> {
 }
 
 /// Parse `\x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\` and return luma.
+#[cfg(any(unix, test))]
 fn parse_osc11_response(response: &str) -> Option<f32> {
     let rgb_start = response.find("rgb:")?;
     let raw = &response[rgb_start + 4..];
