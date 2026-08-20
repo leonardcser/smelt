@@ -339,6 +339,25 @@ fn prompt_docked_picker_relayouts_on_resize() {
 }
 
 #[test]
+fn theme_picker_confirms_selection_without_callback_error() {
+    let mut app = TestApp::builder().build();
+
+    app.type_text("/theme");
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    assert!(
+        app.overlays_probe().has_pickers(),
+        "theme picker should open"
+    );
+
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+
+    assert!(app.lua_messages_contain("theme preview selected for this session:"));
+    assert!(!app.lua_messages_contain("cmd.picker on_enter:"));
+}
+
+#[test]
 fn prompt_picker_custom_rank_uses_returned_indices() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(

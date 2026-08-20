@@ -44,7 +44,7 @@ smelt.cmd.picker("theme", {
   apply = function(arg)
     if not original then original = snapshot() end
     if apply(arg) then
-      smelt.notify("theme preview is session-local; add smelt.theme.use(\"" .. arg .. "\") to init.lua to keep it")
+      smelt.notify.info("theme preview is session-local; add smelt.theme.use(\"" .. arg .. "\") to init.lua to keep it")
     end
   end,
   prepare = function()
@@ -57,7 +57,7 @@ smelt.cmd.picker("theme", {
   on_enter = function(item)
     if item and item.label then
       apply(item.label)
-      smelt.notify("theme preview selected for this session: " .. item.label)
+      smelt.notify.info("theme preview selected for this session: " .. item.label)
     end
     original = nil
   end,

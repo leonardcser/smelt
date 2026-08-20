@@ -505,7 +505,7 @@ local function run_compact(opts)
 		return
 	end
 	if not has_compactable_group_prefix(history) then
-		smelt.notify("nothing old enough to compact")
+		smelt.notify.info("nothing old enough to compact")
 		return
 	end
 	-- Use the provider's actual prompt-token count.  If no turn has

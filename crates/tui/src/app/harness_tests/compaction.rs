@@ -31,6 +31,16 @@ async fn read_json_request(stream: &mut tokio::net::TcpStream) -> serde_json::Va
 }
 
 #[test]
+fn compact_command_reports_when_history_is_too_recent() {
+    let mut app = TestApp::builder().build();
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
+
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+
+    assert!(app.lua_messages_contain("nothing old enough to compact"));
+}
+
+#[test]
 fn compact_command_shows_preview_before_first_delta() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
