@@ -3182,10 +3182,11 @@ impl TuiApp {
                 return;
             }
         };
-        // Independent SIGWINCH listener: crossterm's signal source intermittently drops
-        // resize events (signal-hook-mio counter / mio readiness race), so we keep our
-        // own tokio-native handler. Both fire on resize; the duplicate just hits an
-        // idempotent `compositor.resize` and one extra full repaint.
+        // Independent SIGWINCH listener: crossterm's Unix signal source intermittently
+        // drops resize events (signal-hook-mio counter / mio readiness race), so we keep
+        // our own tokio-native handler there. Both fire on resize; the duplicate just
+        // hits an idempotent `compositor.resize` and one extra full repaint.
+        #[cfg(unix)]
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
                 .expect("install SIGWINCH listener");
@@ -3382,6 +3383,16 @@ impl TuiApp {
             .into_iter()
             .flatten()
             .min();
+            let window_change = async {
+                #[cfg(unix)]
+                {
+                    sigwinch.recv().await
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<Option<()>>().await
+                }
+            };
 
             tokio::select! {
                 biased;
@@ -3557,7 +3568,7 @@ impl TuiApp {
                     self.render_normal();
                 }
 
-                Some(_) = sigwinch.recv() => {
+                Some(_) = window_change => {
                     if let Ok((w, h)) = terminal::size() {
                         if w != self.last_width || h != self.last_height {
                             self.handle_resize(w, h);
