@@ -783,6 +783,10 @@ impl ProjectionAnchor {
 pub(crate) struct StableRowAnchor(ProjectionAnchor);
 
 impl StableRowAnchor {
+    pub(crate) fn rendered_block_row(id: BlockId, row_offset: RowIndex) -> Self {
+        Self(ProjectionAnchor::rendered_block_row(id, row_offset))
+    }
+
     pub(crate) fn block_id(self) -> Option<BlockId> {
         match self.0 {
             ProjectionAnchor::Node { id, .. } => id.as_block_id(),

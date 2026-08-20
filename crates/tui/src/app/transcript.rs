@@ -5049,18 +5049,15 @@ impl TranscriptDocument {
                 .filter(|(exact, tape)| {
                     tape.rows.clamped_scroll.saturating_add(exact.row_offset) == fallback_scroll_top
                 });
-        let semantic_viewport_matches = self
-            .viewport
-            .state
-            .resolved_anchor
-            .is_some_and(|anchor| anchor.scroll_top == fallback_scroll_top);
-        if !matches!(
+        let current_content_anchor_matches = matches!(
             self.viewport.state.resolved_anchor,
             Some(TranscriptResolvedViewportAnchor {
                 top: TranscriptScrollAnchor::Content(_),
+                scroll_top,
                 ..
-            })
-        ) {
+            }) if scroll_top == fallback_scroll_top
+        );
+        if !current_content_anchor_matches {
             if let Some((exact, _)) = exact_viewport {
                 self.capture_viewport_anchor_with_offset(
                     lua,
@@ -5072,6 +5069,11 @@ impl TranscriptDocument {
                 );
             }
         }
+        let semantic_viewport_matches = self
+            .viewport
+            .state
+            .resolved_anchor
+            .is_some_and(|anchor| anchor.scroll_top == fallback_scroll_top);
         let exact_anchor = exact_viewport.and_then(|(_, tape)| tape.top_anchor);
         let (semantic_anchor, semantic_offset_rows) = match self.viewport.state.resolved_anchor {
             Some(TranscriptResolvedViewportAnchor {
@@ -5120,13 +5122,23 @@ impl TranscriptDocument {
             }
         }
         let reanchored_semantic_anchor = semantic_anchor.map(|anchor| {
-            TranscriptRowAnchor {
-                id: crate::content::render_plan::RenderNodeId::Block(
-                    self.current_block_id_for_content_anchor(anchor),
-                ),
-                row_offset: anchor.intra_block_row,
-            }
-            .into()
+            let block_id = self.current_block_id_for_content_anchor(anchor);
+            self.content
+                .projection
+                .row_anchor_for_block(
+                    lua,
+                    &mut self.content.transcript.history,
+                    width,
+                    block_id,
+                    anchor.intra_block_row,
+                )
+                .map(Into::into)
+                .unwrap_or_else(|| {
+                    crate::content::transcript_buf::StableRowAnchor::rendered_block_row(
+                        block_id,
+                        anchor.intra_block_row,
+                    )
+                })
         });
         let content_exact_anchor = exact_anchor.filter(|anchor| anchor.block_id().is_some());
         let present_exact_anchor = content_exact_anchor.and_then(|anchor| {
