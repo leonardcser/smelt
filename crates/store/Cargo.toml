@@ -8,6 +8,7 @@ default = []
 test-util = []
 
 [dependencies]
+fs4 = "1.1.0"
 getrandom = "0.4.3"
 hostname = "0.4.2"
 libc.workspace = true

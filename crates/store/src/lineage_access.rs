@@ -1,6 +1,5 @@
 use std::fs::{self, File};
 use std::io::Write;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,17 +94,13 @@ impl LineageLease {
             options.mode(0o600);
         }
         let file = options.open(path)?;
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Err(StoreError::OwnershipConflict {
-                    owner: Some(name.to_owned()),
-                });
-            }
-            return Err(StoreError::Io(error));
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(fs4::TryLockError::WouldBlock) => Err(StoreError::OwnershipConflict {
+                owner: Some(name.to_owned()),
+            }),
+            Err(fs4::TryLockError::Error(error)) => Err(StoreError::Io(error)),
         }
-        Ok(Self { _file: file })
     }
 }
 
