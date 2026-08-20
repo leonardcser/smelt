@@ -524,6 +524,64 @@ async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() 
     }
 }
 
+#[test]
+fn wheel_scroll_moves_while_compaction_preview_streams() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.push_assistant_text("a1");
+    for index in 0..40 {
+        app.push_user_block(&format!("transcript row {index}: {}", "content ".repeat(8)));
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("assistant row {index}: {}", "response ".repeat(8)),
+        });
+    }
+    app.set_context_token_baseline_for_harness(Some(500));
+    app.follow_transcript_tail();
+    app.render_to_frame();
+
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    let ask_id = app
+        .pending_ask_id()
+        .expect("/compact registered ask callback");
+    app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: (1..=20)
+            .map(|line| format!("summary line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+    app.render_to_frame();
+
+    let viewport = app
+        .transcript_window()
+        .viewport
+        .expect("rendered transcript viewport");
+    for step in 0..6 {
+        let before = app.app.transcript_scroll_top();
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: viewport.rect.left.saturating_add(2),
+            row: viewport.rect.top.saturating_add(2),
+            modifiers: KeyModifiers::NONE,
+        })));
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+            id: ask_id,
+            delta: format!(" streaming-{step}"),
+        });
+        app.render_to_frame();
+
+        let after = app.app.transcript_scroll_top();
+        assert!(
+            after < before,
+            "wheel step {step} was lost while the preview streamed: {before} -> {after}"
+        );
+        assert!(!app.transcript_window().following_tail);
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn real_engine_responses_compaction_streams_preview_before_response() {
     use std::sync::Arc;

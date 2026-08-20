@@ -3268,14 +3268,13 @@ impl TuiApp {
                 self.apply_context_window_update(update);
             }
 
-            let drained_idle_work = self.drain_idle_work();
+            let mut drained_idle_work = self.drain_idle_work();
             if drained_idle_work {
                 self.render_normal_after_startup_work(
                     &mut workspace_warmup_pending,
                     &mut pre_first_frame_startup,
                     &mut first_frame_pending,
                 );
-                continue 'main;
             }
 
             self.drain_ready_engine_outputs_for_frame();
@@ -3284,15 +3283,15 @@ impl TuiApp {
                 self.handle_process_completed(completion.id, completion.exit_code);
             }
 
-            let drained_idle_work = self.drain_idle_work();
-            if drained_idle_work {
+            let drained_more_idle_work = self.drain_idle_work();
+            if drained_more_idle_work {
                 self.render_normal_after_startup_work(
                     &mut workspace_warmup_pending,
                     &mut pre_first_frame_startup,
                     &mut first_frame_pending,
                 );
-                continue 'main;
             }
+            drained_idle_work |= drained_more_idle_work;
 
             self.start_next_queued_input_if_idle();
 
@@ -3576,6 +3575,10 @@ impl TuiApp {
                         }
                     }
                 }
+
+                // Continue bounded background work only after every foreground
+                // event source above had a chance to run.
+                _ = std::future::ready(()), if drained_idle_work => {}
             }
         }
 
