@@ -146,27 +146,14 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    use std::io::Write;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("cache");
-    let temporary = path.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), id));
-    let result = (|| {
-        let mut file = std::fs::File::create(&temporary)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    file.write_all(bytes)?;
+    file.commit()
 }
 
 #[cfg(test)]

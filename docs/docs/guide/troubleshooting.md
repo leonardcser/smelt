@@ -34,8 +34,9 @@ and a `--system-prompt` file require manual `/reload`.
 
 For plugin development, verify the
 [load order and early-phase restrictions](customization.md#config-files). Do not
-edit the mirrored built-ins under `$XDG_DATA_HOME/smelt/builtins/`; an upgrade
-replaces them.
+edit the mirrored `builtins/` tree in the
+[data directory](../reference/configuration.md#storage-paths); an upgrade
+replaces it.
 
 ## Modified Enter or Command keys do not work
 

@@ -62,6 +62,17 @@ pub(crate) fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::R
     std::fs::write(path, contents)
 }
 
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    file.write_all(contents)?;
+    file.commit()
+}
+
 pub(crate) fn exists(path: impl AsRef<Path>) -> bool {
     path.as_ref().exists()
 }

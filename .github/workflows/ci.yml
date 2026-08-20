@@ -158,8 +158,11 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Test Windows paths
-        run: cargo test -p smelt-engine paths::tests --lib
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run Windows test suite
+        run: cargo nextest run --workspace --features smelt-tui/harness
 
       - name: Build and run release archive
         shell: pwsh

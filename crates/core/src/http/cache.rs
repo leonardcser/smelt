@@ -44,15 +44,9 @@ pub(crate) fn put(cache_root: &Path, key: &str, value: &str) {
 }
 
 /// Cache `value` under `key` with an explicit TTL.
-/// Uses temp-file + rename so readers never see a partial write.
 pub(crate) fn put_with_ttl(cache_root: &Path, key: &str, value: &str, ttl: Duration) {
-    let dir = cache_dir(cache_root);
-    let _ = std::fs::create_dir_all(&dir);
     let path = key_path(cache_root, key);
-    let tmp = dir.join(format!("{}.tmp", std::process::id()));
     let expires = now_secs() + ttl.as_secs();
     let data = format!("{expires}\n{value}");
-    if std::fs::write(&tmp, &data).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = crate::fs::write_atomic(&path, data.as_bytes());
 }

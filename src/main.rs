@@ -1015,6 +1015,7 @@ fn restore_canonical_session_cwd_for_launch(
 }
 
 fn main() {
+    upgrade::cleanup_stale_staging();
     std::panic::set_hook(Box::new(|info| {
         let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
         let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);

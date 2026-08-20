@@ -255,14 +255,18 @@ fn install_stable(tag: &str) -> Result<(), String> {
         .join(format!("previous-smelt{}", std::env::consts::EXE_SUFFIX));
 
     println!("installing to {}...", exe.display());
-    replace_executable(&exe, &candidate, &backup, |from, to| fs::rename(from, to)).map_err(
-        |error| {
-            if error.rollback_failed {
-                staging.preserve = true;
-            }
-            error.message
-        },
-    )?;
+    let defer_cleanup =
+        replace_executable(&exe, &candidate, &backup, |from, to| fs::rename(from, to)).map_err(
+            |error| {
+                if error.rollback_failed {
+                    staging.preserve = true;
+                }
+                error.message
+            },
+        )?;
+    if defer_cleanup {
+        staging.preserve = true;
+    }
     println!("upgraded to {tag}; restart smelt to use it");
     Ok(())
 }
@@ -356,6 +360,40 @@ impl Drop for UpgradeStaging {
     }
 }
 
+pub fn cleanup_stale_staging() {
+    #[cfg(windows)]
+    {
+        let Ok(executable) = std::env::current_exe() else {
+            return;
+        };
+        let Some(parent) = executable.parent() else {
+            return;
+        };
+        cleanup_stale_staging_in(parent, &executable);
+    }
+}
+
+#[cfg(any(windows, test))]
+fn cleanup_stale_staging_in(parent: &Path, executable: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_staging_dir = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".smelt-upgrade-"))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let has_deferred_backup = path
+            .join(format!("previous-smelt{}", std::env::consts::EXE_SUFFIX))
+            .is_file();
+        if is_staging_dir && has_deferred_backup && !executable.starts_with(&path) {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn sanitize_tag(tag: &str) -> String {
     let safe = tag
         .chars()
@@ -407,7 +445,7 @@ fn replace_executable(
     candidate: &Path,
     backup: &Path,
     mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
-) -> Result<(), ReplaceExecutableError> {
+) -> Result<bool, ReplaceExecutableError> {
     #[cfg(unix)]
     {
         fs::hard_link(executable, backup).map_err(|error| ReplaceExecutableError {
@@ -438,6 +476,14 @@ fn replace_executable(
                 }),
             };
         }
+        fs::remove_file(backup).map_err(|error| ReplaceExecutableError {
+            message: format!(
+                "replacement installed but removing previous executable {} failed: {error}",
+                backup.display()
+            ),
+            rollback_failed: true,
+        })?;
+        Ok(false)
     }
 
     #[cfg(not(unix))]
@@ -469,16 +515,8 @@ fn replace_executable(
                 }),
             };
         }
+        Ok(true)
     }
-
-    fs::remove_file(backup).map_err(|error| ReplaceExecutableError {
-        message: format!(
-            "replacement installed but removing previous executable {} failed: {error}",
-            backup.display()
-        ),
-        rollback_failed: true,
-    })?;
-    Ok(())
 }
 
 fn install_unstable(sha: &str) -> Result<(), String> {
@@ -816,6 +854,47 @@ mod tests {
             root
         };
         assert!(!invalid_shape_root.exists());
+    }
+
+    #[test]
+    fn stale_upgrade_cleanup_removes_only_inactive_staging_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(".smelt-upgrade-old-1-0");
+        let active = dir.path().join(".smelt-upgrade-active-2-0");
+        let unrelated = dir.path().join("keep-me");
+        fs::create_dir(&stale).unwrap();
+        fs::create_dir(&active).unwrap();
+        fs::create_dir(&unrelated).unwrap();
+        let backup_name = format!("previous-smelt{}", std::env::consts::EXE_SUFFIX);
+        fs::write(stale.join(&backup_name), b"old").unwrap();
+        let executable = active.join(backup_name);
+        fs::write(&executable, b"running").unwrap();
+
+        cleanup_stale_staging_in(dir.path(), &executable);
+
+        assert!(!stale.exists());
+        assert!(active.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn replacement_defers_running_binary_cleanup_until_next_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("current-smelt.exe");
+        let candidate = dir.path().join("candidate-smelt.exe");
+        let backup = dir.path().join("previous-smelt.exe");
+        fs::write(&current, b"old").unwrap();
+        fs::write(&candidate, b"new").unwrap();
+
+        let cleanup = replace_executable(&current, &candidate, &backup, |from, to| {
+            fs::rename(from, to)
+        })
+        .unwrap();
+
+        assert!(cleanup);
+        assert_eq!(fs::read(&current).unwrap(), b"new");
+        assert_eq!(fs::read(&backup).unwrap(), b"old");
     }
 
     #[cfg(unix)]

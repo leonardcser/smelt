@@ -306,39 +306,22 @@ fn runtime_root() -> PathBuf {
 }
 
 fn write_status_atomic(path: &Path, status: &PublicStatus) -> io::Result<()> {
+    use std::io::Write;
+
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "status path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     let data = serde_json::to_vec(status).map_err(io::Error::other)?;
-    write_private(&tmp, &data)?;
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = fs::remove_file(&tmp);
-            Err(err)
-        }
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-}
-
-#[cfg(unix)]
-fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data)
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
-    fs::write(path, data)
+    file.write_all(&data)?;
+    file.commit()
 }
 
 fn should_publish(last: Option<&LastPublished>, key: &StatusKey, now_ms: u64) -> bool {
@@ -463,6 +446,23 @@ mod tests {
                 linux_process_start_time_ticks(std::process::id())
             );
         }
+
+        publisher
+            .publish(StatusUpdate {
+                state: PublicState::Idle,
+                reason: None,
+                focus: FocusState::Focused,
+                cwd: Some("/other".to_string()),
+                session_id: None,
+                mode: None,
+                headless: false,
+            })
+            .unwrap();
+        let replaced = read_status_for_pid(std::process::id()).unwrap();
+        assert_eq!(replaced.state, PublicState::Idle);
+        assert_eq!(replaced.focus, FocusState::Focused);
+        assert_eq!(replaced.cwd.as_deref(), Some("/other"));
+
         drop(publisher);
         assert!(!status_path_for_pid(std::process::id()).exists());
     }

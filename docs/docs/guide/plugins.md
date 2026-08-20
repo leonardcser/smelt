@@ -50,13 +50,10 @@ are the canonical examples. Every pattern below comes straight from them.
 
 ## Editor setup
 
-On every launch, smelt mirrors its embedded Lua runtime to:
-
-```
-$XDG_DATA_HOME/smelt/builtins/lua/smelt/
-```
-
-The default is `~/.local/share/smelt/builtins/lua/smelt/`. It includes the
+On every launch, smelt mirrors its embedded Lua runtime to `builtins/lua/smelt/`
+in the [data directory](../reference/configuration.md#storage-paths). The default
+is `~/.local/share/smelt/builtins/lua/smelt/` on Linux and macOS and
+`%LOCALAPPDATA%\smelt\data\builtins\lua\smelt\` on Windows. It includes the
 bundled implementation and generated LuaCATS stubs under `_meta/`. Treat the
 mirror as read-only because an upgrade refreshes it.
 
@@ -534,10 +531,11 @@ local s = smelt.state.get("my_plugin")
 s.counter = (s.counter or 0) + 1
 ```
 
-`smelt.state.persistent(name)` returns a JSON-backed wrapper that writes through
-to `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Use it for user preferences or
-data that must survive restarts. Top-level assignments are debounced and
-auto-saved; nested mutations need an explicit `.save()` call.
+`smelt.state.persistent(name)` returns a JSON-backed wrapper that writes to
+`plugins/<name>.json` in the
+[state directory](../reference/configuration.md#storage-paths). Use it for user
+preferences or data that must survive restarts. Top-level assignments are
+debounced and auto-saved; nested mutations need an explicit `.save()` call.
 
 ```lua
 local s = smelt.state.persistent("recent_files")

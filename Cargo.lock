@@ -270,6 +270,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "atomic-write-file"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae67d5c03ee972c101a1d8db3ddbf8a9c819ad1ea9d6fd9cd385605547b60edb"
+dependencies = [
+ "nix",
+ "rand",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3252,6 +3262,7 @@ dependencies = [
 name = "smelt-core"
 version = "0.5.0-alpha.9"
 dependencies = [
+ "atomic-write-file",
  "brush-parser",
  "chrono",
  "dirs",
@@ -3307,6 +3318,7 @@ name = "smelt-engine"
 version = "0.5.0-alpha.9"
 dependencies = [
  "apple-native-keyring-store",
+ "atomic-write-file",
  "base64",
  "dirs",
  "futures-util",
@@ -3358,6 +3370,7 @@ dependencies = [
 name = "smelt-provider"
 version = "0.5.0-alpha.9"
 dependencies = [
+ "atomic-write-file",
  "base64",
  "futures-util",
  "libc",

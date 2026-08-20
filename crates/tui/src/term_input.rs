@@ -7,7 +7,7 @@
 //! before deciding that a lone ESC is a real key.
 
 use std::io;
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use std::time::Duration;
 
 use crossterm::event::Event;
@@ -354,6 +354,7 @@ impl Parser {
         out
     }
 
+    #[cfg(unix)]
     fn awaiting_escape_tail(&self) -> bool {
         self.buf.first() == Some(&0x1b) && !self.buf.starts_with(b"\x1b[200~")
     }

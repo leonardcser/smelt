@@ -41,6 +41,7 @@ chrono = "0.4.45"
 brush-parser = "0.4.0"
 scoped-tls-hkt = "0.1.5"
 process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "process-group", "job-object"] }
+atomic-write-file = "0.3.1"
 
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }

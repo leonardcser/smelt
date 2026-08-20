@@ -44,11 +44,13 @@ fn cache_put_with_ttl(cache_dir: Option<&Path>, key: &str, value: &str, ttl: Dur
     };
     let _ = std::fs::create_dir_all(dir);
     let path = key_path(dir, key);
-    let tmp = dir.join(format!("{}.tmp", std::process::id()));
     let expires = now_secs() + ttl.as_secs();
     let data = format!("{expires}\n{value}");
-    if std::fs::write(&tmp, &data).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    if let Ok(mut file) = atomic_write_file::AtomicWriteFile::open(path) {
+        use std::io::Write;
+        if file.write_all(data.as_bytes()).is_ok() {
+            let _ = file.commit();
+        }
     }
 }
 
