@@ -1,6 +1,8 @@
 # Configuration Reference
 
-Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
+Config file: `~/.config/smelt/init.lua` on Linux and macOS, or
+`%APPDATA%\smelt\init.lua` on Windows. `$XDG_CONFIG_HOME` overrides the config
+root on every platform.
 
 Load a different file with `--config <path>`.
 
@@ -502,7 +504,7 @@ See [Permissions Reference](permissions.md) for full details.
 
 ## Storage Paths
 
-All runtime data is stored under the XDG base directories:
+On Linux and macOS, runtime data is stored under the XDG base directories:
 
 | Directory                           | Contents                                                                          |
 | ----------------------------------- | --------------------------------------------------------------------------------- |
@@ -519,6 +521,10 @@ All runtime data is stored under the XDG base directories:
 | `$XDG_DATA_HOME/smelt/runtime/`     | Extra Lua runtime roots (optional)                                                |
 | `$XDG_CACHE_HOME/smelt/web/`        | HTTP/pricing cache                                                                |
 | `$XDG_CACHE_HOME/smelt/`            | `copilot_models.json` and other discovered model caches                           |
+
+Windows uses `%APPDATA%\smelt` for config and `%LOCALAPPDATA%\smelt\state`,
+`%LOCALAPPDATA%\smelt\cache`, and `%LOCALAPPDATA%\smelt\data` for the other
+roots. Explicit XDG variables override these defaults on every platform.
 
 OAuth-backed providers load credentials in this order: a provider-specific
 environment override, a private JSON file under `$XDG_STATE_HOME/smelt/`, then

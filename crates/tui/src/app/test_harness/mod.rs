@@ -437,34 +437,32 @@ impl TestAppBuilder {
             Instant::now(),
             self.wall_time.unwrap_or_else(SystemTime::now),
         ));
-        let xdg_config = home.join("config");
-        let xdg_state = home.join("state");
-        let xdg_cache = home.join("cache");
-        let xdg_data = home.join("data");
-        let xdg_runtime = home.join("runtime");
+        let config_dir = home.join("config").join("smelt");
+        let state_dir = home.join("state").join("smelt");
+        let cache_dir = home.join("cache").join("smelt");
+        let data_dir = home.join("data").join("smelt");
+        let app_runtime_dir = home.join("runtime");
         let cwd = self.cwd.unwrap_or_else(|| home.join("cwd"));
         for path in [
             &home,
-            &xdg_config,
-            &xdg_state,
-            &xdg_cache,
-            &xdg_data,
-            &xdg_runtime,
+            &config_dir,
+            &state_dir,
+            &cache_dir,
+            &data_dir,
+            &app_runtime_dir,
             &cwd,
         ] {
             std::fs::create_dir_all(path).expect("create isolated app runtime path");
         }
-        let lua_config_dir = self
-            .lua_config_dir
-            .unwrap_or_else(|| xdg_config.join("smelt"));
+        let lua_config_dir = self.lua_config_dir.unwrap_or_else(|| config_dir.clone());
         let env = Arc::new(engine::env::RuntimeEnv::scripted(
             4242,
             home,
-            xdg_config,
-            xdg_state,
-            xdg_cache,
-            xdg_data,
-            xdg_runtime,
+            config_dir,
+            state_dir,
+            cache_dir,
+            data_dir,
+            app_runtime_dir,
             cwd.clone(),
             std::num::NonZeroUsize::new(1).unwrap(),
         ));

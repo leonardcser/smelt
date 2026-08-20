@@ -1052,13 +1052,13 @@ async fn async_main() {
     let env = Arc::new(engine::env::RuntimeEnv::snapshot());
     drop(environment_startup);
 
-    // Mirror the embedded runtime tree to `<XDG_DATA_HOME>/smelt/builtins/`
+    // Mirror the embedded runtime tree to the user data directory's `builtins/` tree
     // on first launch / after a version bump, so the `customize` skill
     // can point the agent at on-disk source for inspection. Best-effort:
     // a failure here just means the skill's example links won't resolve,
     // not that smelt can't run.
     let builtins_startup = smelt_perf::perf::begin("startup:extract_builtins");
-    let data_dir = env.xdg_data().join("smelt");
+    let data_dir = env.data_dir().clone();
     if let Err(e) = smelt_core::lua::ensure_builtins_extracted(&data_dir) {
         eprintln!("smelt: failed to extract built-in runtime: {e}");
     }
@@ -1167,7 +1167,7 @@ async fn async_main() {
         .config
         .as_deref()
         .map(std::path::PathBuf::from)
-        .or_else(|| Some(env.xdg_config().join("smelt").join("init.lua")));
+        .or_else(|| Some(env.config_dir().join("init.lua")));
     let has_provider_cli_flags = args.api_base.is_some()
         || args.api_key_env.is_some()
         || args.r#type.is_some()
@@ -1328,7 +1328,7 @@ async fn async_main() {
     let instructions = if args.no_system_prompt {
         None
     } else {
-        tui::instructions::load(&env.xdg_config().join("smelt"), &cwd)
+        tui::instructions::load(env.config_dir(), &cwd)
     };
     // Track the source path when `--system-prompt` points at a file so
     // `/reload` can re-read it. Inline strings keep `system_prompt_path = None`.
@@ -1356,9 +1356,8 @@ async fn async_main() {
     };
 
     let permission_rules = lua_permission_rules.unwrap_or_default();
-    let workspace_permissions = smelt_core::permissions::store::WorkspacePermissionStore::new(
-        env.xdg_state().join("smelt"),
-    );
+    let workspace_permissions =
+        smelt_core::permissions::store::WorkspacePermissionStore::new(env.state_dir().clone());
     let permission_resolution = smelt_core::permissions::resolve_permissions(
         &permission_rules,
         &lua_tool_defaults,

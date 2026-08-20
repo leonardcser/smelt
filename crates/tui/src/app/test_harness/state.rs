@@ -477,11 +477,11 @@ impl TestApp {
     }
 
     pub fn runtime_dir(&self) -> &std::path::Path {
-        self.app.core.env.xdg_runtime()
+        self.app.core.env.runtime_dir()
     }
 
     pub fn runtime_cache_root(&self) -> std::path::PathBuf {
-        self.app.core.env.xdg_cache().join("smelt")
+        self.app.core.env.cache_dir().clone()
     }
 
     pub fn shell_effect_paths(&self, command: &str) -> Vec<std::path::PathBuf> {

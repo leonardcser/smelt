@@ -87,7 +87,7 @@ impl PlatformRuntime {
                 (tx, Some(rx))
             });
         let public_status = match smelt_core::public_status::StatusPublisher::new_in(
-            env.xdg_runtime(),
+            env.runtime_dir(),
             env.pid(),
         ) {
             Ok(publisher) => Some(publisher),

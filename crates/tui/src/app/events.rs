@@ -1015,7 +1015,7 @@ impl TuiApp {
     fn edit_in_editor(&mut self) {
         let req = match crate::input::editor::prepare(
             self.prompt_buf().source(),
-            self.core.env.xdg_runtime(),
+            self.core.env.runtime_dir(),
         ) {
             Ok(req) => req,
             Err(e) => {

@@ -57,6 +57,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: smelt-aarch64-apple-darwin.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: smelt-x86_64-pc-windows-msvc.tar.gz
 
     steps:
       - name: Checkout code
@@ -83,10 +86,13 @@ jobs:
         run: cargo build --profile dist --bin smelt --target ${{ matrix.target }}
 
       - name: Package binary
-        run: |
-          cd target/${{ matrix.target }}/dist
-          tar czf ../../../${{ matrix.artifact }} smelt
-          cd ../../..
+        if: runner.os != 'Windows'
+        run: tar czf "${{ matrix.artifact }}" -C "target/${{ matrix.target }}/dist" smelt
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tar czf "${{ matrix.artifact }}" -C "target/${{ matrix.target }}/dist" smelt.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

@@ -3298,6 +3298,7 @@ version = "0.5.0-alpha.9"
 dependencies = [
  "apple-native-keyring-store",
  "base64",
+ "dirs",
  "futures-util",
  "keyring-core",
  "libc",

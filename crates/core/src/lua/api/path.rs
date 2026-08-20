@@ -139,7 +139,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &[],
         |_, ()| {
             Ok(
-                crate::host::try_with_core(|core| to_string(core.env.xdg_config().join("smelt")))
+                crate::host::try_with_core(|core| to_string(core.env.config_dir().clone()))
                     .unwrap_or_default(),
             )
         },
@@ -150,10 +150,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return the absolute path to the slash-commands directory under the runtime config root.",
         &[],
         |_, ()| {
-            Ok(crate::host::try_with_core(|core| {
-                to_string(core.env.xdg_config().join("smelt").join("commands"))
-            })
-            .unwrap_or_default())
+            Ok(
+                crate::host::try_with_core(|core| {
+                    to_string(core.env.config_dir().join("commands"))
+                })
+                .unwrap_or_default(),
+            )
         },
     )?;
 

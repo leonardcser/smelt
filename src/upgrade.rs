@@ -250,7 +250,9 @@ fn install_stable(tag: &str) -> Result<(), String> {
     let mut staging = UpgradeStaging::create(&exe, tag)?;
     println!("downloading {tag} for {target} ({})...", asset.name);
     let candidate = prepare_stable_candidate(&staging, &asset.url, run_command)?;
-    let backup = staging.root.join("previous-smelt");
+    let backup = staging
+        .root
+        .join(format!("previous-smelt{}", std::env::consts::EXE_SUFFIX));
 
     println!("installing to {}...", exe.display());
     replace_executable(&exe, &candidate, &backup, |from, to| fs::rename(from, to)).map_err(
@@ -283,7 +285,8 @@ fn prepare_stable_candidate(
     mut run: impl FnMut(&str, &[&str], Option<&Path>, &str) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let archive = staging.root.join("release.tar.gz");
-    let candidate = staging.root.join("smelt");
+    let executable_name = format!("smelt{}", std::env::consts::EXE_SUFFIX);
+    let candidate = staging.root.join(&executable_name);
     run(
         "curl",
         &["-fLso", path_str(&archive)?, url],
@@ -297,7 +300,7 @@ fn prepare_stable_candidate(
             path_str(&archive)?,
             "-C",
             path_str(&staging.root)?,
-            "smelt",
+            &executable_name,
         ],
         None,
         "extract release asset",

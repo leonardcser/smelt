@@ -19,11 +19,11 @@ use std::sync::RwLock;
 pub struct RuntimeEnv {
     pid: u32,
     home: PathBuf,
-    xdg_config: PathBuf,
-    xdg_state: PathBuf,
-    xdg_cache: PathBuf,
-    xdg_data: PathBuf,
-    xdg_runtime: PathBuf,
+    config_dir: PathBuf,
+    state_dir: PathBuf,
+    cache_dir: PathBuf,
+    data_dir: PathBuf,
+    runtime_dir: PathBuf,
     cwd: RwLock<PathBuf>,
     available_parallelism: NonZeroUsize,
 }
@@ -32,19 +32,11 @@ impl RuntimeEnv {
     /// Capture the real process environment. Call once at startup.
     pub fn snapshot() -> Self {
         let home = crate::paths::home_dir();
-        let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"));
-        let xdg_state = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local").join("state"));
-        let xdg_cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".cache"));
-        let xdg_data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local").join("share"));
-        let xdg_runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        let config_dir = crate::paths::config_dir();
+        let state_dir = crate::paths::state_dir();
+        let cache_dir = crate::paths::cache_dir();
+        let data_dir = crate::paths::data_dir();
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(std::env::temp_dir);
@@ -54,11 +46,11 @@ impl RuntimeEnv {
         Self {
             pid: std::process::id(),
             home,
-            xdg_config,
-            xdg_state,
-            xdg_cache,
-            xdg_data,
-            xdg_runtime,
+            config_dir,
+            state_dir,
+            cache_dir,
+            data_dir,
+            runtime_dir,
             cwd: RwLock::new(cwd),
             available_parallelism,
         }
@@ -70,22 +62,22 @@ impl RuntimeEnv {
     pub fn scripted(
         pid: u32,
         home: PathBuf,
-        xdg_config: PathBuf,
-        xdg_state: PathBuf,
-        xdg_cache: PathBuf,
-        xdg_data: PathBuf,
-        xdg_runtime: PathBuf,
+        config_dir: PathBuf,
+        state_dir: PathBuf,
+        cache_dir: PathBuf,
+        data_dir: PathBuf,
+        runtime_dir: PathBuf,
         cwd: PathBuf,
         available_parallelism: NonZeroUsize,
     ) -> Self {
         Self {
             pid,
             home,
-            xdg_config,
-            xdg_state,
-            xdg_cache,
-            xdg_data,
-            xdg_runtime,
+            config_dir,
+            state_dir,
+            cache_dir,
+            data_dir,
+            runtime_dir,
             cwd: RwLock::new(cwd),
             available_parallelism,
         }
@@ -99,24 +91,24 @@ impl RuntimeEnv {
         &self.home
     }
 
-    pub fn xdg_config(&self) -> &PathBuf {
-        &self.xdg_config
+    pub fn config_dir(&self) -> &PathBuf {
+        &self.config_dir
     }
 
-    pub fn xdg_state(&self) -> &PathBuf {
-        &self.xdg_state
+    pub fn state_dir(&self) -> &PathBuf {
+        &self.state_dir
     }
 
-    pub fn xdg_cache(&self) -> &PathBuf {
-        &self.xdg_cache
+    pub fn cache_dir(&self) -> &PathBuf {
+        &self.cache_dir
     }
 
-    pub fn xdg_data(&self) -> &PathBuf {
-        &self.xdg_data
+    pub fn data_dir(&self) -> &PathBuf {
+        &self.data_dir
     }
 
-    pub fn xdg_runtime(&self) -> &PathBuf {
-        &self.xdg_runtime
+    pub fn runtime_dir(&self) -> &PathBuf {
+        &self.runtime_dir
     }
 
     pub fn cwd(&self) -> PathBuf {
@@ -162,7 +154,11 @@ mod tests {
         );
         assert_eq!(env.pid(), 42);
         assert_eq!(env.home(), &PathBuf::from("/home/sim"));
-        assert_eq!(env.xdg_runtime(), &PathBuf::from("/run/user/42"));
+        assert_eq!(env.config_dir(), &PathBuf::from("/home/sim/.config"));
+        assert_eq!(env.state_dir(), &PathBuf::from("/home/sim/.state"));
+        assert_eq!(env.cache_dir(), &PathBuf::from("/home/sim/.cache"));
+        assert_eq!(env.data_dir(), &PathBuf::from("/home/sim/.data"));
+        assert_eq!(env.runtime_dir(), &PathBuf::from("/run/user/42"));
         assert_eq!(env.cwd(), PathBuf::from("/scenario/cwd"));
         assert_eq!(env.available_parallelism().get(), 1);
     }

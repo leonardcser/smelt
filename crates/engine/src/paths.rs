@@ -28,35 +28,81 @@ pub fn collapse_tilde_from(p: &Path, home: &Path) -> PathBuf {
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
+fn xdg_app_dir(variable: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".config"))
-        .join(APP_NAME)
+        .map(|root| root.join(APP_NAME))
+}
+
+pub fn config_dir() -> PathBuf {
+    xdg_app_dir("XDG_CONFIG_HOME").unwrap_or_else(default_config_dir)
 }
 
 pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".local").join("state"))
-        .join(APP_NAME)
+    xdg_app_dir("XDG_STATE_HOME").unwrap_or_else(default_state_dir)
 }
 
 pub fn cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".cache"))
-        .join(APP_NAME)
+    xdg_app_dir("XDG_CACHE_HOME").unwrap_or_else(default_cache_dir)
 }
 
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".local").join("share"))
+    xdg_app_dir("XDG_DATA_HOME").unwrap_or_else(default_data_dir)
+}
+
+#[cfg(windows)]
+fn default_config_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| home_dir().join("AppData").join("Roaming"))
+        .join(APP_NAME)
+}
+
+#[cfg(not(windows))]
+fn default_config_dir() -> PathBuf {
+    home_dir().join(".config").join(APP_NAME)
+}
+
+#[cfg(windows)]
+fn default_state_dir() -> PathBuf {
+    windows_local_app_dir().join("state")
+}
+
+#[cfg(not(windows))]
+fn default_state_dir() -> PathBuf {
+    home_dir().join(".local").join("state").join(APP_NAME)
+}
+
+#[cfg(windows)]
+fn default_cache_dir() -> PathBuf {
+    windows_local_app_dir().join("cache")
+}
+
+#[cfg(not(windows))]
+fn default_cache_dir() -> PathBuf {
+    home_dir().join(".cache").join(APP_NAME)
+}
+
+#[cfg(windows)]
+fn default_data_dir() -> PathBuf {
+    windows_local_app_dir().join("data")
+}
+
+#[cfg(not(windows))]
+fn default_data_dir() -> PathBuf {
+    home_dir().join(".local").join("share").join(APP_NAME)
+}
+
+#[cfg(windows)]
+fn windows_local_app_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| home_dir().join("AppData").join("Local"))
         .join(APP_NAME)
 }
 
@@ -222,10 +268,33 @@ mod tests {
 
     #[test]
     #[serial]
-    fn home_dir_falls_back_to_dot_when_home_unset() {
+    fn home_dir_uses_platform_home_when_home_unset() {
         with_env(&[("HOME", None)], || {
-            assert_eq!(home_dir(), PathBuf::from("."));
+            assert_eq!(
+                home_dir(),
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+            );
         });
+    }
+
+    #[test]
+    #[serial]
+    fn empty_xdg_overrides_are_ignored() {
+        with_env(
+            &[
+                ("XDG_CONFIG_HOME", Some("")),
+                ("XDG_STATE_HOME", Some("")),
+                ("XDG_CACHE_HOME", Some("")),
+                ("XDG_DATA_HOME", Some("")),
+                ("HOME", Some("/tmp/h")),
+            ],
+            || {
+                assert_ne!(config_dir(), PathBuf::from("smelt"));
+                assert_ne!(state_dir(), PathBuf::from("smelt"));
+                assert_ne!(cache_dir(), PathBuf::from("smelt"));
+                assert_ne!(data_dir(), PathBuf::from("smelt"));
+            },
+        );
     }
 
     #[test]
@@ -236,6 +305,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     #[serial]
     fn config_dir_falls_back_to_home_dot_config_when_xdg_unset() {
@@ -255,6 +325,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     #[serial]
     fn state_dir_falls_back_to_home_local_state_when_xdg_unset() {
@@ -274,6 +345,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     #[serial]
     fn cache_dir_falls_back_to_home_cache_when_xdg_unset() {
@@ -293,12 +365,41 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     #[serial]
     fn data_dir_falls_back_to_home_local_share_when_xdg_unset() {
         with_env(&[("XDG_DATA_HOME", None), ("HOME", Some("/tmp/h"))], || {
             assert_eq!(data_dir(), PathBuf::from("/tmp/h/.local/share/smelt"));
         });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn directories_use_windows_known_folders_without_xdg_or_home() {
+        with_env(
+            &[
+                ("HOME", None),
+                ("XDG_CONFIG_HOME", None),
+                ("XDG_STATE_HOME", None),
+                ("XDG_CACHE_HOME", None),
+                ("XDG_DATA_HOME", None),
+            ],
+            || {
+                let home = home_dir();
+                let roaming =
+                    dirs::config_dir().unwrap_or_else(|| home.join("AppData").join("Roaming"));
+                let local =
+                    dirs::data_local_dir().unwrap_or_else(|| home.join("AppData").join("Local"));
+
+                let local_app = local.join("smelt");
+                assert_eq!(config_dir(), roaming.join("smelt"));
+                assert_eq!(state_dir(), local_app.join("state"));
+                assert_eq!(cache_dir(), local_app.join("cache"));
+                assert_eq!(data_dir(), local_app.join("data"));
+            },
+        );
     }
 
     // ---- git_root / git_branch (best-effort, depends on the test workspace being a git repo) ----

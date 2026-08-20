@@ -33,7 +33,7 @@ impl RecentStore {
     }
 
     pub fn from_env(env: &engine::env::RuntimeEnv) -> Self {
-        Self::new(env.xdg_state().join("smelt"))
+        Self::new(env.state_dir().clone())
     }
 
     pub fn state_root(&self) -> &Path {

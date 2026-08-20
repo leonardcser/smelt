@@ -90,9 +90,9 @@ impl Core {
         });
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
-        let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
+        let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.state_dir().clone());
         let workspace_permissions =
-            crate::permissions::store::WorkspacePermissionStore::new(env.xdg_state().join("smelt"));
+            crate::permissions::store::WorkspacePermissionStore::new(env.state_dir().clone());
         let recent = crate::state::RecentStore::from_env(&env);
         let sessions = crate::session::SessionStorage::from_env(&env);
         // Read before the struct literal moves `config` into the field below.

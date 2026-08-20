@@ -1679,7 +1679,7 @@ impl TuiApp {
         let command_catalog = Arc::new(smelt_core::commands::CommandCatalog::new(
             lua.command_names_handle(),
         ));
-        let input = PromptState::new_for_runtime(env.cwd(), env.xdg_runtime().to_path_buf());
+        let input = PromptState::new_for_runtime(env.cwd(), env.runtime_dir().to_path_buf());
         let vim_enabled = config.settings.vim;
 
         let cwd = env.cwd().to_string_lossy().into_owned();
@@ -1827,7 +1827,7 @@ impl TuiApp {
         let auto_reload_enabled = runtime_state.settings.auto_reload;
         let mut session = smelt_core::session::Session::new(env.pid(), env.cwd());
         session.fast_mode = Some(runtime_state.settings.fast_mode);
-        let prompt_history = History::load_from_state_root(env.xdg_state().join("smelt"));
+        let prompt_history = History::load_from_state_root(env.state_dir().clone());
         let prompt_inputs =
             prompt_inputs.unwrap_or_else(|| crate::prompt_inputs::PromptInputs::for_runtime(&env));
         let mut core = smelt_core::Core::new(
