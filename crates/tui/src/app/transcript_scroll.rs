@@ -11,7 +11,48 @@ pub(crate) enum WindowScrollCommand {
     Tail,
 }
 
+pub(crate) struct WindowScrollSnapshot {
+    pub(crate) top: RowIndex,
+    pub(crate) follow: bool,
+    pub(crate) total: RowIndex,
+    pub(crate) viewport: u16,
+    pub(crate) max: RowIndex,
+    pub(crate) overflow: bool,
+    pub(crate) at_bottom: bool,
+    pub(crate) needs_tail_repin: bool,
+}
+
 impl TuiApp {
+    pub(crate) fn window_scroll_snapshot(&self, window_id: WinId) -> Option<WindowScrollSnapshot> {
+        let window = self.ui.win(window_id)?;
+        let total = self
+            .ui
+            .buf(window.buf)
+            .map(|buffer| window.scroll_row_total(buffer))
+            .unwrap_or(0);
+        let viewport = window
+            .viewport
+            .map(|viewport| viewport.rect.height)
+            .unwrap_or(0);
+        let max = total.saturating_sub(RowIndex::from(viewport));
+        let top = window.scroll_top().min(max);
+        let overflow = total > RowIndex::from(viewport);
+        let numeric_at_bottom = top >= max;
+        let semantic_needs_tail_repin = window_id == crate::app::TRANSCRIPT_WIN
+            && self.conversation.transcript().needs_tail_repin();
+        let needs_tail_repin = overflow && (semantic_needs_tail_repin || !numeric_at_bottom);
+        Some(WindowScrollSnapshot {
+            top,
+            follow: window.is_following_tail(),
+            total,
+            viewport,
+            max,
+            overflow,
+            at_bottom: numeric_at_bottom && !semantic_needs_tail_repin,
+            needs_tail_repin,
+        })
+    }
+
     pub(crate) fn scroll_window(&mut self, win_id: WinId, scroll: WindowScrollCommand) {
         let Some(win) = self.ui.win(win_id) else {
             return;

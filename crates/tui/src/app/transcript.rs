@@ -10398,6 +10398,7 @@ pub(super) struct TranscriptSearchRangeAnchor {
 
 struct TranscriptViewAnchors {
     following_tail: bool,
+    pinned_to_tail: bool,
     scroll_top: Option<TranscriptPositionAnchor>,
     cursor: Option<TranscriptPositionAnchor>,
     selection_anchor: Option<TranscriptPositionAnchor>,
@@ -10562,11 +10563,19 @@ impl TuiApp {
     }
 
     fn capture_transcript_view_anchors(&mut self, width: u16) -> TranscriptViewAnchors {
-        let (following_tail, scroll_top, cursor, selection_anchor, drag_endpoint) = {
+        let scroll = self.window_scroll_snapshot(crate::app::TRANSCRIPT_WIN);
+        let (following_tail, pinned_to_tail, scroll_top, cursor, selection_anchor, drag_endpoint) = {
             let win = self.transcript_win();
             let state = win.document_view_state();
+            let following_tail = scroll.as_ref().is_some_and(|scroll| scroll.follow);
             (
-                win.is_following_tail(),
+                following_tail,
+                scroll.as_ref().is_some_and(|scroll| {
+                    !scroll.follow
+                        && scroll.viewport > 0
+                        && scroll.at_bottom
+                        && !win.selection_active()
+                }),
                 win.scroll_top(),
                 state.cursor,
                 state.selection_anchor,
@@ -10586,7 +10595,8 @@ impl TuiApp {
             .map(|matched| self.conversation.transcript_search_range_anchor(matched));
         TranscriptViewAnchors {
             following_tail,
-            scroll_top: (!following_tail).then(|| {
+            pinned_to_tail,
+            scroll_top: (!following_tail && !pinned_to_tail).then(|| {
                 self.conversation.transcript_position_anchor(
                     &self.lua,
                     width,
@@ -10636,10 +10646,10 @@ impl TuiApp {
         });
 
         if let Some(win) = self.ui.win_mut(self.well_known.transcript) {
-            if !anchors.following_tail {
-                if let Some(row) = scroll_top {
-                    win.pin_scroll(row);
-                }
+            if anchors.following_tail || anchors.pinned_to_tail {
+                win.follow_tail();
+            } else if let Some(row) = scroll_top {
+                win.pin_scroll(row);
             }
             let mut state = win.document_view_state();
             if let Some(cursor) = cursor {

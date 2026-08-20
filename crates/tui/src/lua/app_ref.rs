@@ -13,17 +13,6 @@ pub(crate) struct PermissionSnapshot {
     pub(crate) workspace_rules: Vec<smelt_core::permissions::store::Rule>,
 }
 
-pub(crate) struct WindowScrollSnapshot {
-    pub(crate) top: u64,
-    pub(crate) follow: bool,
-    pub(crate) total: u64,
-    pub(crate) viewport: u16,
-    pub(crate) max: u64,
-    pub(crate) overflow: bool,
-    pub(crate) at_bottom: bool,
-    pub(crate) needs_tail_repin: bool,
-}
-
 pub(crate) struct SessionStatusSnapshot {
     pub(crate) active_model: Option<smelt_core::runtime_state::ActiveModel>,
     pub(crate) cost: f64,
@@ -1360,35 +1349,8 @@ impl UiLuaHost<'_> {
     pub(crate) fn window_scroll_snapshot(
         &self,
         window_id: crate::smelt_edit::WinId,
-    ) -> Option<WindowScrollSnapshot> {
-        let window = self.app.ui.win(window_id)?;
-        let total = self
-            .app
-            .ui
-            .buf(window.buf)
-            .map(|buffer| window.scroll_row_total(buffer))
-            .unwrap_or(0);
-        let viewport = window
-            .viewport
-            .map(|viewport| viewport.rect.height)
-            .unwrap_or(0);
-        let max = total.saturating_sub(u64::from(viewport));
-        let top = window.scroll_top().min(max);
-        let overflow = total > u64::from(viewport);
-        let numeric_at_bottom = top >= max;
-        let semantic_needs_tail_repin = window_id == crate::app::TRANSCRIPT_WIN
-            && self.app.conversation.transcript().needs_tail_repin();
-        let needs_tail_repin = overflow && (semantic_needs_tail_repin || !numeric_at_bottom);
-        Some(WindowScrollSnapshot {
-            top,
-            follow: window.is_following_tail(),
-            total,
-            viewport,
-            max,
-            overflow,
-            at_bottom: numeric_at_bottom && !semantic_needs_tail_repin,
-            needs_tail_repin,
-        })
+    ) -> Option<crate::app::transcript_scroll::WindowScrollSnapshot> {
+        self.app.window_scroll_snapshot(window_id)
     }
 
     pub(crate) fn scroll_window(

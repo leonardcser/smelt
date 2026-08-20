@@ -116,6 +116,92 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
 }
 
 #[test]
+fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 12);
+    assert!(app.run_lua(
+        r#"
+        smelt.keymap.set("n", "<space>", function()
+            local transcript = smelt.win.transcript()
+            smelt.transcript.fold_at_row(transcript:cursor(), "toggle")
+        end)
+        "#
+    ));
+    for i in 0..20 {
+        app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+            format!("history {i}"),
+        )));
+    }
+    app.set_context_token_baseline_for_harness(Some(500));
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    let ask_id = app
+        .pending_ask_id()
+        .expect("/compact registered ask callback");
+    app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: "# Goal\nkeep the active task\n\n# Progress\none\ntwo\nthree\nfour\nfive".into(),
+    });
+    app.follow_transcript_tail();
+    app.render_silent();
+
+    let total_before = transcript_total_rows(&app);
+    let preview = app
+        .app
+        .transcript_node_at_row(total_before.saturating_sub(1))
+        .expect("streaming compaction preview at transcript tail");
+    assert_eq!(preview.view_state, ViewState::Peek);
+    let window = app.transcript_window();
+    assert!(window.following_tail);
+    let viewport = window.viewport.expect("transcript viewport");
+    let click_row = viewport.rect.top.saturating_add(
+        preview
+            .first_row
+            .saturating_sub(window.scroll_top)
+            .min(viewport.rect.height.saturating_sub(1).into()) as u16,
+    );
+    let click_col = viewport
+        .rect
+        .left
+        .saturating_add(viewport.gutter_width)
+        .saturating_add(2);
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: click_row,
+            column: click_col,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+    assert!(
+        !app.transcript_window().following_tail,
+        "click should pin the viewport before the fold"
+    );
+
+    app.press(KeyCode::Char(' '));
+    app.render_silent();
+
+    let expanded = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("expanded compaction preview at cursor");
+    assert_eq!(expanded.id, preview.id);
+    assert_eq!(expanded.view_state, ViewState::Expanded);
+    assert!(app.transcript_window().following_tail);
+    let total_after = transcript_total_rows(&app);
+    let window = app.transcript_window();
+    assert_eq!(
+        window.scroll_top,
+        total_after.saturating_sub(viewport.rect.height.into()),
+        "expanded streaming preview should remain pinned to the transcript tail"
+    );
+}
+
+#[test]
 fn fold_keys_work_while_compaction_preview_is_streaming() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 24);
