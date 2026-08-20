@@ -1,19 +1,30 @@
-use super::{find_root, LspConfig, LspManager, LspRuntimePaths};
+#[cfg(unix)]
+use super::find_root;
+use super::{LspConfig, LspManager, LspRuntimePaths};
+#[cfg(unix)]
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(not(unix))]
 use std::sync::OnceLock;
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[cfg(unix)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+#[cfg(unix)]
 const STARTUP_WAIT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const SPAWN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
+#[cfg(unix)]
 #[derive(Debug, Deserialize, Serialize)]
 struct DaemonRequest {
     config: LspConfig,
@@ -22,6 +33,7 @@ struct DaemonRequest {
     args: Value,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Deserialize, Serialize)]
 struct DaemonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,6 +210,7 @@ async fn write_response(
     stream.flush().await.map_err(|err| err.to_string())
 }
 
+#[cfg(unix)]
 impl DaemonResponse {
     fn into_result(self) -> Result<Value, String> {
         if let Some(err) = self.err {

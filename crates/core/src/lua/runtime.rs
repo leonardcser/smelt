@@ -230,13 +230,13 @@ impl LuaLoadPaths {
     ) -> Self {
         Self {
             home: env.home().clone(),
-            config_dir: config_dir.unwrap_or_else(|| env.xdg_config().join("smelt")),
-            state_root: env.xdg_state().join("smelt"),
-            cache_root: env.xdg_cache().join("smelt"),
+            config_dir: config_dir.unwrap_or_else(|| env.config_dir().clone()),
+            state_root: env.state_dir().clone(),
+            cache_root: env.cache_dir().clone(),
             runtime_override,
             development_runtime: Self::development_runtime(),
             project_cwd: project_cwd.or_else(|| Some(env.cwd())),
-            data_runtime: env.xdg_data().join("smelt").join("runtime"),
+            data_runtime: env.data_dir().join("runtime"),
         }
     }
 
@@ -3902,10 +3902,7 @@ fn lua_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 pub fn init_lua_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
-    Some(base.join("smelt").join("init.lua"))
+    Some(engine::config_dir().join("init.lua"))
 }
 
 fn build_tool_ctx(

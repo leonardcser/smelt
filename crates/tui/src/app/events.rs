@@ -6,7 +6,7 @@ use crate::app::{
 use crate::input::Action;
 use crate::keymap::{self, KeyAction};
 use crate::smelt_edit::UiHost;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const ESC_TOKEN: &str = "<Esc>";
 
@@ -32,6 +32,10 @@ impl TuiApp {
 
     /// Returns `true` if the app should quit.
     pub(crate) fn dispatch_terminal_event(&mut self, ev: Event) -> bool {
+        if matches!(&ev, Event::Key(key) if key.kind == KeyEventKind::Release) {
+            return false;
+        }
+
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             let focused = matches!(ev, Event::FocusGained);
             self.platform.set_terminal_focus(focused);
@@ -1015,7 +1019,7 @@ impl TuiApp {
     fn edit_in_editor(&mut self) {
         let req = match crate::input::editor::prepare(
             self.prompt_buf().source(),
-            self.core.env.xdg_runtime(),
+            self.core.env.runtime_dir(),
         ) {
             Ok(req) => req,
             Err(e) => {
@@ -1920,10 +1924,29 @@ impl smelt_core::keymap::ChordOracle for LuaChordOracle<'_> {
 #[cfg(test)]
 mod tests {
     use crate::app::test_harness::{Action, TestApp};
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use protocol::AgentMode;
     use smelt_core::working::TurnPhase;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[test]
+    fn key_releases_are_ignored_without_disabling_key_repeat() {
+        let mut app = TestApp::builder().build();
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            app.app
+                .dispatch_terminal_event(Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('a'),
+                    KeyModifiers::NONE,
+                    kind,
+                )));
+        }
+
+        assert_eq!(app.state().prompt_text, "aa");
+    }
 
     #[test]
     fn running_esc_esc_cancels_but_single_esc_does_not() {

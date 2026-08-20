@@ -191,7 +191,7 @@ fn model_switch_marks_missing_credentials_unavailable() {
 
     assert_eq!(
         app.core_probe().recent.state_root(),
-        app.core_probe().env.xdg_state().join("smelt")
+        app.core_probe().env.state_dir()
     );
     let recent = app.core_probe().recent.load();
     assert_eq!(
@@ -375,8 +375,8 @@ fn skill_backed_commands_submit_skill_body_and_focus() {
     let loader = std::sync::Arc::new(engine::SkillLoader::load_for_runtime(
         &[],
         app.core_probe().env.home(),
-        &app.core_probe().env.xdg_config().join("smelt"),
-        &app.core_probe().env.xdg_data().join("smelt"),
+        app.core_probe().env.config_dir(),
+        app.core_probe().env.data_dir(),
         &app.core_probe().env.cwd(),
     ));
     app.install_skill_loader_for_harness(loader);

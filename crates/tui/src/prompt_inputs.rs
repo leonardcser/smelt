@@ -46,8 +46,8 @@ impl PromptInputs {
     pub fn for_runtime(env: &engine::env::RuntimeEnv) -> Self {
         Self {
             runtime_home: env.home().clone(),
-            config_dir: env.xdg_config().join("smelt"),
-            data_dir: env.xdg_data().join("smelt"),
+            config_dir: env.config_dir().clone(),
+            data_dir: env.data_dir().clone(),
             cwd: env.cwd(),
             skill_extra_paths: Vec::new(),
             system_prompt_path: None,

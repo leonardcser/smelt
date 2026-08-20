@@ -30,12 +30,14 @@ use smelt_provider::{
 #[cfg(test)]
 use smelt_provider::{context_window_from_models_entry, models_entry_matches};
 
+#[cfg(all(test, unix))]
+use smelt_provider::format_epoch_local;
 #[cfg(test)]
 use smelt_provider::{
-    anthropic_supports_structured_output, api_base_normalization_hint, format_epoch_local,
-    format_rate_limit, json_as_u64, parse_claude_model_version, parse_resets_at,
-    parse_retry_from_body, quota_exceeded_message, unix_now, ApiBaseNormalizationHint,
-    CancellationToken, ClaudeModelFamily, FunctionSchema, ResponseFormat,
+    anthropic_supports_structured_output, api_base_normalization_hint, format_rate_limit,
+    json_as_u64, parse_claude_model_version, parse_resets_at, parse_retry_from_body,
+    quota_exceeded_message, unix_now, ApiBaseNormalizationHint, CancellationToken,
+    ClaudeModelFamily, FunctionSchema, ResponseFormat,
 };
 #[cfg(test)]
 use smelt_provider::{collect_indexed_tool_calls, non_empty};

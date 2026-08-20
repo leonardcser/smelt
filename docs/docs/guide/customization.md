@@ -5,19 +5,20 @@
 smelt loads Lua from a fixed sequence of files. Each one is optional; if it
 doesn't exist, smelt moves on.
 
-| Order | File or phase                    | What it is for |
-| ----- | -------------------------------- | -------------- |
-| 1     | `~/.config/smelt/early.lua`      | Runs before argv is parsed. Restricted API: `smelt.cli`, `smelt.builtins`, `smelt.provider`, and `smelt.phase`. See [Early-phase config](#early-phase-config). |
-| 2     | `.smelt/early.lua`               | Project-scoped early phase. Same restrictions; requires trust. |
-| 3     | Bundled autoload modules         | Built-in modes, commands, tools, and plugins that were not disabled in `early.lua`. |
-| 4     | `~/.config/smelt/init.lua`       | Main config: providers, settings, permissions, MCP/LSP, keymaps, commands, and tools. |
-| 5     | `~/.config/smelt/plugins/*.lua`  | Global user plugins, loaded in filename order after `init.lua`. |
-| 6     | `.smelt/init.lua`                | Project-local override. Requires trust. |
-| 7     | `.smelt/plugins/*.lua`           | Project-local plugins. Requires trust. |
+| Order | File or phase                   | What it is for |
+| ----- | ------------------------------- | -------------- |
+| 1     | Config directory `early.lua`    | Runs before argv is parsed. Restricted API: `smelt.cli`, `smelt.builtins`, `smelt.provider`, and `smelt.phase`. See [Early-phase config](#early-phase-config). |
+| 2     | `.smelt/early.lua`              | Project-scoped early phase. Same restrictions; requires trust. |
+| 3     | Bundled autoload modules        | Built-in modes, commands, tools, and plugins that were not disabled in `early.lua`. |
+| 4     | Config directory `init.lua`     | Main config: providers, settings, permissions, MCP/LSP, keymaps, commands, and tools. |
+| 5     | Config directory `plugins/*.lua` | Global user plugins, loaded in filename order after `init.lua`. |
+| 6     | `.smelt/init.lua`               | Project-local override. Requires trust. |
+| 7     | `.smelt/plugins/*.lua`          | Project-local plugins. Requires trust. |
 
-`~/.config/smelt` honors `$XDG_CONFIG_HOME`. Override the `init.lua` path with
-`--config <path>`. If no config exists on first launch, the setup wizard creates
-one for you.
+The config directory is `~/.config/smelt` on Linux and macOS and
+`%APPDATA%\smelt` on Windows. `$XDG_CONFIG_HOME` overrides its root on every
+platform. Override the `init.lua` path with `--config <path>`. If no config
+exists on first launch, the setup wizard creates one for you.
 
 Project-local files (`.smelt/*`) are content-hash gated. Review them, then run
 `/trust` from the project to record the current SHA-256 hash. Any edit invalidates

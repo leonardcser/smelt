@@ -207,7 +207,7 @@ impl ProcessCleanup {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn is_finished(&self) -> bool {
         matches!(*self.state.borrow(), ProcessCleanupState::Finished(_))
     }

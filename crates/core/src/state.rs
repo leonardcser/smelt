@@ -33,7 +33,7 @@ impl RecentStore {
     }
 
     pub fn from_env(env: &engine::env::RuntimeEnv) -> Self {
-        Self::new(env.xdg_state().join("smelt"))
+        Self::new(env.state_dir().clone())
     }
 
     pub fn state_root(&self) -> &Path {
@@ -127,44 +127,15 @@ impl RecentLock {
             .open(&path)
             .map_err(|error| path_error("open lock", &path, error))?;
 
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(path_error("lock", &path, io::Error::last_os_error()));
-            }
-        }
+        file.lock()
+            .map_err(|error| path_error("lock", &path, error))?;
 
         Ok(Self { _file: file })
     }
 }
 
-impl Drop for RecentLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            unsafe {
-                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
-            }
-        }
-    }
-}
-
 fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    let Some(parent) = path.parent() else {
-        return std::fs::write(path, contents);
-    };
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("recent"),
-        std::process::id()
-    ));
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
+    crate::fs::write_atomic(path, contents.as_bytes())
 }
 
 #[cfg(test)]

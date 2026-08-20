@@ -1,6 +1,8 @@
 # Configuration Reference
 
-Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
+Config file: `~/.config/smelt/init.lua` on Linux and macOS, or
+`%APPDATA%\smelt\init.lua` on Windows. `$XDG_CONFIG_HOME` overrides the config
+root on every platform.
 
 Load a different file with `--config <path>`.
 
@@ -152,8 +154,8 @@ Model resolution follows this precedence on a fresh launch:
 4. First model in the providers list
 
 Switch models at runtime with `/model`. The choice is recorded in `recent.json`
-(in `$XDG_STATE_HOME/smelt/`) and restored on the next launch. To always start
-from `smelt.defaults` and ignore the last pick, set
+in the [state directory](#storage-paths) and restored on the next launch. To
+always start from `smelt.defaults` and ignore the last pick, set
 `smelt.remember.set({ model = false })` in `init.lua`.
 
 OAuth-backed Codex, Copilot, and Kimi Code catalogs load from cache for the first
@@ -200,8 +202,8 @@ Smelt distinguishes two layers for model / mode / reasoning effort:
 
 - **Defaults** in `init.lua` are the cold-start values, used when there is no
   recorded last-used pick.
-- **Recent** (`recent.json` under `$XDG_STATE_HOME/smelt/`) is what you picked
-  last session. Each launch restores it, so you don't have to re-pick.
+- **Recent** (`recent.json` in the [state directory](#storage-paths)) is what you
+  picked last session. Each launch restores it, so you don't have to re-pick.
 
 Precedence on a fresh launch is
 `CLI flag → recent → defaults → hardcoded fallback`. Resuming a session
@@ -502,7 +504,11 @@ See [Permissions Reference](permissions.md) for full details.
 
 ## Storage Paths
 
-All runtime data is stored under the XDG base directories:
+smelt uses four platform directories: **config**, **state**, **data**, and
+**cache**. Paths elsewhere in the documentation use these names rather than
+assuming an operating system.
+
+On Linux and macOS, they are stored under the XDG base directories:
 
 | Directory                           | Contents                                                                          |
 | ----------------------------------- | --------------------------------------------------------------------------------- |
@@ -520,9 +526,13 @@ All runtime data is stored under the XDG base directories:
 | `$XDG_CACHE_HOME/smelt/web/`        | HTTP/pricing cache                                                                |
 | `$XDG_CACHE_HOME/smelt/`            | `copilot_models.json` and other discovered model caches                           |
 
+Windows uses `%APPDATA%\smelt` for config and `%LOCALAPPDATA%\smelt\state`,
+`%LOCALAPPDATA%\smelt\cache`, and `%LOCALAPPDATA%\smelt\data` for the other
+roots. Explicit XDG variables override these defaults on every platform.
+
 OAuth-backed providers load credentials in this order: a provider-specific
-environment override, a private JSON file under `$XDG_STATE_HOME/smelt/`, then
-the operating system's native keyring. Background status and model-cache checks
+environment override, a private JSON file in the state directory, then the
+operating system's native keyring. Background status and model-cache checks
 stop before the keyring, so they never open an operating-system credential
 prompt. A provider operation can recover a keyring-only credential and copy it
 to the private file after one successful read. `smelt auth` writes both file and
@@ -533,10 +543,10 @@ keyring storage. The files are `codex_auth.json`, `copilot_auth.json`, and
 
 | Variable                   | Purpose |
 | -------------------------- | ------- |
-| `XDG_CONFIG_HOME`          | Config directory (default: `~/.config`) |
-| `XDG_STATE_HOME`           | State directory (default: `~/.local/state`) |
-| `XDG_CACHE_HOME`           | Cache directory (default: `~/.cache`) |
-| `XDG_DATA_HOME`            | Data directory (default: `~/.local/share`) |
+| `XDG_CONFIG_HOME`          | Override the config root (Unix default: `~/.config`; Windows default: `%APPDATA%`) |
+| `XDG_STATE_HOME`           | Override the state root (Unix default: `~/.local/state`; Windows default: `%LOCALAPPDATA%\smelt\state`) |
+| `XDG_CACHE_HOME`           | Override the cache root (Unix default: `~/.cache`; Windows default: `%LOCALAPPDATA%\smelt\cache`) |
+| `XDG_DATA_HOME`            | Override the data root (Unix default: `~/.local/share`; Windows default: `%LOCALAPPDATA%\smelt\data`) |
 | `XDG_RUNTIME_DIR`          | Public process-status root; falls back to the platform temp directory |
 | `HOME`                     | Used as a fallback when XDG variables are unset |
 | `SMELT_RUNTIME_DIR`        | Highest-priority bundled Lua runtime override, mainly for development |

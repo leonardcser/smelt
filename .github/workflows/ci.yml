@@ -74,6 +74,116 @@ jobs:
             docs/zensical.toml \
             || (echo "::error::Generated Lua documentation is out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
 
+  latest-stable:
+    name: Latest stable compatibility
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up latest stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: latest-stable
+
+      - name: Check all targets
+        run: cargo +stable check --workspace --all-targets --features smelt-tui/harness
+
+  library-msrv:
+    name: MSRV (${{ matrix.crate }})
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - crate: smelt-perf
+            rust: "1.70"
+            targets: --all-targets
+          - crate: smelt-style
+            rust: "1.70"
+            targets: --all-targets
+          - crate: smelt-ansi
+            rust: "1.70"
+            targets: --all-targets
+          - crate: smelt-term
+            rust: "1.71"
+            targets: --lib
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pinned Rust
+        run: rustup toolchain install
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ matrix.crate }}-${{ matrix.rust }}
+
+      - name: Package crate
+        env:
+          CRATE: ${{ matrix.crate }}
+        run: |
+          cargo package -p "$CRATE" --no-verify
+          archive="$(find target/package -maxdepth 1 -name "$CRATE-*.crate" -print -quit)"
+          test -n "$archive"
+          mkdir /tmp/msrv-package
+          tar -xzf "$archive" -C /tmp/msrv-package --strip-components=1
+          rm -f /tmp/msrv-package/Cargo.lock
+
+      - name: Install MSRV
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+
+      - name: Check packaged crate
+        run: cargo +${{ matrix.rust }} check --manifest-path /tmp/msrv-package/Cargo.toml ${{ matrix.targets }}
+
+  windows-install:
+    name: Windows install smoke test
+    if: github.event_name != 'pull_request_target'
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -D warnings
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run Windows test suite
+        run: cargo nextest run --workspace --features smelt-tui/harness
+
+      - name: Build and run release archive
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $env:RUNNER_TEMP "smelt-x86_64-pc-windows-msvc.tar.gz"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "smelt release"
+          cargo build --profile dist --bin smelt --target x86_64-pc-windows-msvc
+          tar czf $artifact -C "target/x86_64-pc-windows-msvc/dist" smelt.exe
+          New-Item -ItemType Directory -Force $extractRoot | Out-Null
+          tar xzf $artifact -C $extractRoot
+          & (Join-Path $extractRoot "smelt.exe") --version
+
+      - name: Install from source
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "smelt install"
+          $binDir = Join-Path $installRoot "bin"
+          $env:PATH = "$binDir;$env:PATH"
+          cargo install --path . --locked --debug --root $installRoot
+          & (Join-Path $binDir "smelt.exe") --version
+
   fuzz-regression:
     name: Fuzz regression replay
     if: github.event_name != 'pull_request_target'

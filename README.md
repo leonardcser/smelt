@@ -43,9 +43,10 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 
 ## Install
 
-Prebuilt Linux and macOS binaries for x86_64 and aarch64 are on the
-[Releases](https://github.com/leonardcser/smelt/releases) page, or install from
-source:
+Prebuilt Linux and macOS binaries for x86_64 and aarch64, plus Windows x86_64,
+are on the [Releases](https://github.com/leonardcser/smelt/releases) page. Extract
+the archive and put `smelt` (`smelt.exe` on Windows) on your `PATH`, or install
+from source:
 
 ```bash
 cargo install --git https://github.com/leonardcser/smelt.git smelt-agent

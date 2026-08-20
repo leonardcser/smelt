@@ -4,13 +4,24 @@
 
 === "Prebuilt Binaries"
 
-    Grab the latest binary for Linux or macOS (`x86_64` or `aarch64`) from
-    [GitHub Releases](https://github.com/leonardcser/smelt/releases) and put
-    it on your `$PATH`:
+    Grab the latest binary for Linux or macOS (`x86_64` or `aarch64`), or
+    Windows (`x86_64`), from
+    [GitHub Releases](https://github.com/leonardcser/smelt/releases).
+
+    Linux and macOS:
 
     ```bash
     tar xzf smelt-*.tar.gz
     sudo mv smelt /usr/local/bin/
+    ```
+
+    Windows PowerShell:
+
+    ```powershell
+    tar xzf smelt-x86_64-pc-windows-msvc.tar.gz
+    New-Item -ItemType Directory -Force "$HOME\.local\bin"
+    Move-Item .\smelt.exe "$HOME\.local\bin\smelt.exe"
+    # Add $HOME\.local\bin to your user PATH if it is not already present.
     ```
 
 === "From Source"
@@ -23,7 +34,7 @@
 
 Just run `smelt`. The first launch opens a provider wizard. Subscription
 providers log in with OAuth and can be used immediately; API-key providers write
-a starter `~/.config/smelt/init.lua`.
+a starter `~/.config/smelt/init.lua` (`%APPDATA%\smelt\init.lua` on Windows).
 
 You can also skip the wizard and configure everything from the command line:
 
@@ -104,8 +115,9 @@ These need `--model` and an environment variable or config file:
 
 ## Save your config
 
-Once you have a setup you like, write it to `~/.config/smelt/init.lua` and run
-`smelt` from then on with no flags. Keeping config in a file means your
+Once you have a setup you like, write it to `~/.config/smelt/init.lua` (or
+`%APPDATA%\smelt\init.lua` on Windows) and run `smelt` from then on with no
+flags. Keeping config in a file means your
 providers, keymaps, and custom commands are version-controlled and portable
 across machines. You do not need to remember a long CLI invocation every time.
 

@@ -803,6 +803,8 @@ fn configure_search_writer(conn: &Connection, path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     conn.busy_timeout(SEARCH_BUSY_TIMEOUT)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "journal_mode", "WAL")?;

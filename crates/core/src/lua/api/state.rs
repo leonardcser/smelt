@@ -8,11 +8,7 @@ use crate::lua::doc::Tier;
 use crate::lua::json_to_lua;
 use crate::lua::module::LuaMod;
 use mlua::prelude::*;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_STATE_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, state_root: &Path) -> LuaResult<()> {
     let m = LuaMod::under(
@@ -64,59 +60,7 @@ fn state_path(plugin_state_dir: &Path, name: &str) -> PathBuf {
 }
 
 fn save_state_json(path: &Path, serialized: &str) -> std::io::Result<()> {
-    let Some(parent) = path.parent() else {
-        return std::fs::write(path, serialized);
-    };
-
-    let mut last_err = None;
-    for _ in 0..16 {
-        std::fs::create_dir_all(parent)?;
-        let tmp = state_tmp_path(path);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(serialized.as_bytes()) {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(e);
-                }
-                drop(file);
-                match std::fs::rename(&tmp, path) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&tmp);
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            return Err(e);
-                        }
-                        last_err = Some(e);
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_err = Some(e);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "failed to allocate state temp file",
-        )
-    }))
-}
-
-fn state_tmp_path(path: &Path) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy())
-        .unwrap_or_else(|| "state.json".into());
-    let id = NEXT_STATE_TMP_ID.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), id))
+    crate::fs::write_atomic(path, serialized.as_bytes())
 }
 
 #[cfg(test)]
@@ -124,17 +68,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn state_tmp_paths_are_unique_and_next_to_target() {
-        let path = PathBuf::from("/tmp/smelt-state/plugins/foo.json");
-        let a = state_tmp_path(&path);
-        let b = state_tmp_path(&path);
-        assert_ne!(a, b);
-        assert_eq!(a.parent(), path.parent());
-        assert_eq!(b.parent(), path.parent());
-    }
-
-    #[test]
-    fn save_state_json_replaces_target_without_fixed_tmp_name() {
+    fn save_state_json_replaces_target_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugins").join("upgrade.json");
 

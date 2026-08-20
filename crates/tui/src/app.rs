@@ -1679,7 +1679,7 @@ impl TuiApp {
         let command_catalog = Arc::new(smelt_core::commands::CommandCatalog::new(
             lua.command_names_handle(),
         ));
-        let input = PromptState::new_for_runtime(env.cwd(), env.xdg_runtime().to_path_buf());
+        let input = PromptState::new_for_runtime(env.cwd(), env.runtime_dir().to_path_buf());
         let vim_enabled = config.settings.vim;
 
         let cwd = env.cwd().to_string_lossy().into_owned();
@@ -1827,7 +1827,7 @@ impl TuiApp {
         let auto_reload_enabled = runtime_state.settings.auto_reload;
         let mut session = smelt_core::session::Session::new(env.pid(), env.cwd());
         session.fast_mode = Some(runtime_state.settings.fast_mode);
-        let prompt_history = History::load_from_state_root(env.xdg_state().join("smelt"));
+        let prompt_history = History::load_from_state_root(env.state_dir().clone());
         let prompt_inputs =
             prompt_inputs.unwrap_or_else(|| crate::prompt_inputs::PromptInputs::for_runtime(&env));
         let mut core = smelt_core::Core::new(
@@ -3182,10 +3182,11 @@ impl TuiApp {
                 return;
             }
         };
-        // Independent SIGWINCH listener: crossterm's signal source intermittently drops
-        // resize events (signal-hook-mio counter / mio readiness race), so we keep our
-        // own tokio-native handler. Both fire on resize; the duplicate just hits an
-        // idempotent `compositor.resize` and one extra full repaint.
+        // Independent SIGWINCH listener: crossterm's Unix signal source intermittently
+        // drops resize events (signal-hook-mio counter / mio readiness race), so we keep
+        // our own tokio-native handler there. Both fire on resize; the duplicate just
+        // hits an idempotent `compositor.resize` and one extra full repaint.
+        #[cfg(unix)]
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
                 .expect("install SIGWINCH listener");
@@ -3382,6 +3383,16 @@ impl TuiApp {
             .into_iter()
             .flatten()
             .min();
+            let window_change = async {
+                #[cfg(unix)]
+                {
+                    sigwinch.recv().await
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<Option<()>>().await
+                }
+            };
 
             tokio::select! {
                 biased;
@@ -3557,7 +3568,7 @@ impl TuiApp {
                     self.render_normal();
                 }
 
-                Some(_) = sigwinch.recv() => {
+                Some(_) = window_change => {
                     if let Ok((w, h)) = terminal::size() {
                         if w != self.last_width || h != self.last_height {
                             self.handle_resize(w, h);

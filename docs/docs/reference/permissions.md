@@ -196,7 +196,7 @@ The "always allow" options above approve future calls at one of two scopes:
 | Scope         | Lifetime                        | Storage                                                   |
 | ------------- | ------------------------------- | --------------------------------------------------------- |
 | **Session**   | Until `/clear`, `/new`, or exit | Memory                                                    |
-| **Workspace** | All future sessions in this CWD | `$XDG_STATE_HOME/smelt/workspaces/<encoded-cwd>/permissions.json` |
+| **Workspace** | All future sessions in this CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](configuration.md#storage-paths) |
 
 Workspace approvals stay narrow: approving a command pattern only approves calls
 matching that pattern, and approving an outside directory only approves access
@@ -232,8 +232,9 @@ project root to record a SHA-256 hash of the current `.smelt/` contents; on next
 startup smelt loads the directory if the hash still matches. Editing any trusted
 file invalidates the hash and requires re-running `/trust`.
 
-Trust state is stored in `$XDG_STATE_HOME/smelt/trust.json`, keyed by canonical
-project path. See [`smelt.trust`](api/trust.md) for the Lua API.
+Trust state is stored in `trust.json` in the
+[state directory](configuration.md#storage-paths), keyed by canonical project
+path. See [`smelt.trust`](api/trust.md) for the Lua API.
 
 ## Secret Redaction
 
