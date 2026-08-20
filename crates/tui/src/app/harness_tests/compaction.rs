@@ -98,6 +98,69 @@ fn compact_command_streams_preview_into_rendered_transcript() {
 }
 
 #[test]
+fn compact_command_keeps_completed_block_at_compaction_position() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 12);
+    app.commit_request_history_item(
+        protocol::HistoryItem::user(protocol::Content::text("old user")),
+        Some(smelt_core::transcript_model::Block::User {
+            text: "old user".into(),
+            image_labels: Vec::new(),
+            command: false,
+        }),
+    );
+    app.commit_request_history_item(
+        protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("old assistant")),
+            None,
+            Vec::new(),
+        )),
+        Some(smelt_core::transcript_model::Block::Text {
+            content: "old assistant".into(),
+        }),
+    );
+    let retained = "retained user line\n".repeat(20);
+    app.commit_request_history_item(
+        protocol::HistoryItem::user(protocol::Content::text(retained.clone())),
+        Some(smelt_core::transcript_model::Block::User {
+            text: retained,
+            image_labels: Vec::new(),
+            command: false,
+        }),
+    );
+    app.set_context_token_baseline_for_harness(Some(500));
+    app.follow_transcript_tail();
+
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    let ask_id = app
+        .pending_ask_id()
+        .expect("/compact registered ask callback");
+    app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+        id: ask_id,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text("# Goal\ncompleted marker")),
+            None,
+            None,
+        )),
+        error: None,
+    });
+    app.drive_lua_tasks();
+
+    let history = app.conversation_probe().transcript().history();
+    let marker_id = *history
+        .order
+        .last()
+        .expect("completed marker at transcript tail");
+    assert!(matches!(
+        history.block(marker_id),
+        Some(smelt_core::transcript_model::Block::Compacted { summary })
+            if summary == "# Goal\ncompleted marker"
+    ));
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("compacted"), "frame: {frame}");
+}
+
+#[test]
 fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);

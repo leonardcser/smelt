@@ -37,7 +37,9 @@ pub struct ContextCheckpointEvent {
     #[serde(default = "default_checkpoint_kind")]
     pub kind: String,
     pub summary: String,
+    /// Canonical history boundary retained verbatim in model context.
     pub first_live_index: usize,
+    /// Canonical history length when compaction completed and its transcript marker appeared.
     pub completed_at_history_len: usize,
     pub created_at_ms: u64,
 }

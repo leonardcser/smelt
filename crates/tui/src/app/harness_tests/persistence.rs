@@ -1269,7 +1269,7 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
         );
     }
 
-    fn compaction_boundaries(app: &mut TestApp) -> Vec<(String, Option<usize>)> {
+    fn compaction_positions(app: &mut TestApp) -> Vec<(String, Option<usize>)> {
         let ids = {
             let history = app.conversation_probe().transcript().history();
             (0..history.len())
@@ -1324,10 +1324,10 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
         ));
 
         assert_eq!(
-            compaction_boundaries(&mut app),
+            compaction_positions(&mut app),
             vec![
-                ("first checkpoint".into(), Some(2)),
-                ("second checkpoint".into(), Some(4)),
+                ("first checkpoint".into(), Some(4)),
+                ("second checkpoint".into(), Some(6)),
             ]
         );
         app.save_session_and_flush();
@@ -1337,13 +1337,19 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
             loaded
                 .checkpoint_events
                 .iter()
-                .map(|event| (event.summary.as_str(), event.first_live_index))
+                .map(|event| {
+                    (
+                        event.summary.as_str(),
+                        event.first_live_index,
+                        event.completed_at_history_len,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![("first checkpoint", 2), ("second checkpoint", 4)]
+            vec![("first checkpoint", 2, 4), ("second checkpoint", 4, 6)]
         );
         let lua = crate::lua::LuaRuntime::new();
         let rebuilt = crate::app::history::build_transcript_from_session(&lua, &loaded);
-        let rebuilt_boundaries = rebuilt
+        let rebuilt_positions = rebuilt
             .history
             .order
             .iter()
@@ -1360,8 +1366,8 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            rebuilt_boundaries,
-            vec![("first checkpoint", 2), ("second checkpoint", 4)]
+            rebuilt_positions,
+            vec![("first checkpoint", 4), ("second checkpoint", 6)]
         );
         session_id
     };
@@ -1369,10 +1375,10 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
     assert_eq!(
-        compaction_boundaries(&mut resumed),
+        compaction_positions(&mut resumed),
         vec![
-            ("first checkpoint".into(), Some(2)),
-            ("second checkpoint".into(), Some(4)),
+            ("first checkpoint".into(), Some(4)),
+            ("second checkpoint".into(), Some(6)),
         ]
     );
 }
@@ -2162,7 +2168,7 @@ async fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
 }
 
 #[test]
-fn sparse_resume_compaction_skips_unoriginated_compacted_prefix() {
+fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
     const EXCHANGE_COUNT: usize = 300;
     const HISTORY_LEN: usize = EXCHANGE_COUNT * 2 + 1;
     const RETAINED_HISTORY_INDEX: usize = HISTORY_LEN - 1;
@@ -2234,9 +2240,9 @@ fn sparse_resume_compaction_skips_unoriginated_compacted_prefix() {
 
     let marker_index = compacted_marker_index(&resumed).expect("live compacted marker");
     assert_eq!(
-        marker_index + 2,
+        marker_index + 1,
         resumed.conversation_probe().transcript().history().len(),
-        "marker should sit immediately before the retained assistant block"
+        "completed marker should remain at the transcript tail"
     );
     resumed.save_session_and_flush();
 
@@ -2253,7 +2259,7 @@ fn sparse_resume_compaction_skips_unoriginated_compacted_prefix() {
     assert_eq!(
         origin,
         smelt_core::BlockOrigin::Checkpoint {
-            history_index: RETAINED_HISTORY_INDEX,
+            history_index: HISTORY_LEN,
         }
     );
     drop(resumed);
@@ -2262,9 +2268,9 @@ fn sparse_resume_compaction_skips_unoriginated_compacted_prefix() {
     reloaded.load_session_by_id(&session_id);
     let marker_index = compacted_marker_index(&reloaded).expect("resumed compacted marker");
     assert_eq!(
-        marker_index + 2,
+        marker_index + 1,
         reloaded.conversation_probe().transcript().history().len(),
-        "resumed marker should remain immediately before the retained assistant block"
+        "resumed marker should remain at its completion position"
     );
     assert!(reloaded.run_lua("smelt.transcript.fold_kind('compacted', 'open')"));
     assert!(

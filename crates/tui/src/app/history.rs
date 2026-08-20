@@ -188,21 +188,31 @@ pub(crate) fn materialize_full_transcript_read_only_result(
     )))
 }
 
-fn checkpoint_markers_by_history_index(session: &session::Session) -> BTreeMap<usize, Vec<String>> {
+fn checkpoint_transcript_markers(
+    session: &session::Session,
+) -> impl DoubleEndedIterator<Item = (usize, &str)> {
+    session
+        .checkpoint_events
+        .iter()
+        .map(|event| (event.completed_at_history_len, event.summary.as_str()))
+        .chain(
+            session
+                .checkpoint
+                .iter()
+                .filter(|_| session.checkpoint_events.is_empty())
+                .map(|checkpoint| (checkpoint.first_live_index, checkpoint.summary.as_str())),
+        )
+}
+
+fn checkpoint_markers_by_completion_index(
+    session: &session::Session,
+) -> BTreeMap<usize, Vec<String>> {
     let mut markers = BTreeMap::<usize, Vec<String>>::new();
-    for event in &session.checkpoint_events {
+    for (history_index, summary) in checkpoint_transcript_markers(session) {
         markers
-            .entry(event.first_live_index)
+            .entry(history_index)
             .or_default()
-            .push(event.summary.clone());
-    }
-    if markers.is_empty() {
-        if let Some(checkpoint) = &session.checkpoint {
-            markers
-                .entry(checkpoint.first_live_index)
-                .or_default()
-                .push(checkpoint.summary.clone());
-        }
+            .push(summary.to_owned());
     }
     markers
 }
@@ -235,7 +245,7 @@ pub(crate) fn build_transcript_from_session(
         return transcript;
     }
 
-    let mut checkpoint_markers = checkpoint_markers_by_history_index(session);
+    let mut checkpoint_markers = checkpoint_markers_by_completion_index(session);
     for (idx, item) in session.history.iter().enumerate() {
         insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx);
         match item {
@@ -1536,7 +1546,7 @@ impl TuiApp {
     fn build_current_transcript(&mut self) -> Transcript {
         let history_len = self.conversation.session().history.len();
         let mut checkpoint_markers =
-            checkpoint_markers_by_history_index(self.conversation.session());
+            checkpoint_markers_by_completion_index(self.conversation.session());
 
         let mut transcript = Transcript::new();
         let lua = self.lua.execution();
@@ -2090,23 +2100,25 @@ impl TuiApp {
     }
 
     fn refresh_compaction_marker(&mut self) {
-        let Some(checkpoint) = self.conversation.session().checkpoint.as_ref() else {
+        let Some((history_index, summary)) =
+            checkpoint_transcript_markers(self.conversation.session()).next_back()
+        else {
             return;
         };
-        let first_live_index = checkpoint.first_live_index;
-        let block = Block::Compacted {
-            summary: checkpoint.summary.clone(),
-        };
+        let summary = summary.to_owned();
         let index = transcript_index_for_checkpoint(
             self.conversation.transcript().history(),
             &self.conversation.session().history,
             self.conversation.history_len(),
-            first_live_index,
+            history_index,
             |range| self.conversation.history_range(range),
         );
         let index = self.suppress_duplicate_carried_tail_before(index);
-        self.conversation
-            .insert_checkpoint_marker(index, first_live_index, block);
+        self.conversation.insert_checkpoint_marker(
+            index,
+            history_index,
+            Block::Compacted { summary },
+        );
     }
 
     fn install_live_context_checkpoint(
@@ -3448,10 +3460,10 @@ mod checkpoint_tests {
         assert_eq!(history.order.len(), before.len() + 1);
         assert_eq!(history.order[0], before[0]);
         assert_eq!(history.order[1], before[1]);
-        assert_eq!(history.order[3], before[2]);
-        assert_eq!(history.order[4], before[3]);
+        assert_eq!(history.order[2], before[2]);
+        assert_eq!(history.order[3], before[3]);
         assert!(matches!(
-            history.block(history.order[2]),
+            history.block(history.order[4]),
             Some(Block::Compacted { summary }) if summary == "summary"
         ));
     }
@@ -3495,7 +3507,7 @@ mod checkpoint_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(markers, vec![(2, "old summary"), (4, "new summary")]);
+        assert_eq!(markers, vec![(2, "old summary"), (6, "new summary")]);
         assert!(app.app.conversation.has_document_work());
     }
 
@@ -3536,7 +3548,7 @@ mod checkpoint_tests {
         assert!(installed);
         let history = app.app.conversation.transcript().history();
         assert!(matches!(
-            history.block(history.order[2]),
+            history.block(history.order[4]),
             Some(Block::Compacted { summary }) if summary == "summary"
         ));
     }
@@ -3577,7 +3589,7 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn checkpoint_commit_falls_back_when_boundary_is_after_known_origins() {
+    fn checkpoint_commit_places_completion_after_unoriginated_tail() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app
             .conversation
@@ -3619,12 +3631,12 @@ mod checkpoint_tests {
         assert!(installed);
         let history = app.app.conversation.transcript().history();
         assert!(matches!(
-            history.block(history.order[4]),
-            Some(Block::Compacted { summary }) if summary == "summary"
+            history.block(history.order[5]),
+            Some(Block::Text { content }) if content == "live recent reply"
         ));
         assert!(matches!(
-            history.block(history.order[5]),
-            Some(Block::User { text, .. }) if text == "live recent"
+            history.block(history.order[6]),
+            Some(Block::Compacted { summary }) if summary == "summary"
         ));
     }
 
