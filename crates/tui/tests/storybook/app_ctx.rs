@@ -624,7 +624,7 @@ macro_rules! app_story {
         #[tokio::test]
         async fn $name() {
             let snapshot_id = format!(
-                "{}::{}",
+                "{}__{}",
                 module_path!().rsplit("::").next().unwrap_or("app_story"),
                 stringify!($name),
             );

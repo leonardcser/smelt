@@ -166,7 +166,7 @@ macro_rules! story {
         #[test]
         fn $name() {
             let snapshot_id = format!(
-                "{}::{}",
+                "{}__{}",
                 module_path!().rsplit("::").next().unwrap_or("story"),
                 stringify!($name),
             );
