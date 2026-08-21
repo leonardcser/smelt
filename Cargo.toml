@@ -33,7 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
 # Terminal
-crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+crossterm = { version = "0.29", default-features = false, features = ["event-stream", "bracketed-paste", "windows"] }
 unicode-width = "0.2"
 
 # Cryptography / encoding

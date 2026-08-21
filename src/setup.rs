@@ -884,9 +884,7 @@ mod tests {
 
     #[test]
     fn public_config_example_matches_generated_default() {
-        assert_eq!(
-            include_str!("../docs/lua-examples/config.lua"),
-            default_config_lua()
-        );
+        let public_example = include_str!("../docs/lua-examples/config.lua").replace("\r\n", "\n");
+        assert_eq!(public_example, default_config_lua());
     }
 }

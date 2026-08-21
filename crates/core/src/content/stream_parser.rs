@@ -402,8 +402,7 @@ impl StreamParser {
         status: ToolStatus,
         now: Instant,
     ) {
-        let tools: Vec<ActiveTool> = self.active_tools.drain(..).collect();
-        for tool in tools {
+        for tool in std::mem::take(&mut self.active_tools) {
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
