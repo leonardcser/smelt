@@ -124,9 +124,10 @@ pub(crate) fn validate_session_checkpoint(
                         .to_owned(),
                 )
             })?;
-        if !event
+        if event
             .get("created_at_ms")
-            .is_some_and(|created_at| created_at.as_u64().is_some())
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
         {
             return Err(StoreError::Integrity(
                 "checkpoint event created_at_ms must be a nonnegative integer".to_owned(),

@@ -32,6 +32,24 @@ pub(crate) enum EngineOutputDrainOutcome {
     FrameBoundary,
 }
 
+pub(super) struct TranscriptSearchProjection<'a> {
+    pub(super) anchor: Option<crate::app::transcript::TranscriptSearchRangeAnchor>,
+    pub(super) range_after: &'a mut Option<crate::smelt_edit::DocRange>,
+}
+
+fn record_transcript_projection_hydration_failure(
+    error: crate::app::transcript::TranscriptProjectionHydrationError,
+) {
+    smelt_perf::perf::record_value(
+        "transcript:projection_hydration_failure:required_blocks",
+        error.required_blocks as u64,
+    );
+    smelt_perf::perf::record_value(
+        "transcript:projection_hydration_failure:missing_blocks",
+        error.missing_blocks as u64,
+    );
+}
+
 pub(super) fn prepare_transcript_window(
     transcript: &mut crate::app::transcript::TranscriptDocument,
     lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -39,7 +57,7 @@ pub(super) fn prepare_transcript_window(
     ui: &mut crate::smelt_edit::Ui,
     request: crate::smelt_edit::MaterializeRequest,
     render_now: std::time::Instant,
-    transcript_search_range_after_projection: &mut Option<crate::smelt_edit::DocRange>,
+    search_projection: TranscriptSearchProjection<'_>,
 ) {
     if crate::app::document::DocumentRegistry::resolve_optional(request.document_handle)
         != Some(crate::app::document::RegisteredDocument::Transcript)
@@ -53,6 +71,7 @@ pub(super) fn prepare_transcript_window(
         .and_then(|win| win.cursor_screen_row(viewport_rows));
     let transcript_scroll_state;
     let transcript_cursor_range;
+    let suppress_cursor_screen_row_restore;
     {
         let _p = smelt_perf::perf::begin("compositor:project_transcript");
         let width = request.content_width.max(1);
@@ -60,6 +79,7 @@ pub(super) fn prepare_transcript_window(
             .win(request.win)
             .and_then(|win| win.viewport.map(|viewport| viewport.content_width));
         let width_changed = previous_content_width.is_some_and(|previous| previous != width);
+        let search_anchor = search_projection.anchor.clone();
         let plan = transcript.plan_viewport_projection_measured(
             lua,
             width,
@@ -75,22 +95,79 @@ pub(super) fn prepare_transcript_window(
         let Some(buf) = ui.buf_mut(request.buf) else {
             return;
         };
-        let applied = match plan {
+        let mut applied = match plan {
             Ok(plan) => transcript.project_applied_viewport(lua, buf, theme, plan),
             Err(error) => {
-                smelt_perf::perf::record_value(
-                    "transcript:projection_hydration_failure:required_blocks",
-                    error.required_blocks as u64,
-                );
-                smelt_perf::perf::record_value(
-                    "transcript:projection_hydration_failure:missing_blocks",
-                    error.missing_blocks as u64,
-                );
+                record_transcript_projection_hydration_failure(error);
                 transcript.project_hydration_failure(buf, viewport_rows)
             }
         };
+        let settled_search_range = if let Some(anchor) = search_anchor {
+            let matched = transcript.resolve_search_range_anchor(lua, width, theme, anchor.clone());
+            let search_needs_projection = width_changed || applied.cursor_range.is_some();
+            if search_needs_projection {
+                let target_screen_row = applied
+                    .cursor_range
+                    .map(|range| {
+                        range
+                            .start
+                            .row
+                            .saturating_sub(applied.materialized_rows.clamped_scroll)
+                    })
+                    .unwrap_or_else(|| fallback_cursor_screen_row.unwrap_or_default().into())
+                    .min(crate::smelt_edit::RowIndex::from(
+                        viewport_rows.saturating_sub(1),
+                    ));
+                transcript.set_pending_projection_with_hint(
+                    crate::app::transcript_scroll_trace::TranscriptScrollIntent::SearchJump {
+                        anchor: matched.anchor,
+                        target_screen_row,
+                        match_start_byte_col: matched.start_byte_col(),
+                        match_end_byte_col: matched.end_byte_col(),
+                    },
+                    crate::app::transcript::TranscriptProjectionRestore::default(),
+                    None,
+                    Some(
+                        crate::app::transcript::TranscriptProjectionHint::SearchProjectedRow {
+                            width,
+                            anchor: matched.anchor,
+                            start_byte_col: matched.start_byte_col(),
+                            row: matched.range.start.row,
+                            prefer_projected_row: true,
+                        },
+                    ),
+                );
+                let search_plan = transcript.plan_viewport_projection_measured(
+                    lua,
+                    width,
+                    theme,
+                    crate::app::transcript::TranscriptViewportProjectionInput {
+                        fallback_scroll_top: applied.materialized_rows.clamped_scroll,
+                        follow_tail: false,
+                        width_changed: false,
+                        previous_width: None,
+                    },
+                    viewport_rows,
+                );
+                match search_plan {
+                    Ok(plan) => {
+                        applied = transcript.project_applied_viewport(lua, buf, theme, plan);
+                    }
+                    Err(error) => record_transcript_projection_hydration_failure(error),
+                }
+                let matched = transcript.resolve_search_range_anchor(lua, width, theme, anchor);
+                let range = applied.cursor_range.unwrap_or(matched.range);
+                *search_projection.range_after = Some(range);
+                Some(range)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let desired_scroll_state = applied.scroll_state;
-        transcript_cursor_range = applied.cursor_range;
+        suppress_cursor_screen_row_restore = settled_search_range.is_some();
+        transcript_cursor_range = settled_search_range.or(applied.cursor_range);
         let tdata = applied.materialized_rows;
         debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
         debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
@@ -120,7 +197,11 @@ pub(super) fn prepare_transcript_window(
             cursor_selection: crate::smelt_edit::CursorScreenRowSelection::RestoreActiveSelection,
             drag_endpoint: pending_restore.drag_endpoint_screen_row,
         };
-        if restore.cursor.is_none() {
+        if suppress_cursor_screen_row_restore {
+            restore.cursor = None;
+            restore.cursor_selection =
+                crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
+        } else if restore.cursor.is_none() {
             restore.cursor = fallback_cursor_screen_row;
             restore.cursor_selection =
                 crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
@@ -128,7 +209,7 @@ pub(super) fn prepare_transcript_window(
         win.restore_document_view_screen_rows(buf, restore);
         if let Some(range) = transcript_cursor_range {
             if win.set_row_cursor(buf, range.start) {
-                *transcript_search_range_after_projection = Some(range);
+                *search_projection.range_after = Some(range);
             }
         }
         if win.has_materialized_rows() {
@@ -157,6 +238,21 @@ impl TuiApp {
     ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
         let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();
+        let transcript_search_anchor = self
+            .overlays
+            .search_session()
+            .filter(|session| session.target == crate::app::TRANSCRIPT_WIN)
+            .and_then(|session| match &session.backend {
+                crate::app::search::SearchBackend::Transcript(transcript) => transcript
+                    .current
+                    .and_then(|index| transcript.matches.get(index).copied())
+                    .map(|matched| (matched, session.query.clone())),
+                crate::app::search::SearchBackend::Full { .. } => None,
+            })
+            .map(|(matched, query)| {
+                self.conversation
+                    .transcript_search_range_anchor(matched, query)
+            });
         let mut transcript_search_range_after_projection = None;
         let lua = self.lua.execution();
         let prepared_transcript = {
@@ -171,7 +267,10 @@ impl TuiApp {
                         ui,
                         request,
                         render_now,
-                        &mut transcript_search_range_after_projection,
+                        TranscriptSearchProjection {
+                            anchor: transcript_search_anchor.clone(),
+                            range_after: &mut transcript_search_range_after_projection,
+                        },
                     );
                 })
             })

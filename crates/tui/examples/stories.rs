@@ -541,14 +541,16 @@ fn run() -> std::io::Result<()> {
                                 app.set_query(query);
                                 dirty = true;
                             }
-                            KeyCode::Char(ch) if app.search_active => {
-                                if !modifiers.contains(KeyModifiers::CONTROL) {
-                                    let mut query = app.query.clone();
-                                    query.push(ch);
-                                    app.set_query(query);
-                                    dirty = true;
-                                }
+                            KeyCode::Char(ch)
+                                if app.search_active
+                                    && !modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                let mut query = app.query.clone();
+                                query.push(ch);
+                                app.set_query(query);
+                                dirty = true;
                             }
+                            KeyCode::Char(_) if app.search_active => {}
                             KeyCode::Char('j') | KeyCode::Down => {
                                 app.move_selection(1, list_height);
                                 dirty = true;

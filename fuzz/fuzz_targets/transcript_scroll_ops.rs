@@ -41,6 +41,8 @@ enum Op {
     FollowTail,
     NoInputRender,
     Render,
+    SearchCommon,
+    RepeatSearch { reverse: bool },
 }
 
 fn run(input: Input) {
@@ -129,6 +131,10 @@ fn run_with_app(input: Input) {
             Op::Search { record } => {
                 app.transcript_scroll_probe_search_record(usize::from(record));
             }
+            Op::SearchCommon => app.transcript_scroll_probe_search_common_text(),
+            Op::RepeatSearch { reverse } => {
+                app.transcript_scroll_probe_repeat_search(reverse);
+            }
             Op::Reveal { record } => {
                 app.transcript_scroll_probe_reveal_record(usize::from(record));
             }
@@ -136,7 +142,7 @@ fn run_with_app(input: Input) {
             Op::Resize { width, height } => {
                 let width = u16::from(width % 96).saturating_add(32);
                 let height = u16::from(height % 32).saturating_add(8);
-                app.set_terminal_size(width, height);
+                app.transcript_scroll_probe_resize(width, height);
             }
             Op::Append { variant } => app.transcript_scroll_probe_append(variant),
             Op::FollowTail => app.transcript_scroll_probe_follow_tail(),

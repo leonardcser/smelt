@@ -60,6 +60,7 @@ pub(super) struct TranscriptScrollProbeState {
     drag_edge: Option<TranscriptScrollProbeEdge>,
     last_user_delta_anchor: Option<UserDeltaAnchor>,
     pending_wheel_movement: Option<PendingWheelMovement>,
+    pending_search_match_check: bool,
     fixture: Option<SparseTranscriptFixture>,
 }
 
@@ -454,6 +455,8 @@ impl TestApp {
     pub fn transcript_scroll_probe_render(&mut self) {
         self.transcript_scroll_probe.keep_fixture_alive();
         let pending_wheel_movement = self.transcript_scroll_probe.pending_wheel_movement.take();
+        let check_search_match =
+            std::mem::take(&mut self.transcript_scroll_probe.pending_search_match_check);
         self.render_silent();
         let frames = self
             .app
@@ -463,6 +466,9 @@ impl TestApp {
         if let Some(pending) = pending_wheel_movement {
             let viewport_after = self.transcript_viewport_lines();
             assert_wheel_movement_visible(&pending, &viewport_after, &frames);
+        }
+        if check_search_match {
+            self.assert_current_transcript_search_match();
         }
         self.assert_invariants();
     }
@@ -680,6 +686,88 @@ impl TestApp {
             crate::app::TRANSCRIPT_WIN,
             SearchDirection::Forward,
             format!("record-{record_index:04}"),
+        );
+        self.transcript_scroll_probe.pending_search_match_check = self
+            .app
+            .overlays
+            .search_session()
+            .and_then(|session| session.current_range())
+            .is_some();
+    }
+
+    pub fn transcript_scroll_probe_search_common_text(&mut self) {
+        self.app.submit_search(
+            crate::app::TRANSCRIPT_WIN,
+            SearchDirection::Forward,
+            "markdown".into(),
+        );
+        self.transcript_scroll_probe.pending_search_match_check = self
+            .app
+            .overlays
+            .search_session()
+            .and_then(|session| session.current_range())
+            .is_some();
+    }
+
+    pub fn transcript_scroll_probe_repeat_search(&mut self, reverse: bool) {
+        let has_match = self
+            .app
+            .overlays
+            .search_session()
+            .and_then(|session| session.current_range())
+            .is_some();
+        if has_match {
+            self.type_char(if reverse { 'N' } else { 'n' });
+            self.transcript_scroll_probe.pending_search_match_check = true;
+        }
+    }
+
+    pub fn transcript_scroll_probe_resize(&mut self, width: u16, height: u16) {
+        self.transcript_scroll_probe.pending_search_match_check = self
+            .app
+            .overlays
+            .search_session()
+            .and_then(|session| session.current_range())
+            .is_some();
+        self.set_terminal_size(width, height);
+    }
+
+    fn assert_current_transcript_search_match(&self) {
+        let (query, range) = self
+            .app
+            .overlays
+            .search_session()
+            .and_then(|session| {
+                session
+                    .current_range()
+                    .and_then(|range| range.rows())
+                    .map(|range| (session.query.clone(), range))
+            })
+            .expect("pending transcript search check has a current match");
+        let window = self.app.transcript_win();
+        let materialized = window
+            .materialized_rows()
+            .expect("search result has materialized transcript rows");
+        assert!(
+            materialized.contains_abs_row(range.start.row),
+            "search result {range:?} is outside materialized rows {materialized:?}"
+        );
+        assert_eq!(
+            window.row_cursor().map(|position| position.row),
+            Some(range.start.row),
+            "search cursor and current result diverged"
+        );
+        let local_row = crate::smelt_edit::row_to_usize(materialized.local_row(range.start.row));
+        let buffer = self
+            .app
+            .ui
+            .buf(window.buf)
+            .expect("transcript search buffer");
+        let row = buffer.get_line(local_row).unwrap_or_default();
+        let matched_text = smelt_buffer::text::slice(row, range.start.byte_col..range.end.byte_col);
+        assert_eq!(
+            matched_text, query,
+            "search result {range:?} resolved to the wrong text in row {row:?}"
         );
     }
 
@@ -1163,6 +1251,50 @@ mod tests {
         app.transcript_scroll_probe_search_record(37779);
         app.transcript_scroll_probe_render();
         app.set_terminal_size(32, 8);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_repeats_land_on_the_matching_row() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(128, 80, 16);
+        app.transcript_scroll_probe_search_common_text();
+        app.transcript_scroll_probe_render();
+
+        for step in 0..32 {
+            if step % 7 == 0 {
+                let width = if step % 14 == 0 { 40 } else { 129 };
+                app.transcript_scroll_probe_resize(width, 16);
+                app.transcript_scroll_probe_render();
+            }
+            app.transcript_scroll_probe_repeat_search(step % 5 == 0);
+            app.transcript_scroll_probe_render();
+        }
+    }
+
+    #[test]
+    fn sparse_search_resize_clamps_stale_cursor_screen_row() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(96, 61, 31);
+        for _ in 0..2 {
+            app.transcript_scroll_probe_wheel(true, 21);
+        }
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_wheel(true, 121);
+        }
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        for _ in 0..15 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(32, 8);
         app.transcript_scroll_probe_render();
     }
 

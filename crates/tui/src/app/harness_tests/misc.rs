@@ -1316,7 +1316,7 @@ fn short_transcript_display_document_surfaces_actions() {
     });
     app.render_silent();
     assert!(
-        !app.transcript_window().materialized_rows.is_some(),
+        app.transcript_window().materialized_rows.is_none(),
         "short transcript should exercise the normal-buffer document path"
     );
 

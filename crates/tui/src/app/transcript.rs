@@ -1527,6 +1527,7 @@ pub(crate) enum TranscriptProjectionHint {
         anchor: TranscriptSearchAnchor,
         start_byte_col: usize,
         row: RowIndex,
+        prefer_projected_row: bool,
     },
 }
 
@@ -1714,11 +1715,20 @@ impl TranscriptSearchBound {
 pub(crate) struct TranscriptSearchMatch {
     pub(crate) range: DocRange,
     pub(crate) anchor: TranscriptSearchAnchor,
+    match_ordinal: usize,
 }
 
 impl TranscriptSearchMatch {
-    pub(crate) fn new(range: DocRange, anchor: TranscriptSearchAnchor) -> Self {
-        Self { range, anchor }
+    pub(crate) fn new(
+        range: DocRange,
+        anchor: TranscriptSearchAnchor,
+        match_ordinal: usize,
+    ) -> Self {
+        Self {
+            range,
+            anchor,
+            match_ordinal,
+        }
     }
 
     pub(crate) fn start_byte_col(&self) -> usize {
@@ -4892,22 +4902,27 @@ impl TranscriptDocument {
                     )?;
                     let _ = self.activate_record_window_range(range);
                 }
-                let hinted_row = match hint {
+                let (hinted_row, prefer_projected_row) = match hint {
                     Some(TranscriptProjectionHint::SearchProjectedRow {
                         width: hint_width,
                         anchor: hint_anchor,
                         start_byte_col: hint_start_byte_col,
                         row,
+                        prefer_projected_row,
                     }) if hint_width.max(1) == width.max(1)
                         && hint_anchor == anchor
                         && hint_start_byte_col == start_byte_col =>
                     {
-                        Some(row)
+                        (Some(row), prefer_projected_row)
                     }
-                    _ => None,
+                    _ => (None, false),
                 };
-                self.row_for_node_anchor(lua, width, viewport_rows, node_anchor)
-                    .or(hinted_row)
+                let anchored_row = self.row_for_node_anchor(lua, width, viewport_rows, node_anchor);
+                if prefer_projected_row {
+                    hinted_row.or(anchored_row)
+                } else {
+                    anchored_row.or(hinted_row)
+                }
             }
             TranscriptSearchAnchor::EstimatedRow(row) => Some(row),
         }
@@ -6297,13 +6312,27 @@ impl TranscriptDocument {
         }
         let display = self.exact_or_gap_display_rows_for_range(lua, width, theme, start, count);
         let mut matches = Vec::new();
+        let mut current_node = None;
+        let mut match_ordinal = 0;
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = start.saturating_add(offset as RowIndex);
+            let anchor = self.search_anchor_at_row(lua, width, row_index);
+            match anchor {
+                TranscriptSearchAnchor::Content(anchor) => {
+                    let node = (anchor.record_index, anchor.block_id, anchor.node_index);
+                    if current_node != Some(node) {
+                        current_node = Some(node);
+                        match_ordinal = 0;
+                    }
+                }
+                TranscriptSearchAnchor::EstimatedRow(_) => {
+                    current_node = None;
+                    match_ordinal = 0;
+                }
+            }
             for range in crate::smelt_edit::display_row_matches(row, row_index, query) {
-                matches.push(TranscriptSearchMatch::new(
-                    range,
-                    self.search_anchor_at_row(lua, width, row_index),
-                ));
+                matches.push(TranscriptSearchMatch::new(range, anchor, match_ordinal));
+                match_ordinal = match_ordinal.saturating_add(1);
             }
         }
         matches
@@ -6406,9 +6435,12 @@ impl TranscriptDocument {
     pub(super) fn search_range_anchor(
         &mut self,
         matched: TranscriptSearchMatch,
+        query: String,
     ) -> TranscriptSearchRangeAnchor {
         TranscriptSearchRangeAnchor {
             anchor: matched.anchor,
+            match_ordinal: matched.match_ordinal,
+            query,
             start_byte_col: matched.start_byte_col(),
             end_byte_col: matched.end_byte_col(),
             fallback_range: matched.range,
@@ -6419,8 +6451,45 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
+        theme: &Theme,
         anchor: TranscriptSearchRangeAnchor,
     ) -> TranscriptSearchMatch {
+        if let TranscriptSearchAnchor::Content(target) = anchor.anchor {
+            if self.records.total_count().is_some() {
+                if let Some(range) =
+                    self.record_window_range_around_center(width, target.record_index, 20, true)
+                {
+                    let _ = self.activate_record_window_range(range);
+                }
+            }
+            let layout = self.materialize_exact_loaded_search_layout_for_blocks(
+                lua,
+                width,
+                &[target.block_id.get()],
+            );
+            for entry in layout.entries {
+                let matches = self.search_matches_for_row_range(
+                    lua,
+                    width,
+                    theme,
+                    entry.first_row,
+                    entry.rows,
+                    &anchor.query,
+                );
+                if let Some(matched) = matches.into_iter().find(|matched| {
+                    let TranscriptSearchAnchor::Content(candidate) = matched.anchor else {
+                        return false;
+                    };
+                    candidate.record_index == target.record_index
+                        && candidate.block_id == target.block_id
+                        && candidate.node_index == target.node_index
+                        && matched.match_ordinal == anchor.match_ordinal
+                }) {
+                    return matched;
+                }
+            }
+        }
+
         let row = self
             .row_for_search_anchor(lua, width, 20, anchor.anchor, anchor.start_byte_col, None)
             .unwrap_or(anchor.fallback_range.start.row);
@@ -6434,7 +6503,7 @@ impl TranscriptDocument {
                 byte_col: anchor.end_byte_col,
             },
         };
-        TranscriptSearchMatch::new(range, anchor.anchor)
+        TranscriptSearchMatch::new(range, anchor.anchor, anchor.match_ordinal)
     }
 
     pub(crate) fn fold_node_at_row(
@@ -10400,9 +10469,11 @@ pub(super) struct TranscriptPositionAnchor {
     position: crate::smelt_edit::DocPosition,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct TranscriptSearchRangeAnchor {
     anchor: TranscriptSearchAnchor,
+    match_ordinal: usize,
+    query: String,
     start_byte_col: usize,
     end_byte_col: usize,
     fallback_range: crate::smelt_edit::DocRange,
@@ -10601,10 +10672,14 @@ impl TuiApp {
             .and_then(|session| match &session.backend {
                 crate::app::search::SearchBackend::Transcript(transcript) => transcript
                     .current
-                    .and_then(|index| transcript.matches.get(index).copied()),
+                    .and_then(|index| transcript.matches.get(index).copied())
+                    .map(|matched| (matched, session.query.clone())),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
-            .map(|matched| self.conversation.transcript_search_range_anchor(matched));
+            .map(|(matched, query)| {
+                self.conversation
+                    .transcript_search_range_anchor(matched, query)
+            });
         TranscriptViewAnchors {
             following_tail,
             pinned_to_tail,
@@ -10635,6 +10710,7 @@ impl TuiApp {
     }
 
     fn restore_transcript_view_anchors(&mut self, width: u16, anchors: TranscriptViewAnchors) {
+        let theme = self.ui.theme().clone();
         let scroll_top = anchors.scroll_top.map(|anchor| {
             self.conversation
                 .resolve_transcript_position_anchor(&self.lua, width, anchor)
@@ -10654,7 +10730,7 @@ impl TuiApp {
         });
         let search_current = anchors.search_current.map(|anchor| {
             self.conversation
-                .resolve_transcript_search_range_anchor(&self.lua, width, anchor)
+                .resolve_transcript_search_range_anchor(&self.lua, width, &theme, anchor)
         });
 
         if let Some(win) = self.ui.win_mut(self.well_known.transcript) {

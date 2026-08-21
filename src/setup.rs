@@ -640,11 +640,8 @@ pub async fn run_auth_command() {
                 Ok(SelectOutcome::Cancel) | Err(_) => return,
             };
             match choice {
-                0 => {
-                    if !run_login(kind).await {
-                        continue;
-                    }
-                }
+                0 if !run_login(kind).await => continue,
+                0 => {}
                 1 => run_logout(kind, tmpl.label),
                 _ => {}
             }

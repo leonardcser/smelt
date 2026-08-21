@@ -264,6 +264,7 @@ impl TuiApp {
                 anchor: transcript.anchor,
                 start_byte_col: original.origin.byte_col,
                 row: original.origin.row,
+                prefer_projected_row: false,
             };
             self.record_transcript_scroll_intent_with_hint(
                 "search_restore",
@@ -839,6 +840,7 @@ impl TuiApp {
             anchor: matched.anchor,
             start_byte_col: matched.start_byte_col(),
             row: matched.range.start.row,
+            prefer_projected_row: false,
         };
         self.record_transcript_scroll_intent_with_hint(
             "search_jump",

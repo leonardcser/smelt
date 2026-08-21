@@ -87,7 +87,7 @@ impl StreamParser {
             let Some(state) = history.tool_state(tool.block_id) else {
                 continue;
             };
-            if state.status != ToolStatus::Pending || state.elapsed_active == !paused {
+            if state.status != ToolStatus::Pending || state.elapsed_active != paused {
                 continue;
             }
             if paused {

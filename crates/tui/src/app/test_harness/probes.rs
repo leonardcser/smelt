@@ -124,7 +124,7 @@ impl TestApp {
         // Prompt-docked pickers own the prompt through Lua registrations on
         // the prompt window, not through overlay focus. Reloading drops those
         // registrations before the probe installs its own clean prompt state.
-        if !!self.app.overlays.has_pickers() {
+        if self.app.overlays.has_pickers() {
             self.reload_lua();
         }
         self.app.timers.pending_chord = None;
@@ -255,7 +255,7 @@ impl TestApp {
         // Prompt-docked pickers can open from pending Lua tasks after the
         // probe's initial cleanup. Reloading drops their prompt keymaps while
         // leaving the prediction placeholder intact for the oracle below.
-        if !!self.app.overlays.has_pickers() {
+        if self.app.overlays.has_pickers() {
             self.reload_lua();
         }
         self.app.app_focus = AppFocus::Prompt;

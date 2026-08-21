@@ -232,19 +232,21 @@ impl ConversationRuntime {
     pub(super) fn transcript_search_range_anchor(
         &mut self,
         matched: super::transcript::TranscriptSearchMatch,
+        query: String,
     ) -> super::transcript::TranscriptSearchRangeAnchor {
-        self.document.transcript.search_range_anchor(matched)
+        self.document.transcript.search_range_anchor(matched, query)
     }
 
     pub(super) fn resolve_transcript_search_range_anchor(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
+        theme: &crate::smelt_edit::Theme,
         anchor: super::transcript::TranscriptSearchRangeAnchor,
     ) -> super::transcript::TranscriptSearchMatch {
         self.document
             .transcript
-            .resolve_search_range_anchor(lua, width, anchor)
+            .resolve_search_range_anchor(lua, width, theme, anchor)
     }
 
     pub(crate) fn transcript_node_metadata_at_row(
@@ -351,14 +353,14 @@ impl ConversationRuntime {
         f(&mut document)
     }
 
-    pub(crate) fn prepare_transcript_window(
+    pub(super) fn prepare_transcript_window(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         theme: &std::sync::Arc<crate::smelt_edit::Theme>,
         ui: &mut crate::smelt_edit::Ui,
         request: crate::smelt_edit::MaterializeRequest,
         render_now: std::time::Instant,
-        search_range_after_projection: &mut Option<crate::smelt_edit::DocRange>,
+        search_projection: super::render_loop::TranscriptSearchProjection<'_>,
     ) {
         super::render_loop::prepare_transcript_window(
             &mut self.document.transcript,
@@ -367,7 +369,7 @@ impl ConversationRuntime {
             ui,
             request,
             render_now,
-            search_range_after_projection,
+            search_projection,
         );
     }
 
