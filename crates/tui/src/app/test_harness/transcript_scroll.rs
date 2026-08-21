@@ -725,13 +725,25 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_resize(&mut self, width: u16, height: u16) {
-        self.transcript_scroll_probe.pending_search_match_check = self
+        self.transcript_scroll_probe.pending_search_match_check =
+            self.current_transcript_search_match_is_cursor();
+        self.set_terminal_size(width, height);
+    }
+
+    fn current_transcript_search_match_is_cursor(&self) -> bool {
+        let Some(range) = self
             .app
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
-            .is_some();
-        self.set_terminal_size(width, height);
+            .and_then(|range| range.rows())
+        else {
+            return false;
+        };
+        self.app
+            .transcript_win()
+            .row_cursor()
+            .is_some_and(|position| position.row == range.start.row)
     }
 
     fn assert_current_transcript_search_match(&self) {
