@@ -63,18 +63,21 @@ pub fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String, usize)
 /// Returns `Some((token, end_index))` if the path after `@` exists on disk.
 pub fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
     let (token, path, end) = scan_at_token(chars, i)?;
-    if std::path::Path::new(&path).exists() {
-        return Some((token, end));
+    // Check sentence punctuation before the exact path on unquoted references.
+    // Windows considers `file.` an alias for `file`, so checking the exact path
+    // first would incorrectly retain the trailing punctuation there.
+    if !token.starts_with("@\"") {
+        let trimmed = path.trim_end_matches([',', '.', ')', ';', ':', '!', '?']);
+        if trimmed.len() < path.len()
+            && !trimmed.is_empty()
+            && std::path::Path::new(trimmed).exists()
+        {
+            let stripped = path.len() - trimmed.len();
+            let short_token = token[..token.len() - stripped].to_string();
+            return Some((short_token, end - stripped));
+        }
     }
-    // Strip trailing punctuation and retry
-    let trimmed = path.trim_end_matches([',', '.', ')', ';', ':', '!', '?']);
-    if trimmed.len() < path.len() && !trimmed.is_empty() && std::path::Path::new(trimmed).exists() {
-        let stripped = path.len() - trimmed.len();
-        let short_token = token[..token.len() - stripped].to_string();
-        Some((short_token, end - stripped))
-    } else {
-        None
-    }
+    std::path::Path::new(&path).exists().then_some((token, end))
 }
 
 #[cfg(test)]
@@ -217,6 +220,17 @@ mod tests {
         assert!(result.0.ends_with("page.md"));
         // The returned end_index excludes the trailing punctuation.
         assert_eq!(result.1, cs.len() - 1);
+    }
+
+    #[test]
+    fn try_at_ref_preserves_punctuation_inside_quoted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("page.");
+        std::fs::write(&file, "x").unwrap();
+        let token = format!("@\"{}\"", file.to_str().unwrap());
+        let cs = chars(&token);
+
+        assert_eq!(try_at_ref(&cs, 0), Some((token, cs.len())));
     }
 
     #[test]
