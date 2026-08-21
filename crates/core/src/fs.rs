@@ -333,7 +333,7 @@ mod tests {
 
         let matches = glob("crates/term/**/*.rs", tmp.path().to_str().unwrap(), 200).unwrap();
         assert_eq!(matches.len(), 1);
-        assert!(matches[0].path.ends_with("crates/term/src/lib.rs"));
+        assert!(Path::new(&matches[0].path).ends_with(Path::new("crates/term/src/lib.rs")));
     }
 
     #[test]
@@ -365,7 +365,7 @@ mod tests {
 
         let matches = glob("src/lib.rs", tmp.path().to_str().unwrap(), 200).unwrap();
         assert_eq!(matches.len(), 1);
-        assert!(matches[0].path.ends_with("src/lib.rs"));
+        assert!(Path::new(&matches[0].path).ends_with(Path::new("src/lib.rs")));
     }
 
     #[test]

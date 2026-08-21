@@ -162,7 +162,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Run Windows test suite
-        run: cargo nextest run --workspace --features smelt-tui/harness
+        run: cargo nextest run --workspace --features smelt-tui/harness --no-fail-fast
 
       - name: Build and run release archive
         shell: pwsh
