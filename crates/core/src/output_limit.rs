@@ -105,7 +105,11 @@ impl OutputLimiter {
 }
 
 pub fn limit_text_tail(text: &str) -> String {
-    let mut limiter = OutputLimiter::default();
+    limit_text_tail_with_max_bytes(text, DEFAULT_MAX_BYTES)
+}
+
+pub fn limit_text_tail_with_max_bytes(text: &str, max_bytes: usize) -> String {
+    let mut limiter = OutputLimiter::new(DEFAULT_MAX_LINES, max_bytes);
     limiter.push_text(text);
     limiter.format_text()
 }

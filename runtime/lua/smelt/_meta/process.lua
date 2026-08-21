@@ -34,8 +34,8 @@ process.read_output = nil
 --- Run `cmd` with `args` off the main thread. Yields the calling
 --- coroutine until the child exits; must be called from inside
 --- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
---- `timeout_secs`, `stdin`. Returns
---- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+--- `timeout_secs`, `stdin`, and `max_output_bytes` (default 100 KB, maximum
+--- 32 MB). Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
 --- `(nil, err)` on spawn failure. If the calling coroutine is cancelled
 --- (e.g. by `smelt.task.timeout` or by `:remove()` on the parent spawn),
 --- the child process is killed (SIGTERM to its process group) and

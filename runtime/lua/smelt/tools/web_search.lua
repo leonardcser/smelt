@@ -1,5 +1,7 @@
 -- Built-in web_search tool. Configurable provider with 15-minute HTTP cache.
 
+local USER_AGENT = "smelt-web-search/1"
+
 local function urlencode(s)
   return (
     s:gsub("([^A-Za-z0-9_.~-])", function(c)
@@ -50,9 +52,12 @@ local function search_duckduckgo(query)
   local resp, err = smelt.http.get(url, {
     timeout_secs = 20,
     max_redirects = 10,
+    max_response_bytes = 2 * 1024 * 1024,
+    max_retries = 2,
     headers = {
-      ["User-Agent"] = smelt.http.random_user_agent(),
+      ["User-Agent"] = USER_AGENT,
       ["Accept"] = "text/html",
+      ["Accept-Encoding"] = "identity",
       ["Accept-Language"] = "en-US,en;q=0.9",
       ["Referer"] = "https://html.duckduckgo.com/html/",
     },
@@ -90,22 +95,30 @@ local function search_brave(query)
   local resp, err = smelt.http.get(url, {
     timeout_secs = 20,
     max_redirects = 3,
+    max_response_bytes = 2 * 1024 * 1024,
+    max_retries = 2,
     headers = {
+      ["User-Agent"] = USER_AGENT,
       ["Accept"] = "application/json",
-      ["Accept-Encoding"] = "gzip",
+      ["Accept-Encoding"] = "identity",
       ["X-Subscription-Token"] = key,
     },
   })
   if not resp then
-    return { content = "search failed: " .. (err or "no response"), is_error = true }
+    return { content = "search failed: " .. (err or "no response"), is_error = true, retryable = true }
   end
   if resp.status ~= 200 then
-    return { content = "search failed: HTTP " .. resp.status, is_error = true }
+    local retryable = resp.status == 408 or resp.status == 429 or resp.status >= 500
+    return { content = "search failed: HTTP " .. resp.status, is_error = true, retryable = retryable }
   end
 
   local decoded, decode_err = smelt.json.decode(resp.body or "")
   if not decoded then
-    return { content = "search failed: invalid Brave response: " .. (decode_err or "invalid JSON"), is_error = true }
+    return {
+      content = "search failed: invalid Brave response: " .. (decode_err or "invalid JSON"),
+      is_error = true,
+      retryable = true,
+    }
   end
 
   local results = {}
@@ -158,7 +171,11 @@ smelt.tools.register({
       return { content = "query cannot be empty", is_error = true }
     end
 
-    local provider = setting("web_search_provider", "duckduckgo")
+    local configured_provider = setting("web_search_provider", "auto")
+    local provider = configured_provider
+    if provider == "auto" then
+      provider = brave_api_key() and "brave" or "duckduckgo"
+    end
     local search = providers[provider]
     if not search then
       return { content = "search failed: unknown web search provider '" .. provider .. "'", is_error = true }
@@ -171,6 +188,17 @@ smelt.tools.register({
     end
 
     local output = search(query)
+    if type(output) == "table" and output.is_error and output.retryable
+      and configured_provider == "auto" and provider == "brave"
+    then
+      local brave_error = output.content
+      provider = "duckduckgo"
+      cache_key = "search:" .. provider .. ":" .. query
+      output = smelt.http.cache.read(cache_key) or search_duckduckgo(query)
+      if type(output) == "table" and output.is_error then
+        output.content = brave_error .. "; DuckDuckGo fallback also failed: " .. output.content
+      end
+    end
     if type(output) == "table" and output.is_error then
       return output
     end

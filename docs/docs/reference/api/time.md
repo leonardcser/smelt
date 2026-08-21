@@ -24,6 +24,14 @@ fun(timestamp: integer, format: string): string?
 
 Format Unix seconds in UTC with a strftime-style format string.
 
+## `smelt.time.monotonic_ms`
+
+```lua
+fun(): integer
+```
+
+Return milliseconds elapsed from a runtime-local monotonic clock. Use this for deadlines, never as a timestamp.
+
 ## `smelt.time.now`
 
 ```lua

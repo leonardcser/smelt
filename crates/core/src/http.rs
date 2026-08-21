@@ -1,17 +1,54 @@
-//! HTTP capability. Pure async transport over `reqwest::Client`, no policy:
-//! retry, caching, and rate-limit handling belong to the caller. The `cache`
-//! submodule provides a disk-backed TTL store; `random_user_agent` rotates UA
-//! strings to soften rate-limit detection.
+//! HTTP capability. Async transport over `reqwest::Client`; caching and
+//! application-specific rate-limit policy belong to the caller. Requests reuse pooled
+//! clients, enforce a total timeout and streaming body limit, and can retry
+//! transient GET failures when requested.
 //!
 //! Callers spawn these futures via [`crate::lua::shared::LuaResumeSink`] so a
 //! parked Lua coroutine wakes up when the response lands. The Lua runtime is
 //! never blocked on the request.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::fmt;
+use std::sync::Mutex;
 use std::time::Duration;
 
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+
 pub(crate) mod cache;
+
+#[derive(Debug, Default)]
+pub(crate) struct Client {
+    clients: Mutex<HashMap<usize, reqwest::Client>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum Error {
+    Client(String),
+    Transport(reqwest::Error),
+    Deadline(Duration),
+}
+
+impl Error {
+    fn retryable(&self) -> bool {
+        matches!(self, Self::Transport(err) if err.is_connect() || err.is_timeout() || err.is_body())
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Client(message) => f.write_str(message),
+            Self::Transport(err) => err.fmt(f),
+            Self::Deadline(timeout) => {
+                write!(f, "request timed out after {} seconds", timeout.as_secs())
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Response {
@@ -19,48 +56,95 @@ pub(crate) struct Response {
     pub(crate) final_url: String,
     pub(crate) headers: HashMap<String, String>,
     pub(crate) body: Vec<u8>,
+    pub(crate) truncated: bool,
 }
 
-/// Defaults: 30s timeout, up to 10 redirects, no extra headers.
+/// Defaults: 30s total timeout, up to 10 redirects, no retries, and a 10 MB body.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) timeout: Option<Duration>,
     pub(crate) max_redirects: Option<usize>,
+    pub(crate) max_response_bytes: Option<usize>,
+    pub(crate) max_retries: Option<usize>,
     pub(crate) headers: HashMap<String, String>,
 }
 
-pub(crate) async fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error> {
-    let mut request = build_client(opts)?.get(url);
-    for (k, v) in &opts.headers {
-        request = request.header(k, v);
+impl Client {
+    pub(crate) async fn get(&self, url: &str, opts: &Options) -> Result<Response, Error> {
+        let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        tokio::time::timeout(timeout, self.get_with_retries(url, opts))
+            .await
+            .map_err(|_| Error::Deadline(timeout))?
     }
-    finish(request).await
+
+    async fn get_with_retries(&self, url: &str, opts: &Options) -> Result<Response, Error> {
+        let retries = opts.max_retries.unwrap_or(0);
+        for attempt in 0..=retries {
+            let request = request(self.client(opts)?, reqwest::Method::GET, url, opts);
+            match finish(request, opts, attempt < retries).await {
+                Ok(resp) if retryable_status(resp.status) && attempt < retries => {
+                    tokio::time::sleep(response_retry_delay(&resp, attempt)).await;
+                }
+                Err(err) if err.retryable() && attempt < retries => {
+                    tokio::time::sleep(retry_delay(attempt)).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("retry loop always returns on its final attempt")
+    }
+
+    /// Body is sent verbatim. Set `Content-Type` via `opts.headers` when needed.
+    pub(crate) async fn post(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        opts: &Options,
+    ) -> Result<Response, Error> {
+        let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let request = request(self.client(opts)?, reqwest::Method::POST, url, opts).body(body);
+        tokio::time::timeout(timeout, finish(request, opts, false))
+            .await
+            .map_err(|_| Error::Deadline(timeout))?
+    }
+
+    fn client(&self, opts: &Options) -> Result<reqwest::Client, Error> {
+        let max_redirects = opts.max_redirects.unwrap_or(10);
+        let mut clients = self
+            .clients
+            .lock()
+            .map_err(|_| Error::Client("HTTP client cache lock poisoned".into()))?;
+        if let Some(client) = clients.get(&max_redirects) {
+            return Ok(client.clone());
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(max_redirects))
+            .build()
+            .map_err(|err| Error::Client(err.to_string()))?;
+        clients.insert(max_redirects, client.clone());
+        Ok(client)
+    }
 }
 
-/// Body is sent verbatim. Set `Content-Type` via `opts.headers` when needed.
-pub(crate) async fn post(
+fn request(
+    client: reqwest::Client,
+    method: reqwest::Method,
     url: &str,
-    body: Vec<u8>,
     opts: &Options,
-) -> Result<Response, reqwest::Error> {
-    let mut request = build_client(opts)?.post(url).body(body);
-    for (k, v) in &opts.headers {
-        request = request.header(k, v);
+) -> reqwest::RequestBuilder {
+    let mut request = client.request(method, url);
+    for (key, value) in &opts.headers {
+        request = request.header(key, value);
     }
-    finish(request).await
+    request
 }
 
-fn build_client(opts: &Options) -> Result<reqwest::Client, reqwest::Error> {
-    let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
-    let max_redirects = opts.max_redirects.unwrap_or(10);
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::limited(max_redirects))
-        .build()
-}
-
-async fn finish(request: reqwest::RequestBuilder) -> Result<Response, reqwest::Error> {
-    let resp = request.send().await?;
+async fn finish(
+    request: reqwest::RequestBuilder,
+    opts: &Options,
+    skip_retryable_body: bool,
+) -> Result<Response, Error> {
+    let mut resp = request.send().await.map_err(Error::Transport)?;
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();
     let headers = resp
@@ -68,50 +152,55 @@ async fn finish(request: reqwest::RequestBuilder) -> Result<Response, reqwest::E
         .iter()
         .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.to_string(), s.to_string())))
         .collect();
-    let body = resp.bytes().await?.to_vec();
+    if skip_retryable_body && retryable_status(status) {
+        return Ok(Response {
+            status,
+            final_url,
+            headers,
+            body: Vec::new(),
+            truncated: false,
+        });
+    }
+    let limit = opts
+        .max_response_bytes
+        .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
+    let mut body = Vec::with_capacity(limit.min(64 * 1024));
+    let mut truncated = false;
+    while let Some(chunk) = resp.chunk().await.map_err(Error::Transport)? {
+        let remaining = limit.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
     Ok(Response {
         status,
         final_url,
         headers,
         body,
+        truncated,
     })
 }
 
-/// 80% round-robin, 20% pseudo-random pick from [`USER_AGENTS`].
-pub(crate) fn random_user_agent() -> &'static str {
-    let idx = UA_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if idx.is_multiple_of(5) {
-        let mixed = idx.wrapping_mul(6364136223846793005).wrapping_add(1);
-        USER_AGENTS[mixed % USER_AGENTS.len()]
-    } else {
-        USER_AGENTS[idx % USER_AGENTS.len()]
-    }
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 502 | 503 | 504)
 }
 
-static UA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+fn retry_delay(attempt: usize) -> Duration {
+    RETRY_BASE_DELAY.saturating_mul(1 << attempt.min(4))
+}
 
-const USER_AGENTS: &[&str] = &[
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    "Mozilla/5.0 (iPad; CPU OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/116.0.0.0",
-];
+fn response_retry_delay(response: &Response, attempt: usize) -> Duration {
+    response
+        .headers
+        .get("retry-after")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .map(|delay| delay.min(Duration::from_secs(10)))
+        .unwrap_or_else(|| retry_delay(attempt))
+}
 
 #[cfg(test)]
 mod tests {
@@ -123,7 +212,76 @@ mod tests {
             timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         };
-        let err = get("http://127.0.0.1:1/", &opts).await;
+        let err = Client::default().get("http://127.0.0.1:1/", &opts).await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_caps_response_while_streaming() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789")
+                .await
+                .unwrap();
+        });
+
+        let response = Client::default()
+            .get(
+                &format!("http://{address}/"),
+                &Options {
+                    max_response_bytes: Some(4),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"0123");
+        assert!(response.truncated);
+    }
+
+    #[test]
+    fn retry_after_seconds_overrides_backoff_with_a_cap() {
+        let response = Response {
+            status: 429,
+            final_url: String::new(),
+            headers: HashMap::from([("retry-after".into(), "30".into())]),
+            body: Vec::new(),
+            truncated: false,
+        };
+        assert_eq!(response_retry_delay(&response, 0), Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn get_retries_transient_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for status in ["503 Service Unavailable", "200 OK"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                let _ = socket.read(&mut request).await;
+                let response = format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\n\r\nok");
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let response = Client::default()
+            .get(
+                &format!("http://{address}/"),
+                &Options {
+                    max_retries: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
     }
 }

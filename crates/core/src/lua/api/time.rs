@@ -41,6 +41,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(ms)
         },
     )?;
+    let monotonic_origin = std::time::Instant::now();
+    m.fn_(
+        "monotonic_ms",
+        "Return milliseconds elapsed from a runtime-local monotonic clock. Use this for deadlines, never as a timestamp.",
+        &[],
+        move |_, ()| Ok(monotonic_origin.elapsed().as_millis() as u64),
+    )?;
     m.fn_(
         "parse_iso8601",
         "Parse an ISO-8601 / RFC3339 timestamp and return Unix seconds, not milliseconds, or nil when the input is invalid.",

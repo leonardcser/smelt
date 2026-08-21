@@ -495,8 +495,10 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `request_audit` | `"off"` \| `"summary"` \| `"full"` | `"summary"` | Request audit storage mode. `summary` keeps timing, token, cost, and size metadata only; `full` stores reconstructable provider payloads; `off` disables request audit writes. |
 | `fast_mode` | `boolean` | `false` | Request the provider's accelerated inference mode when supported. |
 | `cache_ttl_long` | `boolean` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on non-Anthropic providers. |
-| `web_search_provider` | `"duckduckgo"` \| `"brave"` | `"duckduckgo"` | Search provider used by the built-in `web_search` tool. |
+| `web_search_provider` | `"auto"` \| `"duckduckgo"` \| `"brave"` | `"auto"` | Search provider used by `web_search`; `auto` prefers Brave when its API key is available and otherwise uses DuckDuckGo. |
 | `brave_search_api_key_env` | string | `"BRAVE_SEARCH_API_KEY"` | Environment variable containing the Brave Search API key. |
+| `web_fetch_render` | `"http"` \| `"auto"` \| `"browser"` | `"auto"` | JavaScript rendering policy for `web_fetch`: `http` never launches a browser, `auto` renders challenge and SPA-shell responses, and `browser` always renders. |
+| `web_fetch_renderer_command` | string | `""` | Renderer executable used by `web_fetch`. It reads a JSON request from stdin and writes rendered HTML, status, and final URL as JSON to stdout. |
 | `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
 | `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection. |
 | `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases, including prereleases) or `"unstable"` (`main` HEAD). |
@@ -754,12 +756,10 @@ HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results
 
 Asynchronous HTTP get/post.
 
-- `smelt.http.get` :: `fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?`
+- `smelt.http.get` :: `fun(url: string, opts: table?): { status: integer, final_url: string, body: string, body_encoding: string?, headers: table, truncated: boolean }?, string?`
   Perform an HTTP GET against `url`.
-- `smelt.http.post` :: `fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?`
+- `smelt.http.post` :: `fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, body_encoding: string?, headers: table, truncated: boolean }?, string?`
   Perform an HTTP POST against `url` with `body` bytes.
-- `smelt.http.random_user_agent` :: `fun(): string`
-  Return a randomly selected User-Agent string from the built-in pool.
 
 #### `smelt.http.cache`
 
@@ -1127,6 +1127,8 @@ Wall-clock time parsing and formatting.
   Format Unix seconds in the user's local time zone with a strftime-style format string.
 - `smelt.time.format_utc` :: `fun(timestamp: integer, format: string): string?`
   Format Unix seconds in UTC with a strftime-style format string.
+- `smelt.time.monotonic_ms` :: `fun(): integer`
+  Return milliseconds elapsed from a runtime-local monotonic clock.
 - `smelt.time.now` :: `fun(): integer`
   Return the current Unix timestamp in seconds.
 - `smelt.time.now_ms` :: `fun(): integer`

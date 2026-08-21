@@ -211,8 +211,9 @@ endpoint.
 ### `web_fetch`
 
 Fetches a URL, converts the page to markdown, and asks an isolated LLM call to
-extract only what the `prompt` asks for. Responses are cached for 15 minutes per
-URL and format.
+extract only what the `prompt` asks for. In the default `auto` rendering mode,
+challenge responses and sparse SPA shells are retried through an optional renderer
+executable. Responses are cached for 15 minutes per URL, format, and rendering mode.
 
 | Parameter | Description                                                      |
 | --------- | ---------------------------------------------------------------- |
@@ -223,17 +224,21 @@ URL and format.
 
 **Limits:**
 
-- Response body capped at 5 MB
-- Final output capped at 2,000 lines or 50 KB (truncation noted)
-- Cross-domain redirects are refused; re-run with the final URL if intended
+- Direct HTTP response bodies are capped at 5 MB while streaming
+- Transient direct HTTP failures are retried within the requested total timeout
+- Final output is capped at 2,000 lines or 50 KB (truncation noted)
+- Cross-domain redirects are refused; redirects that only add or remove `www.` are accepted
+- Browser rendering requires `web_fetch_renderer_command`. The executable receives `{url, timeout_ms, max_response_bytes}` JSON on stdin and must return `{status, final_url, html, truncated}` JSON on stdout
+- Direct HTTP and renderer fallback share one total timeout, and renderer redirects receive the same cross-domain validation
 
 ### `web_search`
 
-Searches the web using the configured DuckDuckGo or Brave backend. Returns a
+Searches the web using DuckDuckGo or the official Brave Search API. Returns a
 numbered list of results with title, URL, and description. Results are cached for
-15 minutes per query. Select the backend with
-[`smelt.settings.web_search_provider`](configuration.md#settings); Brave also
-uses the environment variable named by `brave_search_api_key_env`.
+15 minutes per query. The default `auto` provider uses Brave when the environment
+variable named by `brave_search_api_key_env` is set, otherwise it uses keyless
+DuckDuckGo. If Brave fails transiently in `auto` mode, DuckDuckGo is attempted as
+a fallback.
 
 | Parameter | Description             |
 | --------- | ----------------------- |

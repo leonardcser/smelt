@@ -9,21 +9,18 @@ local http = {}
 
 --- Perform an HTTP GET against `url`. Yields the calling coroutine until the
 --- response lands; the runtime stays responsive throughout. `opts` accepts
---- `headers`, `timeout_secs`, and `max_redirects`. Returns
---- `({ status, final_url, body, headers }, nil)` on success or `(nil, err)`
---- on transport failure. Cancellation of the parent task drops the in-flight
---- request and raises `cancelled` from this call.
----@type fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
+--- `headers`, `timeout_secs`, `max_redirects`, `max_response_bytes`, and
+--- `max_retries`. The total timeout includes retries. `truncated` reports that
+--- the body limit was reached. Non-UTF-8 response bytes are base64 encoded in
+--- `body` and reported by `body_encoding = "base64"`. Cancellation of the parent
+--- task drops the in-flight request and raises `cancelled` from this call.
+---@type fun(url: string, opts: table?): { status: integer, final_url: string, body: string, body_encoding: string?, headers: table, truncated: boolean }?, string?
 http.get = nil
 
 --- Perform an HTTP POST against `url` with `body` bytes. Yields the calling
 --- coroutine until the response lands. Same return shape as `smelt.http.get`.
 ---@see smelt.http.get
----@type fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
+---@type fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, body_encoding: string?, headers: table, truncated: boolean }?, string?
 http.post = nil
-
---- Return a randomly selected User-Agent string from the built-in pool.
----@type fun(): string
-http.random_user_agent = nil
 
 return http

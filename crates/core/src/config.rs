@@ -184,6 +184,8 @@ macro_rules! settings {
     (@effect auto_continue) => { SettingEffect::AutoContinue };
     (@effect web_search_provider) => { SettingEffect::WebSearch };
     (@effect brave_search_api_key_env) => { SettingEffect::WebSearch };
+    (@effect web_fetch_render) => { SettingEffect::FutureRequests };
+    (@effect web_fetch_renderer_command) => { SettingEffect::FutureRequests };
     (@effect autoupgrade) => { SettingEffect::Upgrade };
     (@effect autoupgrade_channel) => { SettingEffect::Upgrade };
     (@effect autoupgrade_interval) => { SettingEffect::Upgrade };
@@ -242,10 +244,14 @@ settings! {
     /// TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.
     cache_ttl_long:        Bool   = false;
-    /// Search provider used by the built-in `web_search` tool.
-    web_search_provider:   String = "duckduckgo", choices: ["duckduckgo", "brave"];
+    /// Search provider used by `web_search`; `auto` prefers Brave when its API key is available and otherwise uses DuckDuckGo.
+    web_search_provider:   String = "auto", choices: ["auto", "duckduckgo", "brave"];
     /// Environment variable containing the Brave Search API key.
     brave_search_api_key_env: String = "BRAVE_SEARCH_API_KEY";
+    /// JavaScript rendering policy for `web_fetch`: `http` never launches a browser, `auto` renders challenge and SPA-shell responses, and `browser` always renders.
+    web_fetch_render:       String = "auto", choices: ["http", "auto", "browser"];
+    /// Renderer executable used by `web_fetch`. It reads a JSON request from stdin and writes rendered HTML, status, and final URL as JSON to stdout.
+    web_fetch_renderer_command: String = "";
     /// Root directory for managed git worktrees. Relative paths are resolved
     /// inside the git root and contain worktrees directly; absolute paths are
     /// external roots and get a per-repository bucket. Supports leading `~`,
@@ -810,6 +816,8 @@ mod tests {
             ("auto_continue", SettingEffect::AutoContinue),
             ("web_search_provider", SettingEffect::WebSearch),
             ("brave_search_api_key_env", SettingEffect::WebSearch),
+            ("web_fetch_render", SettingEffect::FutureRequests),
+            ("web_fetch_renderer_command", SettingEffect::FutureRequests),
             ("autoupgrade", SettingEffect::Upgrade),
             ("autoupgrade_channel", SettingEffect::Upgrade),
             ("autoupgrade_interval", SettingEffect::Upgrade),

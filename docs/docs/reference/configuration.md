@@ -300,8 +300,10 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `request_audit` | `"off"` \| `"summary"` \| `"full"` | `"summary"` | Request audit storage mode. `summary` keeps timing, token, cost, and size metadata only; `full` stores reconstructable provider payloads; `off` disables request audit writes. |
 | `fast_mode` | `boolean` | `false` | Request the provider's accelerated inference mode when supported. |
 | `cache_ttl_long` | `boolean` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on non-Anthropic providers. |
-| `web_search_provider` | `"duckduckgo"` \| `"brave"` | `"duckduckgo"` | Search provider used by the built-in `web_search` tool. |
+| `web_search_provider` | `"auto"` \| `"duckduckgo"` \| `"brave"` | `"auto"` | Search provider used by `web_search`; `auto` prefers Brave when its API key is available and otherwise uses DuckDuckGo. |
 | `brave_search_api_key_env` | string | `"BRAVE_SEARCH_API_KEY"` | Environment variable containing the Brave Search API key. |
+| `web_fetch_render` | `"http"` \| `"auto"` \| `"browser"` | `"auto"` | JavaScript rendering policy for `web_fetch`: `http` never launches a browser, `auto` renders challenge and SPA-shell responses, and `browser` always renders. |
+| `web_fetch_renderer_command` | string | `""` | Renderer executable used by `web_fetch`. It reads a JSON request from stdin and writes rendered HTML, status, and final URL as JSON to stdout. |
 | `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
 | `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection. |
 | `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases, including prereleases) or `"unstable"` (`main` HEAD). |
@@ -309,8 +311,9 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 
 <!-- SETTINGS_REFERENCE_END -->
 
-Use Brave Search instead of the default DuckDuckGo HTML search by selecting the
-provider and exporting the configured API key environment variable:
+The default `auto` search provider uses Brave when its configured API key is
+available. To require Brave instead of allowing the keyless DuckDuckGo fallback,
+select it explicitly and export the API key environment variable:
 
 ```lua
 smelt.settings.web_search_provider = "brave"

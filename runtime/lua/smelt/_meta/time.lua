@@ -15,6 +15,10 @@ time.format = nil
 ---@type fun(timestamp: integer, format: string): string?
 time.format_utc = nil
 
+--- Return milliseconds elapsed from a runtime-local monotonic clock. Use this for deadlines, never as a timestamp.
+---@type fun(): integer
+time.monotonic_ms = nil
+
 --- Return the current Unix timestamp in seconds. Backed by the host clock so tests can freeze time by swapping in a virtual clock.
 ---@type fun(): integer
 time.now = nil

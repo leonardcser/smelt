@@ -66,13 +66,6 @@ pub(super) fn register(
             },
         )?;
     }
-    http.fn_(
-        "random_user_agent",
-        "Return a randomly selected User-Agent string from the built-in pool.",
-        &[],
-        |_, ()| Ok(http::random_user_agent()),
-    )?;
-
     let cache = http.sub(
         "cache",
         "Runtime-owned HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.",
@@ -106,11 +99,12 @@ enum RequestKind {
 fn spawn_request(shared: &Arc<LuaShared>, task_id: u64, kind: RequestKind, opts: http::Options) {
     let cancel = crate::lua::current_task_cancel().unwrap_or_default();
     let sink = shared.resume_sink();
+    let client = Arc::clone(&shared.http_client);
     tokio::spawn(async move {
         let payload = tokio::select! {
             biased;
             _ = cancel.cancelled() => serde_json::json!({ "__cancelled": true }),
-            result = run_request(kind, &opts) => match result {
+            result = run_request(&client, kind, &opts) => match result {
                 Ok(resp) => response_to_json(&resp),
                 Err(err) => serde_json::json!({ "err": err.to_string() }),
             },
@@ -120,12 +114,13 @@ fn spawn_request(shared: &Arc<LuaShared>, task_id: u64, kind: RequestKind, opts:
 }
 
 async fn run_request(
+    client: &http::Client,
     kind: RequestKind,
     opts: &http::Options,
-) -> Result<http::Response, reqwest::Error> {
+) -> Result<http::Response, http::Error> {
     match kind {
-        RequestKind::Get { url } => http::get(&url, opts).await,
-        RequestKind::Post { url, body_bytes } => http::post(&url, body_bytes, opts).await,
+        RequestKind::Get { url } => client.get(&url, opts).await,
+        RequestKind::Post { url, body_bytes } => client.post(&url, body_bytes, opts).await,
     }
 }
 
@@ -147,19 +142,68 @@ fn parse_options(opts: Option<&mlua::Table>) -> LuaResult<http::Options> {
             .get::<Option<u64>>("timeout_secs")?
             .map(Duration::from_secs),
         max_redirects: t.get::<Option<usize>>("max_redirects")?,
+        max_response_bytes: t.get::<Option<usize>>("max_response_bytes")?,
+        max_retries: t.get::<Option<usize>>("max_retries")?,
         headers,
     })
 }
 
 fn response_to_json(resp: &http::Response) -> serde_json::Value {
-    // Body crosses the tokio→Lua boundary as a JSON string. We lossy-decode
-    // UTF-8 here; binary payloads would need a side channel. Every current
-    // caller (upgrade.lua, web_fetch, web_search) consumes text, so this
-    // limitation is documented rather than worked around.
+    let content_type = resp
+        .headers
+        .get("content-type")
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or("");
+    let textual = content_type.starts_with("text/")
+        || content_type.ends_with("+json")
+        || content_type.ends_with("+xml")
+        || matches!(
+            content_type,
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/x-www-form-urlencoded"
+        );
+    let utf8 = std::str::from_utf8(&resp.body).ok();
+    let (body, body_encoding) = if let Some(body) =
+        utf8.filter(|_| textual || content_type.is_empty())
+    {
+        (body.to_owned(), None)
+    } else {
+        let data_url = engine::image::data_url_from_bytes(&resp.body, "application/octet-stream");
+        let encoded = data_url
+            .split_once(',')
+            .map(|(_, encoded)| encoded)
+            .unwrap_or_default()
+            .to_owned();
+        (encoded, Some("base64"))
+    };
     serde_json::json!({
         "status": resp.status,
         "final_url": resp.final_url,
-        "body": String::from_utf8_lossy(&resp.body).into_owned(),
+        "body": body,
+        "body_encoding": body_encoding,
         "headers": resp.headers,
+        "truncated": resp.truncated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_response_crosses_json_boundary_as_base64() {
+        let response = http::Response {
+            status: 200,
+            final_url: "https://example.com/image.png".into(),
+            headers: HashMap::from([("content-type".into(), "image/png".into())]),
+            body: vec![0, 159, 146, 150],
+            truncated: false,
+        };
+        let json = response_to_json(&response);
+        assert_eq!(json["body"], "AJ+Slg==");
+        assert_eq!(json["body_encoding"], "base64");
+    }
 }

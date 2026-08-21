@@ -112,12 +112,19 @@ smelt.settings.fast_mode = false
 -- Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on non-Anthropic providers.
 smelt.settings.cache_ttl_long = false
 
--- Search provider used by the built-in `web_search` tool.
--- possible values: duckduckgo, brave
-smelt.settings.web_search_provider = "duckduckgo"
+-- Search provider used by `web_search`; `auto` prefers Brave when its API key is available and otherwise uses DuckDuckGo.
+-- possible values: auto, duckduckgo, brave
+smelt.settings.web_search_provider = "auto"
 
 -- Environment variable containing the Brave Search API key.
 smelt.settings.brave_search_api_key_env = "BRAVE_SEARCH_API_KEY"
+
+-- JavaScript rendering policy for `web_fetch`: `http` never launches a browser, `auto` renders challenge and SPA-shell responses, and `browser` always renders.
+-- possible values: http, auto, browser
+smelt.settings.web_fetch_render = "auto"
+
+-- Renderer executable used by `web_fetch`. It reads a JSON request from stdin and writes rendered HTML, status, and final URL as JSON to stdout.
+smelt.settings.web_fetch_renderer_command = ""
 
 -- Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo.
 smelt.settings.worktree_root = ".worktrees"

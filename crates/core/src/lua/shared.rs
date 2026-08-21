@@ -203,6 +203,8 @@ pub struct LuaShared {
     pub task_inbox: Mutex<Vec<TaskEvent>>,
     /// Cross-thread inbox: tokio tasks push `(external_id, json)`; main loop drains to `task_inbox`.
     pub json_inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
+    /// Session-long HTTP transport shared by replacement Lua generations.
+    pub(crate) http_client: Arc<crate::http::Client>,
     /// Wakes the main loop when a coroutine resume payload is queued.
     pub wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
@@ -396,6 +398,7 @@ impl Default for LuaShared {
             tasks: Mutex::new(LuaTaskRuntime::new()),
             task_inbox: Mutex::new(Vec::new()),
             json_inbox: Arc::new(Mutex::new(Vec::new())),
+            http_client: Arc::new(crate::http::Client::default()),
             wakeup_tx: std::sync::OnceLock::new(),
             providers: Mutex::new(Vec::new()),
             permission_rules: Mutex::new(None),

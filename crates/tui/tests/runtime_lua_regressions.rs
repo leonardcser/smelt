@@ -8,6 +8,7 @@ const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua")
 const BANNER_LUA: &str = include_str!("../../../runtime/lua/smelt/banner.lua");
 const BANNER_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/banner.lua");
 const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_fetch.lua");
+const WEB_SEARCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_search.lua");
 const TRANSCRIPT_DEFAULTS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
 const SCROLL_PILLS_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/scroll_pills.lua");
@@ -498,6 +499,55 @@ fn session_tree_orders_nested_forks_and_prefixes() {
 }
 
 #[test]
+fn web_search_auto_prefers_brave_with_stable_transport_options() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        smelt = {
+          settings = { web_search_provider = "auto", brave_search_api_key_env = "BRAVE_SEARCH_API_KEY" },
+          tools = { register = function(tool) smelt.__tool = tool end },
+          os = { getenv = function() return "secret" end },
+          http = {
+            get = function(url, opts)
+              smelt.__url = url
+              smelt.__opts = opts
+              return { status = 200, body = [[{"web":{"results":[{"title":"Result","url":"https://example.com","description":"Found"}]}}]] }
+            end,
+            cache = { read = function() return nil end, write = function() end },
+          },
+          json = {
+            decode = function()
+              return { web = { results = { { title = "Result", url = "https://example.com", description = "Found" } } } }
+            end,
+          },
+          html = { parse_ddg_results = function() return {} end },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install web search fixtures");
+    lua.load(WEB_SEARCH_LUA).exec().expect("load web_search");
+
+    let (output, uses_brave, encoding, retries): (String, bool, String, i64) = lua
+        .load(
+            r#"
+            local output = smelt.__tool.execute({ query = "reliable fetch" })
+            return output,
+              smelt.__url:find("api.search.brave.com", 1, true) ~= nil,
+              smelt.__opts.headers["Accept-Encoding"],
+              smelt.__opts.max_retries
+            "#,
+        )
+        .eval()
+        .expect("search with Brave");
+
+    assert!(output.contains("https://example.com"));
+    assert!(uses_brave);
+    assert_eq!(encoding, "identity");
+    assert_eq!(retries, 2);
+}
+
+#[test]
 fn web_fetch_renderer_uses_shared_llm_markdown() {
     let lua = mlua::Lua::new();
     install_explicit_api_fixtures(&lua);
@@ -571,6 +621,137 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     assert_eq!(child_kind, "markdown");
     assert!(dim);
     assert_eq!(rows, 7);
+}
+
+#[test]
+fn web_fetch_auto_renders_spa_shell_with_installed_browser() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        local waited = nil
+        smelt = {
+          settings = {
+            web_fetch_render = "auto",
+            web_fetch_renderer_command = "chromium",
+          },
+          transcript = { register_tool = function() end },
+          layout = { text = function() return {} end, vbox = function() return {} end },
+          tools = {
+            _with_watchdog = function(tool) return tool end,
+            register = function(tool) smelt.__tool = tool end,
+          },
+          http = {
+            get = function(url, opts)
+              smelt.__http_opts = opts
+              return {
+                status = 200,
+                final_url = url,
+                headers = { ["content-type"] = "text/plain" },
+                body = '<html><body><div id="root"></div><script src="app.js"></script></body></html>',
+              }
+            end,
+            cache = { read = function() return nil end, write = function() end },
+          },
+          html = {
+            to_text = function(source)
+              if source:find("Rendered article", 1, true) then return "Rendered article content" end
+              return ""
+            end,
+            to_markdown = function(source)
+              local content = source:find("Rendered article", 1, true) and "Rendered article content" or ""
+              return { title = "Page", links = {}, content = content }
+            end,
+          },
+          process = {
+            run = function(command, args, opts)
+              smelt.__browser = { command = command, args = args, opts = opts }
+              return {
+                exit_code = 0,
+                stdout = "renderer-json",
+                stderr = "",
+              }
+            end,
+          },
+          __renderer_final_url = "https://example.com/final",
+          json = {
+            encode = function(value)
+              smelt.__renderer_request = value
+              return "request-json"
+            end,
+            decode = function()
+              return {
+                status = 200,
+                final_url = smelt.__renderer_final_url,
+                html = "<html><head><title>Page</title></head><body>Rendered article</body></html>",
+                truncated = false,
+              }
+            end,
+          },
+          time = { monotonic_ms = function() return 1000 end },
+          task = {
+            alloc = function() return 1 end,
+            resume = function(_, value) waited = value end,
+            wait = function() return waited end,
+          },
+          engine = {
+            ask = function(opts)
+              smelt.__question = opts.question
+              opts.on_response({ content = "rendered answer" }, nil)
+            end,
+          },
+          model = { preferred = function() return nil end },
+        }
+        package.loaded["smelt.transcript.defaults"] = {
+          render_llm_markdown_tail = function() return {} end,
+        }
+        "#,
+    )
+    .exec()
+    .expect("install web fetch fixtures");
+    lua.load(WEB_FETCH_LUA).exec().expect("load web_fetch");
+
+    let (
+        output,
+        command,
+        max_bytes,
+        retries,
+        rendered,
+        renderer_url,
+        stdin,
+        renderer_output_bytes,
+        rejected,
+    ): (String, String, i64, i64, bool, String, String, i64, bool) = lua
+        .load(
+            r#"
+            local output = smelt.__tool.execute({
+              url = "https://example.com/app",
+              prompt = "What is on the page?",
+            })
+            smelt.__renderer_final_url = "https://attacker.example/final"
+            local rejected = smelt.__tool.execute({
+              url = "https://example.com/app",
+              prompt = "What is on the page?",
+            })
+            return output, smelt.__browser.command, smelt.__http_opts.max_response_bytes,
+              smelt.__http_opts.max_retries,
+              smelt.__question:find("Rendered article content", 1, true) ~= nil,
+              smelt.__renderer_request.url, smelt.__browser.opts.stdin,
+              smelt.__browser.opts.max_output_bytes,
+              rejected.is_error == true and rejected.content:find("redirect crossed domains", 1, true) ~= nil
+            "#,
+        )
+        .eval()
+        .expect("fetch rendered SPA");
+
+    assert_eq!(output, "rendered answer");
+    assert_eq!(command, "chromium");
+    assert_eq!(max_bytes, 5 * 1024 * 1024);
+    assert_eq!(retries, 2);
+    assert!(rendered);
+    assert_eq!(renderer_url, "https://example.com/app");
+    assert_eq!(stdin, "request-json");
+    assert_eq!(renderer_output_bytes, 32 * 1024 * 1024);
+    assert!(rejected);
 }
 
 #[test]

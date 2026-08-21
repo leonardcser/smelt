@@ -2,7 +2,9 @@
 //! streaming (`run_streaming`) primitives. `ProcessRegistry` manages
 //! long-lived background children (`spawn_bg`, `read_output`, `stop`).
 
-use crate::output_limit::{limit_text_tail, OutputLimiter, DEFAULT_MAX_BYTES, TRUNCATION_NOTICE};
+use crate::output_limit::{
+    limit_text_tail_with_max_bytes, OutputLimiter, DEFAULT_MAX_BYTES, TRUNCATION_NOTICE,
+};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,8 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Defaults: 30s timeout, inherit env, no stdin, capture stdout+stderr.
 #[derive(Debug, Clone)]
 pub(crate) struct Options {
@@ -22,6 +26,7 @@ pub(crate) struct Options {
     pub(crate) env: HashMap<String, String>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) stdin: Option<String>,
+    pub(crate) max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,8 +94,14 @@ pub(crate) async fn run_async(
 
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut stderr = child.stderr.take().expect("stderr piped");
-    let stdout_task = tokio::spawn(async move { read_output_tail(&mut stdout).await });
-    let stderr_task = tokio::spawn(async move { read_output_tail(&mut stderr).await });
+    let max_output_bytes = opts
+        .max_output_bytes
+        .unwrap_or(DEFAULT_MAX_BYTES)
+        .min(MAX_OUTPUT_BYTES);
+    let stdout_task =
+        tokio::spawn(async move { read_output_tail(&mut stdout, max_output_bytes).await });
+    let stderr_task =
+        tokio::spawn(async move { read_output_tail(&mut stderr, max_output_bytes).await });
 
     let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
     let deadline = tokio::time::sleep(timeout);
@@ -135,7 +146,7 @@ pub(crate) async fn run_async(
     }
 }
 
-async fn read_output_tail<R>(reader: &mut R) -> String
+async fn read_output_tail<R>(reader: &mut R, max_bytes: usize) -> String
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -152,7 +163,7 @@ where
         };
         total_bytes = total_bytes.saturating_add(n);
         retained.extend(&buf[..n]);
-        while retained.len() > DEFAULT_MAX_BYTES {
+        while retained.len() > max_bytes {
             retained.pop_front();
         }
     }
@@ -161,10 +172,10 @@ where
     let bytes: Vec<u8> = retained.into_iter().collect();
     let body = String::from_utf8_lossy(&bytes).into_owned();
     if total_bytes <= retained_bytes {
-        return limit_text_tail(&body);
+        return limit_text_tail_with_max_bytes(&body, max_bytes);
     }
 
-    let body = limit_text_tail(&body);
+    let body = limit_text_tail_with_max_bytes(&body, max_bytes);
     format!("{TRUNCATION_NOTICE}: last {retained_bytes} of {total_bytes} bytes\n\n{body}")
 }
 
@@ -942,7 +953,46 @@ mod tests {
             env: HashMap::new(),
             timeout: None,
             stdin: None,
+            max_output_bytes: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn renderer_contract_round_trips_through_a_real_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("renderer");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\npayload=$(cat)\nprintf '%s' \"$payload\" >&2\nprintf '%s' '{\"status\":200,\"final_url\":\"https://example.com/final\",\"html\":\"'\nhead -c 200000 /dev/zero | tr '\\000' x\nprintf '%s' '\",\"truncated\":false}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let request =
+            r#"{"url":"https://example.com","timeout_ms":30000,"max_response_bytes":5242880}"#;
+
+        let outcome = run_async(
+            path.to_str().unwrap(),
+            &[],
+            &Options {
+                stdin: Some(request.into()),
+                max_output_bytes: Some(300_000),
+                ..test_options()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let RunOutcome::Done(output) = outcome else {
+            panic!("renderer was unexpectedly cancelled");
+        };
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stderr, request);
+        let response: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        assert_eq!(response["final_url"], "https://example.com/final");
+        assert_eq!(response["html"].as_str().unwrap().len(), 200_000);
     }
 
     fn finished_rx(finished: bool) -> watch::Receiver<bool> {

@@ -323,6 +323,7 @@ fn parse_run_options(
             env: HashMap::new(),
             timeout: None,
             stdin: None,
+            max_output_bytes: None,
         });
     };
 
@@ -346,6 +347,14 @@ fn parse_run_options(
         })
         .unwrap_or_else(|| runtime_cwd.to_path_buf());
 
+    let max_output_bytes = t.get::<Option<usize>>("max_output_bytes")?;
+    if max_output_bytes.is_some_and(|limit| limit == 0 || limit > process::MAX_OUTPUT_BYTES) {
+        return Err(mlua::Error::external(format!(
+            "max_output_bytes must be between 1 and {}",
+            process::MAX_OUTPUT_BYTES
+        )));
+    }
+
     Ok(process::Options {
         cwd,
         env,
@@ -353,5 +362,6 @@ fn parse_run_options(
             .get::<Option<u64>>("timeout_secs")?
             .map(Duration::from_secs),
         stdin: t.get::<Option<String>>("stdin")?,
+        max_output_bytes,
     })
 }
