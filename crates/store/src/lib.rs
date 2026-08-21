@@ -14,13 +14,99 @@ mod request_audit;
 mod schema;
 mod session_command;
 mod session_commit;
+mod session_writer;
 mod snapshot;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionStoreLayout {
+    sessions_root: std::path::PathBuf,
+}
+
+impl SessionStoreLayout {
+    pub fn from_sessions_root(sessions_root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            sessions_root: sessions_root.into(),
+        }
+    }
+
+    pub fn from_state_root(state_root: impl AsRef<std::path::Path>) -> Self {
+        Self::from_sessions_root(state_root.as_ref().join("sessions"))
+    }
+
+    pub fn sessions_root(&self) -> &std::path::Path {
+        &self.sessions_root
+    }
+
+    pub fn catalog_path(&self) -> std::path::PathBuf {
+        self.sessions_root.join("catalog.db")
+    }
+
+    pub fn catalog_lock_path(&self) -> std::path::PathBuf {
+        self.sessions_root.join(".catalog.lock")
+    }
+
+    pub fn catalog_pending_dir(&self) -> std::path::PathBuf {
+        self.sessions_root.join(".catalog-pending")
+    }
+
+    pub fn catalog_pending_path(&self, session_id: &str) -> std::path::PathBuf {
+        self.catalog_pending_dir().join(session_id)
+    }
+
+    pub fn locks_dir(&self) -> std::path::PathBuf {
+        self.sessions_root.join(".locks")
+    }
+
+    pub fn journals_dir(&self) -> std::path::PathBuf {
+        self.sessions_root.join(".journals")
+    }
+
+    pub fn session_journal_path(&self, session_id: &str) -> std::path::PathBuf {
+        self.journals_dir().join(format!("{session_id}.jsonl"))
+    }
+
+    pub fn lineage_lock_path(&self, lineage_id: &str) -> std::path::PathBuf {
+        self.locks_dir().join(format!("{lineage_id}.lock"))
+    }
+
+    pub fn trash_dir(&self) -> std::path::PathBuf {
+        self.sessions_root.join(".trash")
+    }
+
+    pub fn artifacts_dir(&self) -> std::path::PathBuf {
+        self.sessions_root.join(".artifacts")
+    }
+
+    pub fn session_artifact_dir(&self, session_id: &str) -> std::path::PathBuf {
+        self.artifacts_dir().join(session_id)
+    }
+
+    pub fn lineage_dir(&self, lineage_id: &str) -> std::path::PathBuf {
+        self.sessions_root.join(lineage_id)
+    }
+
+    pub fn lineage_database_path(&self, lineage_id: &str) -> std::path::PathBuf {
+        self.lineage_dir(lineage_id).join("lineage.db")
+    }
+
+    pub fn lineage_search_path(&self, lineage_id: &str) -> std::path::PathBuf {
+        self.lineage_dir(lineage_id).join("search.db")
+    }
+
+    pub fn staging_lineage_dir(&self, lineage_id: &str) -> std::path::PathBuf {
+        self.sessions_root.join(format!(".staging-{lineage_id}"))
+    }
+
+    pub fn staging_lineage_database_path(&self, lineage_id: &str) -> std::path::PathBuf {
+        self.staging_lineage_dir(lineage_id).join("lineage.db")
+    }
+}
+
 pub use catalog::{
-    archive_corrupt_catalog, catalog_reconcile_lock_path, catalog_session_pending_token,
-    clear_catalog_session_pending, pending_catalog_session_ids, rebuild_catalog, Catalog,
-    CatalogAvailability, CatalogCursor, CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader,
-    CatalogReconcileLock, CatalogSession, CATALOG_SCHEMA_VERSION, MAX_CATALOG_PAGE_SIZE,
+    catalog_reconcile_lock_path, catalog_session_pending_token, clear_catalog_session_pending,
+    pending_catalog_session_ids, rebuild_catalog, Catalog, CatalogAvailability, CatalogCursor,
+    CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader, CatalogReconcileLock,
+    CatalogSession, CATALOG_SCHEMA_VERSION, MAX_CATALOG_PAGE_SIZE,
 };
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
@@ -35,9 +121,8 @@ pub use history::{
     TranscriptSearchDirection, TRANSCRIPT_EXTENT_CHUNK_RECORDS, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use lineage_access::{
-    cleanup_abandoned_lineage_artifacts, lineage_session_ids, verify_lineage_backup,
-    LineageReclamation, LineageSessionReader, LineageSessionState, LineageVacuum,
-    OwnedLineageWriter,
+    cleanup_abandoned_lineages, lineage_session_ids, verify_lineage_backup, LineageReclamation,
+    LineageSessionReader, LineageSessionState, LineageVacuum, OwnedLineageWriter,
 };
 pub use lineage_search::{
     LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
@@ -57,5 +142,9 @@ pub use session_commit::{
     SessionCommit, SessionCommitFailure, SideTableSuffixes, StartupRecoveryReceipt, StoreHead,
     StoredTurn, SubmitTurn, SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex,
     TranscriptRecordSuffix, TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
+};
+pub use session_writer::{
+    SessionBatchBarrier, SessionEventBatch, SessionEventCommand, SessionEventReceipt,
+    SessionJournalRecovery, SessionWriter,
 };
 pub use snapshot::{FullSession, SessionResumeSnapshot, StoredSession};

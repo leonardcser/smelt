@@ -624,6 +624,7 @@ pub enum ModelHistorySource {
     },
     Store {
         prefix: Vec<crate::history::HistoryItem>,
+        lineage_id: String,
         first_live_index: usize,
         end_index: usize,
         suffix: Vec<crate::history::HistoryItem>,
@@ -648,12 +649,14 @@ impl ModelHistorySource {
 
     pub fn store(
         prefix: Vec<crate::history::HistoryItem>,
+        lineage_id: String,
         first_live_index: usize,
         end_index: usize,
     ) -> Self {
         let coordinates = ModelHistoryCoordinates::projected(prefix.len(), first_live_index);
         Self::Store {
             prefix,
+            lineage_id,
             first_live_index,
             end_index,
             suffix: Vec::new(),
@@ -663,6 +666,7 @@ impl ModelHistorySource {
 
     pub fn store_with_suffix(
         prefix: Vec<crate::history::HistoryItem>,
+        lineage_id: String,
         first_live_index: usize,
         end_index: usize,
         suffix: Vec<crate::history::HistoryItem>,
@@ -671,6 +675,7 @@ impl ModelHistorySource {
         let coordinates = ModelHistoryCoordinates::projected(prefix.len(), canonical_start);
         Self::Store {
             prefix,
+            lineage_id,
             first_live_index,
             end_index,
             suffix,
@@ -733,10 +738,10 @@ pub struct StartTurnPayload {
     #[serde(default)]
     pub fast_mode: bool,
     pub history: ModelHistorySource,
-    /// Session ID for plan file storage.
+    /// Stable identity for storage and provider cache routing.
     pub session_id: String,
-    /// On-disk directory for this session (date-bucketed).
-    pub session_dir: std::path::PathBuf,
+    /// Root containing canonical lineage databases.
+    pub sessions_root: std::path::PathBuf,
     /// Persistence actor coordinates captured when the turn was dispatched.
     #[serde(default)]
     pub persistence: PersistenceScope,
@@ -846,9 +851,6 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
-        /// On-disk directory for this session. The host writes the SQLite
-        /// request audit through the fixed-session persistence actor.
-        session_dir: PathBuf,
         /// Persistence actor coordinates captured when this request was dispatched.
         #[serde(default)]
         persistence: PersistenceScope,
@@ -1101,7 +1103,7 @@ mod tests {
             fast_mode: false,
             history: ModelHistorySource::default(),
             session_id: "s".into(),
-            session_dir: std::path::PathBuf::from("/tmp"),
+            sessions_root: std::path::PathBuf::from("/tmp"),
             persistence: PersistenceScope::default(),
             permission_overrides: None,
             system_prompt: None,
@@ -1146,7 +1148,6 @@ mod tests {
             fast_mode: false,
             tools: Vec::new(),
             session_id: "session".into(),
-            session_dir: "/tmp/session".into(),
             persistence: PersistenceScope {
                 epoch: 3,
                 required_generation: 7,

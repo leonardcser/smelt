@@ -9,12 +9,11 @@ pub(super) fn validate_storage_root(root: &Path) -> Result<()> {
 
 pub(super) fn create_lineage_database(root: &Path) -> Result<LineageId> {
     ensure_private_directory_all(root)?;
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    ensure_private_directory_all(&lineages)?;
+    let layout = crate::SessionStoreLayout::from_sessions_root(root);
     loop {
         let lineage = LineageId::random()?;
-        let directory = lineages.join(lineage.as_str());
-        let staging = lineages.join(format!(".staging-{}", lineage.as_str()));
+        let directory = layout.lineage_dir(lineage.as_str());
+        let staging = layout.staging_lineage_dir(lineage.as_str());
         match fs::create_dir(&staging) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -22,7 +21,7 @@ pub(super) fn create_lineage_database(root: &Path) -> Result<LineageId> {
         }
         let prepare = (|| {
             ensure_private_directory(&staging)?;
-            let path = staging.join(LINEAGE_DB_FILENAME);
+            let path = layout.staging_lineage_database_path(lineage.as_str());
             let mut conn = open_write_connection(&path, &lineage)?;
             crate::schema::initialize_lineage_schema(&mut conn)?;
             lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
@@ -35,7 +34,7 @@ pub(super) fn create_lineage_database(root: &Path) -> Result<LineageId> {
         }
         match rename_without_replacement(&staging, &directory) {
             Ok(()) => {
-                sync_directory(&lineages)?;
+                sync_directory(root)?;
                 return Ok(lineage);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -53,13 +52,7 @@ fn catalog_lineage_hint(root: &Path, branch: &BranchId) -> Option<LineageId> {
     if root.file_name()? != std::ffi::OsStr::new("sessions") {
         return None;
     }
-    if crate::catalog::catalog_session_pending_token(root, branch.as_str())
-        .ok()?
-        .is_some()
-    {
-        return None;
-    }
-    let catalog_path = root.parent()?.join("catalog.db");
+    let catalog_path = crate::SessionStoreLayout::from_sessions_root(root).catalog_path();
     let catalog = crate::catalog::CatalogReader::open_existing(catalog_path).ok()??;
     if !catalog.metadata().ok()?.is_reconciled() {
         return None;
@@ -91,11 +84,10 @@ pub(super) fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<Li
         }
     }
 
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    if lineages.exists() {
-        ensure_private_directory(&lineages)?;
+    if root.exists() {
+        ensure_private_directory(root)?;
     }
-    let entries = match fs::read_dir(&lineages) {
+    let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(StoreError::Io(error)),
@@ -112,7 +104,8 @@ pub(super) fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<Li
         let Ok(lineage) = LineageId::from_hex(name) else {
             continue;
         };
-        let path = entry.path().join(LINEAGE_DB_FILENAME);
+        let path = crate::SessionStoreLayout::from_sessions_root(root)
+            .lineage_database_path(lineage.as_str());
         reject_symlink(&path)?;
         if !path.is_file() {
             continue;
@@ -144,9 +137,7 @@ pub(super) fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<Li
 }
 
 pub(super) fn lineage_database_path(root: &Path, lineage: &LineageId) -> PathBuf {
-    root.join(LINEAGES_DIRECTORY)
-        .join(lineage.as_str())
-        .join(LINEAGE_DB_FILENAME)
+    crate::SessionStoreLayout::from_sessions_root(root).lineage_database_path(lineage.as_str())
 }
 
 pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<Connection> {

@@ -241,6 +241,115 @@ pub enum BlockLayout<L = LuaLeaf> {
     },
 }
 
+impl SourceViewIr {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(match self {
+            Self::Diff(diff) => diff
+                .retained_bytes()
+                .saturating_sub(std::mem::size_of_val(diff)),
+        })
+    }
+}
+
+impl BlockLayout<LayoutLeaf> {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(layout_dynamic_bytes(self))
+    }
+}
+
+fn layout_dynamic_bytes(layout: &LayoutIr) -> usize {
+    match layout {
+        BlockLayout::Empty => 0,
+        BlockLayout::Leaf(leaf) => leaf_dynamic_bytes(leaf),
+        BlockLayout::Vbox(items) => items
+            .capacity()
+            .saturating_mul(std::mem::size_of::<LayoutIr>())
+            .saturating_add(items.iter().map(layout_dynamic_bytes).sum()),
+        BlockLayout::Hbox(items) => items
+            .capacity()
+            .saturating_mul(std::mem::size_of::<HboxItem<LayoutLeaf>>())
+            .saturating_add(
+                items
+                    .iter()
+                    .map(|item| layout_dynamic_bytes(&item.layout))
+                    .sum(),
+            ),
+        BlockLayout::Gutter { child, spec } => {
+            boxed_layout_bytes(child).saturating_add(spec.text.capacity())
+        }
+        BlockLayout::RowPrefix { child, spec } => boxed_layout_bytes(child)
+            .saturating_add(styled_spans_bytes(&spec.first, spec.first.capacity()))
+            .saturating_add(styled_spans_bytes(&spec.rest, spec.rest.capacity())),
+        BlockLayout::Panel { child, spec } => {
+            boxed_layout_bytes(child).saturating_add(spec.hl_group.capacity())
+        }
+        BlockLayout::Style { child, spec } => boxed_layout_bytes(child)
+            .saturating_add(optional_string_bytes(&spec.hl_group))
+            .saturating_add(optional_string_bytes(&spec.fg))
+            .saturating_add(optional_string_bytes(&spec.bg)),
+        BlockLayout::Cap { child, .. } | BlockLayout::Refresh { child, .. } => {
+            boxed_layout_bytes(child)
+        }
+    }
+}
+
+fn boxed_layout_bytes(child: &LayoutIr) -> usize {
+    std::mem::size_of::<LayoutIr>().saturating_add(layout_dynamic_bytes(child))
+}
+
+fn leaf_dynamic_bytes(leaf: &LayoutLeaf) -> usize {
+    match leaf {
+        LayoutLeaf::Text(spec) => spec
+            .content
+            .capacity()
+            .saturating_add(optional_string_bytes(&spec.hl_group)),
+        LayoutLeaf::Runs(spec) => {
+            styled_lines_bytes(&spec.lines).saturating_add(optional_string_bytes(&spec.hl_group))
+        }
+        LayoutLeaf::Line(spec) => styled_spans_bytes(&spec.spans, spec.spans.capacity())
+            .saturating_add(optional_string_bytes(&spec.hl_group)),
+        LayoutLeaf::Markdown(spec) => spec.content.capacity(),
+        LayoutLeaf::Code(spec) => spec.content.capacity().saturating_add(spec.lang.capacity()),
+        LayoutLeaf::Separator(spec) => styled_spans_bytes(&spec.label, spec.label.capacity()),
+        LayoutLeaf::SourceView(source_view) => source_view
+            .retained_bytes()
+            .saturating_sub(std::mem::size_of_val(source_view)),
+    }
+}
+
+fn styled_lines_bytes(lines: &protocol::StyledLines) -> usize {
+    lines
+        .0
+        .capacity()
+        .saturating_mul(std::mem::size_of::<Vec<protocol::StyledSpan>>())
+        .saturating_add(
+            lines
+                .0
+                .iter()
+                .map(|line| styled_spans_bytes(line, line.capacity()))
+                .sum(),
+        )
+}
+
+fn styled_spans_bytes(spans: &[protocol::StyledSpan], capacity: usize) -> usize {
+    capacity
+        .saturating_mul(std::mem::size_of::<protocol::StyledSpan>())
+        .saturating_add(spans.iter().map(styled_span_dynamic_bytes).sum())
+}
+
+fn styled_span_dynamic_bytes(span: &protocol::StyledSpan) -> usize {
+    span.text
+        .capacity()
+        .saturating_add(optional_string_bytes(&span.syntax))
+        .saturating_add(optional_string_bytes(&span.hl))
+        .saturating_add(optional_string_bytes(&span.fg))
+        .saturating_add(optional_string_bytes(&span.bg))
+}
+
+fn optional_string_bytes(value: &Option<String>) -> usize {
+    value.as_ref().map_or(0, String::capacity)
+}
+
 pub type LayoutNode<L = LuaLeaf> = BlockLayout<L>;
 
 impl<L> BlockLayout<L> {

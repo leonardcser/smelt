@@ -30,17 +30,16 @@ fn delete_refuses_session_owned_by_another_process() {
     let environment = ProcessEnvironmentGuard::capture();
     environment.set_var("XDG_STATE_HOME", state.path());
     let id = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let session_dir = smelt_core::session::dir_for_id(id);
+    let sessions_root = smelt_core::session::sessions_dir();
     let mut session = smelt_core::session::Session::new(1, PathBuf::from("/tmp"));
     session.id = id.into();
     session.history = vec![protocol::HistoryItem::user(protocol::Content::text(
         "owned",
     ))];
     smelt_core::session::save_result(&session).expect("create database");
-    let sessions_root = session_dir.parent().expect("sessions root");
     let ready = state.path().join("delete-owner.ready");
     let release = state.path().join("delete-owner.release");
-    let mut owner = spawn_owner(sessions_root, id, &ready, &release);
+    let mut owner = spawn_owner(&sessions_root, id, &ready, &release);
     wait_for(&ready);
 
     let err = smelt_core::session::delete(id).expect_err("active owner prevents deletion");
@@ -50,7 +49,7 @@ fn delete_refuses_session_owned_by_another_process() {
         smelt_core::session::SessionStoreError::ReadOnlyOwnerConflict { .. }
     ));
     assert!(
-        smelt_store::LineageSessionReader::open_existing(session_dir.parent().unwrap(), id).is_ok(),
+        smelt_store::LineageSessionReader::open_existing(&sessions_root, id).is_ok(),
         "canonical lineage branch remains available"
     );
     touch(&release);

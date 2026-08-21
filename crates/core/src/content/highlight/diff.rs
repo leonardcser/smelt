@@ -54,6 +54,19 @@ pub struct DiffIr {
     render_cache: Arc<Mutex<DiffRenderCache>>,
 }
 
+impl DiffIr {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.syntax_ext.capacity())
+            .saturating_add(
+                self.lines
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<DiffLine>()),
+            )
+            .saturating_add(self.lines.iter().map(DiffLine::dynamic_bytes).sum())
+    }
+}
+
 #[derive(Debug, Default)]
 struct DiffRenderCache {
     row_layouts: VecDeque<Arc<DiffRowLayout>>,
@@ -134,6 +147,25 @@ pub(crate) enum DiffLine {
         highlights: Vec<DiffByteRange>,
     },
     Ellipsis,
+}
+
+impl DiffLine {
+    fn dynamic_bytes(&self) -> usize {
+        match self {
+            Self::Context { text, .. } => text.capacity(),
+            Self::Delete {
+                text, highlights, ..
+            }
+            | Self::Insert {
+                text, highlights, ..
+            } => text.capacity().saturating_add(
+                highlights
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<DiffByteRange>()),
+            ),
+            Self::Ellipsis => 0,
+        }
+    }
 }
 
 fn diff_line_layout(text: &str) -> InlineLine<()> {

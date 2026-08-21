@@ -2,6 +2,7 @@
 name = "smelt-ansi"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 description = "ANSI SGR transcript parser for Smelt style spans."
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"

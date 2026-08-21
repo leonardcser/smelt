@@ -258,6 +258,10 @@ pub struct SaveReceipt {
     pub session_id: String,
     pub previous: StoreHead,
     pub current: StoreHead,
+    #[serde(default)]
+    pub lineage_id: Option<String>,
+    #[serde(default)]
+    pub history_text_bytes: u64,
 }
 
 impl SaveReceipt {
@@ -290,6 +294,10 @@ pub enum SessionCommitFailure {
         start: HistoryIndex,
         final_len: HistoryLen,
         item_count: u64,
+    },
+    InvalidHistorySuffixStart {
+        start: HistoryIndex,
+        current_len: HistoryLen,
     },
     InvalidTranscriptRecordSuffix {
         start: TranscriptRecordIndex,

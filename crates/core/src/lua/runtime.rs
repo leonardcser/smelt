@@ -2807,7 +2807,7 @@ impl LuaRuntime {
         let ToolEnv {
             mode,
             session_id,
-            session_dir,
+            artifact_dir,
         } = env;
         let func = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
@@ -2850,7 +2850,7 @@ impl LuaRuntime {
             call_id,
             mode,
             session_id,
-            session_dir,
+            artifact_dir,
         ) {
             Ok(t) => t,
             Err(e) => {
@@ -3911,14 +3911,14 @@ fn build_tool_ctx(
     call_id: &str,
     mode: protocol::AgentMode,
     session_id: &str,
-    session_dir: &std::path::Path,
+    artifact_dir: &std::path::Path,
 ) -> mlua::Result<mlua::Table> {
     let t = lua.create_table()?;
     t.set("invocation_id", invocation_id.get())?;
     t.set("call_id", call_id.to_string())?;
     t.set("mode", mode.as_str())?;
     t.set("session_id", session_id.to_string())?;
-    t.set("session_dir", session_dir.to_string_lossy().into_owned())?;
+    t.set("artifact_dir", artifact_dir.to_string_lossy().into_owned())?;
     Ok(t)
 }
 

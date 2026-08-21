@@ -22,7 +22,7 @@ app_story!(explore_tool_group_states, |ctx| {
             ("path", json!("crates/tui/src")),
             ("output_mode", json!("files_with_matches")),
         ],
-        "crates/tui/src/content/display_layout.rs\ncrates/tui/src/content/render_plan.rs",
+        "crates/tui/src/content/display_layout.rs\ncrates/tui/src/content/transcript_scene.rs",
         json!({ "display_count": { "value": 2, "unit": "file" } }),
         Some(8),
     );
@@ -55,7 +55,7 @@ app_story!(explore_tool_group_states, |ctx| {
             ("kind", json!("enum")),
             ("path_glob", json!("crates/tui/**/*.rs")),
         ],
-        "1 symbol\n- enum RenderNode - crates/tui/src/content/render_plan.rs:26:1",
+        "1 symbol\n- enum RenderNode - crates/tui/src/content/transcript_scene.rs:26:1",
         json!({ "display_count": { "value": 1, "unit": "symbol" } }),
         Some(4),
     );
@@ -81,7 +81,10 @@ app_story!(lsp_tool_group_states, |ctx| {
     ctx.tool_call(
         "inspect_symbol_at",
         &[
-            ("file_path", json!("crates/tui/src/content/render_plan.rs")),
+            (
+                "file_path",
+                json!("crates/tui/src/content/transcript_scene.rs"),
+            ),
             ("line", json!(26)),
             ("column", json!(17)),
         ],
@@ -91,7 +94,10 @@ app_story!(lsp_tool_group_states, |ctx| {
     ctx.tool_call(
         "find_definition",
         &[
-            ("file_path", json!("crates/tui/src/content/render_plan.rs")),
+            (
+                "file_path",
+                json!("crates/tui/src/content/transcript_scene.rs"),
+            ),
             ("line", json!(44)),
             ("column", json!(19)),
         ],
@@ -101,16 +107,19 @@ app_story!(lsp_tool_group_states, |ctx| {
     ctx.tool_call(
         "find_references",
         &[
-            ("file_path", json!("crates/tui/src/content/render_plan.rs")),
+            ("file_path", json!("crates/tui/src/content/transcript_scene.rs")),
             ("line", json!(26)),
             ("column", json!(17)),
         ],
-        "2 references\n- crates/tui/src/content/render_plan.rs:44:13\n- crates/tui/src/content/transcript_buf.rs:812:9",
+        "2 references\n- crates/tui/src/content/transcript_scene.rs:44:13\n- crates/tui/src/content/transcript_buf.rs:812:9",
         Some(8),
     );
     ctx.tool_call(
         "diagnostics",
-        &[("file_path", json!("crates/tui/src/content/render_plan.rs"))],
+        &[(
+            "file_path",
+            json!("crates/tui/src/content/transcript_scene.rs"),
+        )],
         "no diagnostics",
         Some(3),
     );

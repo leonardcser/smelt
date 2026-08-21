@@ -63,7 +63,7 @@ impl ConversationRuntime {
         sessions: smelt_core::session::SessionStorage,
         storage: SessionPersistence,
     ) -> Self {
-        transcript.set_session_dir(storage.session_dir(&sessions, &session));
+        transcript.set_store_address(storage.transcript_store_address(&sessions, &session));
         Self {
             session,
             document: TuiSessionDocument::new(transcript),
@@ -277,7 +277,7 @@ impl ConversationRuntime {
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
-        id: crate::content::render_plan::RenderNodeId,
+        id: crate::content::transcript_scene::RenderNodeId,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.document.transcript.fold_node(lua, width, id, action)
@@ -482,7 +482,25 @@ impl ConversationRuntime {
         &mut self,
         session_dir: std::path::PathBuf,
     ) {
-        self.document.transcript.set_session_dir(session_dir);
+        let session_id = session_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let sessions_root = session_dir
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| self.sessions.sessions_dir());
+        let lineage_id = smelt_store::LineageSessionReader::try_open_existing(
+            &sessions_root,
+            session_id.clone(),
+        )
+        .ok()
+        .flatten()
+        .map(|reader| reader.lineage_id().to_string())
+        .unwrap_or_else(|| session_id.clone());
+        self.document.transcript.set_store_address(Some(
+            smelt_core::session::SessionStoreAddress::new(sessions_root, session_id, lineage_id),
+        ));
     }
 
     #[cfg(test)]
@@ -595,7 +613,7 @@ impl ConversationRuntime {
         &mut self,
         forked: &mut smelt_core::session::Session,
         metadata: super::session_document::RuntimeSessionMetadata,
-    ) -> Result<Option<super::session_document::SessionSaveIntent>, String> {
+    ) -> Result<Option<super::session_document::PreparedSessionBatch>, String> {
         self.document
             .prepare_fork_save(forked, metadata, &self.session.history)
     }
@@ -604,10 +622,7 @@ impl ConversationRuntime {
         let Some(live) = self.document.live_session.as_mut() else {
             return;
         };
-        if let Some((header, _)) = self
-            .sessions
-            .load_store_header_for_dir(live.dir().to_path_buf())
-        {
+        if let Some((header, _)) = self.sessions.load_store_header_for_id(live.id()) {
             live.replace_header(header);
         }
     }
@@ -996,7 +1011,9 @@ impl ConversationRuntime {
         transcript: smelt_core::content::transcript::Transcript,
     ) {
         self.apply_transcript_mutation(
-            super::session_document::TranscriptMutation::ReplaceFromHistory { transcript },
+            super::session_document::TranscriptMutation::ReplaceFromHistory {
+                transcript: Box::new(transcript),
+            },
         );
         self.clear_pending_transcript_history_rebuild();
     }
@@ -1608,8 +1625,8 @@ impl ConversationRuntime {
         self.storage.is_ephemeral()
     }
 
-    pub(crate) fn current_session_dir(&self) -> std::path::PathBuf {
-        self.storage.session_dir(&self.sessions, &self.session)
+    pub(crate) fn current_artifact_dir(&self) -> std::path::PathBuf {
+        self.storage.artifact_dir(&self.sessions, &self.session)
     }
 
     pub(crate) fn sessions(&self) -> &smelt_core::session::SessionStorage {
@@ -1753,13 +1770,8 @@ impl ConversationRuntime {
         let Some(persistence) = self.persistence.as_ref() else {
             return Ok(false);
         };
-        let active_id = smelt_core::session_id::SessionId::parse(&self.session.id)
-            .map_err(|error| error.to_string())?;
-        let active_dir = self.sessions.session_dir(&active_id);
-        let root = active_dir
-            .parent()
-            .ok_or_else(|| "session directory has no storage root".to_string())?;
-        let active = smelt_store::LineageSessionReader::try_open_existing(root, &self.session.id)
+        let root = self.sessions.sessions_dir();
+        let active = smelt_store::LineageSessionReader::try_open_existing(&root, &self.session.id)
             .map_err(|error| error.to_string())?;
         let target_reader =
             smelt_store::LineageSessionReader::try_open_existing(root, target.as_str())
@@ -1836,9 +1848,10 @@ impl ConversationRuntime {
     pub(crate) fn reset(&mut self, pid: u32, cwd: std::path::PathBuf) -> String {
         let old_id = self.session.id.clone();
         self.session = smelt_core::session::Session::new(pid, cwd);
-        self.document
-            .transcript
-            .set_session_dir(self.storage.session_dir(&self.sessions, &self.session));
+        self.document.transcript.set_store_address(
+            self.storage
+                .transcript_store_address(&self.sessions, &self.session),
+        );
         self.access = SessionAccess::Owned;
         self.document.enable_change_tracking();
         self.turn.reset_session();
@@ -1994,7 +2007,10 @@ impl ConversationRuntime {
                 live.live_suffix_bytes() as u64,
             );
         }
-        let intent = match self.document.prepare_save(&mut self.session, metadata) {
+        let intent = match self
+            .document
+            .prepare_event_batch(&mut self.session, metadata)
+        {
             Ok(Some(intent)) => intent,
             Ok(None) => return Ok(SaveStatus::Unchanged),
             Err(message) => {
@@ -2041,7 +2057,10 @@ impl ConversationRuntime {
         let prepare_latest = preparation_blocked
             || actor_blocked_at.is_some_and(|blocked| blocked < latest_generation);
         if prepare_latest {
-            let intent = match self.document.prepare_save(&mut self.session, metadata) {
+            let intent = match self
+                .document
+                .prepare_event_batch(&mut self.session, metadata)
+            {
                 Ok(intent) => intent,
                 Err(message) => {
                     self.persistence_preparation_block = Some(PersistencePreparationBlock {
@@ -2116,7 +2135,6 @@ impl ConversationRuntime {
 
     pub(crate) fn append_request_audit(
         &self,
-        session_dir: &std::path::Path,
         scope: protocol::PersistenceScope,
         entry: protocol::request_log::RequestLogEntry,
         payload_mode: smelt_store::RequestAuditPayloadMode,
@@ -2125,11 +2143,7 @@ impl ConversationRuntime {
             return Ok(false);
         };
         let epoch = crate::persist::SessionEpoch::new(scope.epoch);
-        if session_dir != self.sessions.dir_for_id(&self.session.id)
-            || epoch != actor.epoch()
-            || self.is_ephemeral()
-            || self.is_read_only()
-        {
+        if epoch != actor.epoch() || self.is_ephemeral() || self.is_read_only() {
             return Ok(false);
         }
         actor.append_request_audit(crate::persist::RequestAuditIntent {
@@ -2208,7 +2222,7 @@ impl ConversationRuntime {
         }
         let intent = self
             .document
-            .prepare_turn_update(&mut self.session, metadata)
+            .prepare_turn_batch(&mut self.session, metadata)
             .map_err(crate::persist::PersistenceCause::invariant)?;
         self.publish_shared_state();
         let acknowledgement = self
@@ -2241,7 +2255,7 @@ impl ConversationRuntime {
     ) -> Result<(), crate::persist::PersistenceCause> {
         let intent = self
             .document
-            .prepare_turn_update(&mut self.session, metadata)
+            .prepare_turn_batch(&mut self.session, metadata)
             .map_err(crate::persist::PersistenceCause::invariant)?;
         self.publish_shared_state();
         self.persistence
@@ -2267,7 +2281,7 @@ impl ConversationRuntime {
     ) -> Result<crate::persist::TurnTransitionOutcome, crate::persist::PersistenceCause> {
         let intent = self
             .document
-            .prepare_turn_update(&mut self.session, metadata)
+            .prepare_turn_batch(&mut self.session, metadata)
             .map_err(crate::persist::PersistenceCause::invariant)?;
         self.publish_shared_state();
         let outcome = self
@@ -2300,17 +2314,25 @@ impl ConversationRuntime {
         &mut self,
         acknowledgement: &crate::persist::PersistenceAcknowledgement,
     ) -> bool {
-        let applied = self.document.acknowledge_convergence(
+        let applied = self.document.acknowledge_coalesced_batch(
             acknowledgement,
             &self.session.id,
             self.history_len(),
             self.session.checkpoint.as_ref(),
         );
         if applied {
+            self.refresh_transcript_store_address_from_catalog();
             if let Some(persistence) = self.persistence.as_ref() {
                 persistence.confirm_acknowledgement(acknowledgement);
             }
         }
         applied
+    }
+
+    fn refresh_transcript_store_address_from_catalog(&mut self) {
+        self.document.transcript.set_store_address(
+            self.storage
+                .transcript_store_address(&self.sessions, &self.session),
+        );
     }
 }

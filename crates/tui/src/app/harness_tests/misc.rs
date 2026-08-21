@@ -52,7 +52,7 @@ fn lua_paint_callback_uses_scoped_tui_host_after_ui_paint() {
 #[test]
 fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
     let mut app = TestApp::builder().build();
-    let session_dir = app.app.conversation.current_session_dir();
+    let session_dir = app.app.conversation.current_artifact_dir();
     assert!(
         !session_dir.exists(),
         "fresh session should not be persisted before its first message"
@@ -542,15 +542,16 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
         app.session_snapshot().id.clone()
     };
 
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let preview =
-        crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir.clone(), 59, 22)
-            .expect("load compact preview before corruption");
-    let lineage = smelt_store::LineageSessionReader::open_existing(
-        session_dir.parent().expect("sessions root"),
-        &session_id,
+    let sessions_root = smelt_core::session::sessions_dir();
+    let preview = crate::app::history::load_transcript_tail_from_sqlite_store(
+        sessions_root.clone(),
+        session_id.clone(),
+        59,
+        22,
     )
-    .expect("open canonical preview fixture");
+    .expect("load compact preview before corruption");
+    let lineage = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id)
+        .expect("open canonical preview fixture");
     let db = rusqlite::Connection::open(lineage.database_path())
         .expect("open canonical preview fixture database");
     db.execute(
@@ -3840,7 +3841,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
         .expect("semantic block reveal must resolve an exact content anchor");
     assert_eq!(
         first_visible.node_id,
-        crate::content::render_plan::RenderNodeId::Block(
+        crate::content::transcript_scene::RenderNodeId::Block(
             smelt_core::transcript_model::BlockId::new(block.block_id),
         ),
         "semantic block reveal must align its target block to the viewport top: {frame:?}"
@@ -5374,7 +5375,6 @@ fn resumed_transcript_app_from_records(
 ) -> (TestApp, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("sessions root");
     let session_id = "e".repeat(64);
-    let session_dir = dir.path().join(&session_id);
     let mut session = smelt_core::session::Session::new(1, dir.path().to_path_buf());
     session.id = session_id.clone();
     let initial = smelt_core::session::initial_store_commit_from_session(&session)
@@ -5384,12 +5384,17 @@ fn resumed_transcript_app_from_records(
     writer
         .commit_session(&initial)
         .expect("commit initial session fixture");
+    let lineage_id = writer.lineage_id().to_string();
     writer.release().expect("release session fixture writer");
-    crate::persist::write_transcript_record_suffix(&session_dir, 0, &records)
+    let store = smelt_core::session::SessionStoreAddress::new(
+        dir.path().to_path_buf(),
+        session_id,
+        lineage_id,
+    );
+    crate::persist::write_transcript_record_suffix(&store, 0, &records)
         .expect("write transcript records");
-    let loaded =
-        crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(session_dir, width, height)
-            .expect("tail transcript");
+    let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store, width, height)
+        .expect("tail transcript");
     let mut app = TestApp::builder().build();
     app.set_terminal_size(width, height);
     app.replace_transcript_document_for_harness(

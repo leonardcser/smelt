@@ -14,8 +14,7 @@ use crate::error::{Result, StoreError};
 use crate::history::{StoredTranscriptBlock, TranscriptSearchCandidate, TranscriptSearchDirection};
 use crate::lineage::{self, BranchId, LineageId, TranscriptSearchLeaf};
 
-pub const SEARCH_FORMAT_VERSION: i32 = 5;
-const SEARCH_DB_FILENAME: &str = "search.db";
+pub const SEARCH_FORMAT_VERSION: i32 = 1;
 const SEARCH_SEGMENT_BYTES: u64 = 2 * 1024 * 1024;
 const SEARCH_SEGMENT_MAX_LEAVES: usize = 32;
 const SEARCH_DOCUMENT_BYTES: usize = 32 * 1024;
@@ -148,6 +147,7 @@ pub struct LineageSearchProjector {
 impl LineageSearchProjector {
     pub(crate) fn spawn(
         canonical_path: PathBuf,
+        search_path: PathBuf,
         lineage: LineageId,
         branch: BranchId,
     ) -> Result<Self> {
@@ -188,8 +188,13 @@ impl LineageSearchProjector {
                         worker_stopping.load(Ordering::Acquire)
                             || worker_requested.load(Ordering::Acquire) != target
                     };
-                    let result =
-                        project_current_branch(&canonical_path, &lineage, &branch, cancelled);
+                    let result = project_current_branch(
+                        &canonical_path,
+                        &search_path,
+                        &lineage,
+                        &branch,
+                        cancelled,
+                    );
                     match result {
                         Ok(()) => {
                             *worker_error
@@ -553,6 +558,7 @@ fn search_document_inputs(records: &[StoredTranscriptBlock]) -> Result<Vec<Searc
 
 fn project_current_branch(
     canonical_path: &Path,
+    search_path: &Path,
     lineage: &LineageId,
     branch: &BranchId,
     cancelled: impl Fn() -> bool,
@@ -571,8 +577,7 @@ fn project_current_branch(
     if cancelled() {
         return Ok(());
     }
-    let search_path = search_database_path(canonical_path)?;
-    let mut search = open_search_writer(&search_path, lineage)?;
+    let mut search = open_search_writer(search_path, lineage)?;
     for source in sources {
         if cancelled() {
             return Ok(());
@@ -586,8 +591,8 @@ fn project_current_branch(
             }
             Ok(None) => {}
             Ok(Some(_)) | Err(_) => {
-                reset_search_database(&search_path)?;
-                search = open_search_writer(&search_path, lineage)?;
+                reset_search_database(search_path)?;
+                search = open_search_writer(search_path, lineage)?;
             }
         }
         let records = match search_source_records(&canonical, lineage, &source, &cancelled) {
@@ -631,11 +636,10 @@ fn reachable_search_source_ids(
 
 pub(crate) fn reclaim_one_obsolete_search_segment(
     canonical: &Connection,
-    canonical_path: &Path,
+    search_path: &Path,
     lineage: &LineageId,
 ) -> Result<SearchReclamationStep> {
-    let search_path = search_database_path(canonical_path)?;
-    reject_symlink(&search_path)?;
+    reject_symlink(search_path)?;
     if !search_path.exists() {
         return Ok(SearchReclamationStep {
             complete: true,
@@ -645,7 +649,7 @@ pub(crate) fn reclaim_one_obsolete_search_segment(
 
     let reachable = reachable_search_source_ids(canonical, lineage)?;
     let result = (|| -> Result<SearchReclamationStep> {
-        let mut search = open_search_writer(&search_path, lineage)?;
+        let mut search = open_search_writer(search_path, lineage)?;
         let target = {
             let mut segments = search.prepare(
                 "SELECT segment_id, source_node_id, source_item_count, source_byte_count,
@@ -678,7 +682,7 @@ pub(crate) fn reclaim_one_obsolete_search_segment(
             Ok(records) => records,
             Err(_) => {
                 drop(search);
-                reset_search_database(&search_path)?;
+                reset_search_database(search_path)?;
                 return Ok(SearchReclamationStep {
                     complete: true,
                     ..SearchReclamationStep::default()
@@ -758,7 +762,7 @@ pub(crate) fn reclaim_one_obsolete_search_segment(
     match result {
         Ok(step) => Ok(step),
         Err(_) => {
-            reset_search_database(&search_path)?;
+            reset_search_database(search_path)?;
             Ok(SearchReclamationStep {
                 complete: true,
                 ..SearchReclamationStep::default()
@@ -776,13 +780,6 @@ fn open_canonical_reader(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "query_only", "ON")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
-}
-
-fn search_database_path(canonical_path: &Path) -> Result<PathBuf> {
-    canonical_path
-        .parent()
-        .map(|directory| directory.join(SEARCH_DB_FILENAME))
-        .ok_or_else(|| StoreError::Integrity("lineage database has no directory".into()))
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
@@ -1323,7 +1320,7 @@ impl CandidateSearch<'_> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_transcript_candidate_page(
     canonical: &Connection,
-    canonical_path: &Path,
+    search_path: &Path,
     lineage: &LineageId,
     branch: &BranchId,
     query: &str,
@@ -1351,8 +1348,7 @@ pub(crate) fn search_transcript_candidate_page(
     )?;
     request.check_cancelled()?;
     let sources = search_source_segments(leaves, cancelled)?;
-    let search_path = search_database_path(canonical_path)?;
-    let search = open_search_reader(&search_path, lineage).ok().flatten();
+    let search = open_search_reader(search_path, lineage).ok().flatten();
     let mut segments = search
         .as_ref()
         .and_then(|search| search_segment_rows(search, &sources).ok())
@@ -1948,14 +1944,13 @@ fn decode_search_doc(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchDoc> {
 
 pub(crate) fn search_projection_status(
     canonical: &Connection,
-    canonical_path: &Path,
+    search_path: &Path,
     lineage: &LineageId,
     branch: &BranchId,
 ) -> Result<SearchProjectionStatus> {
     let (_, leaves) = lineage::lineage_transcript_search_leaves(canonical, lineage, branch)?;
     let sources = search_source_segments(leaves, &never_cancelled)?;
-    let search_path = search_database_path(canonical_path)?;
-    let database_bytes = sqlite_physical_bytes(&search_path);
+    let database_bytes = sqlite_physical_bytes(search_path);
     if !search_path.is_file() {
         return Ok(SearchProjectionStatus {
             state: SearchProjectionState::Missing,
@@ -1967,7 +1962,7 @@ pub(crate) fn search_projection_status(
         });
     }
     let found_version = Connection::open_with_flags(
-        &search_path,
+        search_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()
@@ -1975,7 +1970,7 @@ pub(crate) fn search_projection_status(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))
             .ok()
     });
-    let search = match open_search_reader(&search_path, lineage) {
+    let search = match open_search_reader(search_path, lineage) {
         Ok(Some(search)) => search,
         Ok(None) => unreachable!("search path existence checked"),
         Err(error) => {

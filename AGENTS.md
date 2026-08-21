@@ -34,7 +34,7 @@ set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness
 # regenerate Lua API stubs + reference docs (commit the result)
 set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120
 
-# storybook snapshots (run when changing render_plan, tool renderers, or permission/transcript UI)
+# storybook snapshots (run when changing transcript_scene, tool renderers, or permission/transcript UI)
 set -o pipefail; cargo test -p smelt-tui --test storybook_main --features harness app_dialog_permission 2>&1 | tail -120
 ```
 

@@ -212,6 +212,49 @@ fn production_session_adapter_roundtrips_retries_and_rewinds_suffixes() {
 }
 
 #[test]
+fn session_suffixes_cannot_start_beyond_the_expected_head() {
+    let (mut conn, lineage) = setup();
+    let branch = branch_id('a');
+
+    let mut history = initial_session_commit(&branch);
+    history.history = crate::session_commit::HistorySuffix {
+        start: HistoryIndex::new(2),
+        final_len: crate::session_commit::HistoryLen::new(2),
+        items: Vec::new(),
+    };
+    assert!(matches!(
+        apply_lineage_session_commit(
+            &mut conn,
+            &lineage,
+            &branch,
+            &history,
+            ObjectCompression::None,
+        ),
+        Err(SessionCommitFailure::InvalidHistorySuffixStart { start, current_len })
+            if start == HistoryIndex::new(2)
+                && current_len == crate::session_commit::HistoryLen::ZERO
+    ));
+
+    let mut records = initial_session_commit(&branch);
+    records.transcript_records = Some(crate::session_commit::TranscriptRecordSuffix {
+        start: crate::session_commit::TranscriptRecordIndex::new(2),
+        records: Vec::new(),
+    });
+    assert!(matches!(
+        apply_lineage_session_commit(
+            &mut conn,
+            &lineage,
+            &branch,
+            &records,
+            ObjectCompression::None,
+        ),
+        Err(SessionCommitFailure::InvalidTranscriptRecordSuffix { start, current_len })
+            if start == crate::session_commit::TranscriptRecordIndex::new(2)
+                && current_len == crate::session_commit::TranscriptRecordCount::ZERO
+    ));
+}
+
+#[test]
 fn sequence_bounds_and_stale_root_metadata_are_rejected() {
     let (mut conn, lineage) = setup();
     let empty = empty_sequence(&conn, &lineage, SequenceKind::History).unwrap();

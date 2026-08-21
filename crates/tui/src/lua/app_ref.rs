@@ -30,7 +30,7 @@ pub(crate) struct SessionStatusSnapshot {
 
 pub(crate) struct SessionInfoSnapshot {
     pub(crate) id: String,
-    pub(crate) dir: std::path::PathBuf,
+    pub(crate) artifact_dir: std::path::PathBuf,
     pub(crate) ephemeral: bool,
     pub(crate) title: Option<String>,
     pub(crate) slug: Option<String>,
@@ -545,7 +545,7 @@ impl ConversationLuaHost<'_> {
 
     pub(crate) fn fold_transcript_node(
         &mut self,
-        id: crate::content::render_plan::RenderNodeId,
+        id: crate::content::transcript_scene::RenderNodeId,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.app.fold_transcript_node(id, action)
@@ -720,7 +720,6 @@ impl AgentLuaHost<'_> {
         };
         let request_config = self.app.core.config.request_runtime_config();
         let session_id = self.app.conversation.session().id.clone();
-        let session_dir = self.app.conversation.current_session_dir();
         let persistence = self.app.conversation.persistence_scope();
         self.app.core.engine.send(protocol::UiCommand::EngineAsk {
             id,
@@ -733,7 +732,6 @@ impl AgentLuaHost<'_> {
             fast_mode: false,
             tools: Vec::new(),
             session_id,
-            session_dir,
             persistence,
             stream,
             visible_retries,
@@ -765,7 +763,6 @@ impl AgentLuaHost<'_> {
         };
         let request_config = self.app.core.config.request_runtime_config();
         let session_id = self.app.conversation.session().id.clone();
-        let session_dir = self.app.conversation.current_session_dir();
         let persistence = self.app.conversation.persistence_scope();
         let tools = self.app.lua.tool_defs(
             self.app.core.config.mode.clone(),
@@ -782,7 +779,6 @@ impl AgentLuaHost<'_> {
             fast_mode: self.app.fast_mode_active(),
             tools,
             session_id,
-            session_dir,
             persistence,
             stream,
             visible_retries,
@@ -1496,7 +1492,7 @@ impl SessionLuaHost<'_> {
         };
         SessionInfoSnapshot {
             id: session.id.clone(),
-            dir: self.app.current_session_dir(),
+            artifact_dir: self.app.current_artifact_dir(),
             ephemeral: self.app.ephemeral(),
             title: session.title.clone(),
             slug: session.slug.clone(),
@@ -1531,8 +1527,8 @@ impl SessionLuaHost<'_> {
         self.app.conversation.session().id.clone()
     }
 
-    pub(crate) fn current_session_dir(&self) -> std::path::PathBuf {
-        self.app.current_session_dir()
+    pub(crate) fn current_artifact_dir(&self) -> std::path::PathBuf {
+        self.app.current_artifact_dir()
     }
 
     pub(crate) fn install_context_checkpoint(

@@ -10,7 +10,6 @@
 //! pending map and paired `*Response` variants on `UiCommand`.
 
 use protocol::Message;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -98,7 +97,6 @@ pub enum HostCall {
     /// Append a provider request audit row through the host's fixed-session
     /// persistence actor after the required document generation is durable.
     RequestAudit {
-        session_dir: PathBuf,
         persistence: protocol::PersistenceScope,
         entry: Box<protocol::request_log::RequestLogEntry>,
         payload_mode: smelt_store::RequestAuditPayloadMode,

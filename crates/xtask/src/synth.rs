@@ -93,9 +93,9 @@ fn generate(turns: usize, words: usize, title: Option<String>) -> Result<(), Box
     let transcript_rows = save_session_with_transcript_records(&session)?;
     println!("{}", stamp);
     eprintln!(
-        "synth: wrote {turns} turns ({} history items, {transcript_rows} transcript records) → {}",
+        "synth: wrote {turns} turns ({} history items, {transcript_rows} transcript records) to session {}",
         session.history.len(),
-        session::dir_for(&session).display()
+        session.id
     );
     eprintln!("resume with: smelt -r {stamp}");
     Ok(())
@@ -103,11 +103,13 @@ fn generate(turns: usize, words: usize, title: Option<String>) -> Result<(), Box
 
 fn save_session_with_transcript_records(session: &Session) -> Result<usize, Box<dyn Error>> {
     let receipt = session::save_result(session)?;
-    let session_dir = session::dir_for(session);
-    let root = session_dir
-        .parent()
-        .ok_or("synthetic session directory has no storage root")?;
-    let reader = smelt_store::LineageSessionReader::open_existing(root, &session.id)?;
+    let resolved = session::resolve_session_for_read_result(&session.id)?;
+    let sessions_root = resolved.sessions_root.clone();
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &sessions_root,
+        &resolved.lineage_id,
+        &session.id,
+    )?;
     let state = reader.snapshot()?;
     if state.head != receipt.current {
         return Err(format!(
@@ -124,7 +126,11 @@ fn save_session_with_transcript_records(session: &Session) -> Result<usize, Box<
         return Ok(0);
     }
 
-    let mut writer = smelt_store::OwnedLineageWriter::open_existing(root, &session.id)?;
+    let mut writer = smelt_store::OwnedLineageWriter::open_existing_in_lineage(
+        &sessions_root,
+        &resolved.lineage_id,
+        &session.id,
+    )?;
     let command = smelt_store::SessionCommit {
         session_id: session.id.clone(),
         expected: state.head,
@@ -144,11 +150,11 @@ fn save_session_with_transcript_records(session: &Session) -> Result<usize, Box<
             records,
         }),
     };
-    let receipt = writer
+    writer
         .commit_session(&command)
         .map_err(|failure| format!("synthetic transcript record commit failed: {failure:?}"))?;
+    writer.refresh_catalog()?;
     writer.release()?;
-    session::publish_session_catalog_commit(&command, &receipt, true);
     Ok(record_count)
 }
 

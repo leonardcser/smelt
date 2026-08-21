@@ -570,12 +570,9 @@ impl TestApp {
 
     /// Seed one canonical database-backed session and publish its catalog overlay.
     pub fn seed_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
-        let session_dir = self.session_dir_for_id(&meta.id);
-        let mut writer = smelt_store::OwnedLineageWriter::open(
-            session_dir.parent().expect("session root"),
-            &meta.id,
-        )
-        .expect("create session fixture database");
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(self.app.core.sessions.sessions_dir(), &meta.id)
+                .expect("create session fixture database");
         let history = if let Some(text_bytes) = meta.text_bytes.filter(|bytes| *bytes > 0) {
             let mut remaining = usize::try_from(text_bytes).expect("fixture text size fits usize");
             let mut history = Vec::new();

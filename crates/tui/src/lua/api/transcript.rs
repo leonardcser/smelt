@@ -338,17 +338,17 @@ fn fold_action(action: &str) -> Option<crate::content::transcript_buf::FoldActio
 
 fn node_id_table(
     lua: &Lua,
-    id: crate::content::render_plan::RenderNodeId,
+    id: crate::content::transcript_scene::RenderNodeId,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     match id {
-        crate::content::render_plan::RenderNodeId::Block(id) => {
+        crate::content::transcript_scene::RenderNodeId::Block(id) => {
             t.set("kind", "block")?;
             t.set("type", "block")?;
             t.set("id", id.get())?;
             t.set("block_id", id.get())?;
         }
-        crate::content::render_plan::RenderNodeId::Group(id) => {
+        crate::content::transcript_scene::RenderNodeId::Group(id) => {
             t.set("kind", "group")?;
             t.set("type", "group")?;
             t.set("id", id)?;
@@ -360,7 +360,7 @@ fn node_id_table(
 
 fn render_node_id_from_table(
     t: mlua::Table,
-) -> LuaResult<Option<crate::content::render_plan::RenderNodeId>> {
+) -> LuaResult<Option<crate::content::transcript_scene::RenderNodeId>> {
     let kind = t
         .get::<String>("kind")
         .or_else(|_| t.get::<String>("type"))
@@ -368,13 +368,15 @@ fn render_node_id_from_table(
     match kind.as_deref() {
         Some("block") => {
             let id = t.get::<u64>("block_id").or_else(|_| t.get::<u64>("id"))?;
-            Ok(Some(crate::content::render_plan::RenderNodeId::Block(
+            Ok(Some(crate::content::transcript_scene::RenderNodeId::Block(
                 smelt_core::transcript_model::BlockId::new(id),
             )))
         }
         Some("group") => {
             let id = t.get::<u64>("group_id").or_else(|_| t.get::<u64>("id"))?;
-            Ok(Some(crate::content::render_plan::RenderNodeId::Group(id)))
+            Ok(Some(crate::content::transcript_scene::RenderNodeId::Group(
+                id,
+            )))
         }
         _ => Ok(None),
     }
@@ -387,11 +389,11 @@ fn node_snapshot_table(
     let t = lua.create_table()?;
     let id = node_id_table(lua, node.id)?;
     match node.id {
-        crate::content::render_plan::RenderNodeId::Block(block_id) => {
+        crate::content::transcript_scene::RenderNodeId::Block(block_id) => {
             t.set("kind", "block")?;
             t.set("block_id", block_id.get())?;
         }
-        crate::content::render_plan::RenderNodeId::Group(group_id) => {
+        crate::content::transcript_scene::RenderNodeId::Group(group_id) => {
             t.set("kind", "group")?;
             t.set("group_id", group_id)?;
         }

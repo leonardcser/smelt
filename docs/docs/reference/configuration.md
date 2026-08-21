@@ -513,8 +513,7 @@ On Linux and macOS, they are stored under the XDG base directories:
 | Directory                           | Contents                                                                          |
 | ----------------------------------- | --------------------------------------------------------------------------------- |
 | `$XDG_CONFIG_HOME/smelt/`           | `early.lua`, `init.lua`, autoloaded `plugins/`, reusable `lua/` modules, `commands/`, and `skills/` |
-| `$XDG_STATE_HOME/smelt/sessions/`   | Canonical lineage databases, derived search projections, and ownership locks      |
-| `$XDG_STATE_HOME/smelt/catalog.db`  | Disposable session-list catalog rebuilt from canonical lineage databases         |
+| `$XDG_STATE_HOME/smelt/sessions/`   | Canonical lineage databases, derived search projections, ownership locks, and the disposable session-list catalog |
 | `$XDG_STATE_HOME/smelt/*_auth.json` | Private OAuth credential files for Codex, Copilot, and Kimi Code                  |
 | `$XDG_STATE_HOME/smelt/recent.json` | Last-used picks (model, mode, reasoning effort)                                   |
 | `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                                                   |

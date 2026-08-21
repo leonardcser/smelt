@@ -1208,7 +1208,7 @@ mod tests {
         ToolEnv {
             mode: protocol::AgentMode::parse("apply").unwrap(),
             session_id: "",
-            session_dir: p,
+            artifact_dir: p,
         }
     }
 
@@ -2703,7 +2703,7 @@ mod tests {
             ToolEnv {
                 mode: protocol::AgentMode::normal(),
                 session_id: "sess",
-                session_dir: tmp.path(),
+                artifact_dir: tmp.path(),
             },
             std::time::Instant::now(),
         );

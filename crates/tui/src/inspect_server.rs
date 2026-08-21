@@ -469,6 +469,17 @@ fn server_error(message: &str) -> (&'static str, &'static str, String) {
     )
 }
 
+fn unavailable_or_not_found(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> (&'static str, &'static str, String) {
+    match smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id) {
+        Ok(Some(_)) => server_error("session storage is unavailable"),
+        Ok(None) => not_found(),
+        Err(error) => server_error(&error.to_string()),
+    }
+}
+
 async fn list_sessions(
     sessions: &smelt_core::session::SessionStorage,
     query: &str,
@@ -538,6 +549,8 @@ async fn session_detail(
     id: &str,
 ) -> (&'static str, &'static str, String) {
     let id = id.to_string();
+    let lookup_id = id.clone();
+    let lookup_sessions = sessions.clone();
     let sessions = sessions.clone();
     let session = match tokio::task::spawn_blocking(move || {
         smelt_perf::perf::record_value("session:full_materialized", 1);
@@ -548,7 +561,7 @@ async fn session_detail(
     {
         Ok(Ok(session)) => session,
         Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
-            return not_found();
+            return unavailable_or_not_found(&lookup_sessions, &lookup_id);
         }
         Ok(Err(err)) => return server_error(&err.to_string()),
         Err(err) => return server_error(&err.to_string()),
@@ -558,7 +571,7 @@ async fn session_detail(
             Ok(body) => ("200 OK", "application/json", body),
             Err(e) => server_error(&e.to_string()),
         },
-        None => not_found(),
+        None => unavailable_or_not_found(&lookup_sessions, &lookup_id),
     }
 }
 
@@ -567,12 +580,14 @@ async fn session_summary(
     id: &str,
 ) -> (&'static str, &'static str, String) {
     let id = id.to_string();
+    let lookup_id = id.clone();
+    let lookup_sessions = sessions.clone();
     let sessions = sessions.clone();
     let summary =
         match tokio::task::spawn_blocking(move || build_session_summary(&sessions, &id)).await {
             Ok(Ok(summary)) => summary,
             Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
-                return not_found();
+                return unavailable_or_not_found(&lookup_sessions, &lookup_id);
             }
             Ok(Err(err)) => return server_error(&err.to_string()),
             Err(err) => return server_error(&err.to_string()),
@@ -582,7 +597,7 @@ async fn session_summary(
             Ok(body) => ("200 OK", "application/json", body),
             Err(e) => server_error(&e.to_string()),
         },
-        None => not_found(),
+        None => unavailable_or_not_found(&lookup_sessions, &lookup_id),
     }
 }
 
@@ -608,9 +623,18 @@ fn session_requests_json(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> std::result::Result<Option<String>, String> {
-    let id = match sessions.resolve_prefix(id) {
-        Ok(id) => id,
-        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
+    let resolved = match sessions.resolve_session_for_read_result(id) {
+        Ok(resolved) => resolved,
+        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
+            return match smelt_store::LineageSessionReader::try_open_existing(
+                sessions.sessions_dir(),
+                id,
+            ) {
+                Ok(None) => Ok(None),
+                Ok(Some(_)) => Err("session storage is unavailable".into()),
+                Err(error) => Err(error.to_string()),
+            };
+        }
         Err(err) => return Err(err.to_string()),
     };
     let query = smelt_store::RequestAuditQuery {
@@ -618,9 +642,12 @@ fn session_requests_json(
         order: smelt_store::RequestAuditOrder::OldestFirst,
         ..Default::default()
     };
-    let reader =
-        smelt_store::LineageSessionReader::open_existing(sessions.sessions_dir(), id.as_str())
-            .map_err(|err| err.to_string())?;
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &resolved.sessions_root,
+        &resolved.lineage_id,
+        &resolved.id,
+    )
+    .map_err(|err| err.to_string())?;
     let attempts = reader
         .query_request_attempts(&query)
         .map_err(|err| err.to_string())?;
@@ -661,14 +688,26 @@ fn request_payload_json(
     id: &str,
     attempt_id: i64,
 ) -> std::result::Result<Option<String>, String> {
-    let id = match sessions.resolve_prefix(id) {
-        Ok(id) => id,
-        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
+    let resolved = match sessions.resolve_session_for_read_result(id) {
+        Ok(resolved) => resolved,
+        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
+            return match smelt_store::LineageSessionReader::try_open_existing(
+                sessions.sessions_dir(),
+                id,
+            ) {
+                Ok(None) => Ok(None),
+                Ok(Some(_)) => Err("session storage is unavailable".into()),
+                Err(error) => Err(error.to_string()),
+            };
+        }
         Err(err) => return Err(err.to_string()),
     };
-    let reader =
-        smelt_store::LineageSessionReader::open_existing(sessions.sessions_dir(), id.as_str())
-            .map_err(|err| err.to_string())?;
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &resolved.sessions_root,
+        &resolved.lineage_id,
+        &resolved.id,
+    )
+    .map_err(|err| err.to_string())?;
     let payloads = reader
         .request_payloads(attempt_id)
         .map_err(|err| err.to_string())?;
@@ -1139,7 +1178,10 @@ mod tests {
             format!("/api/sessions/{NEWER_SESSION_ID}/requests/1"),
         ] {
             let (head, body) = fetch(&state.sessions, &path).await;
-            assert_status(&head, "500 Internal Server Error");
+            assert!(
+                head.contains("500 Internal Server Error"),
+                "path {path}: expected 500 Internal Server Error, got response headers: {head}"
+            );
             assert!(serde_json::from_str::<serde_json::Value>(&body).is_ok());
         }
     }

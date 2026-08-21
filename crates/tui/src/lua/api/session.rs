@@ -578,7 +578,7 @@ pub(super) fn register(
             let out = lua.create_table()?;
             if let Some(info) = crate::lua::try_with_session_host(|host| host.session_info()) {
                 out.set("id", info.id)?;
-                out.set("dir", info.dir.display().to_string())?;
+                out.set("artifact_dir", info.artifact_dir.display().to_string())?;
                 out.set("ephemeral", info.ephemeral)?;
                 out.set("title", info.title)?;
                 out.set("slug", info.slug)?;
@@ -623,17 +623,17 @@ pub(super) fn register(
     )?;
     m.fn_(
         "id",
-        "Stable session id (matches the on-disk session filename).",
+        "Stable session id used by canonical storage and provider cache routing.",
         &[],
         |_, ()| Ok(crate::lua::try_with_session_host(|host| host.session_id()).unwrap_or_default()),
     )?;
     m.fn_(
-        "dir",
-        "Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
+        "artifact_dir",
+        "Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(
-                crate::lua::try_with_session_host(|host| host.current_session_dir().display().to_string())
+                crate::lua::try_with_session_host(|host| host.current_artifact_dir().display().to_string())
                     .unwrap_or_default(),
             )
         },

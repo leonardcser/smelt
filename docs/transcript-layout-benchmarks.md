@@ -40,6 +40,45 @@ cargo xtask bench-transcript-layout --runs 5 --tall-write-only \
 cargo xtask bench-transcript-layout --debug --runs 1 --workloads mixed_10mib
 ```
 
+## Provider streaming and interaction
+
+The streaming workload sends real `EngineEvent::TextDelta` values through the
+application dispatcher. The scaling mode performs a full silent terminal render
+after each revision; `--stream-scroll` uses the production scheduler cadence.
+Setup and the initial transcript render are outside the measured interval.
+
+```bash
+# Response-length scaling.
+cargo xtask bench-transcript-layout --runs 5 --stream-only \
+  --stream-history 100 --stream-chunks 2048 --stream-bytes 65536
+
+# Transcript-size scaling.
+cargo xtask bench-transcript-layout --runs 5 --stream-only \
+  --stream-history 10000 --stream-chunks 256 --stream-bytes 7936
+
+# Interleave transcript navigation with provider output.
+cargo xtask bench-transcript-layout --runs 5 --stream-only --stream-scroll \
+  --stream-history 10000 --stream-chunks 512 --stream-bytes 16384
+```
+
+Each run reports total, dispatch, and render latency; p95, p99, and maximum tails;
+calling-thread allocations; and process allocation, deallocation, and retained
+bytes. Use the response-length cases to detect work proportional to accumulated
+live output. Use transcript-size cases to detect global scene or cache scans.
+`--stream-scroll` sends deltas at a 1 ms cadence through the production frame
+scheduler, interleaves urgent transcript navigation, and reports actual traced
+frames plus request-to-terminal-flush p99 latency. This exposes input starvation,
+excess frames, and frame-tail regressions while the engine is active.
+
+The rearchitecture acceptance gates are:
+
+- input-to-frame below 16.7 ms p95 and 33 ms p99 while streaming;
+- streaming document and scene work independent of prior transcript block count;
+- a 64 KiB response in 2,048 chunks allocates less than 16 MiB in the warmed
+  document and scene hot path;
+- ordinary streaming frames are capped at 60 per second while first output, final
+  output, and interaction frames remain urgent.
+
 Current projection workloads:
 
 - `mixed_10mib`: representative mixed transcript with user, assistant markdown,
@@ -183,7 +222,7 @@ TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 1 --skip-nav \
   --save-request-item-bytes 8192
 ```
 
-The fixture path must be a complete copied sessions root containing `lineages/`;
+The fixture path must be a complete copied sessions root containing lineage directories;
 `--save-request-session-id` selects the branch to resume. The harness copies the
 complete root into an isolated test home, resumes through the normal application
 path, and mutates only that copy. Copy and resume setup are reported separately
@@ -268,9 +307,7 @@ The exact append decision is shared by materialized and resumed sessions. Resume
 planning uses scalar SQLite projections for visibility, note kind, context name,
 and effective mode rather than hydrating payload rows. Canonical controls are
 also checked between best-effort request-audit transactions, so queued audits do
-not delay a new turn. A compatibility alias accepts the schema-v8
-`descriptor_len` field in opaque `last_session_commit` receipts while always
-writing the current `transcript_record_count` name.
+not delay a new turn.
 
 SQLite `synchronous = FULL`, one canonical transaction per Enter, and provider
 dispatch only after the durable receipt remain unchanged. Representative final

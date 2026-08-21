@@ -27,34 +27,15 @@ pub(crate) fn is_left_down(kind: MouseEventKind) -> bool {
     matches!(kind, MouseEventKind::Down(MouseButton::Left))
 }
 
-/// Inspect the capture state immediately before and after `Ui::dispatch_event`
-/// and report which window owns the scrollbar drag, if any. Either edge of
-/// the transition counts: capture *starts* on Down, but a drag/Up still
-/// observes the scrollbar in `cap_before` after `Ui::dispatch_event` clears it.
-pub(crate) fn scrollbar_owner_from_capture_transition(
+/// Inspect the capture state immediately before and after `Ui::dispatch_event`.
+/// Either edge counts: capture starts on Down, while Up clears it during
+/// dispatch.
+pub(crate) fn is_scrollbar_capture_transition(
     before: Option<HitTarget>,
     after: Option<HitTarget>,
-) -> Option<WinId> {
-    match (before, after) {
-        (Some(HitTarget::Scrollbar { owner }), _) | (_, Some(HitTarget::Scrollbar { owner })) => {
-            Some(owner)
-        }
-        _ => None,
-    }
-}
-
-/// Map a well-known [`WinId`] to the [`AppFocus`] it represents. Used by the
-/// scrollbar-click path so dragging the transcript scrollbar promotes
-/// content focus and dragging the prompt scrollbar promotes prompt focus.
-/// Returns `None` for any other window.
-pub(crate) fn app_focus_for_owner(owner: WinId) -> Option<AppFocus> {
-    if owner == crate::app::TRANSCRIPT_WIN {
-        Some(AppFocus::Content)
-    } else if owner == crate::app::PROMPT_WIN {
-        Some(AppFocus::Prompt)
-    } else {
-        None
-    }
+) -> bool {
+    matches!(before, Some(HitTarget::Scrollbar { .. }))
+        || matches!(after, Some(HitTarget::Scrollbar { .. }))
 }
 
 /// Compute the new [`AppFocus`] for a left-down click landing in `region`.
@@ -357,14 +338,7 @@ impl TuiApp {
                 self.refresh_main_layout();
                 return EventOutcome::Redraw;
             }
-            if let Some(owner) = scrollbar_owner_from_capture_transition(cap_before, cap_after) {
-                // While a modal is open, the modal keeps focus - scrolling a
-                // background pane's scrollbar must not steal it.
-                if is_left_down(me.kind) && self.ui.active_modal().is_none() {
-                    if let Some(focus) = app_focus_for_owner(owner) {
-                        self.app_focus = focus;
-                    }
-                }
+            if is_scrollbar_capture_transition(cap_before, cap_after) {
                 return EventOutcome::Redraw;
             }
             return if is_scroll_event(me.kind) {
@@ -900,62 +874,29 @@ mod tests {
         assert!(!is_left_down(MouseEventKind::Drag(MouseButton::Left)));
     }
 
-    // ── scrollbar_owner_from_capture_transition ─────────────────────────
+    // ── is_scrollbar_capture_transition ─────────────────────────────────
 
-    /// A WinId guaranteed not to collide with `PROMPT_WIN`/`TRANSCRIPT_WIN`,
-    /// for testing the "unknown owner" branch of `app_focus_for_owner`.
     fn other_win() -> WinId {
         WinId(9999)
     }
 
     #[test]
-    fn scrollbar_owner_is_none_when_neither_capture_was_a_scrollbar() {
-        assert_eq!(scrollbar_owner_from_capture_transition(None, None), None);
+    fn scrollbar_transition_is_false_without_scrollbar_capture() {
+        assert!(!is_scrollbar_capture_transition(None, None));
     }
 
     #[test]
-    fn scrollbar_owner_recovers_from_before_when_after_is_cleared() {
-        // `Up` clears capture but we still want to know who owned the drag.
-        let owner = other_win();
-        let before = Some(HitTarget::Scrollbar { owner });
-        assert_eq!(
-            scrollbar_owner_from_capture_transition(before, None),
-            Some(owner)
-        );
+    fn scrollbar_transition_detects_capture_before_dispatch() {
+        // `Up` clears capture during dispatch.
+        let before = Some(HitTarget::Scrollbar { owner: other_win() });
+        assert!(is_scrollbar_capture_transition(before, None));
     }
 
     #[test]
-    fn scrollbar_owner_picks_up_after_when_before_was_empty() {
-        // `Down` sets capture for the first time; `before` was `None`.
-        let owner = other_win();
-        let after = Some(HitTarget::Scrollbar { owner });
-        assert_eq!(
-            scrollbar_owner_from_capture_transition(None, after),
-            Some(owner)
-        );
-    }
-
-    // ── app_focus_for_owner ──────────────────────────────────────────────
-
-    #[test]
-    fn app_focus_for_owner_maps_transcript_window_to_content_focus() {
-        assert_eq!(
-            app_focus_for_owner(crate::app::TRANSCRIPT_WIN),
-            Some(AppFocus::Content)
-        );
-    }
-
-    #[test]
-    fn app_focus_for_owner_maps_prompt_window_to_prompt_focus() {
-        assert_eq!(
-            app_focus_for_owner(crate::app::PROMPT_WIN),
-            Some(AppFocus::Prompt)
-        );
-    }
-
-    #[test]
-    fn app_focus_for_owner_returns_none_for_unrelated_windows() {
-        assert_eq!(app_focus_for_owner(other_win()), None);
+    fn scrollbar_transition_detects_capture_after_dispatch() {
+        // `Down` establishes capture during dispatch.
+        let after = Some(HitTarget::Scrollbar { owner: other_win() });
+        assert!(is_scrollbar_capture_transition(None, after));
     }
 
     // ── focus_for_region_click ───────────────────────────────────────────
@@ -1658,6 +1599,47 @@ mod tests {
         let win = app.transcript_win();
         assert_eq!(win.scroll_top(), tail_top);
         assert!(win.is_following_tail());
+    }
+
+    #[test]
+    fn transcript_scrollbar_gesture_preserves_prompt_focus_until_content_click() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.render_normal_to(&mut std::io::sink());
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        let bar = vp.scrollbar.expect("transcript scrollbar");
+        app.app_focus = AppFocus::Prompt;
+        app.ui.set_focus(crate::app::PROMPT_WIN);
+
+        app.handle_mouse(left_down(vp.rect.top, bar.col));
+        assert_eq!(
+            app.ui.capture(),
+            Some(HitTarget::Scrollbar {
+                owner: crate::app::TRANSCRIPT_WIN
+            })
+        );
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
+
+        app.handle_mouse(left_drag(vp.rect.bottom().saturating_sub(1), bar.col));
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
+
+        app.handle_mouse(left_up(vp.rect.bottom().saturating_sub(1), bar.col));
+        assert_eq!(app.ui.capture(), None);
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
+
+        app.handle_mouse(left_down(vp.rect.top, vp.rect.left));
+        assert_eq!(app.app_focus, AppFocus::Content);
+        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
     }
 
     #[test]

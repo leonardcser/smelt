@@ -277,8 +277,7 @@ struct DerivedRevisionDoctor {
 struct SessionBackupManifest {
     format_version: u32,
     session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lineage_id: Option<String>,
+    lineage_id: String,
     schema_version: i32,
     created_at_ms: u64,
     database_file: String,
@@ -570,8 +569,7 @@ fn write_backup_manifest(
 
 fn resolve_session_target(reference: &str) -> Result<(String, PathBuf), String> {
     let id = smelt_core::session::resolve_prefix(reference).map_err(|err| err.to_string())?;
-    let dir = smelt_core::session::session_dir(&id);
-    Ok((id.into_string(), dir))
+    Ok((id.into_string(), smelt_core::session::sessions_dir()))
 }
 
 fn derived_revision_doctor(canonical_revision: u64, source_revision: u64) -> DerivedRevisionDoctor {
@@ -608,13 +606,11 @@ fn missing_derived_revision(state: DerivedRevisionState) -> DerivedRevisionDocto
 
 fn catalog_doctor(
     session_id: &str,
-    session_dir: &std::path::Path,
+    sessions_root: &std::path::Path,
     canonical_revision: u64,
 ) -> DerivedRevisionDoctor {
-    let Some(state_root) = session_dir.parent().and_then(std::path::Path::parent) else {
-        return unavailable_derived_revision("session directory has no state root");
-    };
-    match smelt_store::CatalogReader::open_existing(state_root.join("catalog.db")) {
+    let layout = smelt_store::SessionStoreLayout::from_sessions_root(sessions_root);
+    match smelt_store::CatalogReader::open_existing(layout.catalog_path()) {
         Ok(None) => missing_derived_revision(DerivedRevisionState::Missing),
         Ok(Some(catalog)) => match catalog.session(session_id) {
             Ok(None) => missing_derived_revision(DerivedRevisionState::Missing),
@@ -632,7 +628,7 @@ fn catalog_doctor(
 }
 
 fn doctor_session(reference: &str) -> SessionDoctorOutput {
-    let (session_id, dir) = match resolve_session_target(reference) {
+    let (session_id, sessions_root) = match resolve_session_target(reference) {
         Ok(resolved) => resolved,
         Err(error) => {
             return SessionDoctorOutput {
@@ -644,10 +640,7 @@ fn doctor_session(reference: &str) -> SessionDoctorOutput {
         }
     };
     let result = (|| {
-        let sessions_root = dir.parent().ok_or_else(|| {
-            smelt_store::StoreError::Integrity("session has no storage root".into())
-        })?;
-        let reader = smelt_store::LineageSessionReader::open_existing(sessions_root, &session_id)?;
+        let reader = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id)?;
         let report = reader.doctor_report()?;
         let canonical_revision = reader.snapshot()?.head.revision.get();
         let turns = reader.turns()?;
@@ -665,7 +658,7 @@ fn doctor_session(reference: &str) -> SessionDoctorOutput {
                 created_at_ms: turn.created_at_ms,
             })
             .collect();
-        let catalog = catalog_doctor(&session_id, &dir, canonical_revision);
+        let catalog = catalog_doctor(&session_id, &sessions_root, canonical_revision);
         Ok::<_, smelt_store::StoreError>((
             report,
             SessionRecoveryDoctor {
@@ -825,11 +818,8 @@ fn with_lineage_writer<T>(
     reference: &str,
     action: impl FnOnce(&mut smelt_store::OwnedLineageWriter) -> Result<T, String>,
 ) -> Result<T, String> {
-    let (session_id, dir) = resolve_session_target(reference)?;
-    let root = dir
-        .parent()
-        .ok_or_else(|| "session directory has no parent".to_string())?;
-    let mut writer = smelt_store::OwnedLineageWriter::open_existing(root, session_id)
+    let (session_id, sessions_root) = resolve_session_target(reference)?;
+    let mut writer = smelt_store::OwnedLineageWriter::open_existing(&sessions_root, session_id)
         .map_err(|err| format!("failed to acquire lineage maintenance ownership: {err}"))?;
     let result = action(&mut writer);
     let release = writer
@@ -853,53 +843,51 @@ fn run_session_command(args: SessionArgs) {
         }),
         SessionCommand::Backup(args) => {
             let manifest_path = backup_manifest_path(&args.output);
-            let result = resolve_session_target(&args.session).and_then(|(session_id, dir)| {
-                let sessions_root = dir
-                    .parent()
-                    .ok_or_else(|| "session directory has no storage root".to_string())?;
-                let backup_result = (|| {
-                    let reader = smelt_store::LineageSessionReader::open_existing(
-                        sessions_root,
-                        &session_id,
-                    )
-                    .map_err(|err| format!("failed to open lineage session: {err}"))?;
-                    let lineage_id = reader.lineage_id().to_owned();
-                    reader
-                        .backup_to(&args.output)
-                        .map_err(|err| format!("failed to back up lineage: {err}"))?;
-                    let report = smelt_store::verify_lineage_backup(&args.output, &lineage_id)
-                        .map_err(|err| format!("failed to verify lineage backup: {err}"))?;
-                    Ok::<_, String>((2, Some(lineage_id), report.schema_version, report.stats))
-                })();
-                let (format_version, lineage_id, schema_version, stats) = match backup_result {
-                    Ok(backup) => backup,
-                    Err(error) => {
+            let result =
+                resolve_session_target(&args.session).and_then(|(session_id, sessions_root)| {
+                    let backup_result = (|| {
+                        let reader = smelt_store::LineageSessionReader::open_existing(
+                            sessions_root,
+                            &session_id,
+                        )
+                        .map_err(|err| format!("failed to open lineage session: {err}"))?;
+                        let lineage_id = reader.lineage_id().to_owned();
+                        reader
+                            .backup_to(&args.output)
+                            .map_err(|err| format!("failed to back up lineage: {err}"))?;
+                        let report = smelt_store::verify_lineage_backup(&args.output, &lineage_id)
+                            .map_err(|err| format!("failed to verify lineage backup: {err}"))?;
+                        Ok::<_, String>((1, lineage_id, report.schema_version, report.stats))
+                    })();
+                    let (format_version, lineage_id, schema_version, stats) = match backup_result {
+                        Ok(backup) => backup,
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&args.output);
+                            return Err(error);
+                        }
+                    };
+                    let finalize = write_backup_manifest(
+                        &manifest_path,
+                        &SessionBackupManifest {
+                            format_version,
+                            session_id,
+                            lineage_id,
+                            schema_version,
+                            created_at_ms: smelt_core::session::now_ms(),
+                            database_file: args
+                                .output
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                            stats,
+                        },
+                    );
+                    if finalize.is_err() {
                         let _ = std::fs::remove_file(&args.output);
-                        return Err(error);
                     }
-                };
-                let finalize = write_backup_manifest(
-                    &manifest_path,
-                    &SessionBackupManifest {
-                        format_version,
-                        session_id,
-                        lineage_id,
-                        schema_version,
-                        created_at_ms: smelt_core::session::now_ms(),
-                        database_file: args
-                            .output
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        stats,
-                    },
-                );
-                if finalize.is_err() {
-                    let _ = std::fs::remove_file(&args.output);
-                }
-                finalize
-            });
+                    finalize
+                });
             if result.is_ok() {
                 println!("backup: {}", args.output.display());
                 println!("manifest: {}", manifest_path.display());

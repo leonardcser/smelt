@@ -371,15 +371,13 @@ impl TuiApp {
             return;
         }
 
+        let Some(store_address) = self.conversation.transcript().store_address().cloned() else {
+            return;
+        };
         let request = TranscriptSearchWorkerRequest {
             generation,
             context: current_context,
-            session_dir: self
-                .conversation
-                .transcript()
-                .session_dir()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| self.conversation.current_session_dir()),
+            store_address,
             query,
             origin_block_idx: original
                 .transcript

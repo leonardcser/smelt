@@ -30,16 +30,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+      - name: Install pinned Rust
+        run: rustup toolchain install
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+
+      - name: Install coverage compiler tools
+        run: rustup component add llvm-tools-preview
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -189,8 +190,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        run: rustup toolchain install
 
       - name: Set up Rust (nightly for cargo-fuzz)
         uses: dtolnay/rust-toolchain@nightly

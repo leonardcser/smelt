@@ -515,14 +515,6 @@ impl TestApp {
         self.app.core.sessions.state_root()
     }
 
-    pub fn session_dir(&self) -> std::path::PathBuf {
-        self.app.current_session_dir()
-    }
-
-    pub fn session_dir_for_id(&self, id: &str) -> std::path::PathBuf {
-        self.app.core.sessions.dir_for_id(id)
-    }
-
     /// Resume a canonical session through the app's normal storage path.
     pub fn resume_session(&mut self, id: &str) -> bool {
         self.app.load_session_by_id(id)
@@ -536,7 +528,7 @@ impl TestApp {
         self.app
             .core
             .sessions
-            .publish_session_catalog_commit(command, receipt, true);
+            .publish_session_catalog_commit(command, receipt);
     }
 
     pub fn reconcile_session_catalog(&self) -> Result<(), String> {

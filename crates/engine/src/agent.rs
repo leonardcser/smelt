@@ -17,7 +17,6 @@ use smelt_provider::{
     ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat, ToolCallStreamEvent, ToolDefinition,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::time::Instant;
@@ -36,7 +35,6 @@ fn next_invocation_id() -> protocol::InvocationId {
 
 fn dispatch_request_audit(
     host_tx: &crate::HostCallSender,
-    session_dir: &Path,
     persistence: protocol::PersistenceScope,
     ctx: crate::request_log::RequestContext,
     info: &RequestAttemptInfo<'_>,
@@ -47,7 +45,6 @@ fn dispatch_request_audit(
         return;
     };
     let _ = host_tx.send(crate::host::HostCall::RequestAudit {
-        session_dir: session_dir.to_path_buf(),
         persistence,
         entry: Box::new(entry),
         payload_mode,
@@ -172,14 +169,14 @@ pub(crate) async fn engine_task(
                             fast_mode,
                             history,
                             session_id,
-                            session_dir,
+                            sessions_root,
                             persistence,
                             permission_overrides,
                             system_prompt: tui_system_prompt,
                             tools,
                         } = *payload;
                         let loaded_history =
-                            match load_model_history(history, &session_dir, &session_id) {
+                            match load_model_history(history, &sessions_root, &session_id) {
                             Ok(history) => history,
                             Err(message) => {
                                 let _ = event_tx.send(EngineEvent::TurnError {
@@ -237,7 +234,6 @@ pub(crate) async fn engine_task(
                             next_history_changed_from: 0,
                             history_revision: 0,
                             session_id,
-                            session_dir,
                             persistence,
                             started_at,
                             tps_samples: Vec::new(),
@@ -280,7 +276,7 @@ struct LoadedModelHistory {
 
 fn load_model_history(
     source: protocol::ModelHistorySource,
-    session_dir: &std::path::Path,
+    sessions_root: &std::path::Path,
     session_id: &str,
 ) -> Result<LoadedModelHistory, String> {
     let _perf = smelt_perf::perf::begin("engine:model_history:load");
@@ -293,6 +289,7 @@ fn load_model_history(
         }
         protocol::ModelHistorySource::Store {
             prefix,
+            lineage_id,
             first_live_index,
             end_index,
             suffix,
@@ -310,18 +307,19 @@ fn load_model_history(
             );
             let mut history = prefix;
             if end_index > first_live_index {
-                let root = session_dir.parent().ok_or_else(|| {
-                    format!("session directory has no storage root: {session_dir:?}")
-                })?;
-                let mut rows = smelt_store::LineageSessionReader::open_existing(root, session_id)
-                    .map_err(|err| format!("open model history lineage: {err}"))?
-                    .history_range(
-                        u64::try_from(first_live_index)
-                            .map_err(|_| "model history start index exceeds u64".to_string())?,
-                        u64::try_from(end_index)
-                            .map_err(|_| "model history end index exceeds u64".to_string())?,
-                    )
-                    .map_err(|err| format!("read lineage model history rows: {err}"))?;
+                let mut rows = smelt_store::LineageSessionReader::open_existing_in_lineage(
+                    sessions_root,
+                    lineage_id,
+                    session_id,
+                )
+                .map_err(|err| format!("open model history lineage: {err}"))?
+                .history_range(
+                    u64::try_from(first_live_index)
+                        .map_err(|_| "model history start index exceeds u64".to_string())?,
+                    u64::try_from(end_index)
+                        .map_err(|_| "model history end index exceeds u64".to_string())?,
+                )
+                .map_err(|err| format!("read lineage model history rows: {err}"))?;
                 smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
                 history.append(&mut rows);
             }
@@ -352,8 +350,6 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
-    /// On-disk directory for this session. Used to identify request audits.
-    pub session_dir: std::path::PathBuf,
     pub persistence: protocol::PersistenceScope,
     /// Whether text deltas for this auxiliary request should be forwarded
     /// as `EngineAskDelta` events.
@@ -431,7 +427,6 @@ pub(crate) fn dispatch_background_cmd(
             fast_mode,
             tools,
             session_id,
-            session_dir,
             persistence,
             stream,
             visible_retries,
@@ -451,7 +446,6 @@ pub(crate) fn dispatch_background_cmd(
                     fast_mode,
                     tools,
                     session_id,
-                    session_dir,
                     persistence,
                     stream,
                     visible_retries,
@@ -486,7 +480,6 @@ fn spawn_engine_ask(
         fast_mode,
         tools: supplied_tools,
         session_id,
-        session_dir,
         persistence,
         stream,
         visible_retries,
@@ -524,7 +517,6 @@ fn spawn_engine_ask(
     let audit_host_tx = host_tx.clone();
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
-        let log_session_dir = session_dir.clone();
         let ask_id = id;
 
         let mut opts = ChatOptions::new(&cancel);
@@ -595,7 +587,6 @@ fn spawn_engine_ask(
                 };
                 dispatch_request_audit(
                     &audit_host_tx,
-                    &log_session_dir,
                     persistence,
                     ctx,
                     &info,
@@ -965,8 +956,6 @@ struct Turn<'a> {
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
-    /// On-disk directory for this session. Used to identify request audits.
-    session_dir: std::path::PathBuf,
     persistence: protocol::PersistenceScope,
     started_at: Instant,
     tps_samples: Vec<f64>,
@@ -2673,7 +2662,6 @@ impl<'a> Turn<'a> {
                 &self.model_target.api_base,
                 &self.model_target.config,
             );
-            let session_dir = self.session_dir.clone();
             let persistence = self.persistence;
             let audit_host_tx = self.host_tx.clone();
             let turn_id = self.turn_id;
@@ -2700,7 +2688,6 @@ impl<'a> Turn<'a> {
                 };
                 dispatch_request_audit(
                     &audit_host_tx,
-                    &session_dir,
                     persistence,
                     ctx,
                     &info,
@@ -3372,7 +3359,6 @@ mod tests {
     fn load_model_history_reads_requested_lineage_range() {
         let root = tempfile::tempdir().unwrap();
         let session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let session_dir = root.path().join(session_id);
         let old = HistoryItem::user(protocol::Content::text("old"));
         let recent = HistoryItem::user(protocol::Content::text("recent"));
         let reply = HistoryItem::Assistant(protocol::AssistantStep::terminal(
@@ -3383,6 +3369,7 @@ mod tests {
         let command = test_store_commit(session_id, vec![old, recent.clone(), reply.clone()]);
         let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), session_id).unwrap();
         writer.commit_session(&command).unwrap();
+        let lineage_id = writer.lineage_id().to_string();
         writer.release().unwrap();
 
         let history = load_model_history(
@@ -3390,10 +3377,11 @@ mod tests {
                 vec![HistoryItem::user(protocol::Content::text(
                     "SUMMARY:\ncompact",
                 ))],
+                lineage_id,
                 1,
                 3,
             ),
-            &session_dir,
+            root.path(),
             session_id,
         )
         .unwrap();
@@ -3414,15 +3402,15 @@ mod tests {
     fn model_history_read_completes_while_writer_remains_owned() {
         let root = tempfile::tempdir().unwrap();
         let session_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let session_dir = root.path().join(session_id);
         let item = HistoryItem::user(protocol::Content::text("persisted"));
         let command = test_store_commit(session_id, vec![item.clone()]);
         let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), session_id).unwrap();
         writer.commit_session(&command).unwrap();
+        let lineage_id = writer.lineage_id().to_string();
 
         let history = load_model_history(
-            protocol::ModelHistorySource::store(Vec::new(), 0, 1),
-            &session_dir,
+            protocol::ModelHistorySource::store(Vec::new(), lineage_id, 0, 1),
+            root.path(),
             session_id,
         )
         .unwrap();
@@ -3676,7 +3664,6 @@ mod tests {
             next_history_changed_from: 0,
             history_revision: 0,
             session_id: "s".into(),
-            session_dir: std::path::PathBuf::from("/tmp/s"),
             persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
@@ -3881,7 +3868,6 @@ mod tests {
             next_history_changed_from: 0,
             history_revision: 0,
             session_id: "s".into(),
-            session_dir: std::path::PathBuf::from("/tmp/s"),
             persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
@@ -3992,7 +3978,7 @@ mod tests {
                 protocol::ModelHistoryCoordinates::projected(1, 24),
             ),
             session_id: "s".into(),
-            session_dir: std::path::PathBuf::from("/tmp"),
+            sessions_root: std::path::PathBuf::from("/tmp"),
             persistence: protocol::PersistenceScope::default(),
             permission_overrides: None,
             system_prompt: Some("sys".into()),

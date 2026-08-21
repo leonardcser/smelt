@@ -165,15 +165,32 @@ impl SessionPersistence {
         matches!(self, Self::Ephemeral { .. })
     }
 
-    fn session_dir(
+    fn artifact_dir(
         &self,
         sessions: &smelt_core::session::SessionStorage,
         session: &smelt_core::session::Session,
     ) -> std::path::PathBuf {
         match self {
-            Self::Persistent => sessions.dir_for(session),
+            Self::Persistent => sessions.artifact_dir_for(session),
             Self::Ephemeral { dir } => dir.path().to_path_buf(),
         }
+    }
+
+    fn transcript_store_address(
+        &self,
+        sessions: &smelt_core::session::SessionStorage,
+        session: &smelt_core::session::Session,
+    ) -> Option<crate::app::transcript::TranscriptStoreAddress> {
+        matches!(self, Self::Persistent)
+            .then(|| sessions.resolve_session_for_read(&session.id))
+            .flatten()
+            .map(|resolved| {
+                crate::app::transcript::TranscriptStoreAddress::new(
+                    resolved.sessions_root,
+                    resolved.id,
+                    resolved.lineage_id,
+                )
+            })
     }
 }
 
@@ -253,13 +270,13 @@ pub struct TuiApp {
     pub(crate) workspace: crate::app::cwd::WorkspaceState,
     pub(crate) task_label: Option<String>,
     pub(crate) pending_quit: bool,
+    pub(crate) pending_session_save: bool,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) working: smelt_core::working::WorkingState,
     /// Viewport layout updated each frame; read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
     platform: crate::app::platform_runtime::PlatformRuntime,
-    /// Set by transient UI updates that can disappear before the next normal frame.
-    transient_render_requested: bool,
+    frame_scheduler: crate::app::render_loop::FrameScheduler,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     managed_models: crate::app::managed_models::ManagedModelState,
@@ -1197,12 +1214,28 @@ impl TuiApp {
         self.active_agent_turn_id().is_some()
     }
 
-    pub(crate) fn request_transient_render(&mut self) {
-        self.transient_render_requested = true;
+    pub(crate) fn request_urgent_render(&mut self) {
+        self.frame_scheduler
+            .request(crate::app::render_loop::FrameUrgency::Urgent);
     }
 
-    pub(crate) fn clear_transient_render_request(&mut self) {
-        self.transient_render_requested = false;
+    pub(crate) fn request_streaming_render(&mut self) {
+        self.frame_scheduler
+            .request(crate::app::render_loop::FrameUrgency::Streaming);
+    }
+
+    pub(crate) fn request_animation_render(&mut self, interval: Duration) {
+        self.frame_scheduler
+            .request(crate::app::render_loop::FrameUrgency::Animation(interval));
+    }
+
+    pub(crate) fn scheduled_frame_delay(&self) -> Option<Duration> {
+        self.frame_scheduler
+            .next_delay(self.core.clock.instant_now())
+    }
+
+    pub(crate) fn scheduled_frame_is_due(&self) -> bool {
+        self.frame_scheduler.is_due(self.core.clock.instant_now())
     }
 
     pub(crate) fn prompt_work_state(&self) -> PromptWorkState {
@@ -1251,8 +1284,8 @@ impl TuiApp {
         self.conversation.is_ephemeral()
     }
 
-    pub(crate) fn current_session_dir(&self) -> std::path::PathBuf {
-        self.conversation.current_session_dir()
+    pub(crate) fn current_artifact_dir(&self) -> std::path::PathBuf {
+        self.conversation.current_artifact_dir()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
@@ -1885,11 +1918,12 @@ impl TuiApp {
             workspace,
             task_label: None,
             pending_quit: false,
+            pending_session_save: false,
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             working: smelt_core::working::WorkingState::new(working_clock),
             layout: crate::content::layout::LayoutState::default(),
             platform,
-            transient_render_requested: false,
+            frame_scheduler: crate::app::render_loop::FrameScheduler::default(),
             last_width: term_w,
             last_height: term_h,
             managed_models,
@@ -3047,6 +3081,22 @@ impl TuiApp {
         let _ = self.core.workspace_files.warmup(self.workspace.cwd_path());
     }
 
+    fn render_scheduled_after_startup_work(
+        &mut self,
+        workspace_warmup_pending: &mut bool,
+        pre_first_frame_startup: &mut Option<smelt_perf::perf::Guard>,
+        first_frame_pending: &mut bool,
+    ) {
+        if !*first_frame_pending && !self.scheduled_frame_is_due() {
+            return;
+        }
+        self.render_normal_after_startup_work(
+            workspace_warmup_pending,
+            pre_first_frame_startup,
+            first_frame_pending,
+        );
+    }
+
     fn render_normal_after_startup_work(
         &mut self,
         workspace_warmup_pending: &mut bool,
@@ -3242,8 +3292,6 @@ impl TuiApp {
             }
         }
 
-        const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-
         'main: loop {
             if self.pending_quit {
                 self.discard_turn(TurnEnd::Cancelled);
@@ -3334,7 +3382,7 @@ impl TuiApp {
                 }
             }
 
-            self.render_normal_after_startup_work(
+            self.render_scheduled_after_startup_work(
                 &mut workspace_warmup_pending,
                 &mut pre_first_frame_startup,
                 &mut first_frame_pending,
@@ -3342,7 +3390,6 @@ impl TuiApp {
             if self.auto_reload.start_pending {
                 self.auto_reload.start_setup();
             }
-            let last_frame = self.core.clock.instant_now();
 
             let now = self.core.clock.instant_now();
             let yank_flash_active = self
@@ -3392,6 +3439,14 @@ impl TuiApp {
                     std::future::pending::<Option<()>>().await
                 }
             };
+            if has_animation {
+                let interval = self
+                    .ui
+                    .drag_autoscroll_interval()
+                    .unwrap_or(Duration::from_millis(16));
+                self.request_animation_render(interval);
+            }
+            let next_scheduled_frame_delay = self.scheduled_frame_delay();
 
             tokio::select! {
                 biased;
@@ -3542,15 +3597,8 @@ impl TuiApp {
                     }
                 }
 
-                _ = tokio::time::sleep({
-                    let since = last_frame.elapsed();
-                    let want = self
-                        .ui
-                        .drag_autoscroll_interval()
-                        .unwrap_or(MIN_FRAME_INTERVAL);
-                    want.saturating_sub(since)
-                }), if has_animation => {
-                    if self.tick_drag_autoscroll_with_transcript_intent() {
+                _ = tokio::time::sleep(next_scheduled_frame_delay.unwrap_or(Duration::MAX)), if next_scheduled_frame_delay.is_some() => {
+                    if has_animation && self.tick_drag_autoscroll_with_transcript_intent() {
                         self.dispatch_ui_window_events(false);
                     }
                     self.publish_diff_signals();

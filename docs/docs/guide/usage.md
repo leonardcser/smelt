@@ -167,8 +167,7 @@ smelt --resume <SESSION_ID> # resume a specific session
 ```
 
 Or use `/resume` from within the TUI. Resuming, listing, and picker previews read
-canonical lineage storage. Pre-lineage session directories are ignored rather
-than imported or modified.
+canonical lineage storage.
 
 Use `/fork` to branch the current conversation into a new session, or `/rewind`
 (also `Esc Esc` when idle) to roll back to an earlier turn. `/session` shows the

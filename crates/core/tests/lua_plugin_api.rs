@@ -432,7 +432,7 @@ fn tool_invocation_context_spans_synchronous_middleware_and_handler() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -503,7 +503,7 @@ fn tool_invocation_context_survives_a_yield() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -566,7 +566,7 @@ fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
             ToolEnv {
                 mode: protocol::AgentMode::normal(),
                 session_id: "sess",
-                session_dir: Path::new("/tmp"),
+                artifact_dir: Path::new("/tmp"),
             },
             Instant::now(),
         );
@@ -650,7 +650,7 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         now,
     );
@@ -667,7 +667,7 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         now,
     );
@@ -726,7 +726,7 @@ fn tool_execute_preserves_result_metadata() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -793,7 +793,7 @@ fn lsp_plugin_formats_semantic_results_as_text() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -872,7 +872,7 @@ fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -1050,7 +1050,7 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -1142,7 +1142,7 @@ fn lsp_plugin_truncates_large_structured_results() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         Instant::now(),
     );
@@ -1210,7 +1210,7 @@ fn tool_timeout_completes_a_parked_tool_with_error() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         now,
     );
@@ -1265,7 +1265,7 @@ fn tool_watchdog_uses_explicit_timeout_arg_metadata() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         now,
     );
@@ -1697,7 +1697,7 @@ fn turn_cancellation_preserves_top_level_spawned_app_tasks() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         now,
     );
@@ -1756,7 +1756,7 @@ fn turn_cancellation_cancels_spawned_child_tasks() {
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
-            session_dir: Path::new("/tmp"),
+            artifact_dir: Path::new("/tmp"),
         },
         now,
     );

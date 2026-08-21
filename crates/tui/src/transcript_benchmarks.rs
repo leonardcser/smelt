@@ -599,8 +599,8 @@ fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64
 
 fn assert_no_full_block_renders_for_scroll(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
     for metric in [
-        "transcript:display_model:render_full_to_buffer",
-        "transcript:display_model:render_full_fallback",
+        "transcript:layout_cache:render_full_to_buffer",
+        "transcript:layout_cache:render_full_fallback",
     ] {
         let full_renders = perf_duration_count(snapshot, metric);
         assert_eq!(
@@ -670,6 +670,40 @@ fn assert_burst_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &s
     assert_no_full_block_renders_for_scroll(snapshot, label);
 }
 
+fn assert_stream_operation_gates(
+    snapshot: &smelt_perf::perf::Snapshot,
+    memory: crate::app::transcript::TranscriptMemorySnapshot,
+    label: &str,
+) {
+    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_block_renders_for_scroll(snapshot, label);
+    for metric in [
+        "transcript:transcript_scene:build_nodes",
+        "transcript:build_rows",
+        "session:catalog:repair",
+    ] {
+        let count = perf_duration_count(snapshot, metric);
+        assert_eq!(
+            count, 0,
+            "{label} recorded {metric} {count} times on the streaming hot path"
+        );
+    }
+    for metric in [
+        "session:catalog:reconcile_scanned",
+        "session:catalog:reconciliation_duration_ms",
+    ] {
+        assert_eq!(
+            perf_value_total(snapshot, metric),
+            0,
+            "{label} recorded {metric} on the streaming hot path"
+        );
+    }
+    assert!(
+        memory.rendered_oversize_debt_bytes <= 4 * 1024 * 1024,
+        "{label} accumulated excessive rendered cache oversize debt: {memory:?}"
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BurstBenchKey {
     CtrlD,
@@ -728,7 +762,7 @@ fn wait_for_bench_catalog(app: &TestApp, label: &str, receipt: &smelt_store::Sav
     );
 
     let session_id = &app.app.conversation.session().id;
-    let catalog_path = app.app.core.sessions.state_root().join("catalog.db");
+    let catalog_path = app.app.core.sessions.layout().catalog_path();
     let expected_revision = receipt.current.revision.get();
     let catalog_current = smelt_store::CatalogReader::open_existing(&catalog_path)
         .ok()
@@ -737,18 +771,18 @@ fn wait_for_bench_catalog(app: &TestApp, label: &str, receipt: &smelt_store::Sav
         .is_some_and(|session| session.source_revision == expected_revision);
     assert!(
         catalog_current,
-        "{label} catalog projection did not reach canonical revision {expected_revision}"
+        "{label} catalog row did not reach canonical revision {expected_revision}"
     );
 }
 
 fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
-    let session_dir = app
-        .app
-        .core
-        .sessions
-        .dir_for(app.app.conversation.session());
-    let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 100, 32)
-        .expect("load sparse bench transcript tail");
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
+        app.app.core.sessions.sessions_dir(),
+        app.app.conversation.session().id.clone(),
+        100,
+        32,
+    )
+    .expect("load sparse bench transcript tail");
     app.app.clear_transcript();
     app.app
         .conversation
@@ -2268,6 +2302,267 @@ impl HotPathCounters {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StreamSample {
+    history_blocks: usize,
+    chunks: usize,
+    final_bytes: usize,
+    scroll: bool,
+    total_ms: f64,
+    dispatch: TailStats,
+    render: TailStats,
+    traced_frames: usize,
+    request_to_flush_p99_ms: f64,
+    thread_allocs: u64,
+    thread_bytes: u64,
+    process_alloc_bytes: u64,
+    process_dealloc_bytes: u64,
+    process_retained_bytes: i64,
+}
+
+fn stream_benchmark_enabled() -> bool {
+    matches!(
+        std::env::var("SMELT_TRANSCRIPT_STREAM_BENCH").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn stream_benchmark_history_blocks() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_STREAM_HISTORY", 100)
+}
+
+fn stream_benchmark_chunks() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_STREAM_CHUNKS", 512)
+}
+
+fn stream_benchmark_final_bytes() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_STREAM_BYTES", 16 * 1024)
+}
+
+fn stream_benchmark_scroll() -> bool {
+    matches!(
+        std::env::var("SMELT_TRANSCRIPT_STREAM_SCROLL").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn stream_benchmark_app(history_blocks: usize) -> TestApp {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(100, 32);
+    for index in 0..history_blocks {
+        let block = if index.is_multiple_of(2) {
+            smelt_core::transcript_model::Block::User {
+                text: format!("stream benchmark prompt {index}: {}", "input ".repeat(12)),
+                image_labels: Vec::new(),
+                command: false,
+            }
+        } else {
+            smelt_core::transcript_model::Block::Text {
+                content: format!(
+                    "stream benchmark response {index}: {}",
+                    "alpha beta gamma delta ".repeat(8)
+                ),
+            }
+        };
+        app.app.push_block(block);
+    }
+    app.start_turn(42);
+    app.render_silent();
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+    app
+}
+
+fn stream_benchmark_deltas(chunks: usize, final_bytes: usize) -> Vec<String> {
+    let base = final_bytes / chunks;
+    let remainder = final_bytes % chunks;
+    (0..chunks)
+        .map(|index| {
+            let len = base + usize::from(index < remainder);
+            "x".repeat(len)
+        })
+        .collect()
+}
+
+fn run_stream_benchmark_sample() -> StreamSample {
+    let history_blocks = stream_benchmark_history_blocks();
+    let chunks = stream_benchmark_chunks();
+    let final_bytes = stream_benchmark_final_bytes().max(chunks);
+    let scroll = stream_benchmark_scroll();
+    let deltas = stream_benchmark_deltas(chunks, final_bytes);
+    let mut app = stream_benchmark_app(history_blocks);
+    let mut dispatch_ms = Vec::with_capacity(chunks);
+    let mut render_ms = Vec::with_capacity(chunks);
+
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    smelt_perf::alloc::set_enabled(true);
+    let process_before = smelt_perf::alloc::snapshot();
+    let (allocs_before, bytes_before) = smelt_perf::alloc::thread_snapshot();
+    let total_start = std::time::Instant::now();
+    for (index, delta) in deltas.into_iter().enumerate() {
+        if scroll {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            let frame_start = std::time::Instant::now();
+            app.app.dispatch_selected_engine_output_in_render_loop_to(
+                engine::EngineOutput::Event(protocol::EngineEvent::TextDelta { delta }),
+                &mut std::io::sink(),
+            );
+            let frame_ms = elapsed_ms(frame_start.elapsed());
+            dispatch_ms.push(frame_ms);
+            render_ms.push(frame_ms);
+
+            if index.is_multiple_of(8) {
+                let modifiers = if (index / 8).is_multiple_of(2) {
+                    KeyModifiers::CONTROL
+                } else {
+                    KeyModifiers::NONE
+                };
+                let key = if modifiers == KeyModifiers::CONTROL {
+                    KeyCode::Char('u')
+                } else {
+                    KeyCode::Char('G')
+                };
+                app.press_mod(key, modifiers);
+                app.app.request_urgent_render();
+                app.render_silent();
+            }
+        } else {
+            let dispatch_start = std::time::Instant::now();
+            app.dispatch_engine_event_in_render_loop_to(
+                protocol::EngineEvent::TextDelta { delta },
+                &mut std::io::sink(),
+                |_| {},
+            );
+            dispatch_ms.push(elapsed_ms(dispatch_start.elapsed()));
+
+            let render_start = std::time::Instant::now();
+            app.render_silent();
+            render_ms.push(elapsed_ms(render_start.elapsed()));
+        }
+    }
+    if scroll {
+        app.app.dispatch_selected_engine_output_in_render_loop_to(
+            engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete {
+                turn_id: 42,
+                history: None,
+                meta: None,
+            }),
+            &mut std::io::sink(),
+        );
+    }
+    let total_ms = elapsed_ms(total_start.elapsed());
+    let (allocs_after, bytes_after) = smelt_perf::alloc::thread_snapshot();
+    let process_after = smelt_perf::alloc::snapshot();
+    let process_delta = smelt_perf::alloc::delta(process_before, process_after);
+    let perf_snapshot = smelt_perf::perf::snapshot();
+    let memory_snapshot = app
+        .app
+        .conversation
+        .transcript_memory_snapshot_for_harness();
+    assert_stream_operation_gates(&perf_snapshot, memory_snapshot, "stream");
+    let frame_latency = perf_snapshot
+        .values
+        .iter()
+        .find(|row| row.label == "frame:request_to_flush:us");
+    let traced_frames = frame_latency.map_or(0, |row| row.count);
+    let request_to_flush_p99_ms = frame_latency.map_or(0.0, |row| row.p99 as f64 / 1_000.0);
+    if scroll {
+        let interaction_frames = chunks.div_ceil(8);
+        let scheduled_frames = (total_ms / 16.0).ceil() as usize;
+        assert!(
+            traced_frames <= interaction_frames + scheduled_frames + 3,
+            "stream scheduler emitted {traced_frames} frames in {total_ms:.3}ms with {interaction_frames} urgent interactions"
+        );
+    }
+    smelt_perf::alloc::set_enabled(false);
+    smelt_perf::perf::set_enabled(false);
+
+    StreamSample {
+        history_blocks,
+        chunks,
+        final_bytes,
+        scroll,
+        total_ms,
+        dispatch: TailStats::from(&dispatch_ms),
+        render: TailStats::from(&render_ms),
+        traced_frames,
+        request_to_flush_p99_ms,
+        thread_allocs: allocs_after.saturating_sub(allocs_before),
+        thread_bytes: bytes_after.saturating_sub(bytes_before),
+        process_alloc_bytes: process_delta.bytes_allocated,
+        process_dealloc_bytes: process_delta.bytes_deallocated,
+        process_retained_bytes: process_after.current_bytes as i64
+            - process_before.current_bytes as i64,
+    }
+}
+
+fn print_stream_sample(sample: StreamSample) {
+    println!(
+        "TRANSCRIPT_STREAM_SAMPLE history_blocks={} chunks={} final_bytes={} scroll={} total_ms={:.3} dispatch_mean_ms={:.3} dispatch_p95_ms={:.3} dispatch_p99_ms={:.3} dispatch_max_ms={:.3} render_mean_ms={:.3} render_p95_ms={:.3} render_p99_ms={:.3} render_max_ms={:.3} traced_frames={} request_to_flush_p99_ms={:.3} thread_allocs={} thread_bytes={} process_alloc_bytes={} process_dealloc_bytes={} process_retained_bytes={}",
+        sample.history_blocks,
+        sample.chunks,
+        sample.final_bytes,
+        sample.scroll,
+        sample.total_ms,
+        sample.dispatch.mean,
+        sample.dispatch.p95,
+        sample.dispatch.p99,
+        sample.dispatch.max,
+        sample.render.mean,
+        sample.render.p95,
+        sample.render.p99,
+        sample.render.max,
+        sample.traced_frames,
+        sample.request_to_flush_p99_ms,
+        sample.thread_allocs,
+        sample.thread_bytes,
+        sample.process_alloc_bytes,
+        sample.process_dealloc_bytes,
+        sample.process_retained_bytes,
+    );
+}
+
+#[test]
+fn transcript_stream_benchmark_suite() {
+    if !benchmark_target_enabled() || !stream_benchmark_enabled() {
+        return;
+    }
+
+    let runs = navigation_bench_runs();
+    let mut samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let sample = run_stream_benchmark_sample();
+        print_stream_sample(sample);
+        samples.push(sample);
+    }
+    let totals = samples
+        .iter()
+        .map(|sample| sample.total_ms)
+        .collect::<Vec<_>>();
+    let render_p99 = samples
+        .iter()
+        .map(|sample| sample.render.p99)
+        .collect::<Vec<_>>();
+    let total = TailStats::from(&totals);
+    let render = TailStats::from(&render_p99);
+    println!(
+        "TRANSCRIPT_STREAM_SUMMARY runs={} history_blocks={} chunks={} final_bytes={} scroll={} total_mean_ms={:.3} total_p95_ms={:.3} render_p99_mean_ms={:.3} render_p99_max_ms={:.3}",
+        runs,
+        samples[0].history_blocks,
+        samples[0].chunks,
+        samples[0].final_bytes,
+        samples[0].scroll,
+        total.mean,
+        total.p95,
+        render.mean,
+        render.max,
+    );
+}
+
 #[derive(Clone, Debug)]
 struct HotPathSample {
     operation: &'static str,
@@ -2489,11 +2784,7 @@ fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
     );
     let session_id = hot_path_fixture_session_id();
     let mut app = TestApp::builder().build();
-    let destination_root = app
-        .session_dir_for_id(&session_id)
-        .parent()
-        .expect("session path has no sessions root")
-        .to_path_buf();
+    let destination_root = app.app.core.sessions.sessions_dir();
     let started = std::time::Instant::now();
     let copied_bytes = copy_fixture_tree(fixture, &destination_root);
     eprintln!(
@@ -2558,10 +2849,11 @@ fn assert_no_full_store_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, op
 
 fn assert_no_full_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
     assert_no_full_store_hot_path_reads(snapshot, operation);
-    let fingerprint_count = perf_duration_count(snapshot, "transcript:render_plan:fingerprint");
+    let fingerprint_count =
+        perf_duration_count(snapshot, "transcript:transcript_scene:fingerprint");
     assert_eq!(
         fingerprint_count, 0,
-        "{operation} rebuilt {fingerprint_count} full transcript render-plan fingerprints"
+        "{operation} rebuilt {fingerprint_count} full transcript transcript-scene fingerprints"
     );
 }
 
@@ -2633,12 +2925,14 @@ fn capture_hot_path_sample(
 
 fn read_provider_history_source(
     source: protocol::ModelHistorySource,
-    session_dir: &std::path::Path,
+    sessions_root: &std::path::Path,
+    session_id: &str,
 ) -> Vec<protocol::HistoryItem> {
     match source {
         protocol::ModelHistorySource::Items { items, .. } => items,
         protocol::ModelHistorySource::Store {
             prefix,
+            lineage_id,
             first_live_index,
             end_index,
             suffix,
@@ -2656,16 +2950,12 @@ fn read_provider_history_source(
             );
             let mut history = prefix;
             if end_index > first_live_index {
-                let sessions_root = session_dir
-                    .parent()
-                    .expect("session path has no sessions root");
-                let session_id = session_dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .expect("session path has no UTF-8 session ID");
-                let reader =
-                    smelt_store::LineageSessionReader::open_existing(sessions_root, session_id)
-                        .expect("open provider history lineage");
+                let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+                    sessions_root,
+                    lineage_id,
+                    session_id,
+                )
+                .expect("open provider history lineage");
                 let mut rows = reader
                     .history_range(first_live_index as u64, end_index as u64)
                     .expect("read provider history rows");
@@ -2914,13 +3204,10 @@ fn run_provider_history_hot_path(
     let first_live = history_len.saturating_sub(32);
     let app = saved_hot_path_app("provider-history", history_len, Some(first_live));
     let source = app.app.model_history_source();
-    let session_dir = app
-        .app
-        .core
-        .sessions
-        .dir_for(app.app.conversation.session());
+    let sessions_root = app.app.core.sessions.sessions_dir();
+    let session_id = app.app.conversation.session().id.clone();
     let (sample, snapshot) = capture_hot_path_sample("provider_history_read", history_len, || {
-        let history = read_provider_history_source(source, &session_dir);
+        let history = read_provider_history_source(source, &sessions_root, &session_id);
         assert_eq!(history.len(), history_len - first_live + 1);
     });
     assert_hot_path_at_most(
@@ -2944,14 +3231,11 @@ fn run_uncheckpointed_provider_history_hot_path(
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let app = saved_hot_path_app("provider-history-uncheckpointed", history_len, None);
     let source = app.app.model_history_source();
-    let session_dir = app
-        .app
-        .core
-        .sessions
-        .dir_for(app.app.conversation.session());
+    let sessions_root = app.app.core.sessions.sessions_dir();
+    let session_id = app.app.conversation.session().id.clone();
     let (sample, snapshot) =
         capture_hot_path_sample("provider_history_uncheckpointed_read", history_len, || {
-            let history = read_provider_history_source(source, &session_dir);
+            let history = read_provider_history_source(source, &sessions_root, &session_id);
             assert_eq!(history.len(), history_len);
         });
     assert_hot_path_at_most(
@@ -2975,14 +3259,11 @@ fn run_engine_request_materialization_hot_path(
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let app = saved_hot_path_app("engine-request-materialization", history_len, None);
     let source = app.app.model_history_source();
-    let session_dir = app
-        .app
-        .core
-        .sessions
-        .dir_for(app.app.conversation.session());
+    let sessions_root = app.app.core.sessions.sessions_dir();
+    let session_id = app.app.conversation.session().id.clone();
     let (sample, snapshot) =
         capture_hot_path_sample("engine_request_materialization", history_len, || {
-            let history = read_provider_history_source(source, &session_dir);
+            let history = read_provider_history_source(source, &sessions_root, &session_id);
             let mut engine_history = {
                 let _perf = smelt_perf::perf::begin("bench:engine_request:install_history");
                 let mut installed = Vec::with_capacity(history.len() + 1);

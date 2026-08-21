@@ -12,8 +12,7 @@ fn sparse_display_only_search_app() -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     let session_id = app.session_snapshot().id.clone();
-    let session_dir = app.core_probe().sessions.dir_for_id(&session_id);
-    let sessions_root = session_dir.parent().expect("sessions root");
+    let sessions_root = app.core_probe().sessions.sessions_dir();
     let mut session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     session.id = session_id.clone();
@@ -35,7 +34,7 @@ fn sparse_display_only_search_app() -> TestApp {
         start: smelt_store::TranscriptRecordIndex::ZERO,
         records,
     });
-    let mut writer = smelt_store::OwnedLineageWriter::open(sessions_root, &session_id).unwrap();
+    let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, &session_id).unwrap();
     let receipt = writer.commit_session(&commit).unwrap();
     let projector = writer.spawn_search_projector().unwrap();
     projector.request();
@@ -51,8 +50,13 @@ fn sparse_display_only_search_app() -> TestApp {
     projector.stop();
     writer.release().unwrap();
 
-    let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)
-        .expect("display-only transcript tail");
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
+        sessions_root,
+        session_id.clone(),
+        80,
+        16,
+    )
+    .expect("display-only transcript tail");
     session.history.clear();
     app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(

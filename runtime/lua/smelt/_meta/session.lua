@@ -12,6 +12,10 @@ local session = {}
 ---@type fun(opts: table?): boolean
 session._rewind_active_turn_if_clean = nil
 
+--- Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.
+---@type fun(): string
+session.artifact_dir = nil
+
 --- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.
 ---@see smelt.work.guard
 ---@see smelt.session.model_messages
@@ -50,10 +54,6 @@ session.cwd = nil
 ---@type fun(id: string): nil
 session.delete = nil
 
---- Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.
----@type fun(): string
-session.dir = nil
-
 --- Create or open a managed git worktree and request a coherent project-context transition. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. The transition updates Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ name, branch, path, base, created, pending }`.
 ---@see smelt.settings.worktree_root
 ---@type fun(opts: table?): table
@@ -71,7 +71,7 @@ session.history = nil
 ---@type fun(): integer
 session.history_len = nil
 
---- Stable session id (matches the on-disk session filename).
+--- Stable session id used by canonical storage and provider cache routing.
 ---@type fun(): string
 session.id = nil
 

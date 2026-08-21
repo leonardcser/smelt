@@ -22,7 +22,7 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
             "persist me",
         )));
     smelt_core::session::save_result(&session).unwrap();
-    let session_dir = smelt_core::session::dir_for(&session);
+    let sessions_root = smelt_core::session::sessions_dir();
 
     let doctor = smelt(state.path(), &["session", "doctor", &session.id, "--json"]);
     assert!(
@@ -50,7 +50,7 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     assert!(manifest.is_file());
     let manifest_json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(manifest_json["format_version"], 2);
+    assert_eq!(manifest_json["format_version"], 1);
     let lineage_id = manifest_json["lineage_id"].as_str().unwrap();
     assert!(
         smelt_store::verify_lineage_backup(&backup, lineage_id)
@@ -79,8 +79,7 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     );
     assert!(!repeated_backup.status.success());
 
-    let sessions_root = session_dir.parent().expect("sessions root");
-    let mut writer = smelt_store::OwnedLineageWriter::open_existing(sessions_root, &session.id)
+    let mut writer = smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &session.id)
         .expect("open canonical writer");
     let previous = writer.store_head().unwrap();
     session
@@ -158,10 +157,7 @@ fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
             "shared prefix",
         )));
     smelt_core::session::save_result(&session).unwrap();
-    let sessions_root = smelt_core::session::dir_for(&session)
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let sessions_root = smelt_core::session::sessions_dir();
     let target_id = "b".repeat(64);
     let mut writer =
         smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &session.id).unwrap();

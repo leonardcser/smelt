@@ -18,6 +18,14 @@ fun(opts: table?): boolean
 
 Cancel the active turn and restore its submitted user message into the prompt only if no assistant or tool output has started. Returns true when it rewound.
 
+## `smelt.session.artifact_dir`
+
+```lua
+fun(): string
+```
+
+Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.
+
 ## `smelt.session.checkpoint`
 
 ```lua
@@ -90,14 +98,6 @@ fun(id: string): nil
 
 Delete the persisted session with `id`. Refuses to delete the currently active session.
 
-## `smelt.session.dir`
-
-```lua
-fun(): string
-```
-
-Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.
-
 ## `smelt.session.enter_worktree`
 
 ```lua
@@ -136,7 +136,7 @@ Return the number of semantic items in the current session history without mater
 fun(): string
 ```
 
-Stable session id (matches the on-disk session filename).
+Stable session id used by canonical storage and provider cache routing.
 
 ## `smelt.session.info`
 

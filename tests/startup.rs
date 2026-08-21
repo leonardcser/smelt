@@ -229,7 +229,7 @@ smelt.provider.register("local", {
     )
     .expect("write init.lua");
 
-    let catalog_path = state_home.join("smelt/catalog.db");
+    let catalog_path = state_home.join("smelt/sessions/catalog.db");
     let mut catalog = smelt_store::Catalog::open(&catalog_path).expect("create session catalog");
     let scan_id = catalog.allocate_scan().expect("allocate catalog scan");
     catalog
@@ -338,7 +338,7 @@ fn inspect_startup_explicitly_reconciles_the_session_catalog() {
     ] {
         std::fs::create_dir_all(path).expect("create inspect runtime directory");
     }
-    let catalog_path = state_home.join("smelt/catalog.db");
+    let catalog_path = state_home.join("smelt/sessions/catalog.db");
     let mut catalog = smelt_store::Catalog::open(&catalog_path).expect("create session catalog");
     let scan_id = catalog.allocate_scan().expect("allocate catalog scan");
     catalog

@@ -67,21 +67,20 @@ pub(super) struct TranscriptScrollProbeState {
 impl TranscriptScrollProbeState {
     fn keep_fixture_alive(&self) {
         if let Some(fixture) = &self.fixture {
-            let _ = fixture.path();
+            let _ = fixture.store();
         }
     }
 }
 
 struct SparseTranscriptFixture {
     root: std::path::PathBuf,
-    session_dir: std::path::PathBuf,
+    store: smelt_core::session::SessionStoreAddress,
 }
 
 impl SparseTranscriptFixture {
     fn new(root: std::path::PathBuf) -> Self {
         let _ = std::fs::remove_dir_all(&root);
         let session_id = "f".repeat(64);
-        let session_dir = root.join(&session_id);
         let mut session = smelt_core::session::Session::new(1, root.clone());
         session.id = session_id.clone();
         let initial = smelt_core::session::initial_store_commit_from_session(&session)
@@ -91,12 +90,15 @@ impl SparseTranscriptFixture {
         writer
             .commit_session(&initial)
             .expect("commit initial transcript fixture");
+        let lineage_id = writer.lineage_id().to_string();
         writer.release().expect("release transcript fixture writer");
-        Self { root, session_dir }
+        let store =
+            smelt_core::session::SessionStoreAddress::new(root.clone(), session_id, lineage_id);
+        Self { root, store }
     }
 
-    fn path(&self) -> &std::path::Path {
-        &self.session_dir
+    fn store(&self) -> &smelt_core::session::SessionStoreAddress {
+        &self.store
     }
 }
 
@@ -417,10 +419,10 @@ impl TestApp {
         let fixture = SparseTranscriptFixture::new(
             managed_harness_dir("transcript-scroll").join(format!("fixture-{fixture_id}")),
         );
-        crate::persist::write_transcript_record_suffix(fixture.path(), 0, &records)
+        crate::persist::write_transcript_record_suffix(fixture.store(), 0, &records)
             .expect("write record suffix");
-        let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
-            fixture.path().to_path_buf(),
+        let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(
+            fixture.store().clone(),
             width,
             height,
         )

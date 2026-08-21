@@ -115,7 +115,7 @@ pub enum TaskEvent {
 pub struct ToolEnv<'a> {
     pub mode: protocol::AgentMode,
     pub session_id: &'a str,
-    pub session_dir: &'a std::path::Path,
+    pub artifact_dir: &'a std::path::Path,
 }
 
 /// Single-threaded task runtime; all methods must run on the Lua owner thread.

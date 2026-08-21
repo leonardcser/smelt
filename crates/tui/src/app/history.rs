@@ -308,7 +308,12 @@ pub(crate) fn load_transcript_tail_from_sqlite(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    load_transcript_tail_from_sqlite_dir(sessions.dir_for(session), width, viewport_rows)
+    load_transcript_tail_from_sqlite_store(
+        sessions.sessions_dir(),
+        session.id.clone(),
+        width,
+        viewport_rows,
+    )
 }
 
 pub(crate) fn load_transcript_tail_from_sqlite_id(
@@ -317,17 +322,30 @@ pub(crate) fn load_transcript_tail_from_sqlite_id(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let resolved = sessions.resolve_session_dir_for_read(id)?;
-    load_transcript_tail_from_sqlite_dir(resolved.dir, width, viewport_rows)
+    let resolved = sessions.resolve_session_for_read(id)?;
+    load_transcript_tail_from_sqlite_store(
+        resolved.sessions_root,
+        resolved.id,
+        width,
+        viewport_rows,
+    )
 }
 
-pub(crate) fn load_transcript_tail_from_sqlite_dir(
-    session_dir: PathBuf,
+pub(crate) fn load_transcript_tail_from_sqlite_store(
+    sessions_root: PathBuf,
+    session_id: String,
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
-        session_dir,
+    let catalog_path =
+        smelt_store::SessionStoreLayout::from_sessions_root(&sessions_root).catalog_path();
+    let lineage_id = smelt_store::CatalogReader::open_existing(catalog_path)
+        .ok()
+        .flatten()
+        .and_then(|catalog| catalog.session(&session_id).ok().flatten())
+        .and_then(|session| session.lineage_id)?;
+    crate::app::transcript::LoadedTranscript::tail_from_sqlite(
+        crate::app::transcript::TranscriptStoreAddress::new(sessions_root, session_id, lineage_id),
         width,
         viewport_rows,
     )
@@ -657,7 +675,7 @@ mod tests {
     fn seed_transcript(
         root: &std::path::Path,
         records: Vec<smelt_store::StoredTranscriptBlock>,
-    ) -> std::path::PathBuf {
+    ) -> crate::app::transcript::TranscriptStoreAddress {
         let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.id = SESSION_ID.into();
         let mut command = session::initial_store_commit_from_session(&session).unwrap();
@@ -667,8 +685,13 @@ mod tests {
         });
         let mut writer = smelt_store::OwnedLineageWriter::open(root, SESSION_ID).unwrap();
         writer.commit_session(&command).unwrap();
+        let lineage_id = writer.lineage_id().to_string();
         writer.release().unwrap();
-        root.join(SESSION_ID)
+        crate::app::transcript::TranscriptStoreAddress::new(
+            root.to_path_buf(),
+            SESSION_ID.into(),
+            lineage_id,
+        )
     }
 
     #[test]
@@ -883,10 +906,10 @@ mod tests {
         let records = (0..200)
             .map(|idx| test_record_record(idx, &format!("block {idx}")))
             .collect::<Vec<_>>();
-        let session_dir = seed_transcript(dir.path(), records);
+        let store = seed_transcript(dir.path(), records);
 
-        let loaded =
-            load_transcript_tail_from_sqlite_dir(session_dir, 10, 1).expect("tail transcript");
+        let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store, 10, 1)
+            .expect("tail transcript");
         let record_window = loaded.record_window.expect("record window");
         assert_eq!(record_window.start.get(), 160);
         assert_eq!(record_window.end().get(), 200);
@@ -916,10 +939,10 @@ mod tests {
             test_record_record(70, "visible old tail"),
             test_record_record(235, "visible newest tail"),
         ];
-        let session_dir = seed_transcript(dir.path(), records);
+        let store = seed_transcript(dir.path(), records);
 
-        let loaded =
-            load_transcript_tail_from_sqlite_dir(session_dir, 80, 12).expect("tail transcript");
+        let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store, 80, 12)
+            .expect("tail transcript");
         let record_window = loaded.record_window.expect("record window");
         assert_eq!(record_window.start.get(), 0);
         assert_eq!(record_window.end().get(), 2);
@@ -1331,7 +1354,7 @@ impl TuiApp {
                 Ok(Some(intent)) => intent,
                 Ok(None) => {
                     self.notify_session_error_sticky(
-                        "failed to prepare fork: dirty session produced no save intent".into(),
+                        "failed to prepare fork: dirty session produced no event batch".into(),
                     );
                     return;
                 }
@@ -1381,16 +1404,32 @@ impl TuiApp {
             },
         );
         let fork_root = self.conversation.sessions().sessions_dir();
-        let mut source =
-            match smelt_store::OwnedLineageWriter::open_existing(&fork_root, &original_id) {
-                Ok(source) => source,
-                Err(err) => {
-                    self.notify_session_error_sticky(format!(
-                        "failed to open source session store: {err}"
-                    ));
-                    return;
-                }
-            };
+        let resolved_source = match self
+            .conversation
+            .sessions()
+            .resolve_session_for_read_result(&original_id)
+        {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                self.notify_session_error_sticky(format!(
+                    "failed to resolve source session store: {err}"
+                ));
+                return;
+            }
+        };
+        let mut source = match smelt_store::OwnedLineageWriter::open_existing_in_lineage(
+            &fork_root,
+            &resolved_source.lineage_id,
+            &original_id,
+        ) {
+            Ok(source) => source,
+            Err(err) => {
+                self.notify_session_error_sticky(format!(
+                    "failed to open source session store: {err}"
+                ));
+                return;
+            }
+        };
         if preserve_unsaved {
             match source.store_head() {
                 Ok(source_head) if source_head == acknowledged_head => {}
@@ -1422,14 +1461,14 @@ impl TuiApp {
                 ));
                 return;
             }
-            let command = smelt_store::SessionCommit {
-                session_id: fork_target.id.clone(),
-                expected: imported.current,
-                identity: intent.identity,
-                metadata: intent.metadata,
-                history: intent.history,
-                side_tables: intent.side_tables,
-                transcript_records: intent.records,
+            let command = match intent.to_store_commit(fork_target.id.clone(), imported.current) {
+                Ok(command) => command,
+                Err(err) => {
+                    self.notify_session_error_sticky(format!(
+                        "failed to prepare unsaved fork state: {err}"
+                    ));
+                    return;
+                }
             };
             if let Err(err) = source.commit_session(&command) {
                 self.notify_session_error_sticky(format!(
@@ -1437,6 +1476,13 @@ impl TuiApp {
                 ));
                 return;
             }
+        } else if let Err(err) = source.switch_branch(&fork_target.id) {
+            self.notify_session_error_sticky(format!("failed to select fork destination: {err}"));
+            return;
+        }
+        if let Err(err) = source.refresh_catalog() {
+            self.notify_session_error_sticky(format!("failed to publish fork catalog row: {err}"));
+            return;
         }
         if let Err(err) = source.release() {
             self.notify_session_error_sticky(format!("failed to release lineage writer: {err}"));
@@ -1613,17 +1659,24 @@ impl TuiApp {
         }
 
         self.install_loaded_session(loaded);
-        let session_dir = self
+        let session_id = &self.conversation.session().id;
+        let store_head = self
             .conversation
             .sessions()
-            .dir_for(self.conversation.session());
-        let session_id = &self.conversation.session().id;
-        let store_head = session_dir.parent().and_then(|root| {
-            smelt_store::LineageSessionReader::open_existing(root, session_id)
+            .resolve_session_for_read_result(session_id)
+            .and_then(|resolved| {
+                smelt_store::LineageSessionReader::open_existing_in_lineage(
+                    &resolved.sessions_root,
+                    &resolved.lineage_id,
+                    session_id,
+                )
                 .and_then(|reader| reader.snapshot())
                 .map(|state| state.head)
-                .ok()
-        });
+                .map_err(|error| smelt_core::session::SessionStoreError::Corrupt {
+                    context: error.to_string(),
+                })
+            })
+            .ok();
         self.conversation
             .install_loaded_full_session(transcript, store_head);
         self.claim_writer_access_for_current_session();
@@ -1822,7 +1875,50 @@ impl TuiApp {
         }
         let (prefix, first_live_index, end_index) =
             self.conversation.session().model_history_range();
-        protocol::ModelHistorySource::store(prefix, first_live_index, end_index)
+        let coordinates =
+            protocol::ModelHistoryCoordinates::projected(prefix.len(), first_live_index);
+        let Ok(resolved) = self
+            .conversation
+            .sessions()
+            .resolve_session_for_read_result(&self.conversation.session().id)
+        else {
+            let mut items = prefix;
+            items.extend(self.session_history_range(first_live_index..end_index));
+            return protocol::ModelHistorySource::projected_items(items, coordinates);
+        };
+        protocol::ModelHistorySource::store(
+            prefix,
+            resolved.lineage_id,
+            first_live_index,
+            end_index,
+        )
+    }
+
+    pub(crate) fn store_model_history_source_for_committed_request(
+        &self,
+        source: &protocol::ModelHistorySource,
+        end_index: usize,
+    ) -> Option<protocol::ModelHistorySource> {
+        let coordinates = source.coordinates();
+        let prefix = match source {
+            protocol::ModelHistorySource::Items { items, .. } => items
+                .iter()
+                .take(coordinates.model_prefix_len())
+                .cloned()
+                .collect(),
+            protocol::ModelHistorySource::Store { prefix, .. } => prefix.clone(),
+        };
+        let resolved = self
+            .conversation
+            .sessions()
+            .resolve_session_for_read_result(&self.conversation.session().id)
+            .ok()?;
+        Some(protocol::ModelHistorySource::store(
+            prefix,
+            resolved.lineage_id,
+            coordinates.canonical_start().get(),
+            end_index,
+        ))
     }
 
     fn materialize_model_history_source(
@@ -1897,16 +1993,19 @@ impl TuiApp {
     }
 
     pub(crate) fn schedule_session_save(&mut self) {
-        if !self.prompt_input_is_busy() {
-            self.save_session();
-        }
+        self.pending_session_save = true;
+        self.save_deferred_session_batch_if_ready();
     }
 
-    pub(crate) fn save_session_if_pending(&mut self) {
-        if self.session_document_has_unflushed_work()
-            && !self.prompt_input_is_busy()
-            && !self.conversation.automatic_save_blocked()
-        {
+    pub(crate) fn save_deferred_session_batch_if_ready(&mut self) {
+        if !self.pending_session_save {
+            return;
+        }
+        if self.prompt_input_is_busy() || self.conversation.automatic_save_blocked() {
+            return;
+        }
+        self.pending_session_save = false;
+        if self.session_document_has_unflushed_work() {
             self.save_session();
         }
     }
@@ -1923,6 +2022,7 @@ impl TuiApp {
     }
 
     pub(crate) fn save_session(&mut self) {
+        self.pending_session_save = false;
         let _perf = smelt_perf::perf::begin("session:save");
         let metadata = self.runtime_session_metadata();
         match self.conversation.save(metadata) {
@@ -2224,13 +2324,15 @@ impl TuiApp {
         };
         let mut history = prefix;
         if end_index > first_live_index {
-            let session_dir = self.conversation.current_session_dir();
-            let sessions_root = session_dir
-                .parent()
-                .ok_or_else(|| "session directory has no storage root".to_string())?;
-            let mut rows = smelt_store::LineageSessionReader::open_existing(
-                sessions_root,
-                &self.conversation.session().id,
+            let resolved = self
+                .conversation
+                .sessions()
+                .resolve_session_for_read_result(&self.conversation.session().id)
+                .map_err(|err| format!("resolve canonical model history: {err}"))?;
+            let mut rows = smelt_store::LineageSessionReader::open_existing_in_lineage(
+                &resolved.sessions_root,
+                &resolved.lineage_id,
+                &resolved.id,
             )
             .map_err(|err| format!("open canonical model history: {err}"))?
             .history_range(first_live_index as u64, end_index as u64)
@@ -2799,7 +2901,7 @@ mod checkpoint_tests {
         let smelt_core::session::SessionStoreResume {
             header,
             session,
-            store_ref,
+            store_address,
             head,
             ..
         } = app
@@ -2812,7 +2914,7 @@ mod checkpoint_tests {
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
             session,
-            store_ref,
+            store_address,
             head,
             loaded_transcript,
         );
@@ -3676,8 +3778,8 @@ mod checkpoint_tests {
             .app
             .core
             .sessions
-            .dir_for(app.app.conversation.session());
-        let temp_dir = app.app.current_session_dir();
+            .artifact_dir_for(app.app.conversation.session());
+        let temp_dir = app.app.current_artifact_dir();
         app.app.session_append_history(user("temporary"));
 
         app.app.save_session();
@@ -4227,19 +4329,16 @@ mod checkpoint_tests {
             .expect("far sparse block");
         app.app.save_session_and_flush();
 
-        let session_dir = app
-            .app
-            .core
-            .sessions
-            .dir_for(app.app.conversation.session());
+        let sessions_root = app.app.core.sessions.sessions_dir();
         let session_id = app.app.conversation.session().id.clone();
         let expected_record_prefix = lineage_transcript(&lineage_reader(&app, &session_id))
             .into_iter()
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
         assert_eq!(expected_record_prefix.len(), TARGET_HISTORY_INDEX);
-        let loaded = load_transcript_tail_from_sqlite_dir(session_dir.clone(), 100, 32)
-            .expect("load sparse transcript");
+        let loaded =
+            load_transcript_tail_from_sqlite_store(sessions_root, session_id.clone(), 100, 32)
+                .expect("load sparse transcript");
         app.app.clear_transcript();
         app.app
             .conversation

@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use rusqlite::types::Value;
 use rusqlite::{named_params, params, params_from_iter, Connection, OpenFlags, OptionalExtension};
@@ -12,11 +12,8 @@ use crate::filesystem::{
 use crate::lineage::BranchId;
 use crate::{Result, StoreError};
 
-pub const CATALOG_SCHEMA_VERSION: i32 = 3;
+pub const CATALOG_SCHEMA_VERSION: i32 = 1;
 pub const MAX_CATALOG_PAGE_SIZE: u32 = 10_000;
-
-const CATALOG_PENDING_DIRECTORY: &str = ".catalog-pending";
-const CATALOG_RECONCILE_LOCK: &str = ".catalog.lock";
 
 const CATALOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -57,7 +54,7 @@ CREATE INDEX IF NOT EXISTS sessions_status_updated_idx ON sessions(status, updat
 "#;
 
 pub fn catalog_reconcile_lock_path(sessions_root: impl AsRef<Path>) -> PathBuf {
-    sqlite_companion_path(sessions_root.as_ref(), CATALOG_RECONCILE_LOCK)
+    crate::SessionStoreLayout::from_sessions_root(sessions_root.as_ref()).catalog_lock_path()
 }
 
 pub(crate) struct CatalogPendingGuard {
@@ -73,7 +70,8 @@ pub(crate) fn mark_catalog_session_pending(
     ensure_private_directory_all(sessions_root)?;
     let lock_path = catalog_reconcile_lock_path(sessions_root);
     let lock = CatalogReconcileLock::acquire(lock_path)?;
-    let pending_dir = sessions_root.join(CATALOG_PENDING_DIRECTORY);
+    let layout = crate::SessionStoreLayout::from_sessions_root(sessions_root);
+    let pending_dir = layout.catalog_pending_dir();
     let created_pending_directory = match fs::create_dir(&pending_dir) {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
@@ -83,7 +81,7 @@ pub(crate) fn mark_catalog_session_pending(
     if created_pending_directory {
         sync_directory(sessions_root)?;
     }
-    let path = pending_dir.join(session_id);
+    let path = layout.catalog_pending_path(session_id);
     reject_symlink(&path)?;
 
     let mut token = [0_u8; 16];
@@ -102,7 +100,8 @@ pub(crate) fn mark_catalog_session_pending(
 }
 
 pub fn pending_catalog_session_ids(sessions_root: impl AsRef<Path>) -> Result<Vec<String>> {
-    let pending_dir = sessions_root.as_ref().join(CATALOG_PENDING_DIRECTORY);
+    let pending_dir =
+        crate::SessionStoreLayout::from_sessions_root(sessions_root.as_ref()).catalog_pending_dir();
     match fs::symlink_metadata(&pending_dir) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err(StoreError::Io(std::io::Error::new(
@@ -146,10 +145,8 @@ pub fn catalog_session_pending_token(
     session_id: &str,
 ) -> Result<Option<Vec<u8>>> {
     BranchId::new(session_id.to_string())?;
-    let path = sessions_root
-        .as_ref()
-        .join(CATALOG_PENDING_DIRECTORY)
-        .join(session_id);
+    let path = crate::SessionStoreLayout::from_sessions_root(sessions_root.as_ref())
+        .catalog_pending_path(session_id);
     reject_symlink(&path)?;
     match fs::read(path) {
         Ok(token) => Ok(Some(token)),
@@ -166,8 +163,9 @@ pub fn clear_catalog_session_pending(
     BranchId::new(session_id.to_string())?;
     let sessions_root = sessions_root.as_ref();
     let _lock = CatalogReconcileLock::acquire(catalog_reconcile_lock_path(sessions_root))?;
-    let pending_dir = sessions_root.join(CATALOG_PENDING_DIRECTORY);
-    let path = pending_dir.join(session_id);
+    let layout = crate::SessionStoreLayout::from_sessions_root(sessions_root);
+    let pending_dir = layout.catalog_pending_dir();
+    let path = layout.catalog_pending_path(session_id);
     reject_symlink(&path)?;
     let current = match fs::read(&path) {
         Ok(token) => token,
@@ -233,6 +231,37 @@ pub struct CatalogSession {
 }
 
 impl CatalogSession {
+    pub fn from_commit(
+        command: &crate::session_commit::SessionCommit,
+        receipt: &crate::session_commit::SaveReceipt,
+        lineage_id: Option<String>,
+    ) -> Self {
+        let metadata = &command.metadata;
+        Self {
+            id: receipt.session_id.clone(),
+            lineage_id: lineage_id.or_else(|| receipt.lineage_id.clone()),
+            title: metadata.title.clone(),
+            slug: metadata.slug.clone(),
+            first_user_message: metadata.first_user_message.clone(),
+            cwd: metadata.cwd.clone(),
+            mode: metadata.mode.clone(),
+            reasoning_effort: metadata.reasoning_effort.clone(),
+            model: metadata.model.clone(),
+            fast_mode: metadata.fast_mode,
+            parent_id: command.identity.parent_id.clone(),
+            context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
+            history_len: Some(receipt.current.history_len.get()),
+            text_bytes: Some(receipt.history_text_bytes),
+            created_at: command.identity.created_at,
+            updated_at: metadata.updated_at,
+            source_revision: receipt.current.revision.get(),
+            availability: CatalogAvailability::Available,
+            error_kind: None,
+            error_summary: None,
+            last_seen_scan: 0,
+        }
+    }
+
     pub fn unavailable(
         id: impl Into<String>,
         error_kind: impl Into<String>,
@@ -576,6 +605,10 @@ impl CatalogReader {
     pub fn session(&self, id: &str) -> Result<Option<CatalogSession>> {
         query_session(&self.conn, id)
     }
+
+    pub fn session_ids_with_prefix(&self, prefix: &str, limit: u32) -> Result<Vec<String>> {
+        query_session_ids_with_prefix(&self.conn, prefix, limit)
+    }
 }
 
 pub struct CatalogReconcileLock {
@@ -604,39 +637,6 @@ impl Drop for CatalogReconcileLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
-}
-
-pub fn archive_corrupt_catalog(path: impl AsRef<Path>) -> Result<Option<PathBuf>> {
-    let path = path.as_ref();
-    let archived = if path.exists() {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("catalog.db");
-        let archived = path.with_file_name(format!(
-            "{file_name}.corrupt-{}-{timestamp}",
-            std::process::id()
-        ));
-        fs::rename(path, &archived)?;
-        Some(archived)
-    } else {
-        None
-    };
-    for candidate in [
-        sqlite_companion_path(path, "-wal"),
-        sqlite_companion_path(path, "-shm"),
-    ] {
-        match fs::remove_file(candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(archived)
 }
 
 pub fn rebuild_catalog(path: impl AsRef<Path>) -> Result<()> {
@@ -699,6 +699,29 @@ fn query_session(conn: &Connection, id: &str) -> Result<Option<CatalogSession>> 
     )?;
     let mut rows = statement.query([id])?;
     rows.next()?.map(catalog_session_from_row).transpose()
+}
+
+fn query_session_ids_with_prefix(
+    conn: &Connection,
+    prefix: &str,
+    limit: u32,
+) -> Result<Vec<String>> {
+    if limit == 0 || limit > MAX_CATALOG_PAGE_SIZE {
+        return Err(StoreError::Integrity(format!(
+            "catalog prefix limit must be between 1 and {MAX_CATALOG_PAGE_SIZE}"
+        )));
+    }
+    let pattern = format!("{prefix}%");
+    let mut statement = conn.prepare(
+        "SELECT id FROM sessions
+         WHERE id LIKE ?1 AND status = 'available'
+         ORDER BY id LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![pattern, i64::from(limit)], |row| {
+        row.get::<_, String>(0)
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
 }
 
 fn query_page(conn: &Connection, query: &CatalogQuery) -> Result<CatalogPage> {
@@ -920,19 +943,19 @@ mod tests {
     }
 
     #[test]
-    fn previous_projection_version_requires_a_one_time_rebuild() {
+    fn unsupported_projection_version_requires_a_rebuild() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("catalog.db");
         let mut catalog = Catalog::open(&path).unwrap();
         let scan_id = catalog.allocate_scan().unwrap();
         catalog
-            .upsert_available_for_reconciliation(&row("obsolete-legacy-row", 1, 1), scan_id)
+            .upsert_available_for_reconciliation(&row("unsupported-row", 1, 1), scan_id)
             .unwrap();
         catalog.complete_scan(scan_id, 1).unwrap();
         catalog
             .conn
             .execute(
-                "UPDATE catalog_meta SET schema_version = 2 WHERE singleton = 1",
+                "UPDATE catalog_meta SET schema_version = 99 WHERE singleton = 1",
                 [],
             )
             .unwrap();
@@ -940,10 +963,10 @@ mod tests {
 
         assert!(matches!(
             CatalogReader::open_existing(&path),
-            Err(StoreError::UnsupportedSchema { found: 2, expected })
+            Err(StoreError::UnsupportedSchema { found: 99, expected })
                 if expected == CATALOG_SCHEMA_VERSION
         ));
-        assert!(archive_corrupt_catalog(&path).unwrap().is_some());
+        rebuild_catalog(&path).unwrap();
         let mut rebuilt = Catalog::open(&path).unwrap();
         let rebuilt_scan = rebuilt.allocate_scan().unwrap();
         rebuilt.complete_scan(rebuilt_scan, 2).unwrap();
@@ -976,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_projection_crash_probe() {
+    fn catalog_repair_crash_probe() {
         let Ok(role) = std::env::var(CATALOG_CRASH_ROLE) else {
             return;
         };
@@ -1009,14 +1032,14 @@ mod tests {
     }
 
     #[test]
-    fn subprocess_crashes_leave_catalog_projection_absent_or_complete() {
+    fn subprocess_crashes_leave_catalog_repair_absent_or_complete() {
         for role in ["during-upsert", "after-upsert"] {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("catalog.db");
             drop(Catalog::open(&path).unwrap());
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--exact")
-                .arg("catalog::tests::catalog_projection_crash_probe")
+                .arg("catalog::tests::catalog_repair_crash_probe")
                 .arg("--nocapture")
                 .env(CATALOG_CRASH_ROLE, role)
                 .env(CATALOG_CRASH_PATH, &path)
@@ -1425,8 +1448,7 @@ mod tests {
         fs::write(&path, b"not sqlite").unwrap();
         assert!(Catalog::open(&path).is_err());
         let _lock = CatalogReconcileLock::acquire(temp.path().join(".catalog.lock")).unwrap();
-        let archived = archive_corrupt_catalog(&path).unwrap().unwrap();
-        assert!(archived.is_file());
+        rebuild_catalog(&path).unwrap();
         let mut catalog = Catalog::open(&path).unwrap();
         catalog.upsert_available(&row("restored", 1, 10)).unwrap();
         assert_eq!(

@@ -955,7 +955,7 @@ impl TuiApp {
         let smelt_core::session::SessionStoreResume {
             header,
             session,
-            store_ref,
+            store_address,
             head,
             transcript_record_tail: record_tail,
         } = resume;
@@ -963,7 +963,11 @@ impl TuiApp {
         let (transcript, repair_records) =
             match crate::app::transcript::LoadedTranscript::from_record_slice(
                 record_tail,
-                store_ref.session_dir.clone(),
+                crate::app::transcript::TranscriptStoreAddress::new(
+                    store_address.sessions_root.clone(),
+                    store_address.session_id.clone(),
+                    store_address.lineage_id.clone(),
+                ),
             ) {
                 Some(transcript) => (transcript, false),
                 None => {
@@ -994,7 +998,11 @@ impl TuiApp {
                 }
             };
         let document = crate::app::session_document::SessionDocument::from_store(
-            header, session, store_ref, head, transcript,
+            header,
+            session,
+            store_address,
+            head,
+            transcript,
         );
         let mut document = document.into_store_backed();
         if repair_records {

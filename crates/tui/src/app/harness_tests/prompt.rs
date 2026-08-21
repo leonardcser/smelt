@@ -251,6 +251,36 @@ fn unknown_slash_prompt_submits_as_user_message() {
 }
 
 #[test]
+fn enter_renders_user_message_and_dispatches_only_after_durable_turn() {
+    let mut app = TestApp::builder().build();
+
+    app.type_text("durable echo");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(app.state().prompt_text, "");
+    assert!(
+        app.render_to_frame().text().contains("durable echo"),
+        "submitted text should be visible in the transcript after Enter"
+    );
+    let payload = app.actions().iter().find_map(|action| match action {
+        Action::EngineSend(cmd) => match cmd.as_ref() {
+            protocol::UiCommand::StartTurn(payload) => Some(payload),
+            _ => None,
+        },
+        _ => None,
+    });
+    let payload = payload.expect("Enter dispatches a provider turn");
+    assert!(
+        payload.persistence.required_generation > 0,
+        "provider dispatch must require a durable document generation"
+    );
+    assert!(
+        payload.persistence.store_revision > 0,
+        "provider dispatch must carry the durable store revision"
+    );
+}
+
+#[test]
 fn question_keymap_after_prompt_attachment_is_not_plain_insertion() {
     let mut app = TestApp::builder()
         .with_vim(true)

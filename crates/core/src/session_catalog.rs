@@ -73,7 +73,7 @@ pub(crate) struct ReadPage {
 
 #[derive(Clone, Debug)]
 enum PendingAction {
-    Project(u64),
+    Repair(u64),
     Remove,
 }
 
@@ -136,14 +136,15 @@ impl ServiceOwner {
     fn spawn(state_root: PathBuf) -> Result<Self, String> {
         crate::session::create_private_dir_all_in(&state_root, &state_root)
             .map_err(|error| format!("create session catalog state directory: {error}"))?;
-        let sessions_root = state_root.join("sessions");
-        let catalog_path = state_root.join("catalog.db");
-        let lock_path = smelt_store::catalog_reconcile_lock_path(&sessions_root);
+        let layout = smelt_store::SessionStoreLayout::from_state_root(&state_root);
+        let sessions_root = layout.sessions_root().to_path_buf();
+        let catalog_path = layout.catalog_path();
+        let lock_path = layout.catalog_lock_path();
         let reusable = reusable_catalog(&catalog_path, &sessions_root);
         let mut startup_actions = HashMap::new();
         if let Some(reusable) = &reusable {
             for id in &reusable.pending_session_ids {
-                startup_actions.insert(id.clone(), PendingAction::Project(0));
+                startup_actions.insert(id.clone(), PendingAction::Repair(0));
             }
         }
         let reconcile_all = reusable.is_none() || startup_actions.len() > MAX_PENDING_SESSIONS;
@@ -222,15 +223,8 @@ impl SessionCatalog {
         &self,
         command: &smelt_store::SessionCommit,
         receipt: &smelt_store::SaveReceipt,
-        schedule_projection: bool,
     ) {
-        publish_commit_to(&self.owner.handle, command, receipt, schedule_projection);
-    }
-
-    pub(crate) fn request_projection(&self, id: &str, revision: smelt_store::Revision) {
-        self.owner
-            .handle
-            .request_action(id.to_string(), PendingAction::Project(revision.get()));
+        publish_commit_to(&self.owner.handle, command, receipt);
     }
 
     pub(crate) fn begin_delete(&self, id: &str) {
@@ -312,10 +306,7 @@ impl ServiceHandle {
                 false
             } else if let Some(current) = pending.actions.get_mut(&id) {
                 match (&mut *current, action) {
-                    (
-                        PendingAction::Project(current_revision),
-                        PendingAction::Project(revision),
-                    ) => {
+                    (PendingAction::Repair(current_revision), PendingAction::Repair(revision)) => {
                         *current_revision = (*current_revision).max(revision);
                     }
                     (current, replacement) => *current = replacement,
@@ -383,7 +374,7 @@ impl ServiceHandle {
             .remove(id);
     }
 
-    fn clear_projected(&self, id: &str, revision: u64) {
+    fn clear_repaired_overlay(&self, id: &str, revision: u64) {
         let mut overlays = self
             .overlays
             .lock()
@@ -398,7 +389,7 @@ impl ServiceHandle {
     }
 
     fn clear_missing(&self, id: &str, revision: u64) {
-        self.clear_projected(id, revision);
+        self.clear_repaired_overlay(id, revision);
         self.overlays
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -485,35 +476,28 @@ pub(crate) fn request_reconciliation() {
 pub(crate) fn publish_commit(
     command: &smelt_store::SessionCommit,
     receipt: &smelt_store::SaveReceipt,
-    schedule_projection: bool,
 ) {
     let Some(service) = service() else {
         return;
     };
-    publish_commit_to(&service, command, receipt, schedule_projection);
+    publish_commit_to(&service, command, receipt);
 }
 
 fn publish_commit_to(
     service: &ServiceHandle,
     command: &smelt_store::SessionCommit,
     receipt: &smelt_store::SaveReceipt,
-    schedule_projection: bool,
 ) {
-    service.publish_overlay(catalog_session_from_commit(command, receipt));
-    if schedule_projection {
-        service.request_action(
-            receipt.session_id.clone(),
-            PendingAction::Project(receipt.current.revision.get()),
-        );
-    }
+    let session = CatalogSession::from_commit(command, receipt, receipt.lineage_id.clone());
+    service.publish_overlay(session);
 }
 
 #[cfg(test)]
-pub(crate) fn request_projection(id: &str, revision: smelt_store::Revision) {
+pub(crate) fn request_repair(id: &str, revision: smelt_store::Revision) {
     let Some(service) = service() else {
         return;
     };
-    service.request_action(id.to_string(), PendingAction::Project(revision.get()));
+    service.request_action(id.to_string(), PendingAction::Repair(revision.get()));
 }
 
 #[cfg(test)]
@@ -670,36 +654,6 @@ fn row_matches_query(session: &CatalogSession, query: &CatalogQuery) -> bool {
     })
 }
 
-fn catalog_session_from_commit(
-    command: &smelt_store::SessionCommit,
-    receipt: &smelt_store::SaveReceipt,
-) -> CatalogSession {
-    let metadata = &command.metadata;
-    CatalogSession {
-        id: receipt.session_id.clone(),
-        lineage_id: None,
-        title: metadata.title.clone(),
-        slug: metadata.slug.clone(),
-        first_user_message: metadata.first_user_message.clone(),
-        cwd: metadata.cwd.clone(),
-        mode: metadata.mode.clone(),
-        reasoning_effort: metadata.reasoning_effort.clone(),
-        model: metadata.model.clone(),
-        fast_mode: metadata.fast_mode,
-        parent_id: command.identity.parent_id.clone(),
-        context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
-        history_len: Some(receipt.current.history_len.get()),
-        text_bytes: None,
-        created_at: command.identity.created_at,
-        updated_at: metadata.updated_at,
-        source_revision: receipt.current.revision.get(),
-        availability: CatalogAvailability::Available,
-        error_kind: None,
-        error_summary: None,
-        last_seen_scan: 0,
-    }
-}
-
 fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
     const RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -726,7 +680,7 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
                     Ok(pending_ids) => {
                         let mut recovery_error = None;
                         for id in pending_ids {
-                            if let Err(error) = project_session(&handle, &id, 0) {
+                            if let Err(error) = repair_session(&handle, &id, 0) {
                                 recovery_error = Some(error);
                                 break;
                             }
@@ -754,8 +708,8 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
             let mut needs_reconciliation = false;
             for (id, action) in std::mem::take(&mut batch.actions) {
                 let result = match action {
-                    PendingAction::Project(minimum_revision) => {
-                        project_session(&handle, &id, minimum_revision)
+                    PendingAction::Repair(minimum_revision) => {
+                        repair_session(&handle, &id, minimum_revision)
                     }
                     PendingAction::Remove => remove_session(&handle, &id).map(|()| false),
                 };
@@ -795,45 +749,41 @@ fn complete_barriers(barriers: Vec<mpsc::Sender<()>>) {
     }
 }
 
-fn project_session(
-    handle: &ServiceHandle,
-    id: &str,
-    minimum_revision: u64,
-) -> Result<bool, String> {
-    let _duration = smelt_perf::perf::begin_value_ms("session:catalog:projection_duration_ms");
-    let _perf = smelt_perf::perf::begin("session:catalog:project");
+fn repair_session(handle: &ServiceHandle, id: &str, minimum_revision: u64) -> Result<bool, String> {
+    let _duration = smelt_perf::perf::begin_value_ms("session:catalog:repair_duration_ms");
+    let _perf = smelt_perf::perf::begin("session:catalog:repair");
     smelt_perf::perf::record_value(
-        "session:catalog:project_requested_revision",
+        "session:catalog:repair_requested_revision",
         minimum_revision,
     );
-    let (needs_reconciliation, projection_completed, pending_token) = {
+    let (needs_reconciliation, repair_completed, pending_token) = {
         let _lock = CatalogReconcileLock::acquire(&handle.lock_path)
-            .map_err(|error| format!("lock session catalog projection: {error}"))?;
+            .map_err(|error| format!("lock session catalog repair: {error}"))?;
         let pending_token =
             smelt_store::catalog_session_pending_token(&handle.sessions_root, id)
-                .map_err(|error| format!("read pending catalog projection for {id}: {error}"))?;
-        let mut projected = load_projection(&handle.sessions_root, id);
-        if projected.as_ref().is_ok_and(|session| {
+                .map_err(|error| format!("read pending catalog repair for {id}: {error}"))?;
+        let mut repaired = load_repair_session(&handle.sessions_root, id);
+        if repaired.as_ref().is_ok_and(|session| {
             session
                 .as_ref()
                 .is_some_and(|session| session.source_revision < minimum_revision)
         }) {
             smelt_perf::perf::record_value("session:catalog:post_publication_retry", 1);
-            projected = load_projection(&handle.sessions_root, id);
+            repaired = load_repair_session(&handle.sessions_root, id);
         }
         let mut catalog = Catalog::open(&handle.catalog_path)
-            .map_err(|error| format!("open session catalog for projection: {error}"))?;
-        let (needs_reconciliation, projection_completed) = match projected {
+            .map_err(|error| format!("open session catalog for repair: {error}"))?;
+        let (needs_reconciliation, repair_completed) = match repaired {
             Ok(Some(session)) => {
                 let revision = session.source_revision;
                 smelt_perf::perf::record_value(
-                    "session:catalog:projection_revision_lag",
+                    "session:catalog:repair_revision_lag",
                     minimum_revision.saturating_sub(revision),
                 );
                 catalog
                     .upsert_available(&session)
-                    .map_err(|error| format!("project session {id}: {error}"))?;
-                handle.clear_projected(id, revision);
+                    .map_err(|error| format!("repair session catalog row {id}: {error}"))?;
+                handle.clear_repaired_overlay(id, revision);
                 let revision_lagged = revision < minimum_revision;
                 (revision_lagged, !revision_lagged)
             }
@@ -851,15 +801,15 @@ fn project_session(
                     .map_err(|catalog_error| {
                         format!("record unavailable session {id}: {catalog_error}")
                     })?;
-                handle.clear_projected(id, minimum_revision);
+                handle.clear_repaired_overlay(id, minimum_revision);
                 (false, false)
             }
         };
-        (needs_reconciliation, projection_completed, pending_token)
+        (needs_reconciliation, repair_completed, pending_token)
     };
-    if let (true, Some(token)) = (projection_completed, pending_token) {
+    if let (true, Some(token)) = (repair_completed, pending_token) {
         smelt_store::clear_catalog_session_pending(&handle.sessions_root, id, &token)
-            .map_err(|error| format!("clear pending catalog projection for {id}: {error}"))?;
+            .map_err(|error| format!("clear pending catalog repair for {id}: {error}"))?;
     }
     Ok(needs_reconciliation)
 }
@@ -895,8 +845,8 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
         Err(open_error) => {
             smelt_perf::perf::record_value("session:catalog:integrity_failures", 1);
             smelt_perf::perf::record_value("session:catalog:rebuilds", 1);
-            smelt_store::archive_corrupt_catalog(&handle.catalog_path)
-                .map_err(|error| format!("archive session catalog after {open_error}: {error}"))?;
+            smelt_store::rebuild_catalog(&handle.catalog_path)
+                .map_err(|error| format!("rebuild session catalog after {open_error}: {error}"))?;
             Catalog::open(&handle.catalog_path)
                 .map_err(|error| format!("open rebuilt session catalog: {error}"))?
         }
@@ -929,15 +879,15 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
             seen_tombstones.insert(id.clone());
         }
         let pending_token = smelt_store::catalog_session_pending_token(&handle.sessions_root, &id)
-            .map_err(|error| format!("read pending catalog projection for {id}: {error}"))?;
-        match load_projection(&handle.sessions_root, &id) {
+            .map_err(|error| format!("read pending catalog repair for {id}: {error}"))?;
+        match load_repair_session(&handle.sessions_root, &id) {
             Ok(Some(session)) => {
                 available += 1;
                 let revision = session.source_revision;
                 catalog
                     .upsert_available_for_reconciliation(&session, scan_id)
                     .map_err(|error| format!("reconcile lineage session {id}: {error}"))?;
-                handle.clear_projected(&id, revision);
+                handle.clear_repaired_overlay(&id, revision);
                 if let Some(token) = pending_token {
                     completed_pending.push((id.clone(), token));
                 }
@@ -968,7 +918,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
     smelt_perf::perf::record_value("session:catalog:reconcile_removed", deleted as u64);
 
     for (id, revision) in active_overlays {
-        handle.clear_projected(&id, revision);
+        handle.clear_repaired_overlay(&id, revision);
     }
     {
         let mut overlays = handle
@@ -986,10 +936,10 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
 
     for (id, token) in completed_pending {
         smelt_store::clear_catalog_session_pending(&handle.sessions_root, &id, &token)
-            .map_err(|error| format!("clear pending catalog projection for {id}: {error}"))?;
+            .map_err(|error| format!("clear pending catalog repair for {id}: {error}"))?;
     }
     smelt_store::pending_catalog_session_ids(&handle.sessions_root)
-        .map_err(|error| format!("enumerate pending catalog projections: {error}"))
+        .map_err(|error| format!("enumerate pending catalog repairs: {error}"))
 }
 
 fn retain_reconciliation_tombstones(
@@ -1001,28 +951,31 @@ fn retain_reconciliation_tombstones(
 }
 
 #[derive(Debug)]
-struct ProjectionError {
+struct CatalogRepairError {
     kind: String,
     summary: String,
 }
 
-fn load_projection(root: &Path, id: &str) -> Result<Option<CatalogSession>, ProjectionError> {
+fn load_repair_session(
+    root: &Path,
+    id: &str,
+) -> Result<Option<CatalogSession>, CatalogRepairError> {
     let Some(reader) =
         smelt_store::LineageSessionReader::try_open_existing(root, id).map_err(|error| {
-            ProjectionError {
+            CatalogRepairError {
                 kind: "corrupt".into(),
-                summary: format!("open lineage session {id} for catalog projection: {error}"),
+                summary: format!("open lineage session {id} for catalog repair: {error}"),
             }
         })?
     else {
         return Ok(None);
     };
-    let state = reader.snapshot().map_err(|error| ProjectionError {
+    let state = reader.snapshot().map_err(|error| CatalogRepairError {
         kind: "corrupt".into(),
-        summary: format!("read lineage session {id} for catalog projection: {error}"),
+        summary: format!("read lineage session {id} for catalog repair: {error}"),
     })?;
     if state.identity.id != id {
-        return Err(ProjectionError {
+        return Err(CatalogRepairError {
             kind: "corrupt".into(),
             summary: format!(
                 "persisted lineage branch id {} does not match requested session {id}",
@@ -1097,7 +1050,7 @@ mod tests {
     fn test_worker(root: &Path) -> (ServiceHandle, thread::JoinHandle<()>) {
         test_worker_with_lock(
             root,
-            smelt_store::catalog_reconcile_lock_path(root.join("sessions")),
+            smelt_store::SessionStoreLayout::from_state_root(root).catalog_lock_path(),
         )
     }
 
@@ -1106,9 +1059,10 @@ mod tests {
         lock_path: PathBuf,
     ) -> (ServiceHandle, thread::JoinHandle<()>) {
         let (wake, wakes) = mpsc::sync_channel(1);
+        let layout = smelt_store::SessionStoreLayout::from_state_root(root);
         let handle = ServiceHandle {
-            sessions_root: root.join("sessions"),
-            catalog_path: root.join("catalog.db"),
+            sessions_root: layout.sessions_root().to_path_buf(),
+            catalog_path: layout.catalog_path(),
             lock_path,
             pending: Arc::new(Mutex::new(PendingWork::default())),
             overlays: Arc::new(Mutex::new(Overlays::default())),
@@ -1133,7 +1087,8 @@ mod tests {
     #[test]
     fn completed_catalog_is_reused_without_startup_reconciliation() {
         let temp = tempfile::tempdir().unwrap();
-        let catalog_path = temp.path().join("catalog.db");
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_state_root(temp.path()).catalog_path();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         let scan_id = catalog.allocate_scan().unwrap();
         catalog.complete_scan(scan_id, 1_700_000_000_000).unwrap();
@@ -1158,7 +1113,8 @@ mod tests {
     #[test]
     fn interrupted_catalog_scan_is_rebuilt_on_startup() {
         let temp = tempfile::tempdir().unwrap();
-        let catalog_path = temp.path().join("catalog.db");
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_state_root(temp.path()).catalog_path();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         let completed_scan = catalog.allocate_scan().unwrap();
         catalog
@@ -1181,10 +1137,13 @@ mod tests {
     }
 
     #[test]
-    fn startup_replays_a_commit_left_dirty_before_catalog_projection() {
+    fn startup_replays_a_commit_left_dirty_before_catalog_repair() {
         let temp = tempfile::tempdir().unwrap();
-        let sessions_root = temp.path().join("sessions");
-        let catalog_path = temp.path().join("catalog.db");
+        let sessions_root = smelt_store::SessionStoreLayout::from_state_root(temp.path())
+            .sessions_root()
+            .to_path_buf();
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_state_root(temp.path()).catalog_path();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         let scan_id = catalog.allocate_scan().unwrap();
         catalog.complete_scan(scan_id, 1_700_000_000_000).unwrap();
@@ -1224,21 +1183,24 @@ mod tests {
     }
 
     #[test]
-    fn startup_replays_a_delete_left_dirty_before_catalog_projection() {
+    fn startup_replays_a_delete_left_dirty_before_catalog_repair() {
         let temp = tempfile::tempdir().unwrap();
-        let sessions_root = temp.path().join("sessions");
-        let catalog_path = temp.path().join("catalog.db");
+        let sessions_root = smelt_store::SessionStoreLayout::from_state_root(temp.path())
+            .sessions_root()
+            .to_path_buf();
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_state_root(temp.path()).catalog_path();
         let session = canonical_session("deleted before crash");
         let command = crate::session::initial_store_commit_from_session(&session).unwrap();
         let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, SESSION_ID).unwrap();
         writer.commit_session(&command).unwrap();
-        let projected = load_projection(&sessions_root, SESSION_ID)
+        let repaired = load_repair_session(&sessions_root, SESSION_ID)
             .unwrap()
             .unwrap();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         let scan_id = catalog.allocate_scan().unwrap();
         catalog
-            .upsert_available_for_reconciliation(&projected, scan_id)
+            .upsert_available_for_reconciliation(&repaired, scan_id)
             .unwrap();
         catalog.complete_scan(scan_id, 1_700_000_000_000).unwrap();
         drop(catalog);
@@ -1267,22 +1229,25 @@ mod tests {
     }
 
     #[test]
-    fn startup_replays_a_fork_left_dirty_before_catalog_projection() {
+    fn startup_replays_a_fork_left_dirty_before_catalog_repair() {
         let temp = tempfile::tempdir().unwrap();
-        let sessions_root = temp.path().join("sessions");
-        let catalog_path = temp.path().join("catalog.db");
+        let sessions_root = smelt_store::SessionStoreLayout::from_state_root(temp.path())
+            .sessions_root()
+            .to_path_buf();
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_state_root(temp.path()).catalog_path();
         let target_id = "2".repeat(64);
         let session = canonical_session("fork source");
         let command = crate::session::initial_store_commit_from_session(&session).unwrap();
         let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, SESSION_ID).unwrap();
         writer.commit_session(&command).unwrap();
-        let projected = load_projection(&sessions_root, SESSION_ID)
+        let repaired = load_repair_session(&sessions_root, SESSION_ID)
             .unwrap()
             .unwrap();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         let scan_id = catalog.allocate_scan().unwrap();
         catalog
-            .upsert_available_for_reconciliation(&projected, scan_id)
+            .upsert_available_for_reconciliation(&repaired, scan_id)
             .unwrap();
         catalog.complete_scan(scan_id, 1_700_000_000_000).unwrap();
         drop(catalog);
@@ -1319,7 +1284,13 @@ mod tests {
     #[test]
     fn reconciliation_ignores_noncanonical_session_directories() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("sessions").join(SESSION_ID)).unwrap();
+        fs::create_dir_all(
+            smelt_store::SessionStoreLayout::from_state_root(temp.path())
+                .sessions_root()
+                .to_path_buf()
+                .join(SESSION_ID),
+        )
+        .unwrap();
         let (handle, worker) = test_worker(temp.path());
 
         reconcile_all_sessions(&handle).unwrap();
@@ -1360,12 +1331,15 @@ mod tests {
     }
 
     #[test]
-    fn pending_projection_map_coalesces_and_overflow_requests_reconciliation() {
+    fn pending_repair_map_coalesces_and_overflow_requests_reconciliation() {
         let temp = tempfile::tempdir().unwrap();
         let (wake, _wakes) = mpsc::sync_channel(1);
         let handle = ServiceHandle {
-            sessions_root: temp.path().join("sessions"),
-            catalog_path: temp.path().join("catalog.db"),
+            sessions_root: smelt_store::SessionStoreLayout::from_state_root(temp.path())
+                .sessions_root()
+                .to_path_buf(),
+            catalog_path: smelt_store::SessionStoreLayout::from_state_root(temp.path())
+                .catalog_path(),
             lock_path: temp.path().join(".catalog.lock"),
             pending: Arc::new(Mutex::new(PendingWork::default())),
             overlays: Arc::new(Mutex::new(Overlays::default())),
@@ -1373,16 +1347,16 @@ mod tests {
             wake,
         };
 
-        handle.request_action(SESSION_ID.into(), PendingAction::Project(2));
-        handle.request_action(SESSION_ID.into(), PendingAction::Project(5));
+        handle.request_action(SESSION_ID.into(), PendingAction::Repair(2));
+        handle.request_action(SESSION_ID.into(), PendingAction::Repair(5));
         assert!(matches!(
             handle.pending.lock().unwrap().actions.get(SESSION_ID),
-            Some(PendingAction::Project(5))
+            Some(PendingAction::Repair(5))
         ));
 
         handle.pending.lock().unwrap().actions.clear();
         for value in 0..=MAX_PENDING_SESSIONS {
-            handle.request_action(format!("{value:064x}"), PendingAction::Project(1));
+            handle.request_action(format!("{value:064x}"), PendingAction::Repair(1));
         }
         let pending = handle.pending.lock().unwrap();
         assert!(pending.reconcile_all);
@@ -1390,14 +1364,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_projection_retires_only_the_overlay_it_attempted() {
+    fn failed_repair_retires_only_the_overlay_it_attempted() {
         let temp = tempfile::tempdir().unwrap();
         let (handle, worker) = test_worker(temp.path());
         let mut overlay = stale_catalog_row();
         overlay.source_revision = 5;
         handle.publish_overlay(overlay);
 
-        assert!(project_session(&handle, SESSION_ID, 5).unwrap());
+        assert!(repair_session(&handle, SESSION_ID, 5).unwrap());
         assert!(!handle
             .overlays
             .lock()
@@ -1408,7 +1382,7 @@ mod tests {
         let mut newer_overlay = stale_catalog_row();
         newer_overlay.source_revision = 6;
         handle.publish_overlay(newer_overlay);
-        assert!(project_session(&handle, SESSION_ID, 5).unwrap());
+        assert!(repair_session(&handle, SESSION_ID, 5).unwrap());
         assert_eq!(
             handle.overlays.lock().unwrap().active[SESSION_ID].source_revision,
             6
@@ -1529,11 +1503,13 @@ mod tests {
         let receipt = writer.commit_session(&command).unwrap();
         writer.release().unwrap();
 
-        let catalog_path = crate::config::state_dir().join("catalog.db");
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_sessions_root(crate::session::sessions_dir())
+                .catalog_path();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         catalog.upsert_available(&stale_catalog_row()).unwrap();
         drop(catalog);
-        publish_commit(&command, &receipt, false);
+        publish_commit(&command, &receipt);
 
         let page = read_page(&CatalogQuery::default());
         assert_eq!(page.sessions.len(), 1);
@@ -1550,19 +1526,21 @@ mod tests {
     }
 
     #[test]
-    fn projection_repairs_stale_rows_and_catalog_rebuilds_from_canonical_data() {
+    fn repair_refreshes_stale_rows_and_catalog_rebuilds_from_canonical_data() {
         let state = tempfile::tempdir().unwrap();
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         let session = canonical_session("canonical");
         let receipt = crate::session::save_result(&session).unwrap();
         assert!(wait_for_queued_work(Duration::from_secs(2)));
-        let catalog_path = crate::config::state_dir().join("catalog.db");
+        let catalog_path =
+            smelt_store::SessionStoreLayout::from_sessions_root(crate::session::sessions_dir())
+                .catalog_path();
 
         let mut catalog = Catalog::open(&catalog_path).unwrap();
         catalog.remove(SESSION_ID).unwrap();
         catalog.upsert_available(&stale_catalog_row()).unwrap();
         drop(catalog);
-        request_projection(SESSION_ID, receipt.current.revision);
+        request_repair(SESSION_ID, receipt.current.revision);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let page = read_page(&CatalogQuery::default());
@@ -1585,5 +1563,12 @@ mod tests {
         let rebuilt = read_page(&CatalogQuery::default());
         assert_eq!(rebuilt.sessions.len(), 1);
         assert_eq!(rebuilt.sessions[0].title.as_deref(), Some("canonical"));
+        assert!(fs::read_dir(catalog_path.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("catalog.db.corrupt-")));
     }
 }

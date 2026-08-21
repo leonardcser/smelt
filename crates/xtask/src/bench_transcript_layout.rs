@@ -64,6 +64,12 @@ pub fn run(args: Vec<String>) {
     let mut hot_path_fixture_session_id: Option<String> = None;
     let mut hot_path_heterogeneous = false;
     let mut save_request_only = false;
+    let mut stream = false;
+    let mut stream_only = false;
+    let mut stream_history: Option<String> = None;
+    let mut stream_chunks: Option<String> = None;
+    let mut stream_bytes: Option<String> = None;
+    let mut stream_scroll = false;
     let mut tall_write_only = false;
     let mut tall_write_lines: Option<String> = None;
     let mut no_warmup = false;
@@ -101,6 +107,27 @@ pub fn run(args: Vec<String>) {
             "--save-request-only" => {
                 hot_path = true;
                 save_request_only = true;
+            }
+            "--stream" => stream = true,
+            "--stream-only" => {
+                stream = true;
+                stream_only = true;
+            }
+            "--stream-history" => {
+                stream = true;
+                stream_history = Some(take_positive_usize_arg(&mut iter, "--stream-history"));
+            }
+            "--stream-chunks" => {
+                stream = true;
+                stream_chunks = Some(take_positive_usize_arg(&mut iter, "--stream-chunks"));
+            }
+            "--stream-bytes" => {
+                stream = true;
+                stream_bytes = Some(take_positive_usize_arg(&mut iter, "--stream-bytes"));
+            }
+            "--stream-scroll" => {
+                stream = true;
+                stream_scroll = true;
             }
             "--save-request-operations" => {
                 hot_path = true;
@@ -184,6 +211,12 @@ pub fn run(args: Vec<String>) {
         );
         std::process::exit(2);
     }
+    if save_request_only && stream_only {
+        eprintln!(
+            "bench-transcript-layout: --save-request-only and --stream-only are mutually exclusive"
+        );
+        std::process::exit(2);
+    }
 
     let mut env = vec![("SMELT_TRANSCRIPT_BENCH_RUNS", runs.clone())];
     if let Some(workloads) = workloads {
@@ -225,6 +258,21 @@ pub fn run(args: Vec<String>) {
     if hot_path_heterogeneous {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH_HETEROGENEOUS", "1".into()));
     }
+    if stream {
+        env.push(("SMELT_TRANSCRIPT_STREAM_BENCH", "1".into()));
+    }
+    if let Some(history) = stream_history {
+        env.push(("SMELT_TRANSCRIPT_STREAM_HISTORY", history));
+    }
+    if let Some(chunks) = stream_chunks {
+        env.push(("SMELT_TRANSCRIPT_STREAM_CHUNKS", chunks));
+    }
+    if let Some(bytes) = stream_bytes {
+        env.push(("SMELT_TRANSCRIPT_STREAM_BYTES", bytes));
+    }
+    if stream_scroll {
+        env.push(("SMELT_TRANSCRIPT_STREAM_SCROLL", "1".into()));
+    }
 
     eprintln!(
         "running transcript layout benchmark: profile={} runs={}",
@@ -235,6 +283,8 @@ pub fn run(args: Vec<String>) {
         "bench-transcript-layout",
         if save_request_only {
             "transcript_layout_hot_path_benchmark_suite"
+        } else if stream_only {
+            "transcript_stream_benchmark_suite"
         } else if tall_write_only {
             "transcript_layout_tall_write_file_benchmark_suite"
         } else {
@@ -302,7 +352,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-chunks N] [--stream-bytes N] [--stream-scroll] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -324,6 +374,12 @@ fn print_usage() {
         "--active-memory runs the receipt-compacted active-session retained-memory benchmark."
     );
     eprintln!("--active-memory-bytes N sets its generated transcript size; default is 50 MiB.");
+    eprintln!("--stream enables real engine-delta plus full-render streaming samples.");
+    eprintln!("--stream-only skips unrelated transcript benchmark suites.");
+    eprintln!("--stream-history N sets prior transcript blocks; default is 100.");
+    eprintln!("--stream-chunks N sets provider deltas; default is 512.");
+    eprintln!("--stream-bytes N sets final streamed response bytes; default is 16384.");
+    eprintln!("--stream-scroll interleaves transcript navigation with provider deltas.");
     eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
     eprintln!("--save-request-only skips unrelated transcript layout and navigation suites.");
     eprintln!("--save-request-operations CSV runs only named hot-path operations.");

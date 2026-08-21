@@ -36,7 +36,7 @@ pub(super) struct TranscriptSearchIndex {
 }
 
 pub(super) struct TranscriptSearchStore {
-    session_dir: std::path::PathBuf,
+    store_address: super::transcript::TranscriptStoreAddress,
     reader: smelt_store::LineageSessionReader,
 }
 
@@ -58,7 +58,7 @@ pub struct TranscriptSearchWorkerResult {
 pub(super) struct TranscriptSearchWorkerRequest {
     pub(super) generation: u64,
     pub(super) context: TranscriptSearchContext,
-    pub(super) session_dir: std::path::PathBuf,
+    pub(super) store_address: super::transcript::TranscriptStoreAddress,
     pub(super) query: String,
     pub(super) origin_block_idx: Option<u64>,
     pub(super) direction: SearchDirection,
@@ -211,7 +211,7 @@ fn persistent_transcript_candidate_blocks(
     request: &TranscriptSearchWorkerRequest,
     cancelled: &dyn Fn() -> bool,
 ) -> smelt_store::Result<SqliteTranscriptCandidateBlocks> {
-    let store = TranscriptSearchStore::open(request.session_dir.clone())?;
+    let store = TranscriptSearchStore::open(request.store_address.clone())?;
     let store_direction = match request.direction {
         SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
         SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
@@ -251,26 +251,16 @@ fn persistent_transcript_candidate_blocks(
 }
 
 impl TranscriptSearchStore {
-    fn open(session_dir: std::path::PathBuf) -> smelt_store::Result<Self> {
-        let (sessions_root, session_id) = session_dir
-            .parent()
-            .zip(session_dir.file_name().and_then(|name| name.to_str()))
-            .filter(|(_, session_id)| {
-                session_id.len() == 64
-                    && session_id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-            .ok_or_else(|| {
-                smelt_store::StoreError::Integrity("invalid lineage session directory".into())
-            })?;
-        let reader =
-            smelt_store::LineageSessionReader::try_open_existing(sessions_root, session_id)?
-                .ok_or_else(|| {
-                    smelt_store::StoreError::Integrity("lineage session does not exist".into())
-                })?;
+    fn open(store_address: super::transcript::TranscriptStoreAddress) -> smelt_store::Result<Self> {
+        let reader = smelt_store::LineageSessionReader::try_open_existing(
+            &store_address.sessions_root,
+            &store_address.session_id,
+        )?
+        .ok_or_else(|| {
+            smelt_store::StoreError::Integrity("lineage session does not exist".into())
+        })?;
         Ok(Self {
-            session_dir,
+            store_address,
             reader,
         })
     }
@@ -528,18 +518,13 @@ impl TuiApp {
     }
 
     fn transcript_search_store(&mut self) -> Option<&TranscriptSearchStore> {
-        let session_dir = self
-            .conversation
-            .transcript()
-            .session_dir()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| self.conversation.current_session_dir());
+        let store_address = self.conversation.transcript().store_address()?.clone();
         if self
             .overlays
             .transcript_search_store()
-            .is_none_or(|store| store.session_dir != session_dir)
+            .is_none_or(|store| store.store_address != store_address)
         {
-            let store = TranscriptSearchStore::open(session_dir).ok()?;
+            let store = TranscriptSearchStore::open(store_address).ok()?;
             self.overlays.install_transcript_search_store(store);
         }
         self.overlays.transcript_search_store()
@@ -1291,7 +1276,7 @@ mod tests {
 
     #[test]
     fn dropping_search_worker_cancels_and_joins_in_flight_work() {
-        let session_dir = tempfile::tempdir().unwrap();
+        let store_address = tempfile::tempdir().unwrap();
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         let worker = TranscriptSearchWorker::spawn(event_tx);
         worker.set_delay(std::time::Duration::from_secs(30));
@@ -1300,7 +1285,11 @@ mod tests {
             context: TranscriptSearchContext {
                 session_id: "1".repeat(64),
             },
-            session_dir: session_dir.path().to_path_buf(),
+            store_address: crate::app::transcript::TranscriptStoreAddress::new(
+                store_address.path().to_path_buf(),
+                "1".repeat(64),
+                "1".repeat(64),
+            ),
             query: "needle".into(),
             origin_block_idx: None,
             direction: SearchDirection::Forward,
@@ -1462,9 +1451,13 @@ mod tests {
             })
             .expect("search target block");
         app.app.save_session_and_flush();
-        let loaded =
-            crate::app::history::load_transcript_tail_from_sqlite_dir(app.session_dir(), 100, 32)
-                .expect("load sparse transcript");
+        let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
+            app.app.core.sessions.sessions_dir(),
+            app.app.conversation.session().id.clone(),
+            100,
+            32,
+        )
+        .expect("load sparse transcript");
         app.app.clear_transcript();
         app.app
             .conversation

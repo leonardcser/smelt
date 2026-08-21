@@ -68,8 +68,14 @@ pub struct MarkdownStream {
 #[derive(Default)]
 struct MarkdownStreamState {
     current_line: String,
-    current_line_id: Option<BlockId>,
+    current_visible: VisibleBlock,
     active: Option<ActiveMarkdownBlock>,
+}
+
+#[derive(Default)]
+struct VisibleBlock {
+    id: Option<BlockId>,
+    len: usize,
 }
 
 impl MarkdownStreamKind {
@@ -96,19 +102,20 @@ pub(crate) fn normalize_thinking_title_spacing(content: &str) -> String {
 enum ActiveMarkdownBlock {
     Paragraph {
         content: String,
-        id: Option<BlockId>,
+        visible: VisibleBlock,
     },
     TableCandidate {
         header: String,
     },
     Table {
-        rows: Vec<String>,
-        id: Option<BlockId>,
+        content: String,
+        row_count: usize,
+        visible: VisibleBlock,
     },
     Code {
         content: String,
         fence: MarkdownFence,
-        id: Option<BlockId>,
+        visible: VisibleBlock,
     },
 }
 
@@ -140,7 +147,7 @@ impl MarkdownStream {
 
     pub fn is_active(&self) -> bool {
         !self.state.current_line.is_empty()
-            || self.state.current_line_id.is_some()
+            || self.state.current_visible.id.is_some()
             || self.state.active.is_some()
     }
 
@@ -174,49 +181,44 @@ impl MarkdownStream {
     fn sync(&mut self, history: &mut BlockHistory) {
         let kind = self.kind;
         match self.state.active.as_mut() {
-            Some(ActiveMarkdownBlock::Paragraph { content, id }) => {
+            Some(ActiveMarkdownBlock::Paragraph { content, visible }) => {
                 if opening_fence_candidate(&self.state.current_line) != Candidate::Not
                     || (kind.uses_thinking_section_policy()
                         && thinking_title_candidate(&self.state.current_line) != Candidate::Not)
                 {
-                    Self::sync_text(kind, history, id, content.clone());
+                    Self::sync_parts(kind, history, visible, &[content]);
                 } else {
-                    Self::sync_text(
-                        kind,
-                        history,
-                        id,
-                        joined_preview(content, &self.state.current_line),
-                    );
+                    Self::sync_preview(kind, history, visible, content, &self.state.current_line);
                 }
             }
             Some(ActiveMarkdownBlock::TableCandidate { header }) => {
-                match table_delimiter_candidate(&self.state.current_line) {
-                    Candidate::Not => {
-                        Self::sync_text(
-                            kind,
-                            history,
-                            &mut self.state.current_line_id,
-                            joined_preview(header, &self.state.current_line),
-                        );
-                    }
-                    Candidate::Pending | Candidate::Complete => {}
-                }
-            }
-            Some(ActiveMarkdownBlock::Table { rows, id }) => {
-                if rows.len() >= 3 {
-                    Self::sync_text(kind, history, id, rows.join("\n"));
-                }
-            }
-            Some(ActiveMarkdownBlock::Code { content, fence, id }) => {
-                if closing_fence_candidate(&self.state.current_line, fence) != Candidate::Not {
-                    Self::sync_text(kind, history, id, content.clone());
-                } else {
-                    Self::sync_text(
+                if table_delimiter_candidate(&self.state.current_line) == Candidate::Not {
+                    Self::sync_parts(
                         kind,
                         history,
-                        id,
-                        joined_preview(content, &self.state.current_line),
+                        &mut self.state.current_visible,
+                        &[header, "\n", &self.state.current_line],
                     );
+                }
+            }
+            Some(ActiveMarkdownBlock::Table {
+                content,
+                row_count,
+                visible,
+            }) => {
+                if *row_count >= 3 {
+                    Self::sync_parts(kind, history, visible, &[content]);
+                }
+            }
+            Some(ActiveMarkdownBlock::Code {
+                content,
+                fence,
+                visible,
+            }) => {
+                if closing_fence_candidate(&self.state.current_line, fence) != Candidate::Not {
+                    Self::sync_parts(kind, history, visible, &[content]);
+                } else {
+                    Self::sync_preview(kind, history, visible, content, &self.state.current_line);
                 }
             }
             None => {
@@ -226,11 +228,11 @@ impl MarkdownStream {
                 {
                     return;
                 }
-                Self::sync_text(
+                Self::sync_parts(
                     kind,
                     history,
-                    &mut self.state.current_line_id,
-                    self.state.current_line.clone(),
+                    &mut self.state.current_visible,
+                    &[&self.state.current_line],
                 );
             }
         }
@@ -241,70 +243,112 @@ impl MarkdownStream {
             Some(ActiveMarkdownBlock::Code {
                 mut content,
                 fence,
-                id,
+                visible,
             }) => {
                 append_line(&mut content, line);
                 if markdown_closes_fence(&fence, line) {
-                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, visible });
                 } else {
-                    self.state.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Code {
+                        content,
+                        fence,
+                        visible,
+                    });
                 }
             }
             Some(ActiveMarkdownBlock::TableCandidate { header }) => {
                 if markdown_table_delimiter(line) {
+                    let mut content = header;
+                    append_line(&mut content, line);
+                    self.state.current_visible = VisibleBlock::default();
                     self.state.active = Some(ActiveMarkdownBlock::Table {
-                        rows: vec![header, line.to_string()],
-                        id: None,
+                        content,
+                        row_count: 2,
+                        visible: VisibleBlock::default(),
                     });
                 } else {
-                    let id = self.state.current_line_id.take();
+                    let visible = std::mem::take(&mut self.state.current_visible);
                     let mut content = header;
                     if !line.trim().is_empty() {
                         append_line(&mut content, line);
                     }
-                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, visible });
                     if line.trim().is_empty() {
                         self.finish_active(history);
                     }
                 }
             }
-            Some(ActiveMarkdownBlock::Table { mut rows, id }) => {
+            Some(ActiveMarkdownBlock::Table {
+                mut content,
+                mut row_count,
+                visible,
+            }) => {
                 if is_streaming_table_row(line) {
-                    rows.push(line.to_string());
-                    self.state.active = Some(ActiveMarkdownBlock::Table { rows, id });
+                    append_line(&mut content, line);
+                    row_count += 1;
+                    self.state.active = Some(ActiveMarkdownBlock::Table {
+                        content,
+                        row_count,
+                        visible,
+                    });
                 } else if line.trim().is_empty() {
-                    self.state.active = Some(ActiveMarkdownBlock::Table { rows, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Table {
+                        content,
+                        row_count,
+                        visible,
+                    });
                 } else {
-                    self.state.active = Some(ActiveMarkdownBlock::Table { rows, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Table {
+                        content,
+                        row_count,
+                        visible,
+                    });
                     self.finish_active(history);
                     self.process_line(history, line);
                 }
             }
-            Some(ActiveMarkdownBlock::Paragraph { mut content, id }) => {
+            Some(ActiveMarkdownBlock::Paragraph {
+                mut content,
+                visible,
+            }) => {
                 if line.trim().is_empty() {
                     if self.kind.uses_thinking_section_policy() {
-                        append_line(&mut content, line);
-                        self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                        let follows_title = content
+                            .rsplit('\n')
+                            .find(|line| !line.trim().is_empty())
+                            .and_then(thinking_title)
+                            .is_some();
+                        if !follows_title {
+                            append_line(&mut content, line);
+                        }
+                        self.state.active =
+                            Some(ActiveMarkdownBlock::Paragraph { content, visible });
                     } else {
-                        self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                        self.state.active =
+                            Some(ActiveMarkdownBlock::Paragraph { content, visible });
                         self.finish_active(history);
                     }
                 } else if self.kind.uses_thinking_section_policy() && thinking_title(line).is_some()
                 {
-                    Self::finish_text(self.kind, history, id, content);
+                    Self::finish_text(self.kind, history, visible.id, content);
                     self.state.active = Some(ActiveMarkdownBlock::Paragraph {
                         content: line.to_string(),
-                        id: None,
+                        visible: VisibleBlock::default(),
                     });
                 } else if let Some(fence) = markdown_opening_fence(line) {
                     append_line(&mut content, line);
-                    self.state.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Code {
+                        content,
+                        fence,
+                        visible,
+                    });
                 } else {
                     append_line(&mut content, line);
-                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, visible });
                 }
             }
             None => {
+                let visible = std::mem::take(&mut self.state.current_visible);
                 if line.trim().is_empty() {
                     return;
                 }
@@ -312,17 +356,16 @@ impl MarkdownStream {
                     self.state.active = Some(ActiveMarkdownBlock::Code {
                         content: line.to_string(),
                         fence,
-                        id: self.state.current_line_id.take(),
+                        visible,
                     });
                 } else if is_streaming_table_row(line) {
-                    self.state.current_line_id = None;
                     self.state.active = Some(ActiveMarkdownBlock::TableCandidate {
                         header: line.to_string(),
                     });
                 } else {
                     self.state.active = Some(ActiveMarkdownBlock::Paragraph {
                         content: line.to_string(),
-                        id: self.state.current_line_id.take(),
+                        visible,
                     });
                 }
             }
@@ -334,35 +377,78 @@ impl MarkdownStream {
             return;
         };
         match active {
-            ActiveMarkdownBlock::Paragraph { content, id }
-            | ActiveMarkdownBlock::Code { content, id, .. } => {
-                Self::finish_text(self.kind, history, id, content);
+            ActiveMarkdownBlock::Paragraph { content, visible }
+            | ActiveMarkdownBlock::Code {
+                content, visible, ..
+            }
+            | ActiveMarkdownBlock::Table {
+                content, visible, ..
+            } => {
+                Self::finish_text(self.kind, history, visible.id, content);
             }
             ActiveMarkdownBlock::TableCandidate { header } => {
                 Self::finish_text(self.kind, history, None, header);
             }
-            ActiveMarkdownBlock::Table { rows, id } => {
-                Self::finish_text(self.kind, history, id, rows.join("\n"));
-            }
         }
     }
 
-    fn sync_text(
+    fn sync_preview(
         kind: MarkdownStreamKind,
         history: &mut BlockHistory,
-        id: &mut Option<BlockId>,
-        content: String,
+        visible: &mut VisibleBlock,
+        content: &str,
+        current_line: &str,
     ) {
-        if content.trim().is_empty() {
+        if current_line.is_empty() {
+            Self::sync_parts(kind, history, visible, &[content]);
+        } else {
+            Self::sync_parts(kind, history, visible, &[content, "\n", current_line]);
+        }
+    }
+
+    fn sync_parts(
+        kind: MarkdownStreamKind,
+        history: &mut BlockHistory,
+        visible: &mut VisibleBlock,
+        parts: &[&str],
+    ) {
+        if parts
+            .iter()
+            .all(|part| part.chars().all(char::is_whitespace))
+        {
             return;
         }
-        let block = kind.block(content);
-        if let Some(id) = *id {
-            history.rewrite(id, block);
+        let target_len = parts.iter().map(|part| part.len()).sum::<usize>();
+        debug_assert!(visible.len <= target_len);
+        if let Some(block_id) = visible.id {
+            let mut skip = visible.len;
+            let suffixes = parts.iter().copied().filter_map(move |part| {
+                if skip >= part.len() {
+                    skip -= part.len();
+                    None
+                } else {
+                    let suffix = part
+                        .get(skip..)
+                        .expect("visible Markdown offset is a UTF-8 boundary");
+                    skip = 0;
+                    Some(suffix)
+                }
+            });
+            if history
+                .append_live_text_segments(block_id, suffixes)
+                .is_some()
+            {
+                visible.len = target_len;
+            }
         } else {
-            let new_id = history.push(block);
+            let mut content = String::with_capacity(target_len);
+            for part in parts {
+                content.push_str(part);
+            }
+            let new_id = history.push(kind.block(content));
             history.set_status(new_id, Status::Streaming);
-            *id = Some(new_id);
+            visible.id = Some(new_id);
+            visible.len = target_len;
         }
     }
 
@@ -374,19 +460,20 @@ impl MarkdownStream {
     ) {
         let trimmed = content.trim().to_string();
         if let Some(id) = id {
-            history.rewrite(id, kind.block(trimmed));
+            let already_final = history.block(id).is_some_and(|block| match (kind, block) {
+                (MarkdownStreamKind::Text, Block::Text { content })
+                | (MarkdownStreamKind::Thinking, Block::Thinking { content, .. }) => {
+                    content == &trimmed
+                }
+                _ => false,
+            });
+            if !already_final {
+                history.rewrite(id, kind.block(trimmed));
+            }
             history.set_status(id, Status::Done);
         } else if !trimmed.is_empty() {
             history.push(kind.block(trimmed));
         }
-    }
-}
-
-fn joined_preview(content: &str, current_line: &str) -> String {
-    if current_line.is_empty() {
-        content.to_string()
-    } else {
-        format!("{content}\n{current_line}")
     }
 }
 
@@ -409,7 +496,11 @@ fn thinking_title_candidate(line: &str) -> Candidate {
         return Candidate::Not;
     }
     let Some(inner) = trimmed.strip_prefix("**") else {
-        return Candidate::Not;
+        return if "**".starts_with(trimmed) {
+            Candidate::Pending
+        } else {
+            Candidate::Not
+        };
     };
     if inner.is_empty() || "**".starts_with(inner) {
         return Candidate::Pending;
@@ -596,6 +687,80 @@ mod tests {
         {
             Block::Thinking { content, .. } => content,
             block => panic!("expected thinking block, got {block:?}"),
+        }
+    }
+
+    fn finalized_blocks(
+        input: &str,
+        kind: MarkdownStreamKind,
+        one_char_chunks: bool,
+    ) -> Vec<Block> {
+        let mut stream = MarkdownStream::with_kind(kind);
+        let mut history = BlockHistory::new();
+        if one_char_chunks {
+            let mut encoded = [0; 4];
+            for ch in input.chars() {
+                stream.append(&mut history, ch.encode_utf8(&mut encoded));
+            }
+        } else {
+            stream.append(&mut history, input);
+        }
+        stream.flush(&mut history);
+        (0..history.len())
+            .map(|index| {
+                history
+                    .materialized_block_at(index)
+                    .expect("finalized block")
+                    .clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn continuation_delta_emits_append_patch_without_replacement() {
+        let (mut stream, mut history) = setup();
+        stream.append(&mut history, "a");
+        let revision = history.patch_revision();
+
+        stream.append(&mut history, "β");
+
+        let patches = history
+            .patches_since(revision)
+            .expect("continuation patch is retained")
+            .collect::<Vec<_>>();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0].operations,
+            vec![crate::transcript_model::TranscriptPatchOperation::Append {
+                id: history.last_block_id().expect("stream block"),
+                byte_range: 1..3,
+            }]
+        );
+    }
+
+    #[test]
+    fn arbitrary_character_boundaries_match_one_shot_streaming() {
+        let cases = [
+            (
+                MarkdownStreamKind::Text,
+                "intro αβ\n```rust\nfn main() { println!(\"世界\"); }\n```\nafter",
+            ),
+            (
+                MarkdownStreamKind::Text,
+                "| name | value |\n| :--- | ---: |\n| café | 東京 |\n\nfinished",
+            ),
+            (
+                MarkdownStreamKind::Thinking,
+                "first paragraph\n\n**Assessing 世界**\n\nbody café",
+            ),
+        ];
+
+        for (kind, input) in cases {
+            assert_eq!(
+                finalized_blocks(input, kind, true),
+                finalized_blocks(input, kind, false),
+                "stream result differs for {kind:?}"
+            );
         }
     }
 

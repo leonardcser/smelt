@@ -7,7 +7,7 @@
 //! samples. [`snapshot`] returns sortable rows; [`print_summary`] emits a colored ANSI table.
 
 use crate::alloc;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -17,24 +17,55 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Max retained samples per label. Oldest sample is dropped when the buffer fills.
 pub const RING_CAPACITY: usize = 1024;
 
-fn push_capped<T>(buf: &mut Vec<T>, value: T) {
-    if buf.len() >= RING_CAPACITY {
-        buf.remove(0);
-    }
-    buf.push(value);
+#[derive(Clone, Debug)]
+struct SampleRing<T> {
+    values: VecDeque<T>,
 }
 
-fn samples() -> &'static Mutex<HashMap<&'static str, Vec<Duration>>> {
-    static S: OnceLock<Mutex<HashMap<&'static str, Vec<Duration>>>> = OnceLock::new();
+impl<T> Default for SampleRing<T> {
+    fn default() -> Self {
+        Self {
+            values: VecDeque::with_capacity(RING_CAPACITY),
+        }
+    }
+}
+
+impl<T> SampleRing<T> {
+    fn push(&mut self, value: T) {
+        if self.values.len() == RING_CAPACITY {
+            self.values.pop_front();
+        }
+        self.values.push_back(value);
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.values.iter()
+    }
+
+    fn last(&self) -> Option<&T> {
+        self.values.back()
+    }
+}
+
+fn samples() -> &'static Mutex<HashMap<&'static str, SampleRing<Duration>>> {
+    static S: OnceLock<Mutex<HashMap<&'static str, SampleRing<Duration>>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn value_samples() -> &'static Mutex<HashMap<&'static str, Vec<u64>>> {
-    static V: OnceLock<Mutex<HashMap<&'static str, Vec<u64>>>> = OnceLock::new();
+fn value_samples() -> &'static Mutex<HashMap<&'static str, SampleRing<u64>>> {
+    static V: OnceLock<Mutex<HashMap<&'static str, SampleRing<u64>>>> = OnceLock::new();
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-type AllocSamples = Mutex<HashMap<&'static str, Vec<(u64, u64)>>>;
+type AllocSamples = Mutex<HashMap<&'static str, SampleRing<(u64, u64)>>>;
 
 fn alloc_samples() -> &'static AllocSamples {
     static A: OnceLock<AllocSamples> = OnceLock::new();
@@ -70,7 +101,7 @@ pub fn record_value(label: &'static str, value: u64) {
         return;
     }
     if let Ok(mut m) = value_samples().lock() {
-        push_capped(m.entry(label).or_default(), value);
+        m.entry(label).or_default().push(value);
     }
 }
 
@@ -168,7 +199,7 @@ fn pct_idx(count: usize, p: usize) -> usize {
     ((count * p) / 100).min(count.saturating_sub(1))
 }
 
-fn duration_seed(label: &'static str, durs: &[Duration]) -> Option<DurationSeed> {
+fn duration_seed(label: &'static str, durs: &SampleRing<Duration>) -> Option<DurationSeed> {
     if durs.is_empty() {
         return None;
     }
@@ -180,7 +211,7 @@ fn duration_seed(label: &'static str, durs: &[Duration]) -> Option<DurationSeed>
     })
 }
 
-fn duration_row(seed: DurationSeed, durs: &[Duration]) -> Option<DurationRow> {
+fn duration_row(seed: DurationSeed, durs: &SampleRing<Duration>) -> Option<DurationRow> {
     if durs.is_empty() {
         return None;
     }
@@ -198,11 +229,11 @@ fn duration_row(seed: DurationSeed, durs: &[Duration]) -> Option<DurationRow> {
     })
 }
 
-fn value_row(label: &'static str, vs: &[u64]) -> Option<ValueRow> {
+fn value_row(label: &'static str, vs: &SampleRing<u64>) -> Option<ValueRow> {
     if vs.is_empty() {
         return None;
     }
-    let mut sorted = vs.to_vec();
+    let mut sorted = vs.iter().copied().collect::<Vec<_>>();
     sorted.sort_unstable();
     Some(ValueRow {
         label,
@@ -216,7 +247,7 @@ fn value_row(label: &'static str, vs: &[u64]) -> Option<ValueRow> {
     })
 }
 
-fn alloc_row(label: &'static str, samples: &[(u64, u64)]) -> Option<AllocRow> {
+fn alloc_row(label: &'static str, samples: &SampleRing<(u64, u64)>) -> Option<AllocRow> {
     if samples.is_empty() {
         return None;
     }
@@ -319,16 +350,15 @@ impl Drop for Guard {
     fn drop(&mut self) {
         let dur = self.start.elapsed();
         if let Ok(mut s) = samples().lock() {
-            push_capped(s.entry(self.label).or_default(), dur);
+            s.entry(self.label).or_default().push(dur);
         }
         if alloc::enabled() {
             let (c1, b1) = alloc::thread_snapshot();
             let (c0, b0) = self.allocs_start;
             if let Ok(mut m) = alloc_samples().lock() {
-                push_capped(
-                    m.entry(self.label).or_default(),
-                    (c1.saturating_sub(c0), b1.saturating_sub(b0)),
-                );
+                m.entry(self.label)
+                    .or_default()
+                    .push((c1.saturating_sub(c0), b1.saturating_sub(b0)));
             }
         }
     }
@@ -345,8 +375,10 @@ pub fn print_summary() {
     if map.is_empty() {
         return;
     }
-    let mut groups: Vec<(&'static str, Vec<Duration>)> =
-        map.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let mut groups: Vec<(&'static str, Vec<Duration>)> = map
+        .iter()
+        .map(|(label, values)| (*label, values.iter().copied().collect()))
+        .collect();
     drop(map);
     groups.sort_by(|a, b| {
         let ta: Duration = a.1.iter().sum();
@@ -379,8 +411,10 @@ pub fn print_summary() {
 
     let alloc_map = alloc_samples().lock().unwrap();
     if !alloc_map.is_empty() {
-        let mut agroups: Vec<(&'static str, Vec<(u64, u64)>)> =
-            alloc_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let mut agroups: Vec<(&'static str, Vec<(u64, u64)>)> = alloc_map
+            .iter()
+            .map(|(label, values)| (*label, values.iter().copied().collect()))
+            .collect();
         drop(alloc_map);
         agroups.sort_by(|a, b| {
             let ta: u64 = a.1.iter().map(|(_, b)| *b).sum();
@@ -425,8 +459,10 @@ pub fn print_summary() {
 
     let value_map = value_samples().lock().unwrap();
     if !value_map.is_empty() {
-        let mut vgroups: Vec<(&'static str, Vec<u64>)> =
-            value_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let mut vgroups: Vec<(&'static str, Vec<u64>)> = value_map
+            .iter()
+            .map(|(label, values)| (*label, values.iter().copied().collect()))
+            .collect();
         drop(value_map);
         vgroups.sort_by_key(|(k, _)| *k);
         print_header("value", &bar);
@@ -521,8 +557,26 @@ fn fmt_bytes(n: u64) -> String {
 mod tests {
     use super::*;
 
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[test]
+    fn sample_ring_evicts_oldest_in_constant_time_order() {
+        let mut ring = SampleRing::default();
+        for value in 0..RING_CAPACITY + 3 {
+            ring.push(value);
+        }
+
+        assert_eq!(ring.len(), RING_CAPACITY);
+        assert_eq!(ring.iter().copied().next(), Some(3));
+        assert_eq!(ring.last(), Some(&(RING_CAPACITY + 2)));
+    }
+
     #[test]
     fn value_timer_records_when_its_scope_exits() {
+        let _lock = test_lock();
         set_enabled(true);
         clear();
         {
@@ -534,5 +588,31 @@ mod tests {
             .find(|row| row.label == "test:value_timer_ms")
             .expect("elapsed value sample");
         assert_eq!(row.count, 1);
+    }
+
+    #[test]
+    fn concurrent_recording_stays_bounded() {
+        let _lock = test_lock();
+        set_enabled(true);
+        clear();
+        let threads = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for value in 0..RING_CAPACITY {
+                        record_value("test:concurrent", value as u64);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().expect("recorder thread");
+        }
+
+        let row = snapshot()
+            .values
+            .into_iter()
+            .find(|row| row.label == "test:concurrent")
+            .expect("concurrent samples");
+        assert_eq!(row.count, RING_CAPACITY);
     }
 }

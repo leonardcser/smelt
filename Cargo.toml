@@ -2,6 +2,9 @@
 members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store", "crates/test-support"]
 exclude = ["fuzz"]
 
+[workspace.package]
+rust-version = "1.95"
+
 [workspace.dependencies]
 # Internal crates
 smelt-protocol = { path = "crates/protocol" }
@@ -64,6 +67,7 @@ tempfile = "3"
 name = "smelt-agent"
 version = "0.5.0-alpha.9"
 edition = "2021"
+rust-version.workspace = true
 description = "A Rust TUI coding agent"
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"

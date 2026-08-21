@@ -163,10 +163,9 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             });
         }
         if command.history.start != HistoryIndex::ZERO {
-            return Err(SessionCommitFailure::InvalidHistorySuffix {
+            return Err(SessionCommitFailure::InvalidHistorySuffixStart {
                 start: command.history.start,
-                final_len: command.history.final_len,
-                item_count: command.history.items.len() as u64,
+                current_len: crate::session_commit::HistoryLen::ZERO,
             });
         }
         if let Some(records) = &command.transcript_records {
@@ -211,6 +210,7 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             None => empty_transcript,
         };
         let side_tables = merge_side_tables(&SideTableSuffixes::default(), &command.side_tables);
+        let history_text_bytes = history_root.byte_count();
         let state_bytes =
             revision_state_bytes(&command.metadata, side_tables).map_err(store_failure)?;
         create_initial_branch_in(
@@ -237,6 +237,8 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
                     }),
                 ),
             },
+            lineage_id: Some(lineage.as_str().to_owned()),
+            history_text_bytes,
         };
         insert_session_receipt(
             &tx,
@@ -298,6 +300,8 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
                 session_id: branch.as_str().to_owned(),
                 previous: StoreHead::default(),
                 current: current.head,
+                lineage_id: Some(lineage.as_str().to_owned()),
+                history_text_bytes: current.history_root.byte_count(),
             };
             insert_session_receipt(
                 &tx,
@@ -372,6 +376,8 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             session_id: branch.as_str().to_owned(),
             previous: command.expected,
             current: command.expected,
+            lineage_id: Some(lineage.as_str().to_owned()),
+            history_text_bytes: prior.history_root.byte_count(),
         };
         insert_session_receipt(
             &tx,
@@ -441,6 +447,8 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
                 revision.transcript_root.item_count,
             ),
         },
+        lineage_id: Some(lineage.as_str().to_owned()),
+        history_text_bytes: revision.history_root.byte_count(),
     };
     insert_session_receipt(
         &tx,
@@ -941,6 +949,8 @@ pub(crate) fn recover_lineage_nonterminal_turns(
         session_id: branch.as_str().to_owned(),
         previous: previous.head,
         current,
+        lineage_id: Some(lineage.as_str().to_owned()),
+        history_text_bytes: previous.history_root.byte_count(),
     };
     let mut interrupted_turns = Vec::with_capacity(pending.len());
     for (turn_id, from_state, _, _) in pending {

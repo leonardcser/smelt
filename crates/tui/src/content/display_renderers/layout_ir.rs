@@ -626,6 +626,9 @@ fn render_markdown_spec(
             inline_options,
         );
     }
+    if can_render_markdown_as_plain(&spec.content) {
+        return render_plain_markdown_spec(out, spec, width, row_start, row_count, gutter);
+    }
 
     if gutter.is_none() {
         if spec.italic {
@@ -716,6 +719,9 @@ fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &Inlin
     if spec.inline {
         return measure_inline_markdown_spec(spec, width, inline_options);
     }
+    if can_render_markdown_as_plain(&spec.content) {
+        return measure_plain_markdown_spec(spec, width);
+    }
     measure_markdown_inner_with_options(
         &spec.content,
         width as usize,
@@ -724,6 +730,181 @@ fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &Inlin
         None,
         inline_options,
     )
+}
+
+fn can_render_markdown_as_plain(content: &str) -> bool {
+    !content.is_empty()
+        && !content.contains('\n')
+        && !content.as_bytes().iter().any(|byte| {
+            matches!(
+                byte,
+                b'\\'
+                    | b'`'
+                    | b'*'
+                    | b'_'
+                    | b'['
+                    | b']'
+                    | b'('
+                    | b')'
+                    | b'#'
+                    | b'>'
+                    | b'-'
+                    | b'+'
+                    | b'='
+                    | b'|'
+                    | b'~'
+                    | b'!'
+                    | b'&'
+                    | b'<'
+            )
+        })
+}
+
+fn render_plain_markdown_spec(
+    out: &mut LineBuilder,
+    spec: &MarkdownSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: Option<&GutterSpec>,
+) -> u16 {
+    if plain_markdown_is_single_ascii_word(&spec.content) {
+        return render_plain_markdown_ascii_word(out, spec, width, row_start, row_count, gutter);
+    }
+    let mut seen = 0u16;
+    let mut rows = 0u16;
+    'outer: for line in spec.content.lines() {
+        let expanded = expand_tabs(line);
+        let line_rows = count_plain_line_ranges(&expanded, width);
+        if seen.saturating_add(line_rows) <= row_start {
+            if line_rows > 1 {
+                out.mark_wrapped();
+            }
+            seen = seen.saturating_add(line_rows);
+            continue;
+        }
+        let ranges = wrap_plain_line_ranges(&expanded, width);
+        for segment in wrapped_segments(out, &ranges) {
+            if seen < row_start {
+                seen = seen.saturating_add(1);
+                continue;
+            }
+            if rows >= row_count {
+                break 'outer;
+            }
+            segment.emit(out, |out, &(ws, we), _| {
+                if let Some(gutter) = gutter.filter(|g| !g.styled) {
+                    out.print_gutter(&gutter.text);
+                }
+                if spec.dim {
+                    out.push_dim();
+                }
+                if spec.italic {
+                    out.save_style();
+                    out.set_italic();
+                }
+                if let Some(gutter) = gutter.filter(|g| g.styled) {
+                    out.print_gutter(&gutter.text);
+                }
+                out.print(smelt_buffer::text::slice(&expanded, ws..we));
+                if spec.italic {
+                    out.pop_style();
+                }
+                if spec.dim {
+                    out.pop_style();
+                }
+            });
+            out.newline();
+            rows = rows.saturating_add(1);
+            seen = seen.saturating_add(1);
+        }
+    }
+    rows
+}
+
+fn measure_plain_markdown_spec(spec: &MarkdownSpec, width: u16) -> u16 {
+    if plain_markdown_is_single_ascii_word(&spec.content) {
+        return ascii_word_rows(spec.content.len(), width);
+    }
+    spec.content
+        .lines()
+        .map(|line| count_plain_line_ranges(&expand_tabs(line), width))
+        .sum()
+}
+
+fn plain_markdown_is_single_ascii_word(content: &str) -> bool {
+    content
+        .as_bytes()
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() && *byte != b' ')
+}
+
+fn ascii_word_rows(len: usize, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    len.max(1).div_ceil(width).min(u16::MAX as usize) as u16
+}
+
+fn render_plain_markdown_ascii_word(
+    out: &mut LineBuilder,
+    spec: &MarkdownSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: Option<&GutterSpec>,
+) -> u16 {
+    if row_count == 0 {
+        return 0;
+    }
+    let width = usize::from(width.max(1));
+    let total_rows = ascii_word_rows(spec.content.len(), width as u16);
+    if total_rows > 1 {
+        out.mark_wrapped();
+    }
+    let mut rows = 0u16;
+    let end_row = row_start.saturating_add(row_count).min(total_rows);
+    for row in row_start..end_row {
+        let start = usize::from(row)
+            .saturating_mul(width)
+            .min(spec.content.len());
+        let end = start.saturating_add(width).min(spec.content.len());
+        emit_plain_markdown_slice(
+            out,
+            spec,
+            smelt_buffer::text::slice(&spec.content, start..end),
+            gutter,
+        );
+        out.newline();
+        rows = rows.saturating_add(1);
+    }
+    rows
+}
+
+fn emit_plain_markdown_slice(
+    out: &mut LineBuilder,
+    spec: &MarkdownSpec,
+    text: &str,
+    gutter: Option<&GutterSpec>,
+) {
+    if let Some(gutter) = gutter.filter(|g| !g.styled) {
+        out.print_gutter(&gutter.text);
+    }
+    if spec.dim {
+        out.push_dim();
+    }
+    if spec.italic {
+        out.save_style();
+        out.set_italic();
+    }
+    if let Some(gutter) = gutter.filter(|g| g.styled) {
+        out.print_gutter(&gutter.text);
+    }
+    out.print(text);
+    if spec.italic {
+        out.pop_style();
+    }
+    if spec.dim {
+        out.pop_style();
+    }
 }
 
 fn render_inline_markdown_spec(
@@ -2018,6 +2199,19 @@ mod tests {
         };
 
         assert_eq!(rendered, row_count);
+    }
+
+    #[test]
+    fn markdown_entities_use_markdown_renderer() {
+        let layout = BlockLayout::Leaf(LayoutLeaf::Markdown(MarkdownSpec {
+            content: "alpha &amp; beta".into(),
+            dim: false,
+            italic: false,
+            inline: false,
+        }));
+
+        assert!(!can_render_markdown_as_plain("alpha &amp; beta"));
+        assert_eq!(render_lines(&layout, 80), vec!["alpha & beta"]);
     }
 
     #[test]

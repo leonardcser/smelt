@@ -157,9 +157,9 @@ local function parent_dir(path)
 end
 
 local function session_plans_dir()
-  local session_dir = smelt.session.dir()
-  if session_dir == nil or session_dir == "" then return nil, "no session directory" end
-  return session_dir .. "/plans"
+  local artifact_dir = smelt.session.artifact_dir()
+  if artifact_dir == nil or artifact_dir == "" then return nil, "no session artifact directory" end
+  return artifact_dir .. "/plans"
 end
 
 local function is_child_plan_dir(dir, plans_dir)

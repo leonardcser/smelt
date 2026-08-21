@@ -154,17 +154,14 @@ impl TuiApp {
                 self.dispatch_recover_from_context_limit(messages, reply);
             }
             HostCall::RequestAudit {
-                session_dir,
                 persistence,
                 entry,
                 payload_mode,
             } => {
-                if let Err(cause) = self.conversation.append_request_audit(
-                    &session_dir,
-                    persistence,
-                    *entry,
-                    payload_mode,
-                ) {
+                if let Err(cause) =
+                    self.conversation
+                        .append_request_audit(persistence, *entry, payload_mode)
+                {
                     self.notify_warn(format!("request audit was not queued: {}", cause.message));
                 }
             }

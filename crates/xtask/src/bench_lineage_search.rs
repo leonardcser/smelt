@@ -137,11 +137,7 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
         if text_bytes == 0 {
             return Err(format!("session {session} has no searchable transcript bytes").into());
         }
-        let search_path = reader
-            .database_path()
-            .parent()
-            .ok_or("lineage database has no parent directory")?
-            .join("search.db");
+        let search_path = reader.search_database_path();
         let physical = sqlite_physical_bytes(&search_path);
         let ratio = physical as f64 / text_bytes as f64;
         let query_benchmark = benchmark_queries(&reader, options.runs, synthetic)?;

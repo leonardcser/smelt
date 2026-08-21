@@ -1561,6 +1561,8 @@ Search controls for the active UI session.
 
 Current session metadata, turn list, message snapshots, rewind, and persisted session management.
 
+- `smelt.session.artifact_dir` :: `fun(): string`
+  Absolute path for artifacts owned by the current session, such as plans.
 - `smelt.session.checkpoint` :: `fun(spec: table): boolean?`
   Install a model-context checkpoint without deleting transcript history.
 - `smelt.session.context_note` :: `fun(name: string, text: string?, opts: table?): nil`
@@ -1579,8 +1581,6 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Current working directory.
 - `smelt.session.delete` :: `fun(id: string): nil`
   Delete the persisted session with `id`.
-- `smelt.session.dir` :: `fun(): string`
-  Absolute path of the current session directory.
 - `smelt.session.enter_worktree` :: `fun(opts: table?): table`
   Create or open a managed git worktree and request a coherent project-context transition.
 - `smelt.session.fork` :: `fun(): nil`
@@ -1590,7 +1590,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.history_len` :: `fun(): integer`
   Return the number of semantic items in the current session history without materializing them.
 - `smelt.session.id` :: `fun(): string`
-  Stable session id (matches the on-disk session filename).
+  Stable session id used by canonical storage and provider cache routing.
 - `smelt.session.info` :: `fun(): table`
   Return current session metadata as a table.
 - `smelt.session.list` :: `fun(opts: table?): table`

@@ -2,6 +2,7 @@
 name = "smelt-fuzz"
 version = "0.0.0"
 edition = "2021"
+rust-version = "1.95"
 publish = false
 
 [workspace]

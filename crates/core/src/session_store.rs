@@ -232,16 +232,6 @@ pub fn store_error(
     }
 }
 
-pub(crate) fn reject_symlink(path: &Path, operation: &'static str) -> SessionStoreResult<()> {
-    let state_root = crate::config::state_dir();
-    let root = if path.starts_with(&state_root) {
-        state_root.as_path()
-    } else {
-        path
-    };
-    reject_symlink_in(root, path, operation)
-}
-
 pub(crate) fn reject_symlink_in(
     state_root: &Path,
     path: &Path,
@@ -304,13 +294,17 @@ pub fn export_requests_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), 
 }
 
 fn reader_for_export(id_or_prefix: &str) -> SessionStoreResult<smelt_store::LineageSessionReader> {
-    let id = crate::session::resolve_prefix(id_or_prefix)?;
-    let dir = crate::session::session_dir(&id);
-    let sessions_root = dir.parent().ok_or_else(|| SessionStoreError::Io {
-        operation: "resolve sessions root for",
-        path: dir.display().to_string(),
-        message: "session directory has no parent".into(),
-    })?;
-    smelt_store::LineageSessionReader::open_existing(sessions_root, id.as_str())
-        .map_err(|error| store_error("open lineage export database", sessions_root, error))
+    let resolved = crate::session::resolve_session_for_read_result(id_or_prefix)?;
+    smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &resolved.sessions_root,
+        &resolved.lineage_id,
+        &resolved.id,
+    )
+    .map_err(|error| {
+        store_error(
+            "open lineage export database",
+            &resolved.sessions_root,
+            error,
+        )
+    })
 }

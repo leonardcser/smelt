@@ -1,4 +1,4 @@
-use crate::session::{ContextCheckpoint, Session, SessionHeader, SessionStoreRef};
+use crate::session::{ContextCheckpoint, Session, SessionHeader, SessionStoreAddress};
 use protocol::{history_item_message_count, HistoryItem};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -126,28 +126,31 @@ pub struct LiveSideTables;
 #[derive(Clone, Debug)]
 pub struct LiveSession {
     pub header: SessionHeader,
-    pub session_dir: PathBuf,
-    pub store: Option<SessionStoreRef>,
+    pub artifact_dir: PathBuf,
+    pub store_address: Option<SessionStoreAddress>,
     pub live_start: usize,
     pub live_history: Vec<HistoryItem>,
     pub side_tables: LiveSideTables,
 }
 
 impl LiveSession {
-    pub fn from_store(header: SessionHeader, store: SessionStoreRef) -> Self {
-        Self::from_parts(header, store.session_dir.clone(), Some(store))
+    pub fn from_store(header: SessionHeader, store: SessionStoreAddress) -> Self {
+        let artifact_dir =
+            smelt_store::SessionStoreLayout::from_sessions_root(&store.sessions_root)
+                .session_artifact_dir(&store.session_id);
+        Self::from_parts(header, artifact_dir, Some(store))
     }
 
     pub fn from_parts(
         header: SessionHeader,
-        session_dir: PathBuf,
-        store: Option<SessionStoreRef>,
+        artifact_dir: PathBuf,
+        store_address: Option<SessionStoreAddress>,
     ) -> Self {
         let live_start = header.history_len;
         Self {
             header,
-            session_dir,
-            store,
+            artifact_dir,
+            store_address,
             live_start,
             live_history: Vec::new(),
             side_tables: LiveSideTables,
@@ -158,8 +161,8 @@ impl LiveSession {
         &self.header.meta.id
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.session_dir
+    pub fn artifact_dir(&self) -> &Path {
+        &self.artifact_dir
     }
 
     pub fn history_len(&self) -> usize {
@@ -414,8 +417,15 @@ impl LiveSession {
             .get(suffix_start..)
             .unwrap_or(&[])
             .to_vec();
+        let lineage_id = self
+            .store_address
+            .as_ref()
+            .expect("store-backed live session has a store address")
+            .lineage_id
+            .clone();
         protocol::ModelHistorySource::store_with_suffix(
             prefix,
+            lineage_id,
             store_start_index,
             store_end_index,
             suffix,
@@ -480,20 +490,24 @@ impl LiveSession {
     }
 
     fn open_store(&self) -> Result<LiveStoreReader, String> {
-        let (root, session_id) = self
-            .store
+        let store = self
+            .store_address
             .as_ref()
-            .map(|store| (store.root.as_path(), store.session_id.as_str()))
-            .or_else(|| self.session_dir.parent().map(|root| (root, self.id())))
             .ok_or_else(|| format!("session {} has no storage root", self.id()))?;
-        smelt_store::LineageSessionReader::open_existing(root, session_id)
-            .map(LiveStoreReader)
-            .map_err(|error| {
-                format!(
-                    "open lineage session {session_id} in {}: {error}",
-                    root.display()
-                )
-            })
+        let root = store.sessions_root.as_path();
+        let session_id = store.session_id.as_str();
+        smelt_store::LineageSessionReader::open_existing_in_lineage(
+            root,
+            store.lineage_id.as_str(),
+            session_id,
+        )
+        .map(LiveStoreReader)
+        .map_err(|error| {
+            format!(
+                "open lineage session {session_id} in {}: {error}",
+                root.display()
+            )
+        })
     }
 }
 
@@ -569,7 +583,12 @@ mod tests {
 
     const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    fn seed_store(root: &std::path::Path, id: &str, mode: Option<&str>, history: Vec<HistoryItem>) {
+    fn seed_store(
+        root: &std::path::Path,
+        id: &str,
+        mode: Option<&str>,
+        history: Vec<HistoryItem>,
+    ) -> String {
         let command = smelt_store::SessionCommit {
             session_id: id.into(),
             expected: smelt_store::StoreHead::default(),
@@ -609,7 +628,9 @@ mod tests {
         writer
             .commit_session(&command)
             .expect("seed lineage session store");
+        let lineage_id = writer.lineage_id().to_string();
         writer.release().expect("release lineage session store");
+        lineage_id
     }
 
     fn apply_planned_append(
@@ -639,7 +660,7 @@ mod tests {
             HistoryItem::user(protocol::Content::text("one")),
             HistoryItem::user(protocol::Content::text("two")),
         ];
-        seed_store(dir.path(), SESSION_ID, None, persisted);
+        let lineage_id = seed_store(dir.path(), SESSION_ID, None, persisted);
 
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
@@ -668,11 +689,7 @@ mod tests {
         };
         let mut live = LiveSession::from_store(
             header,
-            SessionStoreRef::new(
-                dir.path().join(SESSION_ID),
-                dir.path().to_path_buf(),
-                SESSION_ID.into(),
-            ),
+            SessionStoreAddress::new(dir.path().to_path_buf(), SESSION_ID.into(), lineage_id),
         );
         live.append_history(HistoryItem::user(protocol::Content::text("three")));
 
@@ -741,7 +758,7 @@ mod tests {
             )),
             HistoryItem::user(protocol::Content::text("after mode")),
         ];
-        seed_store(dir.path(), SESSION_ID, Some("normal"), history);
+        let lineage_id = seed_store(dir.path(), SESSION_ID, Some("normal"), history);
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
                 id: SESSION_ID.into(),
@@ -769,11 +786,7 @@ mod tests {
         };
         let live = LiveSession::from_store(
             header,
-            SessionStoreRef::new(
-                dir.path().join(SESSION_ID),
-                dir.path().to_path_buf(),
-                SESSION_ID.into(),
-            ),
+            SessionStoreAddress::new(dir.path().to_path_buf(), SESSION_ID.into(), lineage_id),
         );
 
         assert!(live.any_transcript_visible_before(2).unwrap());
@@ -790,7 +803,7 @@ mod tests {
         history.extend(
             (0..130).map(|index| HistoryItem::user(protocol::Content::text(index.to_string()))),
         );
-        seed_store(dir.path(), SESSION_ID, Some("normal"), history.clone());
+        let lineage_id = seed_store(dir.path(), SESSION_ID, Some("normal"), history.clone());
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
                 id: SESSION_ID.into(),
@@ -818,11 +831,7 @@ mod tests {
         };
         let mut live = LiveSession::from_store(
             header,
-            SessionStoreRef::new(
-                dir.path().join(SESSION_ID),
-                dir.path().to_path_buf(),
-                SESSION_ID.into(),
-            ),
+            SessionStoreAddress::new(dir.path().to_path_buf(), SESSION_ID.into(), lineage_id),
         );
 
         let duplicate_context = protocol::HistoryAppend::set_context(

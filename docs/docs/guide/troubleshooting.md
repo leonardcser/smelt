@@ -81,12 +81,6 @@ Language servers start lazily. Results can be temporarily incomplete while a
 server indexes a large workspace. See the
 [LSP plugin setup](plugins.md#agent-semantic-code-tools-lsp).
 
-## An old session is not listed
-
-smelt reads only canonical lineage storage. Pre-lineage session directories are
-not imported, upgraded, or modified. Preserve any old state directory separately
-if you still need its data.
-
 ## A saved session looks damaged
 
 First run the read-only health check:

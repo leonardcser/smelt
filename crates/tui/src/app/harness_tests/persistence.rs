@@ -15,12 +15,8 @@ fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
 }
 
 fn lineage_reader(id: &str) -> smelt_store::LineageSessionReader {
-    let session_dir = smelt_core::session::dir_for_id(id);
-    smelt_store::LineageSessionReader::open_existing(
-        session_dir.parent().expect("sessions root"),
-        id,
-    )
-    .unwrap()
+    smelt_store::LineageSessionReader::open_existing(smelt_core::session::sessions_dir(), id)
+        .unwrap()
 }
 
 fn session_revision(_app: &TestApp, id: &str) -> u64 {
@@ -740,32 +736,34 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let lineages_dir = session_dir.parent().unwrap().join("lineages");
-    std::fs::create_dir_all(session_dir.parent().unwrap()).unwrap();
-    std::fs::write(&lineages_dir, "permanently blocks directory creation").unwrap();
+    let sessions_root = smelt_core::session::sessions_dir();
+    let locks_dir = smelt_store::SessionStoreLayout::from_sessions_root(&sessions_root).locks_dir();
+    std::fs::create_dir_all(&sessions_root).unwrap();
+    std::fs::write(&locks_dir, "permanently blocks directory creation").unwrap();
     app.session_append_history(HistoryItem::user(Content::text("cannot save")));
 
     app.save_session_and_flush();
 
     assert!(app.session_document_has_unflushed_work());
     assert!(app.overlays_probe().notification().is_some());
-    assert!(smelt_store::LineageSessionReader::try_open_existing(
-        session_dir.parent().unwrap(),
-        &session_id,
-    )
-    .is_err());
+    assert!(
+        smelt_store::LineageSessionReader::try_open_existing(&sessions_root, &session_id,)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn new_empty_session_does_not_create_a_directory() {
     let guard = test_home_guard();
     let app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_dir = smelt_core::session::dir_for_id(&app.session_snapshot().id);
+    let lineage_dir =
+        smelt_store::SessionStoreLayout::from_sessions_root(smelt_core::session::sessions_dir())
+            .lineage_dir(&app.session_snapshot().id);
 
-    assert!(!session_dir.exists());
+    assert!(!lineage_dir.exists());
     drop(app);
-    assert!(!session_dir.exists());
+    assert!(!lineage_dir.exists());
 }
 
 #[test]
@@ -785,7 +783,6 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
     });
 
     app.dispatch_host_call(engine::HostCall::RequestAudit {
-        session_dir: smelt_core::session::dir_for_id(&session_id),
         persistence: app.conversation_probe().persistence_scope(),
         entry: Box::new(audit),
         payload_mode: smelt_store::RequestAuditPayloadMode::Full,
@@ -810,7 +807,6 @@ fn stale_request_audit_after_session_switch_is_rejected() {
     app.session_append_history(HistoryItem::user(Content::text("old session")));
     app.save_session_and_flush();
     let old_id = app.session_snapshot().id.clone();
-    let old_dir = smelt_core::session::dir_for_id(&old_id);
     let old_scope = app.conversation_probe().persistence_scope();
 
     app.reset_session();
@@ -819,7 +815,6 @@ fn stale_request_audit_after_session_switch_is_rejected() {
     let new_id = app.session_snapshot().id.clone();
 
     app.dispatch_host_call(engine::HostCall::RequestAudit {
-        session_dir: old_dir.clone(),
         persistence: old_scope,
         entry: Box::new(request_audit_entry(42)),
         payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
@@ -918,9 +913,7 @@ fn deleting_source_branch_leaves_active_fork_intact() {
 
     assert!(
         smelt_store::LineageSessionReader::try_open_existing(
-            smelt_core::session::dir_for_id(&source_id)
-                .parent()
-                .unwrap(),
+            smelt_core::session::sessions_dir(),
             &source_id,
         )
         .unwrap()
@@ -955,7 +948,7 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     app.render_silent();
 
     let session_id = app.session_snapshot().id.clone();
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let session_dir = smelt_core::session::sessions_dir().join(&session_id);
     app.require_transcript_record_resave_from_for_harness(0);
     app.set_fast_mode(true);
     app.set_transcript_session_dir_for_harness(session_dir.join("missing-hydration-source"));

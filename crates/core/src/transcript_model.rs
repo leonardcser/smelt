@@ -77,7 +77,7 @@ impl ToolStatus {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
@@ -89,7 +89,7 @@ pub type ToolOutputRef = Box<ToolOutput>;
 /// Mutable sidecar for a committed `Block::ToolCall`, keyed by its `BlockId`.
 /// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
 /// layout can be cached permanently.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolState {
     pub status: ToolStatus,
     pub elapsed: Option<Duration>,
@@ -433,6 +433,132 @@ impl BlockId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptPatchOperation {
+    Insert {
+        id: BlockId,
+        index: usize,
+    },
+    Append {
+        id: BlockId,
+        byte_range: std::ops::Range<usize>,
+    },
+    Replace {
+        id: BlockId,
+    },
+    SetStatus {
+        id: BlockId,
+    },
+    SetSideState {
+        id: BlockId,
+    },
+    Remove {
+        id: BlockId,
+        index: usize,
+    },
+    Commit {
+        id: BlockId,
+    },
+    Reset,
+}
+
+impl TranscriptPatchOperation {
+    fn is_structural(&self) -> bool {
+        matches!(
+            self,
+            Self::Insert { .. } | Self::Remove { .. } | Self::Reset
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptPatch {
+    pub revision: u64,
+    pub operations: Vec<TranscriptPatchOperation>,
+    pub navigation_changed: bool,
+    pub search_changed: bool,
+    pub persistable_changed: bool,
+}
+
+impl TranscriptPatch {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(
+            self.operations
+                .capacity()
+                .saturating_mul(std::mem::size_of::<TranscriptPatchOperation>()),
+        )
+    }
+
+    fn coalesce<'a>(revision: u64, patches: impl IntoIterator<Item = &'a TranscriptPatch>) -> Self {
+        let mut navigation_changed = false;
+        let mut search_changed = false;
+        let mut persistable_changed = false;
+        let mut replaced = HashSet::new();
+        let mut status_changed = HashSet::new();
+        let mut side_state_changed = HashSet::new();
+        let mut committed = HashSet::new();
+        let mut reset = false;
+        for patch in patches {
+            navigation_changed |= patch.navigation_changed;
+            search_changed |= patch.search_changed;
+            persistable_changed |= patch.persistable_changed;
+            for operation in &patch.operations {
+                match operation {
+                    TranscriptPatchOperation::Append { id, .. }
+                    | TranscriptPatchOperation::Replace { id } => {
+                        replaced.insert(*id);
+                    }
+                    TranscriptPatchOperation::SetStatus { id } => {
+                        status_changed.insert(*id);
+                    }
+                    TranscriptPatchOperation::SetSideState { id } => {
+                        side_state_changed.insert(*id);
+                    }
+                    TranscriptPatchOperation::Commit { id } => {
+                        committed.insert(*id);
+                    }
+                    TranscriptPatchOperation::Insert { .. }
+                    | TranscriptPatchOperation::Remove { .. }
+                    | TranscriptPatchOperation::Reset => reset = true,
+                }
+            }
+        }
+        let operations = if reset {
+            vec![TranscriptPatchOperation::Reset]
+        } else {
+            let mut operations = Vec::new();
+            let mut replaced = replaced.into_iter().collect::<Vec<_>>();
+            replaced.sort_by_key(|id| id.get());
+            for id in replaced {
+                operations.push(TranscriptPatchOperation::Replace { id });
+            }
+            let mut status_changed = status_changed.into_iter().collect::<Vec<_>>();
+            status_changed.sort_by_key(|id| id.get());
+            for id in status_changed {
+                operations.push(TranscriptPatchOperation::SetStatus { id });
+            }
+            let mut side_state_changed = side_state_changed.into_iter().collect::<Vec<_>>();
+            side_state_changed.sort_by_key(|id| id.get());
+            for id in side_state_changed {
+                operations.push(TranscriptPatchOperation::SetSideState { id });
+            }
+            let mut committed = committed.into_iter().collect::<Vec<_>>();
+            committed.sort_by_key(|id| id.get());
+            for id in committed {
+                operations.push(TranscriptPatchOperation::Commit { id });
+            }
+            operations
+        };
+        Self {
+            revision,
+            operations,
+            navigation_changed,
+            search_changed,
+            persistable_changed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlockOrigin {
     History(usize),
@@ -566,7 +692,7 @@ pub struct LayoutKey {
     pub sidecar_hash: u64,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptBlockRecord {
     pub block: Block,
     #[serde(default)]
@@ -575,7 +701,7 @@ pub struct TranscriptBlockRecord {
     pub tool_state: Option<ToolState>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptBlockRecordWithId {
     pub block_id: BlockId,
     pub record: TranscriptBlockRecord,
@@ -1291,6 +1417,8 @@ impl ToolStateEntry {
 #[derive(Clone, Copy, Default)]
 struct BlockMetadata {
     content_hash: u64,
+    live_revision: u64,
+    navigation_open: bool,
     status: Status,
     origin: Option<BlockOrigin>,
 }
@@ -1298,6 +1426,13 @@ struct BlockMetadata {
 struct LiveBlock {
     block: Block,
     metadata: BlockMetadata,
+}
+
+fn append_navigation_open(block: &Block) -> bool {
+    match block {
+        Block::Text { content } | Block::Thinking { content, .. } => !content.contains('\n'),
+        _ => false,
+    }
 }
 
 enum BlockEntry {
@@ -1457,9 +1592,12 @@ impl BlockEntry {
 }
 
 const RECORD_CHANGE_LOG_CAPACITY: usize = 64;
+const TRANSCRIPT_PATCH_LOG_BUDGET_BYTES: usize = 64 * 1024;
 
 pub struct BlockHistory {
     pub order: Vec<BlockId>,
+    order_indices: HashMap<BlockId, usize>,
+    order_indices_valid: bool,
     entries: HashMap<BlockId, BlockEntry>,
     pub(crate) next_id: u64,
     tool_states: HashMap<BlockId, ToolStateEntry>,
@@ -1488,12 +1626,18 @@ pub struct BlockHistory {
     /// clears `block_dirty_from`, allowing projections that have not rendered
     /// yet to update an appended suffix without scanning the unchanged prefix.
     record_changes: VecDeque<(u64, usize)>,
+    patch_floor_revision: u64,
+    patch_revision: u64,
+    patch_retained_bytes: usize,
+    patches: VecDeque<TranscriptPatch>,
 }
 
 impl BlockHistory {
     pub(crate) fn new() -> Self {
         Self {
             order: Vec::new(),
+            order_indices: HashMap::new(),
+            order_indices_valid: true,
             entries: HashMap::new(),
             next_id: 0,
             tool_states: HashMap::new(),
@@ -1508,6 +1652,10 @@ impl BlockHistory {
             record_dirty_from: None,
             record_dirty_generation: 0,
             record_changes: VecDeque::new(),
+            patch_floor_revision: 0,
+            patch_revision: 0,
+            patch_retained_bytes: 0,
+            patches: VecDeque::new(),
         }
     }
 
@@ -1521,6 +1669,127 @@ impl BlockHistory {
 
     pub fn navigation_generation(&self) -> u64 {
         self.navigation_generation
+    }
+
+    pub fn patch_revision(&self) -> u64 {
+        self.patch_revision
+    }
+
+    pub fn patches_since(&self, revision: u64) -> Option<impl Iterator<Item = &TranscriptPatch>> {
+        if revision > self.patch_revision || revision < self.patch_floor_revision {
+            return None;
+        }
+        Some(
+            self.patches
+                .iter()
+                .skip_while(move |patch| patch.revision <= revision),
+        )
+    }
+
+    fn record_patch(
+        &mut self,
+        operations: Vec<TranscriptPatchOperation>,
+        navigation_changed: bool,
+        search_changed: bool,
+        persistable_changed: bool,
+    ) {
+        self.patch_revision = self
+            .patch_revision
+            .checked_add(1)
+            .expect("transcript patch revision overflow");
+        let patch = TranscriptPatch {
+            revision: self.patch_revision,
+            operations,
+            navigation_changed,
+            search_changed,
+            persistable_changed,
+        };
+        self.patch_retained_bytes = self
+            .patch_retained_bytes
+            .saturating_add(patch.retained_bytes());
+        self.patches.push_back(patch);
+        if self.patch_retained_bytes > TRANSCRIPT_PATCH_LOG_BUDGET_BYTES {
+            self.compact_patches();
+        }
+    }
+
+    fn install_patches(&mut self, patches: VecDeque<TranscriptPatch>) {
+        self.patch_retained_bytes = patches.iter().map(TranscriptPatch::retained_bytes).sum();
+        self.patches = patches;
+    }
+
+    fn compact_patches(&mut self) {
+        let Some(last_structural_index) = self.patches.iter().rposition(|patch| {
+            patch
+                .operations
+                .iter()
+                .any(TranscriptPatchOperation::is_structural)
+        }) else {
+            let compacted = TranscriptPatch::coalesce(self.patch_revision, self.patches.iter());
+            self.install_patches(VecDeque::from([compacted]));
+            return;
+        };
+
+        let structural_revision = self.patches[last_structural_index].revision;
+        let mut compacted = VecDeque::new();
+        compacted.push_back(TranscriptPatch::coalesce(
+            structural_revision,
+            self.patches.iter().take(last_structural_index + 1),
+        ));
+        if last_structural_index + 1 < self.patches.len() {
+            compacted.push_back(TranscriptPatch::coalesce(
+                self.patch_revision,
+                self.patches.iter().skip(last_structural_index + 1),
+            ));
+        }
+        self.patch_floor_revision = structural_revision.saturating_sub(1);
+        self.install_patches(compacted);
+    }
+
+    fn rebuild_order_indices(&mut self) {
+        self.order_indices.clear();
+        self.order_indices.extend(
+            self.order
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (*id, index)),
+        );
+        self.order_indices_valid = true;
+        debug_assert_eq!(self.order.len(), self.order_indices.len());
+    }
+
+    fn ensure_order_indices(&mut self) {
+        if !self.order_indices_valid {
+            self.rebuild_order_indices();
+        }
+    }
+
+    fn order_index(&mut self, id: BlockId) -> Option<usize> {
+        self.ensure_order_indices();
+        self.order_indices.get(&id).copied()
+    }
+
+    fn insert_order_id(&mut self, index: usize, id: BlockId) {
+        let was_append = index == self.order.len();
+        self.order.insert(index, id);
+        if self.order_indices_valid && was_append {
+            self.order_indices.insert(id, index);
+            debug_assert_eq!(self.order.len(), self.order_indices.len());
+        } else {
+            self.order_indices_valid = false;
+        }
+    }
+
+    fn remove_order_index(&mut self, index: usize) -> BlockId {
+        let was_tail = index + 1 == self.order.len();
+        let id = self.order.remove(index);
+        if self.order_indices_valid && was_tail {
+            self.order_indices.remove(&id);
+            debug_assert_eq!(self.order.len(), self.order_indices.len());
+        } else {
+            self.order_indices_valid = false;
+        }
+        id
     }
 
     pub(crate) fn bump_generation(&mut self) {
@@ -1622,10 +1891,12 @@ impl BlockHistory {
 
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
+        self.rebuild_order_indices();
         self.recount_persisted_blocks();
         self.recount_hydrated_entries();
         self.bump_order_generation();
         self.mark_record_dirty_from(0);
+        self.record_patch(vec![TranscriptPatchOperation::Reset], true, true, true);
     }
 
     pub fn persisted_block_count(&self) -> usize {
@@ -1689,7 +1960,7 @@ impl BlockHistory {
     }
 
     fn mark_record_dirty_for_id(&mut self, id: BlockId) {
-        if let Some(idx) = self.order.iter().position(|candidate| *candidate == id) {
+        if let Some(idx) = self.order_index(id) {
             self.mark_record_dirty_from(idx);
         }
     }
@@ -1705,6 +1976,17 @@ impl BlockHistory {
                 stored.content_hash
             }
             None => 0,
+        }
+    }
+
+    fn layout_content_hash(&self, id: BlockId) -> u64 {
+        match self.entries.get(&id) {
+            Some(BlockEntry::Live(live)) if live.metadata.status == Status::Streaming => {
+                live.metadata.content_hash
+                    ^ id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    ^ live.metadata.live_revision.wrapping_add(1).rotate_left(17)
+            }
+            _ => self.content_hash(id),
         }
     }
 
@@ -1898,12 +2180,16 @@ impl BlockHistory {
             return None;
         }
         let block = entry.cloned_block()?;
+        let content_hash = match entry {
+            BlockEntry::Live(_) => block.content_hash(),
+            BlockEntry::Stored(stored) | BlockEntry::Hydrated { stored, .. } => stored.content_hash,
+        };
         let tool_state = self.tool_state(id).cloned();
         Some(TranscriptBlockRecordWithId {
             block_id: id,
             record: TranscriptBlockRecord {
                 block,
-                content_hash: self.content_hash(id),
+                content_hash,
                 origin: self.block_origin(id),
                 tool_state,
             },
@@ -2030,8 +2316,10 @@ impl BlockHistory {
         self.entries.retain(|id, _| retained_ids.contains(id));
         if self.order != next_order {
             self.order = next_order;
+            self.rebuild_order_indices();
             self.bump_order_generation();
             self.bump_navigation_generation();
+            self.record_patch(vec![TranscriptPatchOperation::Reset], true, true, false);
         }
         self.recount_persisted_blocks();
         self.recount_hydrated_entries();
@@ -2065,18 +2353,25 @@ impl BlockHistory {
         let block_weight = block_retained_bytes(&block);
         let weight = block_weight.saturating_add(tool_state_weight);
         let had_entry = self.entries.contains_key(&id);
-        debug_assert_eq!(had_entry, self.order.contains(&id));
+        debug_assert_eq!(had_entry, self.order_index(id).is_some());
         if let Some(state) = record.tool_state {
             if !matches!(self.tool_states.get(&id), Some(ToolStateEntry::Live(_))) {
                 self.tool_states.insert(id, ToolStateEntry::Hydrated(state));
             }
         }
         if !had_entry {
-            self.order.push(id);
+            let index = self.order.len();
+            self.insert_order_id(index, id);
             self.bump_order_generation();
             if stored.kind == StoredBlockKind::User {
                 self.bump_navigation_generation();
             }
+            self.record_patch(
+                vec![TranscriptPatchOperation::Insert { id, index }],
+                true,
+                true,
+                false,
+            );
         }
         self.next_id = self.next_id.max(id.0.saturating_add(1));
         self.insert_entry(
@@ -2101,6 +2396,7 @@ impl BlockHistory {
         };
         let metadata = BlockMetadata {
             content_hash: stored.content_hash,
+            navigation_open: append_navigation_open(&block),
             origin: stored.origin,
             ..BlockMetadata::default()
         };
@@ -2328,11 +2624,21 @@ impl BlockHistory {
             panic!("status can only change on a live transcript block: {id:?}");
         };
         let was_streaming = matches!(live.metadata.status, Status::Streaming);
+        let committed = matches!(status, Status::Done) && was_streaming;
         live.metadata.status = status;
-        if matches!(status, Status::Done) && was_streaming {
+        if committed && live.metadata.live_revision != 0 {
+            live.metadata.content_hash = live.block.content_hash();
+            live.metadata.live_revision = 0;
+        }
+        if committed {
             self.finished_blocks.push(id);
         }
         self.bump_generation();
+        let mut operations = vec![TranscriptPatchOperation::SetStatus { id }];
+        if committed {
+            operations.push(TranscriptPatchOperation::Commit { id });
+        }
+        self.record_patch(operations, false, false, committed);
     }
 
     fn add_block(
@@ -2343,6 +2649,7 @@ impl BlockHistory {
     ) -> BlockId {
         let block = block.normalize_content();
         let hash = block.content_hash();
+        let navigation_open = append_navigation_open(&block);
         let id = BlockId(self.next_id);
         self.next_id += 1;
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
@@ -2350,14 +2657,24 @@ impl BlockHistory {
             block,
             metadata: BlockMetadata {
                 content_hash: hash,
+                navigation_open,
                 origin,
                 ..BlockMetadata::default()
             },
         }));
-        self.order.insert(order_index, id);
+        self.insert_order_id(order_index, id);
         self.insert_entry(id, entry);
         self.bump_order_generation();
         self.mark_record_dirty_from(order_index);
+        self.record_patch(
+            vec![TranscriptPatchOperation::Insert {
+                id,
+                index: order_index,
+            }],
+            true,
+            true,
+            true,
+        );
         id
     }
 
@@ -2416,10 +2733,19 @@ impl BlockHistory {
             block_weight,
             tool_state_weight,
         };
-        self.order.insert(order_index, id);
+        self.insert_order_id(order_index, id);
         self.insert_entry(id, entry);
         self.bump_order_generation();
         self.mark_record_dirty_from(order_index);
+        self.record_patch(
+            vec![TranscriptPatchOperation::Insert {
+                id,
+                index: order_index,
+            }],
+            true,
+            true,
+            true,
+        );
         id
     }
 
@@ -2481,13 +2807,19 @@ impl BlockHistory {
         if self.block_origin(id).is_some() || !self.is_materialized(id) {
             return None;
         }
-        self.order.remove(idx);
+        self.remove_order_index(idx);
         self.tool_states.remove(&id);
         let block = self
             .remove_entry(id)
             .and_then(BlockEntry::into_materialized);
         self.bump_order_generation();
         self.mark_record_dirty_from(idx);
+        self.record_patch(
+            vec![TranscriptPatchOperation::Remove { id, index: idx }],
+            true,
+            true,
+            true,
+        );
         block
     }
 
@@ -2520,7 +2852,7 @@ impl BlockHistory {
     }
 
     pub fn update_tool_state(&mut self, id: BlockId, mutator: impl FnOnce(&mut ToolState)) -> bool {
-        let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
+        let dirty_idx = self.order_index(id);
         if dirty_idx.is_some() {
             self.promote_hydrated(id);
         }
@@ -2532,7 +2864,64 @@ impl BlockHistory {
         if let Some(idx) = dirty_idx {
             self.mark_record_dirty_from(idx);
         }
+        self.record_patch(
+            vec![TranscriptPatchOperation::SetSideState { id }],
+            false,
+            true,
+            true,
+        );
         true
+    }
+
+    pub(crate) fn append_live_text_segments<'a>(
+        &mut self,
+        id: BlockId,
+        segments: impl IntoIterator<Item = &'a str>,
+    ) -> Option<std::ops::Range<usize>> {
+        let (start, end, navigation_changed) = {
+            let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                return None;
+            };
+            let content = match &mut live.block {
+                Block::Text { content } | Block::Thinking { content, .. } => content,
+                _ => return None,
+            };
+            let start = content.len();
+            let navigation_changed = live.metadata.navigation_open;
+            for segment in segments {
+                if live.metadata.navigation_open && segment.contains('\n') {
+                    live.metadata.navigation_open = false;
+                }
+                content.push_str(segment);
+            }
+            let end = content.len();
+            if start == end {
+                return None;
+            }
+            live.metadata.live_revision = live
+                .metadata
+                .live_revision
+                .checked_add(1)
+                .expect("live transcript revision overflow");
+            (start, end, navigation_changed)
+        };
+
+        self.bump_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
+        self.mark_record_dirty_for_id(id);
+        let byte_range = start..end;
+        self.record_patch(
+            vec![TranscriptPatchOperation::Append {
+                id,
+                byte_range: byte_range.clone(),
+            }],
+            navigation_changed,
+            true,
+            true,
+        );
+        Some(byte_range)
     }
 
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
@@ -2558,10 +2947,13 @@ impl BlockHistory {
                 .unwrap_or_default(),
         );
         let hash = block.content_hash();
+        let navigation_open = append_navigation_open(&block);
         let entry = BlockEntry::Live(Box::new(LiveBlock {
             block,
             metadata: BlockMetadata {
                 content_hash: hash,
+                live_revision: 0,
+                navigation_open,
                 status,
                 origin,
             },
@@ -2571,10 +2963,17 @@ impl BlockHistory {
             return;
         }
         self.bump_generation();
-        if navigation != previous_navigation {
+        let navigation_changed = navigation != previous_navigation;
+        if navigation_changed {
             self.bump_navigation_generation();
         }
         self.mark_record_dirty_for_id(id);
+        self.record_patch(
+            vec![TranscriptPatchOperation::Replace { id }],
+            navigation_changed,
+            true,
+            true,
+        );
     }
 
     pub(crate) fn rewrite_with_tool_state(&mut self, id: BlockId, block: Block, state: ToolState) {
@@ -2582,25 +2981,36 @@ impl BlockHistory {
         self.tool_states.insert(id, ToolStateEntry::Live(state));
         self.bump_generation();
         self.mark_record_dirty_for_id(id);
+        self.record_patch(
+            vec![TranscriptPatchOperation::SetSideState { id }],
+            false,
+            true,
+            true,
+        );
     }
 
     pub(crate) fn remove_block(&mut self, id: BlockId) {
-        if !self.entries.contains_key(&id) {
+        let Some(index) = self.order_index(id) else {
             return;
-        }
-        let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
-        self.order.retain(|candidate| *candidate != id);
+        };
+        self.remove_order_index(index);
         self.remove_entry(id);
         self.tool_states.remove(&id);
         self.bump_order_generation();
-        if let Some(idx) = dirty_idx {
-            self.mark_record_dirty_from(idx);
-        }
+        self.mark_record_dirty_from(index);
+        self.record_patch(
+            vec![TranscriptPatchOperation::Remove { id, index }],
+            true,
+            true,
+            true,
+        );
         self.gc_tool_states();
     }
 
     pub fn clear(&mut self) {
         if self.order.is_empty() {
+            self.order_indices.clear();
+            self.order_indices_valid = true;
             self.entries.clear();
             self.persisted_block_count = 0;
             self.hydrated_ids.clear();
@@ -2611,6 +3021,8 @@ impl BlockHistory {
             return;
         }
         self.order.clear();
+        self.order_indices.clear();
+        self.order_indices_valid = true;
         self.entries.clear();
         self.persisted_block_count = 0;
         self.hydrated_ids.clear();
@@ -2620,6 +3032,7 @@ impl BlockHistory {
         self.tool_states.clear();
         self.bump_order_generation();
         self.mark_record_dirty_from(0);
+        self.record_patch(vec![TranscriptPatchOperation::Reset], true, true, true);
     }
 
     pub fn block_gap(&self, i: usize) -> u16 {
@@ -2653,7 +3066,7 @@ impl BlockHistory {
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         LayoutKey {
-            content_hash: self.content_hash(id),
+            content_hash: self.layout_content_hash(id),
             sidecar_hash: self.sidecar_hash(id),
             ..base
         }
@@ -2664,11 +3077,18 @@ impl BlockHistory {
             return;
         }
         let removed: Vec<BlockId> = self.order.drain(idx..).collect();
+        let operations = removed
+            .iter()
+            .copied()
+            .map(|id| TranscriptPatchOperation::Remove { id, index: idx })
+            .collect();
         for id in removed {
+            self.order_indices.remove(&id);
             self.remove_entry(id);
         }
         self.bump_order_generation();
         self.mark_record_dirty_from(idx);
+        self.record_patch(operations, true, true, true);
         self.gc_tool_states();
     }
 
@@ -3062,6 +3482,274 @@ mod tests {
             "rewrite must not change order"
         );
         assert_ne!(history.generation(), g0, "rewrite must bump generation");
+    }
+
+    #[test]
+    fn append_live_text_emits_precise_patch_and_hashes_on_commit() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "hello".into(),
+        });
+        history.set_status(id, Status::Streaming);
+        let canonical_before = history.content_hash(id);
+        let layout_before = history.resolve_key(
+            id,
+            LayoutKey {
+                width: 80,
+                view_state: ViewState::Expanded,
+                content_hash: 0,
+                sidecar_hash: 0,
+            },
+        );
+        let revision = history.patch_revision();
+
+        assert_eq!(
+            history.append_live_text_segments(id, [" world"]),
+            Some(5..11)
+        );
+        assert_eq!(
+            history.block(id).and_then(Block::raw_text),
+            Some("hello world".into())
+        );
+        assert_eq!(history.content_hash(id), canonical_before);
+        assert_ne!(
+            history.resolve_key(
+                id,
+                LayoutKey {
+                    width: 80,
+                    view_state: ViewState::Expanded,
+                    content_hash: 0,
+                    sidecar_hash: 0,
+                },
+            ),
+            layout_before
+        );
+
+        let patches = history
+            .patches_since(revision)
+            .expect("append revision is retained")
+            .collect::<Vec<_>>();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0].operations,
+            vec![TranscriptPatchOperation::Append {
+                id,
+                byte_range: 5..11,
+            }]
+        );
+
+        history.set_status(id, Status::Done);
+        assert_eq!(
+            history.content_hash(id),
+            history.block(id).expect("live block").content_hash()
+        );
+        let commit = history.patches.back().expect("commit patch");
+        assert_eq!(
+            commit.operations,
+            vec![
+                TranscriptPatchOperation::SetStatus { id },
+                TranscriptPatchOperation::Commit { id },
+            ]
+        );
+    }
+
+    #[test]
+    fn order_index_map_tracks_insert_remove_and_truncate() {
+        let mut history = BlockHistory::new();
+        let a = history.push(Block::Text {
+            content: "a".into(),
+        });
+        let c = history.push(Block::Text {
+            content: "c".into(),
+        });
+        let b = history.add_block(
+            Some(1),
+            Block::Text {
+                content: "b".into(),
+            },
+            None,
+        );
+
+        history.ensure_order_indices();
+        assert_eq!(history.order, vec![a, b, c]);
+        assert_eq!(history.order_indices.get(&a), Some(&0));
+        assert_eq!(history.order_indices.get(&b), Some(&1));
+        assert_eq!(history.order_indices.get(&c), Some(&2));
+
+        history.remove_block(b);
+        history.ensure_order_indices();
+        assert_eq!(history.order, vec![a, c]);
+        assert_eq!(history.order_indices.get(&c), Some(&1));
+        history.truncate(1);
+        history.ensure_order_indices();
+        assert_eq!(history.order, vec![a]);
+        assert_eq!(history.order_indices, HashMap::from([(a, 0)]));
+    }
+
+    #[test]
+    fn transcript_patches_replay_to_an_equivalent_replica() {
+        #[derive(Default)]
+        struct Replica {
+            order: Vec<BlockId>,
+            blocks: HashMap<BlockId, Block>,
+            statuses: HashMap<BlockId, Status>,
+        }
+
+        fn apply_since(source: &BlockHistory, revision: &mut u64, replica: &mut Replica) {
+            for patch in source
+                .patches_since(*revision)
+                .expect("replica revision is retained")
+            {
+                for operation in &patch.operations {
+                    match operation {
+                        TranscriptPatchOperation::Insert { id, index } => {
+                            replica.order.insert(*index, *id);
+                            replica
+                                .blocks
+                                .insert(*id, source.block(*id).expect("inserted block").clone());
+                        }
+                        TranscriptPatchOperation::Append { id, byte_range } => {
+                            let source_text = source
+                                .block(*id)
+                                .and_then(Block::raw_text)
+                                .expect("appended text block");
+                            let suffix = source_text
+                                .get(byte_range.clone())
+                                .expect("append patch is on UTF-8 boundaries");
+                            let replica_text = match replica.blocks.get_mut(id) {
+                                Some(Block::Text { content })
+                                | Some(Block::Thinking { content, .. }) => content,
+                                _ => panic!("replica append target is text"),
+                            };
+                            assert_eq!(replica_text.len(), byte_range.start);
+                            replica_text.push_str(suffix);
+                        }
+                        TranscriptPatchOperation::Replace { id } => {
+                            replica
+                                .blocks
+                                .insert(*id, source.block(*id).expect("replaced block").clone());
+                        }
+                        TranscriptPatchOperation::SetStatus { id } => {
+                            replica
+                                .statuses
+                                .insert(*id, source.status(*id).expect("block status"));
+                        }
+                        TranscriptPatchOperation::Remove { id, index } => {
+                            assert_eq!(replica.order.remove(*index), *id);
+                            replica.blocks.remove(id);
+                            replica.statuses.remove(id);
+                        }
+                        TranscriptPatchOperation::SetSideState { .. }
+                        | TranscriptPatchOperation::Commit { .. } => {}
+                        TranscriptPatchOperation::Reset => {
+                            replica.order.clone_from(&source.order);
+                            replica.blocks = source
+                                .order
+                                .iter()
+                                .filter_map(|id| {
+                                    source.block(*id).cloned().map(|block| (*id, block))
+                                })
+                                .collect();
+                        }
+                    }
+                }
+                *revision = patch.revision;
+            }
+        }
+
+        let mut source = BlockHistory::new();
+        let mut replica = Replica::default();
+        let mut revision = 0;
+        let first = source.push(Block::Text {
+            content: "one".into(),
+        });
+        apply_since(&source, &mut revision, &mut replica);
+        source.set_status(first, Status::Streaming);
+        apply_since(&source, &mut revision, &mut replica);
+        source.append_live_text_segments(first, [" β"]);
+        apply_since(&source, &mut revision, &mut replica);
+        source.rewrite(
+            first,
+            Block::Text {
+                content: "replaced".into(),
+            },
+        );
+        apply_since(&source, &mut revision, &mut replica);
+        let second = source.push(Block::Text {
+            content: "two".into(),
+        });
+        apply_since(&source, &mut revision, &mut replica);
+        source.remove_block(first);
+        apply_since(&source, &mut revision, &mut replica);
+
+        assert_eq!(replica.order, source.order);
+        assert_eq!(replica.order, vec![second]);
+        assert_eq!(replica.blocks.get(&second), source.block(second));
+        assert_eq!(revision, source.patch_revision());
+    }
+
+    #[test]
+    fn transcript_patch_compaction_preserves_streaming_suffix_after_structural_prefix() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: String::new(),
+        });
+        let scene_revision = history.patch_revision();
+        let mut mid_stream_revision = scene_revision;
+
+        for index in 0..=2048 {
+            let segment = format!("{index},");
+            history.append_live_text_segments(id, [segment.as_str()]);
+            if index == 10 {
+                mid_stream_revision = history.patch_revision();
+            }
+        }
+
+        assert!(
+            history.patch_retained_bytes <= TRANSCRIPT_PATCH_LOG_BUDGET_BYTES,
+            "patch compaction should return retained patch bytes to budget: {}",
+            history.patch_retained_bytes
+        );
+        let patches = history
+            .patches_since(scene_revision)
+            .expect("streaming suffix remains replayable after compaction")
+            .collect::<Vec<_>>();
+        assert!(
+            patches
+                .iter()
+                .flat_map(|patch| &patch.operations)
+                .all(|operation| !matches!(operation, TranscriptPatchOperation::Reset)),
+            "up-to-date transcript scenes should not rebuild after streaming compaction: {patches:?}"
+        );
+        assert!(
+            patches
+                .iter()
+                .flat_map(|patch| &patch.operations)
+                .any(|operation| matches!(operation, TranscriptPatchOperation::Replace { id: patch_id } if *patch_id == id)),
+            "streaming compaction should preserve a block-local replacement for the visible block: {patches:?}"
+        );
+        let mid_stream_patches = history
+            .patches_since(mid_stream_revision)
+            .expect("mid-stream revision remains replayable after compaction")
+            .collect::<Vec<_>>();
+        let mut mid_stream_operations = mid_stream_patches
+            .iter()
+            .flat_map(|patch| &patch.operations);
+        assert!(
+            mid_stream_operations.all(|operation| !matches!(operation, TranscriptPatchOperation::Reset)),
+            "mid-stream consumers should not need a full rebuild after streaming compaction: {mid_stream_patches:?}"
+        );
+        assert!(
+            mid_stream_patches
+                .iter()
+                .flat_map(|patch| &patch.operations)
+                .any(|operation| matches!(operation, TranscriptPatchOperation::Replace { id: patch_id } if *patch_id == id)),
+            "mid-stream consumers need a revision-independent block replacement before later appends: {mid_stream_patches:?}"
+        );
+        assert!(
+            history.patches_since(scene_revision - 1).is_some(),
+            "the structural-prefix reset remains available for older revisions"
+        );
     }
 
     #[test]

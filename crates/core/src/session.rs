@@ -234,63 +234,62 @@ pub struct Session {
     pub session_usage: TokenUsage,
 }
 
-const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
+const SESSION_FORMAT_VERSION: u32 = 1;
 
 pub use crate::session_store::{
     export_history_jsonl, export_requests_jsonl, SessionStoreError, SessionStoreResult,
 };
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionWireV2 {
+struct SessionWire {
     pub schema_version: u32,
     pub id: String,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub slug: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub first_user_message: Option<String>,
-    #[serde(default)]
     pub metadata_snapshots: HistorySnapshots<SessionMetadataSnapshot>,
-    #[serde(default)]
     pub created_at_ms: u64,
-    #[serde(default)]
     pub updated_at_ms: u64,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub mode: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub fast_mode: Option<bool>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub cwd: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub parent_id: Option<String>,
-    #[serde(default)]
     pub history: Vec<HistoryItem>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub checkpoint: Option<ContextCheckpoint>,
-    #[serde(default)]
     pub checkpoint_events: Vec<ContextCheckpointEvent>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub context_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub context_tokens_history_len: Option<usize>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub display_context_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub display_context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
     pub turn_metas: HistorySnapshots<TurnMeta>,
-    #[serde(default, alias = "accounting_snapshots")]
     pub context_snapshots: HistorySnapshots<ContextSnapshot>,
-    #[serde(default)]
     pub session_cost_usd: f64,
-    #[serde(default)]
     pub session_usage: TokenUsage,
 }
 
@@ -395,8 +394,8 @@ impl<T> From<Vec<(usize, T)>> for HistorySnapshots<T> {
     }
 }
 
-impl From<SessionWireV2> for Session {
-    fn from(w: SessionWireV2) -> Self {
+impl From<SessionWire> for Session {
+    fn from(w: SessionWire) -> Self {
         let context_tokens = w.context_tokens;
         let display_context_tokens = w.display_context_tokens.or(context_tokens);
         let metadata_snapshots = w.metadata_snapshots;
@@ -437,10 +436,10 @@ impl From<SessionWireV2> for Session {
     }
 }
 
-impl From<&Session> for SessionWireV2 {
+impl From<&Session> for SessionWire {
     fn from(s: &Session) -> Self {
-        SessionWireV2 {
-            schema_version: CURRENT_SESSION_SCHEMA_VERSION,
+        SessionWire {
+            schema_version: SESSION_FORMAT_VERSION,
             id: s.id.clone(),
             title: s.title.clone(),
             slug: s.slug.clone(),
@@ -472,14 +471,14 @@ impl From<&Session> for SessionWireV2 {
 
 impl Serialize for Session {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        SessionWireV2::from(self).serialize(ser)
+        SessionWire::from(self).serialize(ser)
     }
 }
 
 impl<'de> Deserialize<'de> for Session {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let wire = SessionWireV2::deserialize(de)?;
-        if wire.schema_version != CURRENT_SESSION_SCHEMA_VERSION {
+        let wire = SessionWire::deserialize(de)?;
+        if wire.schema_version != SESSION_FORMAT_VERSION {
             return Err(serde::de::Error::custom(format!(
                 "unsupported session schema version {}",
                 wire.schema_version
@@ -1297,12 +1296,12 @@ impl SessionStorage {
         &self.inner.state_root
     }
 
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.inner.state_root.join("sessions")
+    pub fn layout(&self) -> smelt_store::SessionStoreLayout {
+        smelt_store::SessionStoreLayout::from_state_root(&self.inner.state_root)
     }
 
-    fn reject_symlink(&self, path: &Path, operation: &'static str) -> SessionStoreResult<()> {
-        crate::session_store::reject_symlink_in(self.state_root(), path, operation)
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.layout().sessions_root().to_path_buf()
     }
 
     pub fn create_private_dir_all(&self, path: &Path) -> std::io::Result<()> {
@@ -1313,18 +1312,18 @@ impl SessionStorage {
         write_private_file_in(self.state_root(), path, contents)
     }
 
-    pub fn dir_for(&self, session: &Session) -> PathBuf {
-        self.dir_for_id(&session.id)
+    pub fn artifact_dir_for(&self, session: &Session) -> PathBuf {
+        self.artifact_dir_for_id(&session.id)
     }
 
-    pub fn dir_for_id(&self, id: &str) -> PathBuf {
+    pub fn artifact_dir_for_id(&self, id: &str) -> PathBuf {
         let id = crate::session_id::SessionId::parse(id)
             .unwrap_or_else(|err| panic!("invalid in-memory session id {id:?}: {err}"));
-        self.session_dir(&id)
+        self.session_artifact_dir(&id)
     }
 
-    pub fn session_dir(&self, id: &crate::session_id::SessionId) -> PathBuf {
-        self.sessions_dir().join(id.as_str())
+    pub fn session_artifact_dir(&self, id: &crate::session_id::SessionId) -> PathBuf {
+        self.layout().session_artifact_dir(id.as_str())
     }
 
     fn catalog(&self) -> Result<&crate::session_catalog::SessionCatalog, &str> {
@@ -1354,52 +1353,53 @@ fn process_storage() -> SessionStorage {
         .expect("process session storage initialized")
 }
 
-pub fn dir_for(session: &Session) -> PathBuf {
-    process_storage().dir_for(session)
+pub fn artifact_dir_for(session: &Session) -> PathBuf {
+    process_storage().artifact_dir_for(session)
 }
 
 /// Resolve a path for an in-memory session whose ID must satisfy the persisted ID invariant.
 /// User-provided IDs and prefixes must go through [`resolve_prefix`] first.
-pub fn dir_for_id(id: &str) -> PathBuf {
-    process_storage().dir_for_id(id)
+pub fn artifact_dir_for_id(id: &str) -> PathBuf {
+    process_storage().artifact_dir_for_id(id)
 }
 
-pub fn session_dir(id: &crate::session_id::SessionId) -> PathBuf {
-    process_storage().session_dir(id)
+pub fn session_artifact_dir(id: &crate::session_id::SessionId) -> PathBuf {
+    process_storage().session_artifact_dir(id)
 }
 
-const ARTIFACT_CLEANUP_BATCH: usize = 64;
+const LINEAGE_CLEANUP_BATCH: usize = 64;
 
 impl SessionStorage {
-    pub fn cleanup_abandoned_session_artifacts(&self) {
-        let root = self.sessions_dir();
-        let _ = smelt_store::cleanup_abandoned_lineage_artifacts(&root, ARTIFACT_CLEANUP_BATCH);
+    pub fn cleanup_abandoned_lineages(&self) {
+        let sessions_root = self.sessions_dir();
+        let _ = smelt_store::cleanup_abandoned_lineages(&sessions_root, LINEAGE_CLEANUP_BATCH);
     }
 }
 
-pub fn cleanup_abandoned_session_artifacts() {
-    process_storage().cleanup_abandoned_session_artifacts();
+pub fn cleanup_abandoned_lineages() {
+    process_storage().cleanup_abandoned_lineages();
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedSessionDir {
+pub struct ResolvedSession {
     pub id: String,
-    pub dir: PathBuf,
+    pub sessions_root: PathBuf,
+    pub lineage_id: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct SessionStoreRef {
-    pub session_dir: PathBuf,
-    pub root: PathBuf,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionStoreAddress {
+    pub sessions_root: PathBuf,
     pub session_id: String,
+    pub lineage_id: String,
 }
 
-impl SessionStoreRef {
-    pub fn new(session_dir: PathBuf, root: PathBuf, session_id: String) -> Self {
+impl SessionStoreAddress {
+    pub fn new(sessions_root: PathBuf, session_id: String, lineage_id: String) -> Self {
         Self {
-            session_dir,
-            root,
+            sessions_root,
             session_id,
+            lineage_id,
         }
     }
 }
@@ -1416,7 +1416,7 @@ pub struct SessionHeader {
 pub struct SessionStoreResume {
     pub header: SessionHeader,
     pub session: Session,
-    pub store_ref: SessionStoreRef,
+    pub store_address: SessionStoreAddress,
     pub head: smelt_store::StoreHead,
     pub transcript_record_tail: smelt_store::TranscriptRecordSlice,
 }
@@ -1439,14 +1439,23 @@ impl SessionStorage {
             .map_err(|err| smelt_store::StoreError::Integrity(err.to_string()))?;
         let sessions_dir = self.sessions_dir();
         create_private_dir_all_in(self.state_root(), &sessions_dir)?;
-        let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_dir, session_id.as_str())?;
+        let mut writer = smelt_store::SessionWriter::open(&sessions_dir, session_id.as_str())?;
         let expected = writer.store_head()?;
         let command = store_commit_from_session(session, expected, 0)?;
-        let receipt = writer
-            .commit_session(&command)
-            .map_err(session_commit_failure_to_store_error)?;
+        let batch = smelt_store::SessionEventBatch::save(
+            expected.revision.get().saturating_add(1),
+            command.clone(),
+            smelt_store::SessionBatchBarrier::Lifecycle,
+        );
+        let receipt = match writer
+            .commit_batch(&batch)
+            .map_err(session_commit_failure_to_store_error)?
+        {
+            smelt_store::SessionEventReceipt::Save(receipt) => receipt,
+            _ => unreachable!("save batch returns a save receipt"),
+        };
         writer.release()?;
-        self.publish_session_catalog_commit(&command, &receipt, true);
+        self.publish_session_catalog_commit(&command, &receipt);
         Ok(receipt)
     }
 }
@@ -1864,31 +1873,31 @@ impl SessionStorage {
 
     pub fn load_full_result(&self, id_or_prefix: &str) -> SessionStoreResult<Option<Session>> {
         let _perf = smelt_perf::perf::begin("session:load_full");
-        let id = {
+        let resolved = {
             let _perf = smelt_perf::perf::begin("session:load_full:resolve");
-            self.resolve_prefix(id_or_prefix)?
+            self.resolve_session_for_read_result(id_or_prefix)?
         };
-        let dir = self.session_dir(&id);
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(self.sessions_dir(), id.as_str())
-                .map_err(|error| {
-                    crate::session_store::store_error("open lineage session", &dir, error)
-                })?;
-        let state = reader.snapshot().map_err(|error| {
-            crate::session_store::store_error("read lineage session", &dir, error)
-        })?;
+        let (reader, state) = open_lineage_snapshot(&resolved)?;
         let history = reader
             .history_range(0, state.head.history_len.get())
             .map_err(|error| {
-                crate::session_store::store_error("read lineage history", &dir, error)
+                crate::session_store::store_error(
+                    "read lineage history",
+                    &resolved.sessions_root,
+                    error,
+                )
             })?;
         let transcript_records = reader
             .transcript_range(0, state.head.transcript_record_count.get())
             .map_err(|error| {
-                crate::session_store::store_error("read lineage transcript", &dir, error)
+                crate::session_store::store_error(
+                    "read lineage transcript",
+                    &resolved.sessions_root,
+                    error,
+                )
             })?;
         session_from_full_store(
-            &dir,
+            &resolved.id,
             state.history_text_bytes,
             smelt_store::FullSession {
                 session: smelt_store::StoredSession {
@@ -1931,42 +1940,50 @@ impl SessionStorage {
             .map(|stored| stored.map(|(header, _)| header.meta))
     }
 
-    pub fn resolve_session_dir_for_read(&self, id_or_prefix: &str) -> Option<ResolvedSessionDir> {
-        self.resolve_session_dir_for_read_result(id_or_prefix).ok()
+    pub fn resolve_session_for_read(&self, id_or_prefix: &str) -> Option<ResolvedSession> {
+        self.resolve_session_for_read_result(id_or_prefix).ok()
     }
 
-    pub fn resolve_session_dir_for_read_result(
+    pub fn resolve_session_for_read_result(
         &self,
         id_or_prefix: &str,
-    ) -> SessionStoreResult<ResolvedSessionDir> {
+    ) -> SessionStoreResult<ResolvedSession> {
         let id = self.resolve_prefix(id_or_prefix)?;
-        let dir = self.session_dir(&id);
-        self.reject_symlink(&dir, "read")?;
-        match smelt_store::LineageSessionReader::try_open_existing(self.sessions_dir(), id.as_str())
-        {
-            Ok(Some(_)) => Ok(ResolvedSessionDir {
-                id: id.into_string(),
-                dir,
-            }),
-            Ok(None) => Err(SessionStoreError::MissingDatabase { id: id.to_string() }),
-            Err(error) => Err(crate::session_store::store_error(
-                "locate lineage session",
-                &dir,
-                error,
-            )),
+        let id_string = id.into_string();
+        let catalog_path = self.layout().catalog_path();
+        let catalog = smelt_store::CatalogReader::open_existing(&catalog_path)
+            .map_err(|error| {
+                crate::session_store::store_error("open session catalog", &catalog_path, error)
+            })?
+            .ok_or_else(|| SessionStoreError::CatalogUnavailable {
+                kind: "catalog_unavailable".into(),
+                summary: "session catalog is not initialized".into(),
+            })?;
+        let session = catalog
+            .session(&id_string)
+            .map_err(|error| {
+                crate::session_store::store_error("read session catalog", &catalog_path, error)
+            })?
+            .ok_or_else(|| SessionStoreError::SessionNotFound {
+                id: id_string.clone(),
+            })?;
+        if session.availability != smelt_store::CatalogAvailability::Available {
+            let kind = session.error_kind.unwrap_or_else(|| "unavailable".into());
+            let summary = session
+                .error_summary
+                .unwrap_or_else(|| format!("session {id_string} is unavailable"));
+            return Err(SessionStoreError::CatalogUnavailable { kind, summary });
         }
-    }
-
-    pub fn prepare_session_dir_for_read(&self, id_or_prefix: &str) -> Option<PathBuf> {
-        self.prepare_session_dir_for_read_result(id_or_prefix).ok()
-    }
-
-    pub fn prepare_session_dir_for_read_result(
-        &self,
-        id_or_prefix: &str,
-    ) -> SessionStoreResult<PathBuf> {
-        self.resolve_session_dir_for_read_result(id_or_prefix)
-            .map(|resolved| resolved.dir)
+        let lineage_id = session
+            .lineage_id
+            .ok_or_else(|| SessionStoreError::Corrupt {
+                context: format!("catalog session {id_string} has no lineage locator"),
+            })?;
+        Ok(ResolvedSession {
+            id: id_string,
+            sessions_root: self.sessions_dir(),
+            lineage_id,
+        })
     }
 
     pub fn load_store_resume_result(
@@ -1975,41 +1992,31 @@ impl SessionStorage {
         record_width: u16,
         record_target_rows: u16,
     ) -> SessionStoreResult<Option<SessionStoreResume>> {
-        let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
+        let resolved = self.resolve_session_for_read_result(id_or_prefix)?;
         load_lineage_resume_from_resolved(resolved, record_width, record_target_rows).map(Some)
     }
 
     pub fn load_store_header(
         &self,
         id_or_prefix: &str,
-    ) -> Option<(SessionHeader, SessionStoreRef)> {
+    ) -> Option<(SessionHeader, SessionStoreAddress)> {
         self.load_store_header_result(id_or_prefix).ok().flatten()
     }
 
     pub fn load_store_header_result(
         &self,
         id_or_prefix: &str,
-    ) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
-        let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
-        let (_, snapshot, root) = open_lineage_snapshot(&resolved)?;
-        lineage_header_from_snapshot(&resolved, root, &snapshot).map(Some)
+    ) -> SessionStoreResult<Option<(SessionHeader, SessionStoreAddress)>> {
+        let resolved = self.resolve_session_for_read_result(id_or_prefix)?;
+        let (_, snapshot) = open_lineage_snapshot(&resolved)?;
+        lineage_header_from_snapshot(&resolved, &snapshot).map(Some)
     }
 
-    pub fn load_store_header_for_dir(
+    pub fn load_store_header_for_id(
         &self,
-        session_dir: PathBuf,
-    ) -> Option<(SessionHeader, SessionStoreRef)> {
-        self.load_store_header_for_dir_result(session_dir)
-            .ok()
-            .flatten()
-    }
-
-    pub fn load_store_header_for_dir_result(
-        &self,
-        session_dir: PathBuf,
-    ) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
-        self.reject_symlink(&session_dir, "read")?;
-        load_lineage_header_for_dir(session_dir)
+        session_id: &str,
+    ) -> Option<(SessionHeader, SessionStoreAddress)> {
+        self.load_store_header(session_id)
     }
 }
 
@@ -2033,22 +2040,12 @@ pub fn load_meta_result(id_or_prefix: &str) -> SessionStoreResult<Option<Session
     process_storage().load_meta_result(id_or_prefix)
 }
 
-pub fn resolve_session_dir_for_read(id_or_prefix: &str) -> Option<ResolvedSessionDir> {
-    process_storage().resolve_session_dir_for_read(id_or_prefix)
+pub fn resolve_session_for_read(id_or_prefix: &str) -> Option<ResolvedSession> {
+    process_storage().resolve_session_for_read(id_or_prefix)
 }
 
-pub fn resolve_session_dir_for_read_result(
-    id_or_prefix: &str,
-) -> SessionStoreResult<ResolvedSessionDir> {
-    process_storage().resolve_session_dir_for_read_result(id_or_prefix)
-}
-
-pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
-    process_storage().prepare_session_dir_for_read(id_or_prefix)
-}
-
-pub fn prepare_session_dir_for_read_result(id_or_prefix: &str) -> SessionStoreResult<PathBuf> {
-    process_storage().prepare_session_dir_for_read_result(id_or_prefix)
+pub fn resolve_session_for_read_result(id_or_prefix: &str) -> SessionStoreResult<ResolvedSession> {
+    process_storage().resolve_session_for_read_result(id_or_prefix)
 }
 
 pub fn load_store_resume_result(
@@ -2060,34 +2057,33 @@ pub fn load_store_resume_result(
 }
 
 fn open_lineage_snapshot(
-    resolved: &ResolvedSessionDir,
+    resolved: &ResolvedSession,
 ) -> SessionStoreResult<(
     smelt_store::LineageSessionReader,
     smelt_store::LineageSessionState,
-    PathBuf,
 )> {
-    let root = resolved
-        .dir
-        .parent()
-        .ok_or_else(|| SessionStoreError::Corrupt {
-            context: "lineage session path has no storage root".into(),
-        })?
-        .to_path_buf();
-    let reader =
-        smelt_store::LineageSessionReader::open_existing(&root, &resolved.id).map_err(|error| {
-            crate::session_store::store_error("open lineage session", &resolved.dir, error)
-        })?;
-    let snapshot = reader.snapshot().map_err(|error| {
-        crate::session_store::store_error("read lineage session head", &resolved.dir, error)
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &resolved.sessions_root,
+        &resolved.lineage_id,
+        &resolved.id,
+    )
+    .map_err(|error| {
+        crate::session_store::store_error("open lineage session", &resolved.sessions_root, error)
     })?;
-    Ok((reader, snapshot, root))
+    let snapshot = reader.snapshot().map_err(|error| {
+        crate::session_store::store_error(
+            "read lineage session head",
+            &resolved.sessions_root,
+            error,
+        )
+    })?;
+    Ok((reader, snapshot))
 }
 
 fn lineage_header_from_snapshot(
-    resolved: &ResolvedSessionDir,
-    root: PathBuf,
+    resolved: &ResolvedSession,
     snapshot: &smelt_store::LineageSessionState,
-) -> SessionStoreResult<(SessionHeader, SessionStoreRef)> {
+) -> SessionStoreResult<(SessionHeader, SessionStoreAddress)> {
     let history_len =
         snapshot
             .head
@@ -2102,7 +2098,7 @@ fn lineage_header_from_snapshot(
         head: snapshot.head,
     };
     let meta = session_meta_from_stored_session(
-        &resolved.dir,
+        &resolved.id,
         stored,
         snapshot.history_text_bytes,
         history_len,
@@ -2114,16 +2110,20 @@ fn lineage_header_from_snapshot(
             revision: snapshot.head.revision.get(),
             degraded_warnings: Vec::new(),
         },
-        SessionStoreRef::new(resolved.dir.clone(), root, resolved.id.clone()),
+        SessionStoreAddress::new(
+            resolved.sessions_root.clone(),
+            resolved.id.clone(),
+            resolved.lineage_id.clone(),
+        ),
     ))
 }
 
 fn load_lineage_resume_from_resolved(
-    resolved: ResolvedSessionDir,
+    resolved: ResolvedSession,
     record_width: u16,
     record_target_rows: u16,
 ) -> SessionStoreResult<SessionStoreResume> {
-    let (reader, snapshot, root) = open_lineage_snapshot(&resolved)?;
+    let (reader, snapshot) = open_lineage_snapshot(&resolved)?;
     let transcript_count = snapshot
         .head
         .transcript_record_count
@@ -2134,10 +2134,14 @@ fn load_lineage_resume_from_resolved(
     let transcript_record_tail = reader
         .transcript_tail_for_rows_with_total(transcript_count, record_width, record_target_rows)
         .map_err(|error| {
-            crate::session_store::store_error("read lineage transcript tail", &resolved.dir, error)
+            crate::session_store::store_error(
+                "read lineage transcript tail",
+                &resolved.sessions_root,
+                error,
+            )
         })?;
     let head = snapshot.head;
-    let (header, store_ref) = lineage_header_from_snapshot(&resolved, root, &snapshot)?;
+    let (header, store_address) = lineage_header_from_snapshot(&resolved, &snapshot)?;
     let session = session_from_store_state(
         header.meta.clone(),
         session_side_table_state_from_store(snapshot.side_tables)?,
@@ -2146,55 +2150,20 @@ fn load_lineage_resume_from_resolved(
     Ok(SessionStoreResume {
         header,
         session,
-        store_ref,
+        store_address,
         head,
         transcript_record_tail,
     })
 }
 
-pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionStoreRef)> {
+pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionStoreAddress)> {
     process_storage().load_store_header(id_or_prefix)
 }
 
 pub fn load_store_header_result(
     id_or_prefix: &str,
-) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
+) -> SessionStoreResult<Option<(SessionHeader, SessionStoreAddress)>> {
     process_storage().load_store_header_result(id_or_prefix)
-}
-
-pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader, SessionStoreRef)> {
-    load_store_header_for_dir_result(session_dir).ok().flatten()
-}
-
-pub fn load_store_header_for_dir_result(
-    session_dir: PathBuf,
-) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
-    crate::session_store::reject_symlink(&session_dir, "read")?;
-    load_lineage_header_for_dir(session_dir)
-}
-
-fn load_lineage_header_for_dir(
-    session_dir: PathBuf,
-) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
-    let id = session_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| SessionStoreError::Corrupt {
-            context: "lineage session directory has no UTF-8 ID".into(),
-        })?;
-    crate::session_id::SessionId::parse(id).map_err(|error| SessionStoreError::Corrupt {
-        context: format!("invalid lineage session directory: {error}"),
-    })?;
-    let resolved = ResolvedSessionDir {
-        id: id.to_owned(),
-        dir: session_dir,
-    };
-    let (_, snapshot, root) = open_lineage_snapshot(&resolved)?;
-    lineage_header_from_snapshot(&resolved, root, &snapshot).map(Some)
-}
-
-pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
-    load_meta_for_dir_result(dir).ok().flatten()
 }
 
 fn session_from_store_state(
@@ -2274,7 +2243,7 @@ fn session_from_store_state(
 }
 
 fn session_from_full_store(
-    path: &Path,
+    expected_session_id: &str,
     text_bytes: u64,
     snapshot: smelt_store::FullSession,
 ) -> SessionStoreResult<Session> {
@@ -2287,7 +2256,8 @@ fn session_from_full_store(
         transcript_records: _,
     } = snapshot;
     let metadata = stored.metadata.clone();
-    let meta = session_meta_from_stored_session(path, stored, text_bytes, history.len())?;
+    let meta =
+        session_meta_from_stored_session(expected_session_id, stored, text_bytes, history.len())?;
     let side_tables =
         session_side_table_state_from_values(turn_metas, metadata_snapshots, context_snapshots)?;
     let mut session = session_from_store_state(meta, side_tables, &metadata);
@@ -2371,11 +2341,27 @@ impl SessionStorage {
                 message: error.to_string(),
             }
         })?;
-        let matches = self
-            .session_ids_result()?
+        let root = self.sessions_dir();
+        crate::session_store::reject_symlink_in(self.state_root(), &root, "resolve session")?;
+        let catalog_path = self.layout().catalog_path();
+        let Some(catalog) =
+            smelt_store::CatalogReader::open_existing(&catalog_path).map_err(|error| {
+                crate::session_store::store_error("open session catalog", &catalog_path, error)
+            })?
+        else {
+            return Err(SessionStoreError::SessionNotFound {
+                id: prefix.as_str().to_string(),
+            });
+        };
+        let matches = catalog
+            .session_ids_with_prefix(prefix.as_str(), 2)
+            .map_err(|error| {
+                crate::session_store::store_error("resolve session prefix", &catalog_path, error)
+            })?
             .into_iter()
-            .filter(|id| id.starts_with(prefix.as_str()))
-            .map(|id| crate::session_id::SessionId::parse(&id).expect("listed session ID is valid"))
+            .map(|id| {
+                crate::session_id::SessionId::parse(&id).expect("catalog session ID is valid")
+            })
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [] => Err(SessionStoreError::SessionNotFound {
@@ -2422,37 +2408,34 @@ impl SessionStorage {
     }
 
     pub fn delete(&self, id_or_prefix: &str) -> SessionStoreResult<()> {
-        let id = self.resolve_prefix(id_or_prefix)?;
-        let root = self.sessions_dir();
-        let session_dir = self.session_dir(&id);
-        debug_assert_eq!(session_dir.parent(), Some(root.as_path()));
-        if session_dir.parent() != Some(root.as_path()) {
-            return Err(SessionStoreError::Io {
-                operation: "confine session path beneath",
-                path: root.display().to_string(),
-                message: "resolved session path escaped its root".into(),
-            });
-        }
-        self.reject_symlink(&session_dir, "delete")?;
+        let resolved = self.resolve_session_for_read_result(id_or_prefix)?;
         if let Ok(catalog) = self.catalog() {
-            catalog.begin_delete(id.as_str());
+            catalog.begin_delete(&resolved.id);
         }
         let result = (|| {
-            let writer = smelt_store::OwnedLineageWriter::open_existing(&root, id.as_str())?;
+            let writer = smelt_store::OwnedLineageWriter::open_existing_in_lineage(
+                &resolved.sessions_root,
+                &resolved.lineage_id,
+                &resolved.id,
+            )?;
             writer.delete_branch(now_ms())
         })()
         .map_err(|error| {
-            crate::session_store::store_error("delete lineage session", &session_dir, error)
+            crate::session_store::store_error(
+                "delete lineage session",
+                &resolved.sessions_root,
+                error,
+            )
         });
         match &result {
             Ok(()) => {
                 if let Ok(catalog) = self.catalog() {
-                    catalog.complete_delete(id.as_str());
+                    catalog.complete_delete(&resolved.id);
                 }
             }
             Err(_) => {
                 if let Ok(catalog) = self.catalog() {
-                    catalog.cancel_delete(id.as_str());
+                    catalog.cancel_delete(&resolved.id);
                 }
             }
         }
@@ -2513,20 +2496,13 @@ impl SessionStorage {
             .is_ok_and(|catalog| catalog.wait_for_queued_work(timeout))
     }
 
-    pub fn request_session_catalog_projection(&self, id: &str, revision: smelt_store::Revision) {
-        if let Ok(catalog) = self.catalog() {
-            catalog.request_projection(id, revision);
-        }
-    }
-
     pub fn publish_session_catalog_commit(
         &self,
         command: &smelt_store::SessionCommit,
         receipt: &smelt_store::SaveReceipt,
-        schedule_projection: bool,
     ) {
         if let Ok(catalog) = self.catalog() {
-            catalog.publish_commit(command, receipt, schedule_projection);
+            catalog.publish_commit(command, receipt);
         }
     }
 
@@ -2668,16 +2644,11 @@ pub fn wait_for_session_catalog(timeout: std::time::Duration) -> bool {
     process_storage().wait_for_session_catalog(timeout)
 }
 
-pub fn request_session_catalog_projection(id: &str, revision: smelt_store::Revision) {
-    process_storage().request_session_catalog_projection(id, revision);
-}
-
 pub fn publish_session_catalog_commit(
     command: &smelt_store::SessionCommit,
     receipt: &smelt_store::SaveReceipt,
-    schedule_projection: bool,
 ) {
-    process_storage().publish_session_catalog_commit(command, receipt, schedule_projection);
+    process_storage().publish_session_catalog_commit(command, receipt);
 }
 
 fn session_list_entry_from_catalog(
@@ -2735,13 +2706,8 @@ fn session_list_entry_from_catalog(
     Ok(SessionListEntry { id, status })
 }
 
-fn load_meta_for_dir_result(path: PathBuf) -> SessionStoreResult<Option<SessionMeta>> {
-    crate::session_store::reject_symlink(&path, "read")?;
-    load_lineage_header_for_dir(path).map(|header| header.map(|(header, _)| header.meta))
-}
-
 fn session_meta_from_stored_session(
-    path: &Path,
+    expected_session_id: &str,
     session: smelt_store::StoredSession,
     text_bytes: u64,
     retained_history_len: usize,
@@ -2753,12 +2719,11 @@ fn session_meta_from_stored_session(
             context: format!("invalid persisted session id: {err}"),
         }
     })?;
-    let expected_id = path.file_name().and_then(|name| name.to_str());
-    if expected_id != Some(identity.id.as_str()) {
+    if identity.id != expected_session_id {
         return Err(SessionStoreError::Corrupt {
             context: format!(
-                "session id {:?} does not match directory {:?}",
-                identity.id, expected_id
+                "session id {:?} does not match requested id {:?}",
+                identity.id, expected_session_id
             ),
         });
     }
@@ -2851,18 +2816,25 @@ impl SessionStorage {
         id_or_prefix: &str,
     ) -> SessionStoreResult<Option<String>> {
         let _perf = smelt_perf::perf::begin("session:load_search_blob");
-        let resolved = self.resolve_session_dir_for_read_result(id_or_prefix)?;
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(self.sessions_dir(), &resolved.id)
-                .map_err(|error| {
-                    crate::session_store::store_error(
-                        "open lineage search source",
-                        &resolved.dir,
-                        error,
-                    )
-                })?;
+        let resolved = self.resolve_session_for_read_result(id_or_prefix)?;
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &resolved.sessions_root,
+            &resolved.lineage_id,
+            &resolved.id,
+        )
+        .map_err(|error| {
+            crate::session_store::store_error(
+                "open lineage search source",
+                &resolved.sessions_root,
+                error,
+            )
+        })?;
         reader.search_blob().map(Some).map_err(|error| {
-            crate::session_store::store_error("read lineage search text", &resolved.dir, error)
+            crate::session_store::store_error(
+                "read lineage search text",
+                &resolved.sessions_root,
+                error,
+            )
         })
     }
 
@@ -2900,8 +2872,7 @@ fn session_updated_at(meta: &SessionMeta) -> u64 {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn sessions_dir() -> PathBuf {
+pub fn sessions_dir() -> PathBuf {
     process_storage().sessions_dir()
 }
 
@@ -2927,6 +2898,15 @@ mod tests {
 
     fn lineage_reader(session: &Session) -> smelt_store::LineageSessionReader {
         smelt_store::LineageSessionReader::open_existing(sessions_dir(), &session.id).unwrap()
+    }
+
+    #[test]
+    fn current_session_wire_rejects_missing_fields() {
+        let session = Session::new(1, PathBuf::from("/tmp"));
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("mode");
+
+        assert!(serde_json::from_value::<Session>(value).is_err());
     }
 
     #[test]
@@ -3288,8 +3268,8 @@ mod tests {
             exact_snapshot
                 .durations
                 .iter()
-                .any(|row| row.label == "store:lineage:open_read_only" && row.count > 0),
-            "exact load should still enrich stale metadata from sqlite"
+                .any(|row| row.label == "store:lineage:open_read_only_located" && row.count > 0),
+            "exact load should still enrich stale metadata from the catalog-located sqlite database"
         );
     }
 
@@ -3331,14 +3311,8 @@ mod tests {
         let reader = lineage_reader(&session);
         let database = reader.database_path().to_path_buf();
         let lineage_dir = database.parent().unwrap().to_path_buf();
-        let lineages_dir = lineage_dir.parent().unwrap().to_path_buf();
         drop(reader);
-        for dir in [
-            engine::state_dir(),
-            sessions_dir(),
-            lineages_dir,
-            lineage_dir,
-        ] {
+        for dir in [engine::state_dir(), sessions_dir(), lineage_dir] {
             assert_eq!(
                 fs::metadata(dir).unwrap().permissions().mode() & 0o777,
                 0o700
@@ -3348,7 +3322,7 @@ mod tests {
             fs::metadata(database).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(!dir_for(&session).exists());
+        assert!(!artifact_dir_for(&session).exists());
     }
 
     #[test]
@@ -3392,11 +3366,15 @@ mod tests {
     }
 
     #[test]
-    fn session_listing_reports_root_io_errors_without_synchronous_scanning() {
+    fn session_listing_reports_storage_errors_without_synchronous_scanning() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
-        create_private_dir_all(&engine::state_dir()).unwrap();
-        fs::write(sessions_dir(), "not a directory").unwrap();
+        create_private_dir_all(&sessions_dir()).unwrap();
+        let invalid_lineage = sessions_dir().join("a".repeat(32));
+        create_private_dir_all(&invalid_lineage).unwrap();
+        let invalid_database = smelt_store::SessionStoreLayout::from_sessions_root(sessions_dir())
+            .lineage_database_path("a".repeat(32).as_str());
+        fs::write(invalid_database, "not a database").unwrap();
 
         request_session_catalog_reconciliation();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -3417,7 +3395,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_session_dir_for_read_ignores_non_lineage_directories() {
+    fn resolve_session_for_read_ignores_non_lineage_directories() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
@@ -3430,38 +3408,25 @@ mod tests {
         session.history.push(user_item("hello"));
         save(&session);
 
-        assert!(resolve_session_dir_for_read("abcd").is_none());
+        assert!(resolve_session_for_read("abcd").is_none());
 
-        let store = resolve_session_dir_for_read("01234567").expect("resolve store prefix");
+        let store = resolve_session_for_read("01234567").expect("resolve store prefix");
         assert_eq!(store.id, session.id);
 
-        let (header, store_ref) = load_store_header("01234567").expect("load store header");
+        let (header, store_address) = load_store_header("01234567").expect("load store header");
         assert_eq!(header.meta.id, session.id);
         assert_eq!(header.history_len, 1);
         assert_eq!(header.meta.history_len, Some(1));
         assert!(header.revision > 0);
-        assert_eq!(store_ref.session_dir, dir_for(&session));
-        assert_eq!(store_ref.root, sessions_dir());
-        assert_eq!(store_ref.session_id, session.id);
+        assert_eq!(store_address.sessions_root, sessions_dir());
+        assert_eq!(store_address.session_id, session.id);
     }
 
-    fn non_lineage_session_dir(id: &str) -> std::path::PathBuf {
+    fn non_lineage_fixture_dir(id: &str) -> std::path::PathBuf {
         let dir = sessions_dir().join(id);
-        fs::create_dir_all(&dir).expect("create stale session dir");
+        fs::create_dir_all(&dir).expect("create unsupported session dir");
         fs::write(dir.join("data.json"), "{}").expect("write unrelated file");
         dir
-    }
-
-    #[test]
-    fn prepare_session_dir_for_read_ignores_non_lineage_directory() {
-        let state = tempfile::tempdir().expect("state dir");
-        let _g = crate::test_util::isolate_xdg_state(state.path());
-
-        let id = numbered_session_id(100);
-        let dir = non_lineage_session_dir(&id);
-
-        assert!(prepare_session_dir_for_read(&id).is_none());
-        assert!(dir.join("data.json").exists());
     }
 
     #[test]
@@ -3470,7 +3435,7 @@ mod tests {
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
         let id = numbered_session_id(101);
-        let dir = non_lineage_session_dir(&id);
+        let dir = non_lineage_fixture_dir(&id);
 
         assert!(load_meta(&id).is_none());
         assert!(dir.join("data.json").exists());
@@ -3482,7 +3447,7 @@ mod tests {
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
         let id = numbered_session_id(102);
-        let dir = non_lineage_session_dir(&id);
+        let dir = non_lineage_fixture_dir(&id);
 
         assert!(list_sessions().is_empty());
         assert!(dir.join("data.json").exists());
@@ -3494,7 +3459,7 @@ mod tests {
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
         let id = numbered_session_id(103);
-        let dir = non_lineage_session_dir(&id);
+        let dir = non_lineage_fixture_dir(&id);
 
         assert!(load_search_blob(&id).is_none());
         assert!(dir.join("data.json").exists());
@@ -3510,7 +3475,7 @@ mod tests {
         });
 
         let json = serde_json::to_value(&s).expect("serialize session");
-        assert_eq!(json["schema_version"], CURRENT_SESSION_SCHEMA_VERSION);
+        assert_eq!(json["schema_version"], SESSION_FORMAT_VERSION);
         assert!(json.get("messages").is_none());
         assert_eq!(json["history"][0]["display"], "/reflect");
         assert_eq!(json["history"][0]["command"], true);
@@ -3528,11 +3493,8 @@ mod tests {
 
     #[test]
     fn unsupported_session_schema_version_is_rejected() {
-        let json = serde_json::json!({
-            "schema_version": 99,
-            "id": "future",
-            "history": []
-        });
+        let mut json = serde_json::to_value(Session::new(1, PathBuf::from("/tmp"))).unwrap();
+        json["schema_version"] = serde_json::json!(99);
 
         let err = serde_json::from_value::<Session>(json).expect_err("future schema should fail");
         assert!(err
@@ -4098,7 +4060,7 @@ mod tests {
         session.history = vec![image_item(data_url)];
         save(&session);
 
-        let session_dir = dir_for(&session);
+        let session_dir = artifact_dir_for(&session);
         assert!(!session_dir.join("blobs").exists());
         let reader = lineage_reader(&session);
         let stats = reader.storage_stats().unwrap();
@@ -4223,7 +4185,7 @@ mod tests {
         symlink(external.path(), sessions_dir().join(".trash")).unwrap();
         symlink(external.path(), sessions_dir().join(TEST_SESSION_ID)).unwrap();
 
-        cleanup_abandoned_session_artifacts();
+        cleanup_abandoned_lineages();
 
         assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep");
     }

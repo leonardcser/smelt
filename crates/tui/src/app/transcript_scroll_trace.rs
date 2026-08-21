@@ -37,7 +37,7 @@ use std::ops::Range;
 use serde_json::json;
 
 use crate::app::transcript::TranscriptSearchAnchor;
-use crate::content::render_plan::RenderNodeId;
+use crate::content::transcript_scene::RenderNodeId;
 use crate::smelt_edit::{add_signed_row, RowIndex};
 use smelt_core::transcript_model::BlockId;
 

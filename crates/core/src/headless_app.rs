@@ -187,7 +187,7 @@ impl HeadlessApp {
         }
         let mode = self.core.config.mode.clone();
         let session_id = self.session.id.clone();
-        let session_dir = self.core.sessions.dir_for(&self.session);
+        let artifact_dir = self.core.sessions.artifact_dir_for(&self.session);
         let now = self.core.clock.instant_now();
         let result = crate::host::scope_core(&mut self.core, || {
             lua.execute_tool(
@@ -201,7 +201,7 @@ impl HeadlessApp {
                 crate::lua::ToolEnv {
                     mode,
                     session_id: &session_id,
-                    session_dir: &session_dir,
+                    artifact_dir: &artifact_dir,
                 },
                 now,
             )
@@ -414,7 +414,7 @@ impl HeadlessApp {
                 fast_mode,
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.session.id.clone(),
-                session_dir: self.core.sessions.dir_for(&self.session),
+                sessions_root: self.core.sessions.sessions_dir(),
                 persistence: protocol::PersistenceScope::default(),
                 permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),

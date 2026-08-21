@@ -1229,7 +1229,8 @@ fn lua_config_session_and_transcript_contracts_are_available() {
             assert(type(info.id) == "string")
             assert(info.id == smelt.session.id())
             assert(info.title == "Lua Contract Title")
-            assert(type(info.dir) == "string")
+            assert(type(info.artifact_dir) == "string")
+            assert(info.artifact_dir == smelt.session.artifact_dir())
             assert(type(info.cwd) == "string")
             assert(type(info.tokens) == "table")
             assert(type(info.worktree) == "table")
@@ -1274,9 +1275,13 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
         }
     }
     app.save_session_and_flush();
-    let loaded =
-        crate::app::history::load_transcript_tail_from_sqlite_dir(app.session_dir(), 100, 32)
-            .expect("load sparse transcript");
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
+        app.core_probe().sessions.sessions_dir(),
+        app.session_snapshot().id,
+        100,
+        32,
+    )
+    .expect("load sparse transcript");
     app.clear_transcript();
     app.replace_loaded_transcript_for_harness(loaded);
     app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {

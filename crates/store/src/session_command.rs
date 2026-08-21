@@ -217,6 +217,12 @@ fn prepare_session_commit(
                     command.history.final_len.get()
                 ),
             })?;
+    if command.history.start.get() > command.expected.history_len.get() {
+        return Err(SessionCommitFailure::InvalidHistorySuffixStart {
+            start: command.history.start,
+            current_len: command.expected.history_len,
+        });
+    }
     if start.checked_add(command.history.items.len()) != Some(final_len) {
         return Err(SessionCommitFailure::InvalidHistorySuffix {
             start: command.history.start,
@@ -228,6 +234,12 @@ fn prepare_session_commit(
     let side_tables = prepare_side_tables(command)?;
     if let Some(suffix) = &command.transcript_records {
         validate_coordinate(suffix.start.get(), "record start")?;
+        if suffix.start.get() > command.expected.transcript_record_count.get() {
+            return Err(SessionCommitFailure::InvalidTranscriptRecordSuffix {
+                start: suffix.start,
+                current_len: command.expected.transcript_record_count,
+            });
+        }
         let final_len = suffix
             .start
             .get()

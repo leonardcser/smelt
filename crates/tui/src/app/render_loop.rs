@@ -26,6 +26,121 @@ fn starts_or_updates_live_engine_output(event: &protocol::EngineEvent) -> bool {
         )
 }
 
+const STREAMING_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameUrgency {
+    Streaming,
+    Animation(std::time::Duration),
+    Urgent,
+}
+
+impl FrameUrgency {
+    fn interval(self) -> std::time::Duration {
+        match self {
+            Self::Streaming => STREAMING_FRAME_INTERVAL,
+            Self::Animation(interval) => interval,
+            Self::Urgent => std::time::Duration::ZERO,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Urgent, _) | (_, Self::Urgent) => Self::Urgent,
+            (Self::Streaming, Self::Streaming) => Self::Streaming,
+            (Self::Animation(left), Self::Animation(right)) => Self::Animation(left.min(right)),
+            (Self::Streaming, Self::Animation(interval))
+            | (Self::Animation(interval), Self::Streaming) => {
+                Self::Animation(STREAMING_FRAME_INTERVAL.min(interval))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingFrameTrace {
+    id: u64,
+    requested_at_us: u64,
+    urgency: FrameUrgency,
+}
+
+#[derive(Debug)]
+pub(crate) struct FrameScheduler {
+    pending: Option<PendingFrameTrace>,
+    next_id: u64,
+    last_frame_at: Option<std::time::Instant>,
+}
+
+impl Default for FrameScheduler {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            next_id: 1,
+            last_frame_at: None,
+        }
+    }
+}
+
+impl FrameScheduler {
+    pub(crate) fn request(&mut self, urgency: FrameUrgency) {
+        if let Some(pending) = &mut self.pending {
+            pending.urgency = pending.urgency.merge(urgency);
+            return;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let requested_at_us = smelt_perf::perf::timestamp_us();
+        self.pending = Some(PendingFrameTrace {
+            id,
+            requested_at_us,
+            urgency,
+        });
+        smelt_perf::perf::record_value("frame:requested:id", id);
+        smelt_perf::perf::record_value("frame:requested:at_us", requested_at_us);
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(crate) fn is_due(&self, now: std::time::Instant) -> bool {
+        let Some(pending) = self.pending else {
+            return false;
+        };
+        let interval = pending.urgency.interval();
+        interval.is_zero()
+            || self
+                .last_frame_at
+                .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+    }
+
+    pub(crate) fn next_delay(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let pending = self.pending?;
+        let interval = pending.urgency.interval();
+        Some(
+            self.last_frame_at
+                .map_or(std::time::Duration::ZERO, |last| {
+                    interval.saturating_sub(now.saturating_duration_since(last))
+                }),
+        )
+    }
+
+    fn begin_frame(&mut self, now: std::time::Instant) -> Option<PendingFrameTrace> {
+        self.last_frame_at = Some(now);
+        self.pending.take()
+    }
+
+    fn record_flushed(trace: PendingFrameTrace) {
+        let flushed_at_us = smelt_perf::perf::timestamp_us();
+        smelt_perf::perf::record_value("frame:flushed:id", trace.id);
+        smelt_perf::perf::record_value(
+            "frame:request_to_flush:us",
+            flushed_at_us.saturating_sub(trace.requested_at_us),
+        );
+        smelt_perf::perf::record_value("frame:flushed:at_us", flushed_at_us);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EngineOutputDrainOutcome {
     Drained,
@@ -369,13 +484,11 @@ impl TuiApp {
     pub(crate) fn render_normal(&mut self) {
         let mut stdout = std::io::stdout();
         self.render_normal_to(&mut stdout);
-        self.save_session_if_pending();
     }
 
     pub(crate) fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W) {
         self.publish_diff_signals();
         self.render_normal_to(out);
-        self.save_session_if_pending();
     }
 
     /// Drain one bounded batch from a continuously-ready engine output queue.
@@ -433,7 +546,18 @@ impl TuiApp {
         &mut self,
         out: &mut W,
     ) -> bool {
-        if !self.transient_render_requested {
+        if !self.scheduled_frame_is_due() {
+            return false;
+        }
+        self.render_frame_to(out);
+        true
+    }
+
+    pub(crate) fn render_pending_transient_frame_to<W: std::io::Write>(
+        &mut self,
+        out: &mut W,
+    ) -> bool {
+        if !self.frame_scheduler.has_pending() {
             return false;
         }
         self.render_frame_to(out);
@@ -495,9 +619,16 @@ impl TuiApp {
             on_transient_frame(self);
         }
         let updates_live_output = starts_or_updates_live_engine_output(&ev);
+        let coalescible_continuation = matches!(
+            &ev,
+            protocol::EngineEvent::ReasoningPartDelta { .. }
+                | protocol::EngineEvent::TextDelta { .. }
+        ) && self.conversation.has_live_transcript_blocks();
         let keep_streaming = self.dispatch_engine_event(ev);
-        if updates_live_output {
-            self.request_transient_render();
+        if updates_live_output && coalescible_continuation {
+            self.request_streaming_render();
+        } else {
+            self.request_urgent_render();
         }
         keep_streaming
     }
@@ -510,7 +641,7 @@ impl TuiApp {
         if is_engine_stream_delta(ev) {
             return false;
         }
-        self.render_requested_transient_frame_to(out)
+        self.render_pending_transient_frame_to(out)
     }
 
     pub(crate) fn refresh_main_layout(&mut self) -> (layout::Rect, u16) {
@@ -572,7 +703,9 @@ impl TuiApp {
     /// every code path under `content/*` and `compositor:*` runs without
     /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
-        self.clear_transient_render_request();
+        let frame_trace = self
+            .frame_scheduler
+            .begin_frame(self.core.clock.instant_now());
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
 
@@ -743,6 +876,9 @@ impl TuiApp {
             },
         );
         let _ = self.ui.flush_prepared_frame(out, frame);
+        if let Some(trace) = frame_trace {
+            FrameScheduler::record_flushed(trace);
+        }
     }
 
     /// Compute which pane owns the cursor this frame.
@@ -986,5 +1122,69 @@ fn prompt_block_cursor(theme: &crate::smelt_edit::Theme) -> crate::smelt_edit::C
             ..Default::default()
         },
         pos: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_requests_wait_for_frame_interval() {
+        let start = std::time::Instant::now();
+        let mut scheduler = FrameScheduler::default();
+        scheduler.begin_frame(start);
+        scheduler.request(FrameUrgency::Streaming);
+
+        assert!(!scheduler.is_due(start + std::time::Duration::from_millis(15)));
+        assert_eq!(
+            scheduler.next_delay(start + std::time::Duration::from_millis(15)),
+            Some(std::time::Duration::from_millis(1))
+        );
+        assert!(scheduler.is_due(start + STREAMING_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn urgent_request_promotes_pending_streaming_frame() {
+        let start = std::time::Instant::now();
+        let mut scheduler = FrameScheduler::default();
+        scheduler.begin_frame(start);
+        scheduler.request(FrameUrgency::Streaming);
+        scheduler.request(FrameUrgency::Urgent);
+
+        assert!(scheduler.is_due(start + std::time::Duration::from_millis(2)));
+        let trace = scheduler
+            .begin_frame(start + std::time::Duration::from_millis(2))
+            .expect("promoted frame");
+        assert_eq!(trace.id, 1);
+        assert_eq!(trace.urgency, FrameUrgency::Urgent);
+    }
+
+    #[test]
+    fn animation_and_streaming_share_earliest_deadline() {
+        let start = std::time::Instant::now();
+        let mut scheduler = FrameScheduler::default();
+        scheduler.begin_frame(start);
+        scheduler.request(FrameUrgency::Animation(std::time::Duration::from_millis(
+            40,
+        )));
+        scheduler.request(FrameUrgency::Streaming);
+
+        assert!(!scheduler.is_due(start + std::time::Duration::from_millis(15)));
+        assert!(scheduler.is_due(start + STREAMING_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn repeated_streaming_requests_coalesce_into_one_trace() {
+        let start = std::time::Instant::now();
+        let mut scheduler = FrameScheduler::default();
+        scheduler.request(FrameUrgency::Streaming);
+        for _ in 1..100 {
+            scheduler.request(FrameUrgency::Streaming);
+        }
+
+        let trace = scheduler.begin_frame(start).expect("coalesced frame");
+        assert_eq!(trace.id, 1);
+        assert!(!scheduler.has_pending());
     }
 }

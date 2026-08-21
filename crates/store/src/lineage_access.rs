@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
+use crate::catalog::{Catalog, CatalogAvailability, CatalogSession};
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
 use crate::filesystem::{
@@ -21,10 +23,6 @@ use maintenance::*;
 mod storage;
 use storage::*;
 
-const LINEAGE_DB_FILENAME: &str = "lineage.db";
-const LINEAGES_DIRECTORY: &str = "lineages";
-const LINEAGE_TRASH_DIRECTORY: &str = ".trash";
-const LOCKS_DIRECTORY: &str = ".locks";
 const LINEAGE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,10 +79,10 @@ impl LineageLease {
     }
 
     fn acquire_named(root: &Path, name: &str) -> Result<Self> {
-        let locks = root.join(LOCKS_DIRECTORY);
+        let layout = crate::SessionStoreLayout::from_sessions_root(root);
         ensure_private_directory_all(root)?;
-        ensure_private_directory_all(&locks)?;
-        let path = locks.join(format!("{name}.lock"));
+        ensure_private_directory_all(&layout.locks_dir())?;
+        let path = layout.lineage_lock_path(name);
         reject_symlink(&path)?;
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
@@ -104,16 +102,29 @@ impl LineageLease {
     }
 }
 
-#[derive(Debug)]
 pub struct OwnedLineageWriter {
-    root: PathBuf,
+    sessions_root: PathBuf,
     lineage: LineageId,
     branch: BranchId,
     conn: Connection,
     startup_recovery: Option<crate::session_commit::StartupRecoveryReceipt>,
     connection_invalidated: bool,
+    catalog: RefCell<Option<Catalog>>,
     _lease: LineageLease,
     branch_lease: Option<LineageLease>,
+}
+
+impl std::fmt::Debug for OwnedLineageWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedLineageWriter")
+            .field("sessions_root", &self.sessions_root)
+            .field("lineage", &self.lineage)
+            .field("branch", &self.branch)
+            .field("startup_recovery", &self.startup_recovery)
+            .field("connection_invalidated", &self.connection_invalidated)
+            .field("branch_lease", &self.branch_lease)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OwnedLineageWriter {
@@ -123,6 +134,45 @@ impl OwnedLineageWriter {
 
     pub fn open_existing(root: impl AsRef<Path>, session_id: impl Into<String>) -> Result<Self> {
         Self::open_inner(root.as_ref(), session_id.into(), false)
+    }
+
+    pub fn open_existing_in_lineage(
+        root: impl AsRef<Path>,
+        lineage_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Self> {
+        let root = root.as_ref();
+        let branch = BranchId::new(session_id.into())?;
+        validate_storage_root(root)?;
+        let _branch_lease = LineageLease::acquire_branch(root, &branch)?;
+        let lineage = LineageId::from_hex(lineage_id.into())?;
+        let lease = LineageLease::acquire(root, &lineage)?;
+        let path = lineage_database_path(root, &lineage);
+        reject_symlink(&path)?;
+        if !path.is_file() {
+            return Err(StoreError::Integrity(format!(
+                "catalog lineage {} for session {} does not exist",
+                lineage.as_str(),
+                branch.as_str()
+            )));
+        }
+        let mut conn = open_write_connection(&path, &lineage)?;
+        crate::schema::initialize_lineage_schema(&mut conn)?;
+        if !lineage_exists(&conn, &lineage)? {
+            return Err(StoreError::Integrity(format!(
+                "catalog lineage {} for session {} has no identity",
+                lineage.as_str(),
+                branch.as_str()
+            )));
+        }
+        if !branch_exists(&conn, &lineage, &branch)? {
+            return Err(StoreError::Integrity(format!(
+                "session {} has no branch in catalog lineage {}",
+                branch.as_str(),
+                lineage.as_str()
+            )));
+        }
+        Self::finish_open(root, lineage, branch, conn, lease, None)
     }
 
     fn open_inner(root: &Path, session_id: String, create: bool) -> Result<Self> {
@@ -148,6 +198,24 @@ impl OwnedLineageWriter {
             lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
         }
         crate::schema::initialize_lineage_schema(&mut conn)?;
+        Self::finish_open(
+            root,
+            lineage,
+            branch,
+            conn,
+            lease,
+            is_new.then_some(branch_lease),
+        )
+    }
+
+    fn finish_open(
+        root: &Path,
+        lineage: LineageId,
+        branch: BranchId,
+        mut conn: Connection,
+        lease: LineageLease,
+        branch_lease: Option<LineageLease>,
+    ) -> Result<Self> {
         let _catalog_pending = lineage::lineage_has_nonterminal_turns(&conn, &lineage, &branch)?
             .then(|| crate::catalog::mark_catalog_session_pending(root, branch.as_str()))
             .transpose()?;
@@ -158,14 +226,15 @@ impl OwnedLineageWriter {
             unix_timestamp_millis()?,
         )?;
         Ok(Self {
-            root: root.to_path_buf(),
+            sessions_root: root.to_path_buf(),
             lineage,
             branch,
             conn,
             startup_recovery,
             connection_invalidated: false,
+            catalog: RefCell::new(None),
             _lease: lease,
-            branch_lease: is_new.then_some(branch_lease),
+            branch_lease,
         })
     }
 
@@ -182,7 +251,7 @@ impl OwnedLineageWriter {
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
                 .map_err(crate::session_command::commit_failure_from_store_error)?;
         let receipt = lineage::apply_lineage_session_commit(
             &mut self.conn,
@@ -192,6 +261,8 @@ impl OwnedLineageWriter {
             ObjectCompression::default(),
         )?;
         self.branch_lease = None;
+        self.publish_catalog_for_commit(command, &receipt)
+            .map_err(crate::session_command::commit_failure_from_store_error)?;
         Ok(receipt)
     }
 
@@ -200,7 +271,7 @@ impl OwnedLineageWriter {
         command: &crate::session_commit::SubmitTurn,
     ) -> std::result::Result<crate::session_commit::SubmitTurnReceipt, SessionCommitFailure> {
         let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
                 .map_err(crate::session_command::commit_failure_from_store_error)?;
         let transaction_duration =
             smelt_perf::perf::begin_value_ms("persist:submit_turn:transaction_ms");
@@ -255,7 +326,7 @@ impl OwnedLineageWriter {
     ) -> std::result::Result<crate::session_commit::TurnTransitionReceipt, SessionCommitFailure>
     {
         let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
                 .map_err(crate::session_command::commit_failure_from_store_error)?;
         lineage::apply_lineage_turn_transition(
             &mut self.conn,
@@ -309,6 +380,69 @@ impl OwnedLineageWriter {
         )
     }
 
+    pub fn refresh_catalog(&self) -> Result<()> {
+        self.refresh_catalog_branch(&self.branch)
+    }
+
+    pub fn publish_catalog_for_commit(
+        &self,
+        command: &SessionCommit,
+        receipt: &SaveReceipt,
+    ) -> Result<()> {
+        let session =
+            CatalogSession::from_commit(command, receipt, Some(self.lineage.as_str().to_string()));
+        self.upsert_catalog_session(&session)?;
+        Ok(())
+    }
+
+    fn refresh_catalog_branch(&self, branch: &BranchId) -> Result<()> {
+        let snapshot = public_snapshot(
+            &self.lineage,
+            lineage::lineage_session_snapshot(&self.conn, &self.lineage, branch)?,
+        )?;
+        let metadata = &snapshot.metadata;
+        let session = CatalogSession {
+            id: branch.as_str().to_string(),
+            lineage_id: Some(self.lineage.as_str().to_string()),
+            title: metadata.title.clone(),
+            slug: metadata.slug.clone(),
+            first_user_message: metadata.first_user_message.clone(),
+            cwd: metadata.cwd.clone(),
+            mode: metadata.mode.clone(),
+            reasoning_effort: metadata.reasoning_effort.clone(),
+            model: metadata.model.clone(),
+            fast_mode: metadata.fast_mode,
+            parent_id: snapshot.identity.parent_id.clone(),
+            context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
+            history_len: Some(snapshot.head.history_len.get()),
+            text_bytes: Some(snapshot.history_text_bytes),
+            created_at: snapshot.identity.created_at,
+            updated_at: metadata.updated_at,
+            source_revision: snapshot.head.revision.get(),
+            availability: CatalogAvailability::Available,
+            error_kind: None,
+            error_summary: None,
+            last_seen_scan: 0,
+        };
+        self.upsert_catalog_session(&session)?;
+        Ok(())
+    }
+
+    fn upsert_catalog_session(&self, session: &CatalogSession) -> Result<bool> {
+        self.with_catalog(|catalog| catalog.upsert_available(session))
+    }
+
+    fn with_catalog<T>(&self, f: impl FnOnce(&mut Catalog) -> Result<T>) -> Result<T> {
+        let mut catalog = self.catalog.borrow_mut();
+        if catalog.is_none() {
+            *catalog = Some(Catalog::open(
+                crate::SessionStoreLayout::from_sessions_root(&self.sessions_root).catalog_path(),
+            )?);
+        }
+        let catalog = catalog.as_mut().expect("catalog initialized");
+        f(catalog)
+    }
+
     pub fn history_range(&self, start: u64, end: u64) -> Result<Vec<protocol::HistoryItem>> {
         lineage::lineage_history_range(&self.conn, &self.lineage, &self.branch, start, end)
     }
@@ -352,8 +486,15 @@ impl OwnedLineageWriter {
         created_at: u64,
     ) -> Result<SaveReceipt> {
         let target = BranchId::new(target_session_id.into())?;
+        if let Some(lineage) = locate_lineage(&self.sessions_root, &target)? {
+            return Err(StoreError::Integrity(format!(
+                "session {} already exists in lineage {}",
+                target.as_str(),
+                lineage.as_str()
+            )));
+        }
         let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, target.as_str())?;
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, target.as_str())?;
         let source = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
         lineage::fork_branch(
             &mut self.conn,
@@ -363,6 +504,7 @@ impl OwnedLineageWriter {
             Some(&source.revision_id),
             created_at,
         )?;
+        self.refresh_catalog_branch(&target)?;
         Ok(SaveReceipt {
             session_id: target.as_str().to_owned(),
             previous: StoreHead::default(),
@@ -371,12 +513,16 @@ impl OwnedLineageWriter {
                 history_len: source.head.history_len,
                 transcript_record_count: source.head.transcript_record_count,
             },
+            lineage_id: Some(self.lineage.as_str().to_owned()),
+            history_text_bytes: source.history_root.byte_count(),
         })
     }
 
     pub fn rewind_to_sequence(&mut self, sequence: u64, updated_at: u64) -> Result<SaveReceipt> {
-        let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())?;
+        let _catalog_pending = crate::catalog::mark_catalog_session_pending(
+            &self.sessions_root,
+            self.branch.as_str(),
+        )?;
         let previous = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
         let target = lineage::branch_revision_at_sequence(
             &self.conn,
@@ -397,12 +543,16 @@ impl OwnedLineageWriter {
             session_id: self.branch.as_str().to_owned(),
             previous: previous.head,
             current: current.head,
+            lineage_id: Some(self.lineage.as_str().to_owned()),
+            history_text_bytes: current.history_root.byte_count(),
         })
     }
 
     pub fn delete_branch(self, deleted_at: u64) -> Result<()> {
-        let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, self.branch.as_str())?;
+        let _catalog_pending = crate::catalog::mark_catalog_session_pending(
+            &self.sessions_root,
+            self.branch.as_str(),
+        )?;
         lineage::delete_branch(&self.conn, &self.lineage, &self.branch, deleted_at)?;
         let live_branches: bool = self.conn.query_row(
             "SELECT EXISTS(
@@ -421,11 +571,7 @@ impl OwnedLineageWriter {
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| StoreError::Integrity("lineage database has no parent".into()))?;
-        let lineages = source
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| StoreError::Integrity("lineage directory has no parent".into()))?;
-        let trash = lineages.join(LINEAGE_TRASH_DIRECTORY);
+        let trash = crate::SessionStoreLayout::from_sessions_root(&self.sessions_root).trash_dir();
         ensure_private_directory(&trash)?;
         let token = LineageId::random()?;
         let tombstone = trash.join(format!("{}.{}", self.lineage.as_str(), token.as_str()));
@@ -435,14 +581,12 @@ impl OwnedLineageWriter {
         sync_directory(&source)?;
         rename_without_replacement(&source, &tombstone)?;
         sync_directory(&trash)?;
-        sync_directory(&lineages)?;
-        sync_directory(&self.root)?;
+        sync_directory(&self.sessions_root)?;
 
         if fs::remove_dir_all(&tombstone).is_ok() {
             let _ = sync_directory(&trash);
             let _ = fs::remove_dir(&trash);
-            let _ = sync_directory(&lineages);
-            let _ = sync_directory(&self.root);
+            let _ = sync_directory(&self.sessions_root);
         }
         Ok(())
     }
@@ -454,12 +598,17 @@ impl OwnedLineageWriter {
     ) -> Result<()> {
         let branch = BranchId::new(session_id)?;
         let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.root, branch.as_str())?;
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, branch.as_str())?;
         lineage::delete_branch(&self.conn, &self.lineage, &branch, deleted_at)
     }
 
     pub fn database_path(&self) -> PathBuf {
-        lineage_database_path(&self.root, &self.lineage)
+        lineage_database_path(&self.sessions_root, &self.lineage)
+    }
+
+    pub fn search_database_path(&self) -> PathBuf {
+        crate::SessionStoreLayout::from_sessions_root(&self.sessions_root)
+            .lineage_search_path(self.lineage.as_str())
     }
 
     pub fn invalidate_connection(&mut self) {
@@ -484,7 +633,7 @@ impl OwnedLineageWriter {
         }
         let search = crate::lineage_search::reclaim_one_obsolete_search_segment(
             &self.conn,
-            &self.database_path(),
+            &self.search_database_path(),
             &self.lineage,
         )?;
         debug_assert!(search.segments_deleted <= 1);
@@ -531,6 +680,7 @@ impl OwnedLineageWriter {
     pub fn spawn_search_projector(&self) -> Result<crate::LineageSearchProjector> {
         crate::LineageSearchProjector::spawn(
             self.database_path(),
+            self.search_database_path(),
             self.lineage.clone(),
             self.branch.clone(),
         )
@@ -565,31 +715,28 @@ impl OwnedLineageWriter {
     }
 }
 
-pub fn cleanup_abandoned_lineage_artifacts(root: impl AsRef<Path>, limit: usize) -> Result<usize> {
+pub fn cleanup_abandoned_lineages(root: impl AsRef<Path>, limit: usize) -> Result<usize> {
     let root = root.as_ref();
     validate_storage_root(root)?;
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    match fs::symlink_metadata(&lineages) {
+    match fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
             return Err(StoreError::Integrity(format!(
                 "lineage root is not a private directory: {}",
-                lineages.display()
+                root.display()
             )))
         }
         Err(error) => return Err(StoreError::Io(error)),
     }
 
-    let trash = lineages.join(LINEAGE_TRASH_DIRECTORY);
+    let trash = crate::SessionStoreLayout::from_sessions_root(root).trash_dir();
+    let mut inspected = 0usize;
     let mut removed = 0usize;
-    let mut remaining = limit;
     match fs::symlink_metadata(&trash) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            let entries = fs::read_dir(&trash)?.take(remaining).collect::<Vec<_>>();
-            remaining = remaining.saturating_sub(entries.len());
-            for entry in entries {
+            for entry in fs::read_dir(&trash)? {
                 let entry = entry?;
                 let metadata = entry.file_type()?;
                 if metadata.is_symlink() || !metadata.is_dir() {
@@ -604,6 +751,10 @@ pub fn cleanup_abandoned_lineage_artifacts(root: impl AsRef<Path>, limit: usize)
                 let Ok(lineage) = LineageId::from_hex(lineage_id.to_owned()) else {
                     continue;
                 };
+                if inspected >= limit {
+                    break;
+                }
+                inspected = inspected.saturating_add(1);
                 let _lease = match LineageLease::acquire(root, &lineage) {
                     Ok(lease) => lease,
                     Err(StoreError::OwnershipConflict { .. }) => continue,
@@ -623,8 +774,7 @@ pub fn cleanup_abandoned_lineage_artifacts(root: impl AsRef<Path>, limit: usize)
         Err(error) => return Err(StoreError::Io(error)),
     }
 
-    let published = fs::read_dir(&lineages)?.take(remaining).collect::<Vec<_>>();
-    for entry in published {
+    for entry in fs::read_dir(root)? {
         let entry = entry?;
         let metadata = entry.file_type()?;
         if metadata.is_symlink() || !metadata.is_dir() {
@@ -636,13 +786,18 @@ pub fn cleanup_abandoned_lineage_artifacts(root: impl AsRef<Path>, limit: usize)
         let Ok(lineage) = LineageId::from_hex(name) else {
             continue;
         };
+        if inspected >= limit {
+            break;
+        }
+        inspected = inspected.saturating_add(1);
         let _lease = match LineageLease::acquire(root, &lineage) {
             Ok(lease) => lease,
             Err(StoreError::OwnershipConflict { .. }) => continue,
             Err(error) => return Err(error),
         };
         let source = entry.path();
-        let path = source.join(LINEAGE_DB_FILENAME);
+        let path = crate::SessionStoreLayout::from_sessions_root(root)
+            .lineage_database_path(lineage.as_str());
         reject_symlink(&path)?;
         if !path.is_file() {
             continue;
@@ -668,14 +823,12 @@ pub fn cleanup_abandoned_lineage_artifacts(root: impl AsRef<Path>, limit: usize)
         let tombstone = trash.join(format!("{}.{}", lineage.as_str(), token.as_str()));
         rename_without_replacement(&source, &tombstone)?;
         sync_directory(&trash)?;
-        sync_directory(&lineages)?;
         sync_directory(root)?;
         fs::remove_dir_all(&tombstone)?;
         sync_directory(&trash)?;
         removed = removed.saturating_add(1);
     }
     let _ = fs::remove_dir(&trash);
-    sync_directory(&lineages)?;
     sync_directory(root)?;
     Ok(removed)
 }
@@ -683,13 +836,12 @@ pub fn cleanup_abandoned_lineage_artifacts(root: impl AsRef<Path>, limit: usize)
 pub fn lineage_session_ids(root: impl AsRef<Path>) -> Result<Vec<String>> {
     let root = root.as_ref();
     validate_storage_root(root)?;
-    let lineages = root.join(LINEAGES_DIRECTORY);
-    if !lineages.exists() {
+    if !root.exists() {
         return Ok(Vec::new());
     }
-    ensure_private_directory(&lineages)?;
+    ensure_private_directory(root)?;
     let mut ids = Vec::new();
-    for entry in fs::read_dir(lineages)? {
+    for entry in fs::read_dir(root)? {
         let entry = entry?;
         if entry.file_type()?.is_symlink() || !entry.file_type()?.is_dir() {
             continue;
@@ -700,7 +852,8 @@ pub fn lineage_session_ids(root: impl AsRef<Path>) -> Result<Vec<String>> {
         let Ok(lineage) = LineageId::from_hex(name) else {
             continue;
         };
-        let path = entry.path().join(LINEAGE_DB_FILENAME);
+        let path = crate::SessionStoreLayout::from_sessions_root(root)
+            .lineage_database_path(lineage.as_str());
         reject_symlink(&path)?;
         if !path.is_file() {
             continue;
@@ -728,6 +881,7 @@ pub fn lineage_session_ids(root: impl AsRef<Path>) -> Result<Vec<String>> {
 
 #[derive(Debug)]
 pub struct LineageSessionReader {
+    sessions_root: PathBuf,
     lineage: LineageId,
     branch: BranchId,
     path: PathBuf,
@@ -753,14 +907,47 @@ impl LineageSessionReader {
         let Some(lineage) = locate_lineage(root, &branch)? else {
             return Ok(None);
         };
+        Self::try_open_existing_in_lineage(root, lineage.as_str(), branch.as_str())
+    }
+
+    pub fn open_existing_in_lineage(
+        root: impl AsRef<Path>,
+        lineage_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Self> {
+        let session_id = session_id.into();
+        Self::try_open_existing_in_lineage(root, lineage_id, session_id.clone())?.ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "session {session_id} has no branch in catalog lineage"
+            ))
+        })
+    }
+
+    pub fn try_open_existing_in_lineage(
+        root: impl AsRef<Path>,
+        lineage_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Option<Self>> {
+        let _perf = smelt_perf::perf::begin("store:lineage:open_read_only_located");
+        let root = root.as_ref();
+        validate_storage_root(root)?;
+        let lineage = LineageId::from_hex(lineage_id.into())?;
+        let branch = BranchId::new(session_id.into())?;
         let path = lineage_database_path(root, &lineage);
         reject_symlink(&path)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
         let conn = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        if !branch_exists(&conn, &lineage, &branch)? {
+            return Ok(None);
+        }
         Ok(Some(Self {
+            sessions_root: root.to_path_buf(),
             lineage,
             branch,
             path,
@@ -774,6 +961,11 @@ impl LineageSessionReader {
 
     pub fn database_path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn search_database_path(&self) -> PathBuf {
+        crate::SessionStoreLayout::from_sessions_root(&self.sessions_root)
+            .lineage_search_path(self.lineage.as_str())
     }
 
     pub fn snapshot(&self) -> Result<LineageSessionState> {
@@ -904,6 +1096,7 @@ impl LineageSessionReader {
     pub fn spawn_search_projector(&self) -> Result<crate::LineageSearchProjector> {
         crate::LineageSearchProjector::spawn(
             self.path.clone(),
+            self.search_database_path(),
             self.lineage.clone(),
             self.branch.clone(),
         )
@@ -935,7 +1128,7 @@ impl LineageSessionReader {
     ) -> Result<Vec<crate::TranscriptSearchCandidate>> {
         crate::lineage_search::search_transcript_candidate_page(
             &self.conn,
-            &self.path,
+            &self.search_database_path(),
             &self.lineage,
             &self.branch,
             query,
@@ -949,7 +1142,7 @@ impl LineageSessionReader {
     pub fn search_projection_status(&self) -> Result<crate::SearchProjectionStatus> {
         crate::lineage_search::search_projection_status(
             &self.conn,
-            &self.path,
+            &self.search_database_path(),
             &self.lineage,
             &self.branch,
         )
@@ -1176,13 +1369,11 @@ mod tests {
         }
     }
 
-    fn install_reconciled_catalog_hint(
-        state_root: &Path,
-        sessions_root: &Path,
-        id: &str,
-        lineage_id: &str,
-    ) {
-        let mut catalog = Catalog::open(state_root.join("catalog.db")).unwrap();
+    fn install_reconciled_catalog_hint(sessions_root: &Path, id: &str, lineage_id: &str) {
+        let mut catalog = Catalog::open(
+            crate::SessionStoreLayout::from_sessions_root(sessions_root).catalog_path(),
+        )
+        .unwrap();
         let scan_id = catalog.allocate_scan().unwrap();
         catalog
             .upsert_available_for_reconciliation(
@@ -1333,6 +1524,31 @@ mod tests {
     }
 
     #[test]
+    fn canonical_lineage_layout_is_flat_and_ignores_the_nested_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('0');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        writer.commit_session(&initial_commit(&id)).unwrap();
+        let lineage_id = writer.lineage_id().to_owned();
+        let database = writer.database_path();
+        let lineage_dir = database.parent().unwrap().to_path_buf();
+        writer.release().unwrap();
+
+        let layout = crate::SessionStoreLayout::from_sessions_root(root.path());
+        assert_eq!(database, layout.lineage_database_path(&lineage_id));
+        assert_eq!(lineage_dir.parent().unwrap(), root.path());
+        assert!(!root.path().join("lineages").exists());
+
+        let nested = root.path().join("lineages");
+        fs::create_dir(&nested).unwrap();
+        fs::rename(&lineage_dir, nested.join(lineage_dir.file_name().unwrap())).unwrap();
+
+        assert!(LineageSessionReader::try_open_existing(root.path(), &id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn reconciled_catalog_hint_avoids_scanning_unrelated_lineages() {
         let state = tempfile::tempdir().unwrap();
         let sessions_root = state.path().join("sessions");
@@ -1341,13 +1557,13 @@ mod tests {
         writer.commit_session(&initial_commit(&id)).unwrap();
         let lineage_id = writer.lineage_id().to_owned();
         writer.release().unwrap();
-        install_reconciled_catalog_hint(state.path(), &sessions_root, &id, &lineage_id);
+        install_reconciled_catalog_hint(&sessions_root, &id, &lineage_id);
 
         let decoy = LineageId::random().unwrap();
-        let decoy_dir = sessions_root.join(LINEAGES_DIRECTORY).join(decoy.as_str());
-        fs::create_dir_all(&decoy_dir).unwrap();
+        let layout = crate::SessionStoreLayout::from_sessions_root(&sessions_root);
+        fs::create_dir_all(layout.lineage_dir(decoy.as_str())).unwrap();
         fs::write(
-            decoy_dir.join(LINEAGE_DB_FILENAME),
+            layout.lineage_database_path(decoy.as_str()),
             b"not a sqlite database",
         )
         .unwrap();
@@ -1373,14 +1589,14 @@ mod tests {
         let stale_lineage = other.lineage_id().to_owned();
         other.release().unwrap();
 
-        install_reconciled_catalog_hint(state.path(), &sessions_root, &id, &stale_lineage);
+        install_reconciled_catalog_hint(&sessions_root, &id, &stale_lineage);
 
         let reader = LineageSessionReader::open_existing(&sessions_root, &id).unwrap();
         assert_eq!(reader.lineage_id(), target_lineage);
     }
 
     #[test]
-    fn pending_catalog_projection_preserves_duplicate_lineage_detection() {
+    fn fork_rejects_session_id_already_owned_by_another_lineage() {
         let state = tempfile::tempdir().unwrap();
         let sessions_root = state.path().join("sessions");
         let id = session_id('4');
@@ -1393,12 +1609,10 @@ mod tests {
 
         let mut other = OwnedLineageWriter::open(&sessions_root, &other_id).unwrap();
         other.commit_session(&initial_commit(&other_id)).unwrap();
-        install_reconciled_catalog_hint(state.path(), &sessions_root, &id, &target_lineage);
-        other.fork_current(&id, 2).unwrap();
-
-        let error = LineageSessionReader::open_existing(&sessions_root, &id).unwrap_err();
+        install_reconciled_catalog_hint(&sessions_root, &id, &target_lineage);
+        let error = other.fork_current(&id, 2).unwrap_err();
         assert!(
-            matches!(&error, StoreError::Integrity(message) if message.contains("belongs to multiple lineages")),
+            matches!(&error, StoreError::Integrity(message) if message.contains("already exists in lineage")),
             "unexpected duplicate-lineage error: {error}"
         );
     }
@@ -1884,7 +2098,7 @@ mod tests {
             .unwrap();
         assert_eq!(canonical_search_objects, 0);
 
-        let search_path = reader.path.parent().unwrap().join("search.db");
+        let search_path = reader.search_database_path();
         let search = Connection::open(search_path).unwrap();
         let document_columns = search
             .prepare("PRAGMA table_info(search_docs)")
@@ -1918,7 +2132,7 @@ mod tests {
                 "max_block_idx",
             ],
             "search path={} tables={table_names:?}",
-            reader.path.parent().unwrap().join("search.db").display(),
+            reader.search_database_path().display(),
         );
         assert_eq!(
             segment_columns,
@@ -1988,7 +2202,7 @@ mod tests {
             crate::TranscriptSearchDirection::Forward,
             10,
         );
-        let search_path = reader.path.parent().unwrap().join("search.db");
+        let search_path = reader.search_database_path();
 
         for path in [
             search_path.clone(),
@@ -2213,7 +2427,7 @@ mod tests {
         assert_eq!(source_status.total_segments, 1);
         assert_eq!(source_status.ready_segments, 1);
         drop(projector);
-        let search_path = source.path.parent().unwrap().join("search.db");
+        let search_path = source.search_database_path();
         let segment_count = || {
             Connection::open_with_flags(
                 &search_path,
@@ -2412,10 +2626,7 @@ mod tests {
         writer.release().unwrap();
 
         assert!(lineage_directory.is_dir());
-        assert_eq!(
-            cleanup_abandoned_lineage_artifacts(root.path(), 1).unwrap(),
-            1
-        );
+        assert_eq!(cleanup_abandoned_lineages(root.path(), 1).unwrap(), 1);
         assert!(!lineage_directory.exists());
     }
 
@@ -2428,17 +2639,35 @@ mod tests {
         let lineage_directory = writer.database_path().parent().unwrap().to_path_buf();
         writer.delete_branch_by_id(&session_id, 2).unwrap();
 
-        assert_eq!(
-            cleanup_abandoned_lineage_artifacts(root.path(), 1).unwrap(),
-            0
-        );
+        assert_eq!(cleanup_abandoned_lineages(root.path(), 1).unwrap(), 0);
         assert!(lineage_directory.is_dir());
         writer.release().unwrap();
-        assert_eq!(
-            cleanup_abandoned_lineage_artifacts(root.path(), 1).unwrap(),
-            1
-        );
+        assert_eq!(cleanup_abandoned_lineages(root.path(), 1).unwrap(), 1);
         assert!(!lineage_directory.exists());
+    }
+
+    #[test]
+    fn lineage_cleanup_bounds_candidates_inspected() {
+        let root = tempfile::tempdir().unwrap();
+        let active_lineage = LineageId::from_hex("a".repeat(32)).unwrap();
+        let _lease = LineageLease::acquire(root.path(), &active_lineage).unwrap();
+        let trash = crate::SessionStoreLayout::from_sessions_root(root.path()).trash_dir();
+        ensure_private_directory(&trash).unwrap();
+        let active_tombstone = trash.join(format!("{}.interrupted", active_lineage.as_str()));
+        ensure_private_directory(&active_tombstone).unwrap();
+
+        let abandoned_id = session_id('b');
+        let mut writer = OwnedLineageWriter::open(root.path(), &abandoned_id).unwrap();
+        writer
+            .commit_session(&initial_commit(&abandoned_id))
+            .unwrap();
+        let abandoned_dir = writer.database_path().parent().unwrap().to_path_buf();
+        writer.delete_branch_by_id(&abandoned_id, 2).unwrap();
+        writer.release().unwrap();
+
+        assert_eq!(cleanup_abandoned_lineages(root.path(), 1).unwrap(), 0);
+        assert!(active_tombstone.exists());
+        assert!(abandoned_dir.exists());
     }
 
     #[cfg(unix)]
@@ -2447,14 +2676,17 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir().unwrap();
-        let lineages = root.path().join(LINEAGES_DIRECTORY);
-        ensure_private_directory_all(&lineages).unwrap();
+        let lineages = root.path();
         let external = tempfile::tempdir().unwrap();
         fs::write(external.path().join("sentinel"), b"keep").unwrap();
-        symlink(external.path(), lineages.join(LINEAGE_TRASH_DIRECTORY)).unwrap();
+        symlink(
+            external.path(),
+            crate::SessionStoreLayout::from_sessions_root(lineages).trash_dir(),
+        )
+        .unwrap();
 
         assert!(matches!(
-            cleanup_abandoned_lineage_artifacts(root.path(), 1),
+            cleanup_abandoned_lineages(root.path(), 1),
             Err(StoreError::Integrity(_))
         ));
         assert_eq!(fs::read(external.path().join("sentinel")).unwrap(), b"keep");
@@ -2470,22 +2702,13 @@ mod tests {
         let source = writer.database_path().parent().unwrap().to_path_buf();
         writer.release().unwrap();
 
-        let trash = root
-            .path()
-            .join(LINEAGES_DIRECTORY)
-            .join(LINEAGE_TRASH_DIRECTORY);
+        let trash = crate::SessionStoreLayout::from_sessions_root(root.path()).trash_dir();
         ensure_private_directory(&trash).unwrap();
         let tombstone = trash.join(format!("{}.interrupted", lineage.as_str()));
         fs::rename(&source, &tombstone).unwrap();
-        assert_eq!(
-            cleanup_abandoned_lineage_artifacts(root.path(), 1).unwrap(),
-            1
-        );
+        assert_eq!(cleanup_abandoned_lineages(root.path(), 1).unwrap(), 1);
         assert!(!tombstone.exists());
-        assert_eq!(
-            cleanup_abandoned_lineage_artifacts(root.path(), 1).unwrap(),
-            0
-        );
+        assert_eq!(cleanup_abandoned_lineages(root.path(), 1).unwrap(), 0);
     }
 
     #[test]

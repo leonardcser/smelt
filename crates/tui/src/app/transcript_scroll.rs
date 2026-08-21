@@ -86,7 +86,7 @@ impl TuiApp {
                         ),
                         window_scroll_before,
                     );
-                    self.request_transient_render();
+                    self.request_urgent_render();
                 }
             }
             WindowScrollCommand::Tail => {
@@ -96,7 +96,7 @@ impl TuiApp {
                         TranscriptScrollIntent::Tail,
                         window_scroll_before,
                     );
-                    self.request_transient_render();
+                    self.request_urgent_render();
                     return;
                 }
 

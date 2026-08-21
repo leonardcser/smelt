@@ -627,6 +627,7 @@ impl TuiApp {
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
+        let mut history = turn.history.clone();
         let (turn_id, submitted_revision, required_generation, durable_receipt_at) =
             if self.ephemeral() {
                 let turn_id = self.conversation.next_turn_id();
@@ -668,6 +669,14 @@ impl TuiApp {
                     Some(std::time::Instant::now()),
                 )
             };
+        if !self.ephemeral() && !matches!(turn.kind, smelt_store::TurnKind::Continuation) {
+            if let Some(store_history) = self.store_model_history_source_for_committed_request(
+                &history,
+                turn.submitted_history_idx.get() as usize,
+            ) {
+                history = store_history;
+            }
+        }
         self.conversation.record_started_turn(
             turn_id,
             self.core.config.mode.clone(),
@@ -683,9 +692,9 @@ impl TuiApp {
             request_config: turn.request_config,
             reasoning_effort: turn.reasoning_effort,
             fast_mode: self.fast_mode_active(),
-            history: turn.history,
+            history,
             session_id: self.conversation.session().id.clone(),
-            session_dir: self.current_session_dir(),
+            sessions_root: self.core.sessions.sessions_dir(),
             persistence: self
                 .conversation
                 .persistence_scope_at(required_generation, submitted_revision),
@@ -1305,7 +1314,7 @@ impl TuiApp {
     ) {
         let mode = self.core.config.mode.clone();
         let session_id = self.conversation.session().id.clone();
-        let session_dir = self.current_session_dir();
+        let artifact_dir = self.current_artifact_dir();
         let now = self.core.clock.instant_now();
         let lua = self.lua.execution();
         let lua_call_id = call_id.clone();
@@ -1321,7 +1330,7 @@ impl TuiApp {
                 crate::lua::ToolEnv {
                     mode,
                     session_id: &session_id,
-                    session_dir: &session_dir,
+                    artifact_dir: &artifact_dir,
                 },
                 now,
             )
@@ -1875,9 +1884,8 @@ mod tests {
     fn lineage_reader(
         app: &crate::app::test_harness::TestApp,
     ) -> smelt_store::LineageSessionReader {
-        let session_dir = app.session_dir();
         smelt_store::LineageSessionReader::open_existing(
-            session_dir.parent().expect("session storage root"),
+            app.app.core.sessions.sessions_dir(),
             &app.app.conversation.session().id,
         )
         .expect("open canonical lineage session")
@@ -2909,7 +2917,7 @@ mod tests {
     fn committed_ready_turn_is_interrupted_after_receipt_publication_failure() {
         let runtime = tempfile::tempdir().expect("create shared runtime root");
         let session_id;
-        let session_dir;
+        let sessions_root;
         {
             let mut app = crate::app::test_harness::TestApp::builder()
                 .with_runtime_home(runtime.path())
@@ -2920,7 +2928,7 @@ mod tests {
                 )));
             app.app.save_session_and_flush();
             session_id = app.app.conversation.session().id.clone();
-            session_dir = app.app.core.sessions.dir_for_id(&session_id);
+            sessions_root = app.app.core.sessions.sessions_dir();
             app.type_text("durable before dispatch failure");
             app.clear_actions();
             app.app.conversation.inject_publish_failure();
@@ -2958,8 +2966,7 @@ mod tests {
             assert_eq!(reader.turns().unwrap().len(), 1);
         }
 
-        let root = session_dir.parent().expect("session root");
-        let writer = smelt_store::OwnedLineageWriter::open_existing(root, &session_id)
+        let writer = smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &session_id)
             .expect("writable restart recovers nonterminal turn");
         let recovery = writer
             .startup_recovery()
@@ -2968,7 +2975,8 @@ mod tests {
             recovery.interrupted_turns,
             vec![smelt_store::TurnId::new(1)]
         );
-        let reader = smelt_store::LineageSessionReader::open_existing(root, &session_id).unwrap();
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id).unwrap();
         assert_eq!(
             lineage_turn(&reader, 1).state,
             smelt_store::TurnState::Interrupted

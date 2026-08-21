@@ -1637,7 +1637,10 @@ fn present_plan_existing_path_approves_without_overwriting_plan_body() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
 
-    let session_dir = app.core_probe().sessions.dir_for(&app.session_snapshot());
+    let session_dir = app
+        .core_probe()
+        .sessions
+        .artifact_dir_for(&app.session_snapshot());
     let artifact_dir = session_dir.join("plans/20260101-000000-parser-plan");
     std::fs::create_dir_all(&artifact_dir).unwrap();
     let plan_path = artifact_dir.join("plan.md");

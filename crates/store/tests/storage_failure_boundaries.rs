@@ -315,7 +315,6 @@ fn spawn_probe(
     let root = db_path
         .parent()
         .and_then(Path::parent)
-        .and_then(Path::parent)
         .expect("lineage database below storage root");
     command
         .arg("--exact")
