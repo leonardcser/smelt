@@ -1023,7 +1023,16 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
         ))));
     }
     app.restore_screen();
-    app.save_session_and_flush();
+    app.save_session();
+    let persistence_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        match app.flush_persist() {
+            crate::persist::PersistenceFlushOutcome::Durable { .. } => break,
+            crate::persist::PersistenceFlushOutcome::Deadline { .. }
+                if std::time::Instant::now() < persistence_deadline => {}
+            outcome => panic!("large fork fixture persistence failed: {outcome:?}"),
+        }
+    }
     app.drain_transcript_compaction_for_harness();
     app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
         hydrated_blocks: 1,
