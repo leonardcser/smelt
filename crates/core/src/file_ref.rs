@@ -205,7 +205,8 @@ mod tests {
         let path = file.to_string_lossy();
 
         assert!(expanded.contains("Called the read_file tool with the following input:"));
-        assert!(expanded.contains(&format!(r#""file_path":"{path}""#)));
+        let json_path = serde_json::to_string(path.as_ref()).unwrap();
+        assert!(expanded.contains(&format!(r#""file_path":{json_path}"#)));
         assert!(expanded.contains(&format!(
             "<attached_file path=\"{path}\" tool=\"read_file\" already_read=\"true\" source=\"user_attachment\">"
         )));
