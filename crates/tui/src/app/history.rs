@@ -1310,45 +1310,6 @@ impl TuiApp {
     }
 
     pub(crate) fn fork_session(&mut self) {
-        if self.conversation.has_live_session() {
-            self.fork_live_session();
-            return;
-        }
-        if self.session_is_empty() {
-            self.notify_error("nothing to fork".into());
-            return;
-        }
-        // Cancel any in-flight turn and Lua tasks before swapping sessions.
-        self.cancel_session_bound_work();
-        self.save_session_and_flush();
-        let close_policy =
-            if self.session_is_read_only() && self.session_document_has_unflushed_work() {
-                crate::persist::ClosePolicy::AllowUnsaved
-            } else {
-                crate::persist::ClosePolicy::RequireDurable
-            };
-        if !self.close_current_session_for_replacement(close_policy) {
-            return;
-        }
-        self.stop_background_processes();
-        let original_id = self.conversation.fork(self.core.env.pid());
-        self.bump_epoch("session_epoch");
-        self.save_session();
-        self.flush_persist();
-        self.core
-            .signals
-            .emit_dyn("session_ended", std::rc::Rc::new(original_id.clone()));
-        self.core.signals.emit_dyn(
-            "session_started",
-            std::rc::Rc::new(self.conversation.session().id.clone()),
-        );
-        self.publish_history_delta(HistoryDeltaKind::Forked);
-        self.notify(format!("forked from {original_id}"));
-        // Drain stale events so old snapshots don't overwrite the forked session.
-        while self.core.engine.try_recv().is_ok() {}
-    }
-
-    fn fork_live_session(&mut self) {
         if self.session_is_empty() {
             self.notify_error("nothing to fork".into());
             return;
@@ -1358,8 +1319,10 @@ impl TuiApp {
             self.session_is_read_only() && self.session_document_has_unflushed_work();
         let acknowledged_head = self.conversation.acknowledged_head();
         let preserved = if preserve_unsaved {
-            let mut forked = self.conversation.session().fork(self.core.env.pid());
-            forked.history.clear();
+            let mut forked = self
+                .conversation
+                .session()
+                .fork_store_backed(self.core.env.pid());
             let runtime_metadata = self.runtime_session_metadata();
             let intent = match self
                 .conversation
@@ -1400,13 +1363,22 @@ impl TuiApp {
         }
 
         let original_id = self.conversation.session().id.clone();
-        let (forked, preserved_intent) = preserved.map_or_else(
+        let (fork_target, preserved_intent) = preserved.map_or_else(
             || {
-                let mut forked = self.conversation.session().fork(self.core.env.pid());
-                forked.history.clear();
-                (forked, None)
+                (
+                    self.conversation.session().fork_target(self.core.env.pid()),
+                    None,
+                )
             },
-            |(forked, intent)| (forked, Some(intent)),
+            |(forked, intent)| {
+                (
+                    smelt_core::session::SessionForkTarget {
+                        id: forked.id,
+                        created_at_ms: forked.created_at_ms,
+                    },
+                    Some(intent),
+                )
+            },
         );
         let fork_root = self.conversation.sessions().sessions_dir();
         let mut source =
@@ -1436,7 +1408,7 @@ impl TuiApp {
                 }
             }
         }
-        let imported = match source.fork_current(&forked.id, forked.created_at_ms) {
+        let imported = match source.fork_current(&fork_target.id, fork_target.created_at_ms) {
             Ok(receipt) => receipt,
             Err(err) => {
                 self.notify_session_error_sticky(format!("failed to fork session store: {err}"));
@@ -1444,14 +1416,14 @@ impl TuiApp {
             }
         };
         if let Some(intent) = preserved_intent {
-            if let Err(err) = source.switch_branch(&forked.id) {
+            if let Err(err) = source.switch_branch(&fork_target.id) {
                 self.notify_session_error_sticky(format!(
                     "failed to select fork destination: {err}"
                 ));
                 return;
             }
             let command = smelt_store::SessionCommit {
-                session_id: forked.id.clone(),
+                session_id: fork_target.id.clone(),
                 expected: imported.current,
                 identity: intent.identity,
                 metadata: intent.metadata,
@@ -1470,9 +1442,10 @@ impl TuiApp {
             self.notify_session_error_sticky(format!("failed to release lineage writer: {err}"));
             return;
         }
-        self.load_current_session_by_id(&forked.id);
-        self.publish_history_delta(HistoryDeltaKind::Forked);
-        self.notify(format!("forked from {original_id}"));
+        if self.load_current_session_by_id(&fork_target.id) {
+            self.publish_history_delta(HistoryDeltaKind::Forked);
+            self.notify(format!("forked from {original_id}"));
+        }
     }
 
     pub(crate) fn reset_session(&mut self) {
@@ -1681,7 +1654,7 @@ impl TuiApp {
     pub(crate) fn load_store_backed_session(
         &mut self,
         document: crate::app::session_document::StoreBackedSessionDocument,
-    ) {
+    ) -> bool {
         let crate::app::session_document::StoreBackedSessionDocument {
             session: loaded,
             transcript,
@@ -1694,7 +1667,7 @@ impl TuiApp {
         self.save_session_and_flush();
         if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
         {
-            return;
+            return false;
         }
 
         if self.core.startup_overrides.mode.is_none() {
@@ -1759,6 +1732,7 @@ impl TuiApp {
         );
         self.publish_history_delta(HistoryDeltaKind::Loaded);
         while self.core.engine.try_recv().is_ok() {}
+        true
     }
 
     // Explicit promotion for old in-memory-only UI flows. Normal store-backed
@@ -1929,13 +1903,17 @@ impl TuiApp {
     }
 
     pub(crate) fn save_session_if_pending(&mut self) {
-        if self.session_document_has_unflushed_work() && !self.prompt_input_is_busy() {
+        if self.session_document_has_unflushed_work()
+            && !self.prompt_input_is_busy()
+            && !self.conversation.automatic_save_blocked()
+        {
             self.save_session();
         }
     }
 
     pub(crate) fn retry_blocked_persistence(&mut self) -> bool {
-        match self.conversation.retry_blocked_persistence() {
+        let metadata = self.runtime_session_metadata();
+        match self.conversation.retry_blocked_persistence(metadata) {
             Ok(retried) => retried,
             Err(message) => {
                 self.notify_session_save_failure(&self.conversation.session().id.clone(), &message);
@@ -1952,6 +1930,7 @@ impl TuiApp {
                 smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             }
             Ok(crate::app::conversation::SaveStatus::SkippedReadOnly)
+            | Ok(crate::app::conversation::SaveStatus::Blocked)
             | Ok(crate::app::conversation::SaveStatus::DurableEphemeral)
             | Ok(crate::app::conversation::SaveStatus::Submitted) => {}
             Err(message) => {

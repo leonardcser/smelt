@@ -18,9 +18,16 @@ pub(crate) struct PersistenceReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SaveStatus {
     SkippedReadOnly,
+    Blocked,
     Unchanged,
     DurableEphemeral,
     Submitted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PersistencePreparationBlock {
+    desired: super::session_document::PersistenceGeneration,
+    cause: crate::persist::PersistenceCause,
 }
 
 /// Owns canonical conversation state and the runtime machinery that keeps its
@@ -40,6 +47,7 @@ pub(crate) struct ConversationRuntime {
     persistence: Option<crate::persist::SessionPersistence>,
     persistence_epoch: crate::persist::SessionEpoch,
     observed_persistence_status: Option<crate::persist::SessionPersistenceStatus>,
+    persistence_preparation_block: Option<PersistencePreparationBlock>,
     access: SessionAccess,
     sessions: smelt_core::session::SessionStorage,
     storage: SessionPersistence,
@@ -69,6 +77,7 @@ impl ConversationRuntime {
             persistence: None,
             persistence_epoch: crate::persist::SessionEpoch::ZERO,
             observed_persistence_status: None,
+            persistence_preparation_block: None,
             access: SessionAccess::Owned,
             sessions,
             storage,
@@ -466,6 +475,14 @@ impl ConversationRuntime {
             .require_record_resave_from(index);
     }
 
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn set_transcript_session_dir_for_harness(
+        &mut self,
+        session_dir: std::path::PathBuf,
+    ) {
+        self.document.transcript.set_session_dir(session_dir);
+    }
+
     #[cfg(test)]
     pub(crate) fn set_transcript_memory_budget_for_harness(
         &mut self,
@@ -560,12 +577,25 @@ impl ConversationRuntime {
         self.document.has_session_work()
     }
 
+    pub(crate) fn automatic_save_blocked(&self) -> bool {
+        self.persistence_preparation_block.is_some()
+            || self.persistence.as_ref().is_some_and(|persistence| {
+                matches!(
+                    persistence.status().state,
+                    crate::persist::PersistenceState::Blocked { .. }
+                        | crate::persist::PersistenceState::OwnershipLost { .. }
+                        | crate::persist::PersistenceState::Stopped { cause: Some(_), .. }
+                )
+            })
+    }
+
     pub(crate) fn prepare_fork_save(
         &mut self,
         forked: &mut smelt_core::session::Session,
         metadata: super::session_document::RuntimeSessionMetadata,
     ) -> Result<Option<super::session_document::SessionSaveIntent>, String> {
-        self.document.prepare_save(forked, metadata)
+        self.document
+            .prepare_fork_save(forked, metadata, &self.session.history)
     }
 
     pub(crate) fn refresh_live_session_header(&mut self) {
@@ -1801,18 +1831,6 @@ impl ConversationRuntime {
             .inject_publish_failure();
     }
 
-    pub(crate) fn fork(&mut self, pid: u32) -> String {
-        let original_id = self.session.id.clone();
-        self.session = self.session.fork(pid);
-        self.document
-            .transcript
-            .set_session_dir(self.storage.session_dir(&self.sessions, &self.session));
-        self.access = SessionAccess::Owned;
-        self.document.enable_change_tracking();
-        self.document.mark_session_unpersisted();
-        original_id
-    }
-
     pub(crate) fn reset(&mut self, pid: u32, cwd: std::path::PathBuf) -> String {
         let old_id = self.session.id.clone();
         self.session = smelt_core::session::Session::new(pid, cwd);
@@ -1947,6 +1965,9 @@ impl ConversationRuntime {
         if self.is_read_only() {
             return Ok(SaveStatus::SkippedReadOnly);
         }
+        if self.persistence_preparation_block.is_some() {
+            return Ok(SaveStatus::Blocked);
+        }
         if self.is_ephemeral() {
             self.apply_metadata_mutation(
                 super::session_document::MetadataMutation::UpdateRuntime {
@@ -1971,8 +1992,16 @@ impl ConversationRuntime {
                 live.live_suffix_bytes() as u64,
             );
         }
-        let Some(intent) = self.document.prepare_save(&mut self.session, metadata)? else {
-            return Ok(SaveStatus::Unchanged);
+        let intent = match self.document.prepare_save(&mut self.session, metadata) {
+            Ok(Some(intent)) => intent,
+            Ok(None) => return Ok(SaveStatus::Unchanged),
+            Err(message) => {
+                self.persistence_preparation_block = Some(PersistencePreparationBlock {
+                    desired: self.document.generation(),
+                    cause: crate::persist::PersistenceCause::invariant(message.clone()),
+                });
+                return Err(message);
+            }
         };
         if self.persistence.is_none() {
             if let Err(reason) = self.claim_writer_access() {
@@ -1989,16 +2018,74 @@ impl ConversationRuntime {
         Ok(SaveStatus::Submitted)
     }
 
-    pub(crate) fn retry_blocked_persistence(&self) -> Result<bool, String> {
-        let Some(persistence) = self.persistence.as_ref() else {
+    pub(crate) fn retry_blocked_persistence(
+        &mut self,
+        metadata: super::session_document::RuntimeSessionMetadata,
+    ) -> Result<bool, String> {
+        let preparation_blocked = self.persistence_preparation_block.is_some();
+        let actor_blocked_at = self
+            .persistence
+            .as_ref()
+            .and_then(|persistence| match persistence.status().state {
+                crate::persist::PersistenceState::Blocked { desired, .. }
+                | crate::persist::PersistenceState::OwnershipLost { desired, .. } => Some(desired),
+                _ => None,
+            });
+        if !preparation_blocked && actor_blocked_at.is_none() {
             return Ok(false);
-        };
-        persistence.retry_blocked().map_err(|cause| cause.message)?;
+        }
+
+        let latest_generation = self.document.generation();
+        let prepare_latest = preparation_blocked
+            || actor_blocked_at.is_some_and(|blocked| blocked < latest_generation);
+        if prepare_latest {
+            let intent = match self.document.prepare_save(&mut self.session, metadata) {
+                Ok(intent) => intent,
+                Err(message) => {
+                    self.persistence_preparation_block = Some(PersistencePreparationBlock {
+                        desired: self.document.generation(),
+                        cause: crate::persist::PersistenceCause::invariant(message.clone()),
+                    });
+                    return Err(message);
+                }
+            };
+            if let Some(intent) = intent {
+                if self.persistence.is_none() {
+                    if let Err(reason) = self.claim_writer_access() {
+                        self.mark_read_only(reason.clone());
+                        return Err(reason);
+                    }
+                }
+                self.publish_shared_state();
+                self.persistence
+                    .as_ref()
+                    .ok_or_else(|| "persistence actor is unavailable".to_string())?
+                    .submit(intent)
+                    .map_err(|cause| cause.message)?;
+            }
+            self.persistence_preparation_block = None;
+        }
+
+        if actor_blocked_at.is_some() {
+            self.persistence
+                .as_ref()
+                .ok_or_else(|| "persistence actor is unavailable".to_string())?
+                .retry_blocked()
+                .map_err(|cause| cause.message)?;
+        }
         Ok(true)
     }
 
     pub(crate) fn flush_persistence(&self) -> crate::persist::PersistenceFlushOutcome {
         let target = self.document.generation();
+        if let Some(block) = self.persistence_preparation_block.as_ref() {
+            return crate::persist::PersistenceFlushOutcome::Blocked {
+                epoch: self.persistence_epoch,
+                target: target.max(block.desired),
+                durable: self.document.durable_generation(),
+                cause: block.cause.clone(),
+            };
+        }
         let Some(persistence) = self.persistence.as_ref() else {
             return crate::persist::PersistenceFlushOutcome::Stopped {
                 epoch: self.persistence_epoch,
@@ -2060,8 +2147,17 @@ impl ConversationRuntime {
         policy: crate::persist::ClosePolicy,
     ) -> Result<Option<String>, String> {
         let target = self.document.generation();
+        if policy == crate::persist::ClosePolicy::RequireDurable {
+            if let Some(block) = self.persistence_preparation_block.as_ref() {
+                return Err(block.cause.message.clone());
+            }
+        }
+        let preparation_failure = self
+            .persistence_preparation_block
+            .take()
+            .map(|block| block.cause.message);
         let Some(persistence) = self.persistence.as_mut() else {
-            return Ok(None);
+            return Ok(preparation_failure);
         };
         let epoch = persistence.epoch();
         let outcome = persistence.close(
@@ -2086,7 +2182,10 @@ impl ConversationRuntime {
         self.document.unbind_persistence(epoch);
         self.persistence = None;
         self.observed_persistence_status = None;
-        Ok(outcome.cause.map(|cause| cause.message))
+        Ok(outcome
+            .cause
+            .map(|cause| cause.message)
+            .or(preparation_failure))
     }
 
     pub(crate) fn submit_canonical_turn(

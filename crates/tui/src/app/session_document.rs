@@ -353,9 +353,28 @@ impl TuiSessionDocument {
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
     ) -> Result<Option<SessionSaveIntent>, String> {
-        let history = self.live_session.as_ref().map_or(
-            SessionHistoryRef::Materialized(&session.history),
-            SessionHistoryRef::StoreBacked,
+        self.prepare_save_with_history(session, metadata, None)
+    }
+
+    pub(crate) fn prepare_fork_save(
+        &mut self,
+        session: &mut Session,
+        metadata: RuntimeSessionMetadata,
+        source_history: &[HistoryItem],
+    ) -> Result<Option<SessionSaveIntent>, String> {
+        self.prepare_save_with_history(session, metadata, Some(source_history))
+    }
+
+    fn prepare_save_with_history(
+        &mut self,
+        session: &mut Session,
+        metadata: RuntimeSessionMetadata,
+        source_history: Option<&[HistoryItem]>,
+    ) -> Result<Option<SessionSaveIntent>, String> {
+        let history = SessionHistoryRef::for_save(
+            self.live_session.as_ref(),
+            &session.history,
+            source_history,
         );
         let history_len = history.len();
         let record_dirty = self.transcript.history().record_dirty_from().is_some();
@@ -370,9 +389,10 @@ impl TuiSessionDocument {
         }
 
         self.apply_runtime_metadata(session, metadata);
-        let history = self.live_session.as_ref().map_or(
-            SessionHistoryRef::Materialized(&session.history),
-            SessionHistoryRef::StoreBacked,
+        let history = SessionHistoryRef::for_save(
+            self.live_session.as_ref(),
+            &session.history,
+            source_history,
         );
         let history_len = history.len();
         let acknowledged_history_len = self
@@ -592,6 +612,17 @@ enum SessionHistoryRef<'a> {
 }
 
 impl<'a> SessionHistoryRef<'a> {
+    fn for_save(
+        live_session: Option<&'a LiveSession>,
+        session_history: &'a [HistoryItem],
+        source_history: Option<&'a [HistoryItem]>,
+    ) -> Self {
+        live_session.map_or_else(
+            || Self::Materialized(source_history.unwrap_or(session_history)),
+            Self::StoreBacked,
+        )
+    }
+
     fn len(self) -> usize {
         match self {
             SessionHistoryRef::Materialized(history) => history.len(),

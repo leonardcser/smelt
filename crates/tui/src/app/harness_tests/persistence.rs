@@ -936,6 +936,182 @@ fn deleting_source_branch_leaves_active_fork_intact() {
 }
 
 #[test]
+fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement() {
+    const RECORD_COUNT: usize = 600;
+
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    for index in 0..RECORD_COUNT {
+        app.push_transcript_block(Block::Text {
+            content: format!("persisted record {index}"),
+        });
+    }
+    app.save_session_and_flush();
+    app.drain_transcript_compaction_for_harness();
+    app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 1,
+        ..Default::default()
+    });
+    app.render_silent();
+
+    let session_id = app.session_snapshot().id.clone();
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    app.require_transcript_record_resave_from_for_harness(0);
+    app.set_fast_mode(true);
+    app.set_transcript_session_dir_for_harness(session_dir.join("missing-hydration-source"));
+
+    app.save_session();
+
+    assert!(app.session_document_has_unflushed_work());
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| {
+            notification
+                .summary
+                .contains("hydrate canonical transcript record suffix")
+        }));
+    assert!(matches!(
+        app.flush_persist(),
+        crate::persist::PersistenceFlushOutcome::Blocked { cause, .. }
+            if cause.message.contains("hydrate canonical transcript record suffix")
+    ));
+
+    app.set_transcript_session_dir_for_harness(session_dir);
+    assert!(
+        !app.load_session_by_id(&session_id),
+        "loading must report that destination activation was refused"
+    );
+    assert_eq!(app.session_snapshot().id, session_id);
+    app.reset_session();
+    assert_eq!(
+        app.session_snapshot().id,
+        session_id,
+        "a blocked save must prevent session replacement"
+    );
+    for _ in 0..3 {
+        app.render_frame_to(&mut std::io::sink());
+    }
+    assert!(
+        app.session_document_has_unflushed_work(),
+        "automatic frames retried a blocked save"
+    );
+
+    assert!(retry_persistence_via_lua(&mut app));
+    app.flush_persist();
+    assert!(!app.session_document_has_unflushed_work());
+    assert!(!has_sticky_session_save_failure(&app, &session_id));
+    assert_eq!(
+        lineage_reader(&session_id)
+            .snapshot()
+            .unwrap()
+            .transcript_len,
+        RECORD_COUNT as u64
+    );
+}
+
+#[test]
+fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_history() {
+    const ROW_COUNT: usize = 700;
+
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let payload = "x".repeat(8 * 1024);
+    for index in 0..ROW_COUNT {
+        app.session_append_history(HistoryItem::user(Content::text(format!(
+            "fork source row {index}\nexact suffix {index} {payload}"
+        ))));
+    }
+    app.restore_screen();
+    app.save_session_and_flush();
+    app.drain_transcript_compaction_for_harness();
+    app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 1,
+        ..Default::default()
+    });
+    app.render_silent();
+
+    let source_id = app.session_snapshot().id.clone();
+    let source = lineage_reader(&source_id);
+    let source_state = source.snapshot().unwrap();
+    let source_history = source.history_range(0, ROW_COUNT as u64).unwrap();
+    let source_records = source
+        .transcript_range(0, source_state.transcript_len)
+        .unwrap();
+    drop(source);
+    assert!(
+        app.conversation_probe()
+            .transcript()
+            .memory_snapshot()
+            .hydrated_blocks
+            < source_records.len()
+    );
+
+    let unsaved = HistoryItem::user(Content::text("preserved read-only suffix"));
+    app.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    app.session_append_history(unsaved.clone());
+    app.save_session_and_flush();
+    assert!(app.session_is_read_only());
+    assert!(app.session_document_has_unflushed_work());
+
+    let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
+    let fork_started = std::time::Instant::now();
+    app.fork_session();
+    let fork_elapsed = fork_started.elapsed();
+    let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
+    let allocated_bytes = allocated_after.saturating_sub(allocated_before);
+
+    assert!(
+        fork_elapsed < std::time::Duration::from_millis(100),
+        "current compacted fork exceeded the interaction ceiling: {fork_elapsed:?}"
+    );
+    assert!(
+        allocated_bytes <= 4 * 1024 * 1024,
+        "current compacted fork allocated {allocated_bytes} bytes on the UI thread"
+    );
+    let fork_id = app.session_snapshot().id.clone();
+    assert_ne!(fork_id, source_id);
+    assert!(
+        !has_sticky_session_save_failure(&app, &fork_id),
+        "fork failed to save: {:?}",
+        app.overlays_probe().notification()
+    );
+    let fork = lineage_reader(&fork_id);
+    let fork_state = fork.snapshot().unwrap();
+    assert_eq!(
+        fork.history_range(0, ROW_COUNT as u64).unwrap(),
+        source_history
+    );
+    assert_eq!(
+        fork.history_range(ROW_COUNT as u64, ROW_COUNT as u64 + 1)
+            .unwrap(),
+        vec![unsaved]
+    );
+    assert_eq!(
+        fork.transcript_range(0, fork_state.transcript_len).unwrap(),
+        source_records
+    );
+    drop(fork);
+
+    let retained_source = lineage_reader(&source_id);
+    let retained_state = retained_source.snapshot().unwrap();
+    assert_eq!(
+        retained_source.history_range(0, ROW_COUNT as u64).unwrap(),
+        source_history
+    );
+    assert_eq!(
+        retained_source
+            .transcript_range(0, retained_state.transcript_len)
+            .unwrap(),
+        source_records
+    );
+    drop(retained_source);
+
+    app.load_session_by_id(&source_id);
+    assert_eq!(app.session_snapshot().id, source_id);
+}
+
+#[test]
 fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     let guard = test_home_guard();
     let session_id = {

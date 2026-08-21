@@ -924,11 +924,11 @@ impl TuiApp {
     }
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
-    pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        self.load_current_session_by_id(id);
+    pub(crate) fn load_session_by_id(&mut self, id: &str) -> bool {
+        self.load_current_session_by_id(id)
     }
 
-    pub(crate) fn load_current_session_by_id(&mut self, id: &str) {
+    pub(crate) fn load_current_session_by_id(&mut self, id: &str) -> bool {
         let target_rows = crate::app::transcript::record_tail_target_rows(self.last_height);
         let resume =
             match self
@@ -942,14 +942,14 @@ impl TuiApp {
                         NotificationOperation::SessionLoad,
                         format!("session {id:?} has no stored state"),
                     );
-                    return;
+                    return false;
                 }
                 Err(err) => {
                     self.notify_operation_error_sticky(
                         NotificationOperation::SessionLoad,
                         format!("failed to load session: {err}"),
                     );
-                    return;
+                    return false;
                 }
             };
         let smelt_core::session::SessionStoreResume {
@@ -981,14 +981,14 @@ impl TuiApp {
                                 NotificationOperation::SessionLoad,
                                 format!("session {id:?} has no readable transcript state"),
                             );
-                            return;
+                            return false;
                         }
                         Err(err) => {
                             self.notify_operation_error_sticky(
                                 NotificationOperation::SessionLoad,
                                 format!("failed to load session transcript: {err}"),
                             );
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -1000,7 +1000,9 @@ impl TuiApp {
         if repair_records {
             document = document.requiring_record_repair();
         }
-        self.load_store_backed_session(document);
+        if !self.load_store_backed_session(document) {
+            return false;
+        }
         if !degraded_warnings.is_empty() {
             self.notify_session_error_sticky(format!(
                 "session loaded with unavailable attachments: {}",
@@ -1009,6 +1011,7 @@ impl TuiApp {
         }
         self.finish_transcript_turn();
         self.transcript_win_mut().follow_tail();
+        true
     }
 
     /// Resolve a Confirm dialog. Cancels the active turn when the choice requires it.

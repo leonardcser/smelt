@@ -181,6 +181,12 @@ impl Default for ContextCheckpoint {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionForkTarget {
+    pub id: String,
+    pub created_at_ms: u64,
+}
+
 /// In-memory conversation state.
 ///
 /// Storage shape is `Vec<HistoryItem>` (the sum-type history that makes
@@ -1169,23 +1175,40 @@ impl Session {
         }
     }
 
+    pub fn fork_target(&self, pid: u32) -> SessionForkTarget {
+        let created_at_ms = now_ms();
+        SessionForkTarget {
+            id: new_session_id(created_at_ms, pid),
+            created_at_ms,
+        }
+    }
+
     pub fn fork(&self, pid: u32) -> Self {
-        let now = now_ms();
+        self.fork_with_history(pid, self.history.clone())
+    }
+
+    /// Create metadata for a store-backed fork without materializing history.
+    pub fn fork_store_backed(&self, pid: u32) -> Self {
+        self.fork_with_history(pid, Vec::new())
+    }
+
+    fn fork_with_history(&self, pid: u32, history: Vec<HistoryItem>) -> Self {
+        let target = self.fork_target(pid);
         Self {
-            id: new_session_id(now, pid),
+            id: target.id,
             title: self.title.clone(),
             slug: self.slug.clone(),
             first_user_message: self.first_user_message.clone(),
             metadata_snapshots: self.metadata_snapshots.clone(),
-            created_at_ms: now,
-            updated_at_ms: now,
+            created_at_ms: target.created_at_ms,
+            updated_at_ms: target.created_at_ms,
             mode: self.mode.clone(),
             reasoning_effort: self.reasoning_effort,
             model: self.model.clone(),
             fast_mode: self.fast_mode,
             cwd: self.cwd.clone(),
             parent_id: Some(self.id.clone()),
-            history: self.history.clone(),
+            history,
             checkpoint: self.checkpoint.clone(),
             checkpoint_events: self.checkpoint_events.clone(),
             context_tokens: self.context_tokens,
@@ -3960,6 +3983,51 @@ mod tests {
         assert_eq!(forked.display_context_tokens, Some(500));
         assert_eq!(forked.session_cost_usd, 1.25);
         assert!(forked.created_at_ms >= s.created_at_ms);
+    }
+
+    #[test]
+    fn store_backed_fork_preserves_metadata_without_cloning_history() {
+        let mut s = fixture_session();
+        s.history.push(user_item("q1"));
+        s.history.push(assistant_text_item("a1"));
+        s.title = Some("kept".into());
+        s.slug = Some("kept-slug".into());
+        s.model = Some("model".into());
+        s.fast_mode = Some(true);
+        s.record_context_tokens(500, s.history.len(), test_context_identity());
+        s.session_cost_usd = 1.25;
+
+        let forked = s.fork_store_backed(4242);
+
+        assert_ne!(forked.id, s.id);
+        assert_eq!(forked.parent_id.as_deref(), Some(s.id.as_str()));
+        assert!(forked.history.is_empty());
+        assert_eq!(forked.title, s.title);
+        assert_eq!(forked.slug, s.slug);
+        assert_eq!(forked.first_user_message, s.first_user_message);
+        assert_eq!(forked.metadata_snapshots, s.metadata_snapshots);
+        assert_eq!(forked.mode, s.mode);
+        assert_eq!(forked.reasoning_effort, s.reasoning_effort);
+        assert_eq!(forked.model, s.model);
+        assert_eq!(forked.fast_mode, s.fast_mode);
+        assert_eq!(forked.cwd, s.cwd);
+        assert_eq!(forked.checkpoint, s.checkpoint);
+        assert_eq!(forked.checkpoint_events, s.checkpoint_events);
+        assert_eq!(forked.context_tokens, s.context_tokens);
+        assert_eq!(
+            forked.context_tokens_history_len,
+            s.context_tokens_history_len
+        );
+        assert_eq!(forked.context_token_identity, s.context_token_identity);
+        assert_eq!(forked.display_context_tokens, s.display_context_tokens);
+        assert_eq!(
+            forked.display_context_token_identity,
+            s.display_context_token_identity
+        );
+        assert_eq!(forked.turn_metas, s.turn_metas);
+        assert_eq!(forked.context_snapshots, s.context_snapshots);
+        assert_eq!(forked.session_cost_usd, s.session_cost_usd);
+        assert_eq!(forked.session_usage, s.session_usage);
     }
 
     // ── session_updated_at ────────────────────────────────────────────

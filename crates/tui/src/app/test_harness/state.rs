@@ -524,8 +524,8 @@ impl TestApp {
     }
 
     /// Resume a canonical session through the app's normal storage path.
-    pub fn resume_session(&mut self, id: &str) {
-        self.app.load_session_by_id(id);
+    pub fn resume_session(&mut self, id: &str) -> bool {
+        self.app.load_session_by_id(id)
     }
 
     pub fn publish_session_catalog_commit(
@@ -761,6 +761,15 @@ impl TestApp {
         self.app.save_session();
     }
 
+    pub(crate) fn set_transcript_session_dir_for_harness(
+        &mut self,
+        session_dir: std::path::PathBuf,
+    ) {
+        self.app
+            .conversation
+            .set_transcript_session_dir_for_harness(session_dir);
+    }
+
     pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
         self.app.flush_persist()
     }
@@ -784,8 +793,8 @@ impl TestApp {
         self.app.load_store_backed_session(document);
     }
 
-    pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        self.resume_session(id);
+    pub(crate) fn load_session_by_id(&mut self, id: &str) -> bool {
+        self.resume_session(id)
     }
 
     pub(crate) fn fork_session(&mut self) {

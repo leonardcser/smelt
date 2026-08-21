@@ -2555,7 +2555,7 @@ mod tests {
                 if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
 
-        app.app.conversation.retry_blocked_persistence().unwrap();
+        assert!(app.app.retry_blocked_persistence());
         app.clear_actions();
         app.press(crossterm::event::KeyCode::Enter);
         assert!(app.agent_running());
@@ -2770,7 +2770,7 @@ mod tests {
             .into_iter()
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 
-        app.app.conversation.retry_blocked_persistence().unwrap();
+        assert!(app.app.retry_blocked_persistence());
         let turn = app
             .app
             .begin_command_request_turn(
@@ -2831,7 +2831,7 @@ mod tests {
             .into_iter()
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 
-        app.app.conversation.retry_blocked_persistence().unwrap();
+        assert!(app.app.retry_blocked_persistence());
         let turn = app
             .app
             .begin_process_status_turn(note)
