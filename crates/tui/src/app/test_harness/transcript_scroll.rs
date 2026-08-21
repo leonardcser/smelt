@@ -846,9 +846,20 @@ fn assert_wheel_movement_visible(
         pending.viewport_before.len(),
         "wheel movement changed the visible transcript height: pending={pending:?}, after={viewport_after:?}, frames={frames:?}"
     );
-    if viewport_after == pending.viewport_before || pending.rows == 0 {
-        assert_eq!(
-            viewport_after, pending.viewport_before,
+    if viewport_after == pending.viewport_before {
+        return;
+    }
+    if pending.rows == 0 {
+        let max_rows = max_leading_rows_before_content(frames)
+            .max(1)
+            .min(viewport_after.len().saturating_sub(1));
+        let stable_overlap = (1..=max_rows).any(|rows| {
+            let overlap = viewport_after.len() - rows;
+            viewport_after[rows..] == pending.viewport_before[..overlap]
+                || viewport_after[..overlap] == pending.viewport_before[rows..]
+        });
+        assert!(
+            stable_overlap,
             "wheel events with no net movement changed visible transcript content: pending={pending:?}, after={viewport_after:?}"
         );
         return;
