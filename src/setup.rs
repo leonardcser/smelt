@@ -640,12 +640,17 @@ pub async fn run_auth_command() {
                 Ok(SelectOutcome::Cancel) | Err(_) => return,
             };
             match choice {
-                0 if !run_login(kind).await => continue,
-                0 => {}
-                1 => run_logout(kind, tmpl.label),
-                _ => {}
+                0 => {
+                    if run_login(kind).await {
+                        return;
+                    }
+                }
+                1 => {
+                    run_logout(kind, tmpl.label);
+                    return;
+                }
+                _ => return,
             }
-            return;
         }
 
         let provider = match collect_provider(tmpl) {
