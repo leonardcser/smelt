@@ -858,9 +858,13 @@ impl TuiApp {
                 count: interrupted.unsteer_count(),
             });
         }
-        self.discard_turn(crate::app::TurnEnd::Cancelled);
+        let terminal_commit = self.discard_turn(crate::app::TurnEnd::Cancelled);
         if let Some(queued) = self.prompt.restore_after_interrupt(interrupted) {
-            if let Err(queued) = self.start_queued_input(queued) {
+            if terminal_commit.is_durable() {
+                if let Err(queued) = self.start_queued_input(queued) {
+                    self.prompt.queue_front(QueueStage::Turn, queued);
+                }
+            } else {
                 self.prompt.queue_front(QueueStage::Turn, queued);
             }
         }
@@ -2242,6 +2246,55 @@ mod tests {
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().text_content() == "run now")
         )));
+    }
+
+    #[test]
+    fn interrupt_waits_for_terminal_turn_before_submitting_queued_request() {
+        let mut app = TestApp::builder().build();
+        app.type_text("first turn");
+        app.press(KeyCode::Enter);
+        assert!(app.agent_running());
+        let _ = app.app.flush_persist();
+
+        app.type_text("run now");
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+
+        let release_persistence = app.app.conversation.pause_persistence();
+
+        app.press(KeyCode::Enter);
+        assert!(
+            !app.session_is_read_only(),
+            "interrupt submitted the queued request before its terminal transition was durable: {}",
+            app.app.conversation.read_only_reason()
+        );
+        assert!(!app.agent_running());
+        assert_eq!(app.state().queued_inputs, vec!["run now"]);
+
+        release_persistence
+            .send(())
+            .expect("release terminal transition");
+        let flush = app.app.flush_persist();
+        assert!(
+            matches!(
+                flush,
+                crate::persist::PersistenceFlushOutcome::Durable { .. }
+            ),
+            "terminal transition did not become durable: {flush:?}"
+        );
+
+        assert!(
+            !app.session_is_read_only(),
+            "queued request timeout made the session read-only: {}",
+            app.app.conversation.read_only_reason()
+        );
+        assert!(app.agent_running(), "queued request did not start");
+        assert!(app.state().queued_inputs.is_empty());
+        assert!(app.session_snapshot().history.iter().any(|item| {
+            matches!(item, protocol::HistoryItem::User { content, .. }
+                if content.text_content() == "run now")
+        }));
     }
 
     #[test]

@@ -2124,6 +2124,14 @@ impl ConversationRuntime {
     }
 
     #[cfg(test)]
+    pub(crate) fn pause_persistence(&self) -> std::sync::mpsc::Sender<()> {
+        self.persistence
+            .as_ref()
+            .expect("persistence actor is running")
+            .pause()
+    }
+
+    #[cfg(test)]
     pub(crate) fn install_persistence_commit_barrier(
         &self,
     ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {

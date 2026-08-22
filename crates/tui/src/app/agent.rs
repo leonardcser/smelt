@@ -352,6 +352,23 @@ struct StagedTurnRollback {
     transcript_len: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalCommitStatus {
+    Durable,
+    Deferred,
+}
+
+impl TerminalCommitStatus {
+    pub(crate) fn is_durable(self) -> bool {
+        self == Self::Durable
+    }
+}
+
+struct FinishTurnOutcome {
+    start_queued: bool,
+    terminal_commit: TerminalCommitStatus,
+}
+
 struct PreparedTurn {
     input: protocol::StartTurnInput,
     history: protocol::ModelHistorySource,
@@ -1069,11 +1086,11 @@ impl TuiApp {
         turn_id: u64,
         state: smelt_store::TurnState,
         reason: Option<String>,
-    ) -> bool {
+    ) -> TerminalCommitStatus {
         if self.ephemeral() {
             self.conversation.mark_terminal(turn_id);
             self.save_session();
-            return true;
+            return TerminalCommitStatus::Durable;
         }
         match self.commit_canonical_turn_transition(
             smelt_store::TurnId::new(turn_id),
@@ -1082,15 +1099,17 @@ impl TuiApp {
         ) {
             Ok(crate::persist::TurnTransitionOutcome::Durable(_)) => {
                 self.conversation.mark_terminal(turn_id);
-                true
+                TerminalCommitStatus::Durable
             }
-            Ok(crate::persist::TurnTransitionOutcome::Pending { .. }) => false,
+            Ok(crate::persist::TurnTransitionOutcome::Pending { .. }) => {
+                TerminalCommitStatus::Deferred
+            }
             Err(cause) => {
                 self.notify_session_save_failure(
                     &self.conversation.session().id.clone(),
                     &cause.message,
                 );
-                false
+                TerminalCommitStatus::Deferred
             }
         }
     }
@@ -1137,30 +1156,39 @@ impl TuiApp {
         self.conversation.consume_continuation(token)
     }
 
-    pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
+    pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) -> TerminalCommitStatus {
         let was_running = self.conversation.is_active();
         if was_running {
-            let start_queued = self.finish_turn(end);
+            let outcome = self.finish_turn_outcome(end);
             self.conversation.clear_active();
-            if start_queued {
+            if outcome.start_queued && outcome.terminal_commit.is_durable() {
                 self.start_next_queued_input_if_idle();
             }
-        } else if matches!(end, crate::app::TurnEnd::Cancelled) {
-            // No active turn but user requested cancel - still notify the
-            // engine and kill any stale turn-owned Lua tasks (tool calls,
-            // bash executions, etc.). App-scoped background work survives.
-            self.core.engine.send(UiCommand::Cancel);
-            self.cancel_turn_lua_tasks();
-            self.conversation.invalidate_turn_callbacks();
-            self.busy_stack.clear();
-            self.clear_compaction_preview();
-            // Archive an interrupted outcome so the prompt bar shows
-            // "interrupted" rather than falling back to idle/done.
-            self.working.finish(TurnOutcome::Cancelled);
+            outcome.terminal_commit
+        } else {
+            if matches!(end, crate::app::TurnEnd::Cancelled) {
+                // No active turn but user requested cancel - still notify the
+                // engine and kill any stale turn-owned Lua tasks (tool calls,
+                // bash executions, etc.). App-scoped background work survives.
+                self.core.engine.send(UiCommand::Cancel);
+                self.cancel_turn_lua_tasks();
+                self.conversation.invalidate_turn_callbacks();
+                self.busy_stack.clear();
+                self.clear_compaction_preview();
+                // Archive an interrupted outcome so the prompt bar shows
+                // "interrupted" rather than falling back to idle/done.
+                self.working.finish(TurnOutcome::Cancelled);
+            }
+            TerminalCommitStatus::Durable
         }
     }
 
     pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
+        let outcome = self.finish_turn_outcome(end);
+        outcome.start_queued && outcome.terminal_commit.is_durable()
+    }
+
+    fn finish_turn_outcome(&mut self, end: crate::app::TurnEnd) -> FinishTurnOutcome {
         let _perf = smelt_perf::perf::begin("tui:finish_turn");
         use crate::app::TurnEnd;
 
@@ -1278,7 +1306,7 @@ impl TuiApp {
         }
         self.sync_agent_mode_applied();
         self.sync_reasoning_effort_applied();
-        let terminal_committed = match turn {
+        let terminal_commit = match turn {
             Some((turn_id, true)) => {
                 self.commit_terminal_turn(turn_id, terminal_state, terminal_reason)
             }
@@ -1289,7 +1317,7 @@ impl TuiApp {
                 } else {
                     self.save_session();
                 }
-                true
+                TerminalCommitStatus::Durable
             }
             None => {
                 if matches!(end, TurnEnd::Complete) {
@@ -1297,10 +1325,13 @@ impl TuiApp {
                 } else {
                     self.save_session();
                 }
-                true
+                TerminalCommitStatus::Durable
             }
         };
-        start_queued && terminal_committed
+        FinishTurnOutcome {
+            start_queued,
+            terminal_commit,
+        }
     }
 
     /// Invokes the Lua handler for a plugin-defined tool; synchronous handlers resolve immediately, async ones park until `drive_tasks` completes them.

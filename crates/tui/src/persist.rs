@@ -1347,7 +1347,7 @@ impl SessionPersistence {
     }
 
     #[cfg(test)]
-    fn pause(&self) -> mpsc::Sender<()> {
+    pub(crate) fn pause(&self) -> mpsc::Sender<()> {
         let (paused, waiting) = mpsc::channel();
         let (release, released) = mpsc::channel();
         self.control
