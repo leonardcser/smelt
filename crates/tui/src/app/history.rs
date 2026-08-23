@@ -1516,9 +1516,6 @@ impl TuiApp {
             w.pin_scroll(0);
             w.viewport = None;
         }
-        if let Some(w) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            w.viewport = None;
-        }
         self.clear_transcript();
         self.app_focus = crate::app::AppFocus::Prompt;
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);

@@ -6705,6 +6705,12 @@ impl TranscriptDocument {
         &mut self.content.transcript.history
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.content.transcript.history.clear();
+        let transcript = std::mem::take(&mut self.content.transcript);
+        self.replace_transcript(transcript);
+    }
+
     pub(crate) fn projection_generation(&self) -> u64 {
         self.content.projection.projection_generation()
     }
@@ -7070,6 +7076,37 @@ mod document_tests {
         assert!(
             matches!(document.history().block(first_id), Some(Block::Text { content }) if content == "block 0")
         );
+    }
+
+    #[test]
+    fn clear_resets_sparse_state_and_preserves_record_deletion_tracking() {
+        let records = transcript_records(6);
+        let dir = tempfile::tempdir().unwrap();
+        let store_address = create_test_lineage_session(dir.path());
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            2..5,
+            Some(store_address.clone()),
+        ));
+        document.history_mut().clear_record_dirty();
+        document.viewport.state.mode = TranscriptViewportMode::FarSeek;
+        document.viewport.projection_count = 3;
+
+        assert_eq!(document.records.total_count(), Some(records.len()));
+        assert_eq!(document.active_record_range_key(), Some((2, 5)));
+        assert!(!document.history().is_empty());
+
+        document.clear();
+
+        assert!(document.history().is_empty());
+        assert_eq!(document.history().record_dirty_from(), Some(0));
+        assert_eq!(document.records.total_count(), None);
+        assert_eq!(document.active_record_range_key(), None);
+        assert!(document.records.sparse.loaded_ranges().is_empty());
+        assert_eq!(document.records.store_address(), Some(&store_address));
+        assert_eq!(document.viewport.state, TranscriptViewportState::default());
+        assert_eq!(document.viewport.projection_count, 0);
+        assert_eq!(document.compacted_record_len, 0);
     }
 
     #[test]
@@ -11210,6 +11247,11 @@ impl TuiApp {
 
     pub(crate) fn clear_transcript(&mut self) {
         self.conversation.clear_transcript();
+        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            win.clear_materialized_rows();
+            win.resolve_tail_scroll(0);
+            win.viewport = None;
+        }
     }
 
     pub(crate) fn last_user_block_index(&self) -> Option<usize> {

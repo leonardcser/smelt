@@ -2969,6 +2969,52 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
 }
 
 #[test]
+fn clear_command_resets_scrolled_transcript_view() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 80, 16);
+    for _ in 0..4 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+    app.focus_prompt();
+    app.render_silent();
+
+    let before = app.transcript_window();
+    assert!(!before.following_tail);
+    assert!(before
+        .viewport
+        .expect("transcript viewport")
+        .scrollbar
+        .is_some());
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.top.win")
+        .is_some());
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.bottom.win")
+        .is_some());
+
+    app.type_text("/clear");
+    app.press(KeyCode::Enter);
+    app.render_silent();
+
+    let after = app.transcript_window();
+    assert_eq!(after.scroll_top, 0);
+    assert!(after.following_tail, "cleared transcript: {after:#?}");
+    let viewport = after.viewport.expect("cleared transcript viewport");
+    assert!(viewport.total_rows <= viewport.rect.height.into());
+    assert!(viewport.scrollbar.is_none());
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.top.win")
+        .is_none());
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.bottom.win")
+        .is_none());
+}
+
+#[test]
 fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
     let mut app = TestApp::builder()
         .with_ephemeral(true)

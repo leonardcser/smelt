@@ -1477,7 +1477,7 @@ impl SessionDocument {
                     || transcript.history().record_dirty_from() != before_dirty_from
             }
             TranscriptMutation::Clear => {
-                transcript.history_mut().clear();
+                transcript.clear();
                 transcript.history().record_dirty_generation() != before_generation
                     || transcript.history().record_dirty_from() != before_dirty_from
             }
