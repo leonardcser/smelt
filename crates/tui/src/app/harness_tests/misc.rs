@@ -76,6 +76,74 @@ fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
 }
 
 #[test]
+fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse() {
+    for (tool_name, pattern) in [
+        ("grep", "fn content_matches|fn content_is_prefix"),
+        ("glob", "crates/**/*.rs"),
+    ] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(100, 12);
+        app.start_turn(1);
+        let stream_id = format!("{tool_name}-stream");
+        let call_id = format!("{tool_name}-call");
+
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
+            stream_id: stream_id.clone(),
+            call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.into()),
+        }));
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
+            stream_id: stream_id.clone(),
+            call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.into()),
+            delta: format!(r#"{{"pattern":{}"#, serde_json::to_string(pattern).unwrap()),
+        }));
+        let pattern_frame = app.render_to_frame().text();
+        let expected_pattern = format!("* {tool_name} {pattern}");
+        assert!(
+            pattern_frame.contains(&expected_pattern),
+            "pattern frame regressed for {tool_name}: {pattern_frame}"
+        );
+
+        let cwd = app.cwd_str().to_string();
+        let serialized_cwd = serde_json::to_string(&cwd).unwrap();
+        let partial_cwd = serialized_cwd
+            .strip_suffix('"')
+            .expect("serialized path ends with a quote");
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
+            stream_id: stream_id.clone(),
+            call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.into()),
+            delta: format!(r#","path":{}"#, partial_cwd),
+        }));
+        let hidden_path_frame = app.render_to_frame().text();
+        assert!(
+            hidden_path_frame.contains(&expected_pattern),
+            "absolute workspace prefix blanked {tool_name}'s stable pattern: {hidden_path_frame}"
+        );
+        assert!(
+            !hidden_path_frame.contains(&format!("{pattern} in ")),
+            "hidden path left a dangling separator for {tool_name}: {hidden_path_frame}"
+        );
+
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
+            stream_id,
+            call_id: Some(call_id),
+            tool_name: Some(tool_name.into()),
+            delta: "/crates/core/src/content".into(),
+        }));
+        app.feed_one(SourceEvent::Tick(50));
+        let relative_path_frame = app.render_to_frame().text();
+        assert!(
+            relative_path_frame.contains(&format!(
+                "* {tool_name} {pattern} in crates/core/src/content"
+            )),
+            "workspace-relative path did not replace the fallback for {tool_name}: {relative_path_frame}"
+        );
+    }
+}
+
+#[test]
 fn empty_engine_output_is_a_transcript_noop() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);

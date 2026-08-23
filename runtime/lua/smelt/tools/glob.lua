@@ -8,7 +8,9 @@ local function describe(args, ctx)
   if path == "" then
     return pattern
   end
-  return smelt.tools.path_summary(path, ctx, { prefix = pattern .. " in " })
+  local summary = smelt.tools.path_summary(path, ctx, { prefix = pattern .. " in " })
+  if summary == "" then return pattern end
+  return summary
 end
 
 local function glob_collapsed_detail(block)
