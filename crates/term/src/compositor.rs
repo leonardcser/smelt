@@ -110,8 +110,6 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
         Attribute, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     };
 
-    use crate::grid::char_width;
-
     let mut current_style = Style::default();
     for y in 0..grid.height() {
         w.queue(MoveTo(0, y))?;
@@ -119,20 +117,22 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
         let mut x = 0u16;
         while x < grid.width() {
             let cell = grid.cell(x, y);
-            // `\0` is a wide-char continuation slot - paint a space to
-            // keep the cursor in sync rather than emitting a literal NUL.
-            let symbol = if cell.symbol == '\0' {
-                ' '
+            // A continuation is normally skipped with its leading wide glyph. If
+            // one is reached defensively, paint a space rather than a literal NUL.
+            let is_printable = !cell.symbol.is_continuation()
+                && !cell.symbol.as_str().chars().any(char::is_control);
+            let symbol = if is_printable {
+                cell.symbol.as_str()
             } else {
-                cell.symbol
+                " "
             };
-            let cw = char_width(symbol);
+            let width = if is_printable { cell.symbol.width() } else { 1 };
 
-            // Wide char overflowing the right edge: emit a space to prevent wrapping.
-            let (sym, emit_w) = if terminal_col + cw > grid.width() {
-                (' ', 1u16)
+            // A wide grapheme at the right edge would wrap the terminal.
+            let (symbol, emit_width) = if terminal_col + width > grid.width() {
+                (" ", 1u16)
             } else {
-                (symbol, cw)
+                (symbol, width)
             };
 
             if cell.style != current_style {
@@ -164,13 +164,11 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
                 }
                 current_style = cell.style;
             }
-            let mut buf = [0u8; 4];
-            let s = sym.encode_utf8(&mut buf);
-            w.write_all(s.as_bytes())?;
+            w.write_all(symbol.as_bytes())?;
 
-            terminal_col += emit_w;
+            terminal_col += emit_width;
             // Skip the continuation cell so the grid cursor matches the terminal's visual width.
-            x += emit_w;
+            x += emit_width;
         }
     }
     w.queue(SetAttribute(Attribute::Reset))?;

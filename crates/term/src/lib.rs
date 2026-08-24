@@ -28,7 +28,7 @@ pub use compositor::Compositor;
 pub use flush::flush_diff;
 pub use geometry::Insets;
 pub use grid::{
-    display_width, truncate_width, Cell, CellUpdate, Grid, GridSlice, Style, TextAlign,
+    display_width, truncate_width, Cell, CellSymbol, CellUpdate, Grid, GridSlice, Style, TextAlign,
 };
 pub use hit::HitRegistry;
 pub use layout::{

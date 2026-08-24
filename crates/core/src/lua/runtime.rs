@@ -12,6 +12,8 @@ use crate::content::block_layout::{
     BlockLayout, ContentRenderSpec, ContentSpec, LuaLeaf, TextSpec,
 };
 use crate::content::display_safe_text;
+#[cfg(test)]
+use crate::content::markdown_stream::thinking_summary;
 use crate::lua::{
     json_to_lua, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent,
     ToolCallIds, ToolEnv, ToolExecResult, TranscriptGroupSpec,
@@ -3838,7 +3840,7 @@ fn user_display_lines(text: &str) -> Vec<String> {
         .map_or(0, |idx| idx + 1);
     all_lines[start..end]
         .iter()
-        .map(|line| line.trim_end().to_string())
+        .map(|line| smelt_buffer::text::trim_end_whitespace(line).to_owned())
         .collect()
 }
 
@@ -4011,12 +4013,14 @@ fn thinking_fallback_summary(
 }
 
 fn thinking_summary_label(first_nonempty_line: &str) -> String {
-    let trimmed = first_nonempty_line.trim();
-    if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
-        trimmed[2..trimmed.len() - 2].trim().to_string()
-    } else {
-        "thinking".to_string()
-    }
+    let trimmed = smelt_buffer::text::trim_whitespace(first_nonempty_line);
+    trimmed
+        .strip_prefix("**")
+        .and_then(|label| label.strip_suffix("**"))
+        .map(smelt_buffer::text::trim_whitespace)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("thinking")
+        .to_string()
 }
 
 fn pluralize(count: usize, singular: &str, plural: &str) -> String {
@@ -4407,6 +4411,15 @@ mod tests {
         assert_eq!(
             thinking_fallback_summary(Some("Checking files"), "", 0),
             "Checking files"
+        );
+    }
+
+    #[test]
+    fn snapshot_fallback_trimming_keeps_graphemes_atomic() {
+        assert_eq!(user_display_lines("x\u{600} "), vec!["x\u{600} "]);
+        assert_eq!(
+            thinking_summary("** \u{301}title\u{600} **"),
+            (" \u{301}title\u{600} ".to_string(), 1)
         );
     }
 

@@ -76,10 +76,8 @@ pub fn logout() {
 }
 
 pub fn api_base() -> String {
-    std::env::var("KIMI_CODE_BASE_URL")
-        .unwrap_or_else(|_| API_BASE.to_string())
-        .trim_end_matches('/')
-        .to_string()
+    let base = std::env::var("KIMI_CODE_BASE_URL").unwrap_or_else(|_| API_BASE.to_string());
+    smelt_provider::normalize_api_base(&base)
 }
 
 fn device_id_path() -> PathBuf {
@@ -148,11 +146,10 @@ fn ascii_header(value: impl AsRef<str>, fallback: &str) -> String {
 }
 
 fn oauth_host() -> String {
-    std::env::var("KIMI_CODE_OAUTH_HOST")
+    let host = std::env::var("KIMI_CODE_OAUTH_HOST")
         .or_else(|_| std::env::var("KIMI_OAUTH_HOST"))
-        .unwrap_or_else(|_| OAUTH_HOST.to_string())
-        .trim_end_matches('/')
-        .to_string()
+        .unwrap_or_else(|_| OAUTH_HOST.to_string());
+    smelt_provider::normalize_api_base(&host)
 }
 
 pub(crate) fn protocol_headers() -> KimiHeaders {

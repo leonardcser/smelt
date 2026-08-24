@@ -142,15 +142,15 @@ mod tests {
         };
         win.render(&buf, &mut slice, &ctx);
 
-        let cells: Vec<char> = (0..10).map(|c| grid.cell(c, 0).symbol).collect();
-        assert_eq!(cells[0], ' ', "left gutter blank");
-        assert_eq!(cells[9], ' ', "right gutter blank");
+        let cells: Vec<&str> = (0..10).map(|c| grid.cell(c, 0).symbol.as_str()).collect();
+        assert_eq!(cells[0], " ", "left gutter blank");
+        assert_eq!(cells[9], " ", "right gutter blank");
         // Block cursor inverts the underlying glyph rather than stamping its own,
-        // so the buffer char at the cursor stays visible and only its style flips.
-        assert_eq!(cells[1], 'h', "block cursor preserves underlying glyph");
+        // so the buffer grapheme at the cursor stays visible and only its style flips.
+        assert_eq!(cells[1], "h", "block cursor preserves underlying glyph");
         assert_eq!(
             &cells[2..6],
-            ['e', 'l', 'l', 'o'],
+            ["e", "l", "l", "o"],
             "content paints inside inner zone"
         );
     }

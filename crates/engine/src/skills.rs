@@ -300,7 +300,7 @@ fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
         .or_else(|| first_nonempty_line(body).map(trim_description))
         .unwrap_or_default();
     let location = path.display().to_string();
-    let body = body.trim_start();
+    let body = smelt_buffer::text::trim_start_whitespace(body);
     let name_attr = xml_escape_attr(&name);
     let formatted = format!(
         "<skill name=\"{name_attr}\" included_by=\"smelt\" source=\"custom_command\">\n{body}\n\n## Slash command\n\nThis skill is also available to users as `/{name}`. When loaded as a skill, it is static, receives no slash-command arguments, and does not evaluate shell output markers.\n</skill>"
@@ -363,14 +363,14 @@ fn parse_skill_text(
 }
 
 fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
-    let text = text.trim_start();
+    let text = smelt_buffer::text::trim_start_whitespace(text);
     if !text.starts_with("---") {
         return None;
     }
     let after_first = &text[3..];
     let end = after_first.find("\n---")?;
-    let yaml = after_first[..end].trim();
-    let body = after_first[end + 4..].trim_start();
+    let yaml = smelt_buffer::text::trim_whitespace(&after_first[..end]);
+    let body = smelt_buffer::text::trim_start_whitespace(&after_first[end + 4..]);
     Some((yaml, body))
 }
 
@@ -381,19 +381,19 @@ fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
     let mut reading_description = false;
 
     for raw_line in yaml.lines() {
-        let line = raw_line.trim();
+        let line = smelt_buffer::text::trim_whitespace(raw_line);
         if line.is_empty() {
             continue;
         }
 
         if let Some(rest) = line.strip_prefix("name:") {
-            name = Some(unquote_yaml(rest.trim()));
+            name = Some(unquote_yaml(smelt_buffer::text::trim_whitespace(rest)));
             reading_description = false;
             continue;
         }
 
         if let Some(rest) = line.strip_prefix("description:") {
-            description = unquote_yaml(rest.trim());
+            description = unquote_yaml(smelt_buffer::text::trim_whitespace(rest));
             reading_description = true;
             continue;
         }
@@ -418,8 +418,11 @@ fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
 fn frontmatter_string(yaml: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     yaml.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+        .map(smelt_buffer::text::trim_whitespace)
+        .find_map(|line| {
+            line.strip_prefix(&prefix)
+                .map(smelt_buffer::text::trim_whitespace)
+        })
         .map(unquote_yaml)
         .filter(|s| !s.is_empty())
 }
@@ -428,7 +431,9 @@ fn frontmatter_bool(yaml: &str, keys: &[&str]) -> bool {
     keys.iter().any(|key| {
         frontmatter_string(yaml, key).is_some_and(|value| {
             matches!(
-                value.trim().to_ascii_lowercase().as_str(),
+                smelt_buffer::text::trim_whitespace(&value)
+                    .to_ascii_lowercase()
+                    .as_str(),
                 "true" | "yes" | "1"
             )
         })
@@ -436,14 +441,16 @@ fn frontmatter_bool(yaml: &str, keys: &[&str]) -> bool {
 }
 
 fn first_nonempty_line(body: &str) -> Option<&str> {
-    body.lines().map(str::trim).find(|line| !line.is_empty())
+    body.lines()
+        .map(smelt_buffer::text::trim_whitespace)
+        .find(|line| !line.is_empty())
 }
 
 fn trim_description(s: &str) -> String {
-    const MAX_CHARS: usize = 80;
-    let mut chars = s.chars();
-    let out: String = chars.by_ref().take(MAX_CHARS).collect();
-    if chars.next().is_some() {
+    const MAX_GRAPHEMES: usize = 80;
+    let mut graphemes = smelt_buffer::cell_width::graphemes(s);
+    let out: String = graphemes.by_ref().take(MAX_GRAPHEMES).collect();
+    if graphemes.next().is_some() {
         format!("{out}…")
     } else {
         out
@@ -491,11 +498,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn description_truncation_keeps_graphemes_atomic() {
+        let prefix = "a".repeat(79);
+        assert_eq!(
+            trim_description(&format!("{prefix}e\u{301}x")),
+            format!("{prefix}e\u{301}…")
+        );
+    }
+
+    #[test]
     fn split_frontmatter_basic() {
         let text = "---\nname: test\ndescription: A test\n---\n\nbody here";
         let (yaml, body) = split_frontmatter(text).unwrap();
         assert!(yaml.contains("name: test"));
         assert!(body.contains("body here"));
+    }
+
+    #[test]
+    fn split_frontmatter_keeps_leading_graphemes_atomic() {
+        let text = "---\nname: test\n---\n \u{301}body\u{600} ";
+        let (_, body) = split_frontmatter(text).unwrap();
+        assert_eq!(body, " \u{301}body\u{600} ");
     }
 
     #[test]

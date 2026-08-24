@@ -796,6 +796,7 @@ pub fn effective_mode_at<'a>(
 // orphan tool_use blocks by synthesizing an "interrupted" result.
 
 use crate::message::{Message, Role};
+use smelt_buffer::text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserHistoryContent {
@@ -814,12 +815,12 @@ pub fn classify_user_history_content(content: &Content) -> UserHistoryContent {
     }
     if let Some(note) = text.strip_prefix(crate::note::MODE_NOTE_PREFIX) {
         return UserHistoryContent::ModeChange {
-            text: note.trim().to_string(),
+            text: text::trim_whitespace(note).to_owned(),
         };
     }
     if let Some(note) = text.strip_prefix(crate::note::PROCESS_STATUS_NOTE_PREFIX) {
         return UserHistoryContent::ProcessStatus {
-            text: note.trim().to_string(),
+            text: text::trim_whitespace(note).to_owned(),
         };
     }
     UserHistoryContent::Plain

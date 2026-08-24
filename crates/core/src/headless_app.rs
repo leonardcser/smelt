@@ -362,10 +362,10 @@ impl HeadlessApp {
     pub async fn run_oneshot(&mut self, message: String, cancel: Arc<tokio::sync::Notify>) {
         use std::io::Write;
 
-        let trimmed = message.trim();
+        let trimmed = smelt_buffer::text::trim_whitespace(&message);
 
         if let Some(cmd) = trimmed.strip_prefix('!') {
-            let cmd = cmd.trim();
+            let cmd = smelt_buffer::text::trim_whitespace(cmd);
             if !cmd.is_empty() {
                 let output = std::process::Command::new("sh")
                     .arg("-c")

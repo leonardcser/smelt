@@ -29,7 +29,11 @@ impl ProviderClient {
         api_key: &str,
         model: &str,
     ) -> Option<u32> {
-        let url = format!("{}/models/{}", api_base.trim_end_matches('/'), model);
+        let url = format!(
+            "{}/models/{}",
+            crate::endpoint::trim_api_base(api_base),
+            model
+        );
         let resp = self
             .client
             .get(&url)
@@ -51,7 +55,7 @@ impl ProviderClient {
         api_key: &str,
         model: &str,
     ) -> Option<u32> {
-        let url = format!("{}/models", api_base.trim_end_matches('/'));
+        let url = format!("{}/models", crate::endpoint::trim_api_base(api_base));
         let mut req = self.client.get(&url);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);

@@ -6180,7 +6180,7 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
-        let summary = summary.trim().to_string();
+        let summary = smelt_buffer::text::trim_whitespace(&summary).to_owned();
 
         if let Some(id) = self.content.compaction_preview_id {
             if self.content.transcript.block(id).is_some() {
@@ -10228,14 +10228,14 @@ impl TuiApp {
         for (r, row) in rows.iter().enumerate() {
             let row_end = acc + row.len();
             if cpos <= row_end {
-                let col_byte = cpos.saturating_sub(acc).min(row.len());
-                let col = row[..col_byte].chars().count();
+                let col_byte =
+                    smelt_buffer::text::snap_grapheme(row, cpos.saturating_sub(acc).min(row.len()));
+                let col = smelt_buffer::text::byte_to_cell(row, col_byte);
                 let snapped = smelt_buffer::coords::snap_col_to_selectable(buf, r, col);
                 if snapped == col {
-                    return cpos;
+                    return acc + col_byte;
                 }
-                let byte_col: usize = row.chars().take(snapped).map(|c| c.len_utf8()).sum();
-                return acc + byte_col;
+                return acc + smelt_buffer::text::cell_to_byte(row, snapped);
             }
             acc = row_end + 1;
         }

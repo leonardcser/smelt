@@ -5,8 +5,8 @@ use super::motions::{
     move_up_col, repeat_find, retreat_chars, word_end_pos, FindKind,
 };
 use super::text::{
-    char_class, line_end, line_start, next_char_boundary, prev_char_boundary, word_backward_pos,
-    word_forward_pos, CharClass,
+    char_class, line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary,
+    word_backward_pos, word_forward_pos, CharClass,
 };
 use super::text_objects::{
     surrounding_delimiters, text_object, text_object_for_spec, TextObjectKind, TextObjectSpec,
@@ -16,6 +16,18 @@ use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use smelt_buffer::attached::AttachedTextMut;
 use smelt_buffer::attachment::ATTACHMENT_MARKER;
+
+fn toggle_case(text: &str) -> String {
+    let mut toggled = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_uppercase() {
+            toggled.extend(ch.to_lowercase());
+        } else {
+            toggled.extend(ch.to_uppercase());
+        }
+    }
+    toggled
+}
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -334,10 +346,10 @@ pub struct VimWindowState {
 }
 
 impl VimWindowState {
-    /// Visual anchor, snapped to a char boundary in `buf`. All consumers
+    /// Visual anchor, snapped to a grapheme boundary in `buf`. All consumers
     /// must go through this accessor - the raw field may be stale.
     pub fn visual_anchor_at(&self, buf: &str) -> usize {
-        smelt_buffer::text::snap(buf, self.visual_anchor)
+        smelt_buffer::text::snap_grapheme(buf, self.visual_anchor)
     }
 
     /// Raw stored anchor without snapping. For invariant checks that
@@ -355,18 +367,19 @@ impl VimWindowState {
     /// Shift the visual anchor right by `delta` bytes. Call after
     /// prepending text to the buffer so the anchor keeps pointing at the
     /// same character (cpos is shifted by the caller too).
-    pub fn shift_visual_anchor(&mut self, delta: usize) {
-        self.visual_anchor = self.visual_anchor.saturating_add(delta);
+    pub fn shift_visual_anchor(&mut self, delta: usize, source: &str) {
+        self.visual_anchor =
+            smelt_buffer::text::ceil_grapheme(source, self.visual_anchor.saturating_add(delta));
     }
 
-    /// Clamp the visual anchor into `source` and snap it to a char
+    /// Clamp the visual anchor into `source` and snap it to a grapheme
     /// boundary. Call after any in-place source shrink so the anchor
-    /// preserved for `gv` can never outlive its bytes or land mid-UTF-8.
+    /// preserved for `gv` can never outlive its terminal glyph.
     pub fn clamp_visual_anchor(&mut self, source: &str) {
         if self.visual_anchor > source.len() {
             self.visual_anchor = source.len();
         }
-        self.visual_anchor = smelt_buffer::text::snap(source, self.visual_anchor);
+        self.visual_anchor = smelt_buffer::text::snap_grapheme(source, self.visual_anchor);
     }
 
     fn record_change(&mut self, command: RepeatCommand) {
@@ -492,17 +505,17 @@ pub fn visual_range(
     match mode {
         VimMode::Visual => {
             let anchor = state.visual_anchor_at(buf);
-            let cursor = smelt_buffer::text::snap(buf, cpos);
+            let cursor = smelt_buffer::text::snap_grapheme(buf, cpos);
             let (a, b) = if anchor <= cursor {
-                (anchor, next_char_boundary(buf, cursor).min(buf.len()))
+                (anchor, next_grapheme_boundary(buf, cursor).min(buf.len()))
             } else {
-                (cursor, next_char_boundary(buf, anchor).min(buf.len()))
+                (cursor, next_grapheme_boundary(buf, anchor).min(buf.len()))
             };
             Some((a, b))
         }
         VimMode::VisualLine => {
             let anchor = state.visual_anchor_at(buf);
-            let cursor = smelt_buffer::text::snap(buf, cpos);
+            let cursor = smelt_buffer::text::snap_grapheme(buf, cpos);
             let start = line_start(buf, anchor).min(line_start(buf, cursor));
             let end = line_end(buf, anchor).max(line_end(buf, cursor));
             Some((start, end))
@@ -1115,20 +1128,11 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.take_count();
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                 ctx.save_undo();
-                for _ in 0..n {
-                    if *ctx.cpos >= ctx.buf.len() {
-                        break;
-                    }
-                    let ch = ctx.buf.as_str()[*ctx.cpos..].chars().next().unwrap();
-                    let end = *ctx.cpos + ch.len_utf8();
-                    let toggled: String = if ch.is_uppercase() {
-                        ch.to_lowercase().collect()
-                    } else {
-                        ch.to_uppercase().collect()
-                    };
-                    ctx.replace_range(*ctx.cpos, end, &toggled);
-                    *ctx.cpos += toggled.len();
-                }
+                let start = *ctx.cpos;
+                let end = advance_chars(ctx.buf.as_str(), start, n);
+                let toggled = toggle_case(smelt_buffer::text::slice(ctx.buf.as_str(), start..end));
+                ctx.replace_range(start, end, &toggled);
+                *ctx.cpos = start + toggled.len();
                 clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             ctx.vim_state.record_change(RepeatCommand::Direct {
@@ -1149,18 +1153,13 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let text = ctx.register().to_string();
                     let insert = format!("\n{}", text);
                     let p = ctx.insert_str(eol, &insert);
-                    *ctx.cpos = p + 1;
-                    // Move to first non-blank.
-                    *ctx.cpos += ctx.buf.as_str()[*ctx.cpos..]
-                        .bytes()
-                        .take_while(|b| *b == b' ' || *b == b'\t')
-                        .count();
+                    *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), p + 1);
                 } else {
                     let after = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(ctx.buf.len());
                     let text = ctx.register().to_string();
                     let p = ctx.insert_str(after, &text);
                     let paste_end = p + text.len();
-                    *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), paste_end).max(p);
+                    *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), paste_end).max(p);
                     clamp_normal(ctx.buf.as_str(), ctx.cpos);
                 }
             }
@@ -1179,18 +1178,14 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let text = ctx.register().to_string();
                     let insert = format!("{}\n", text);
                     let p = ctx.insert_str(sol, &insert);
-                    *ctx.cpos = p;
-                    *ctx.cpos += ctx.buf.as_str()[*ctx.cpos..]
-                        .bytes()
-                        .take_while(|b| *b == b' ' || *b == b'\t')
-                        .count();
+                    *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), p);
                 } else {
                     let text = ctx.register().to_string();
                     let p = ctx.insert_str(*ctx.cpos, &text);
                     let plen = text.len();
                     if plen > 0 {
                         let paste_end = p + plen;
-                        *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), paste_end).max(p);
+                        *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), paste_end).max(p);
                         clamp_normal(ctx.buf.as_str(), ctx.cpos);
                     } else {
                         *ctx.cpos = p;
@@ -1472,10 +1467,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let after = &ctx.buf.as_str()[join_pos..];
                     if let Some(nl) = after.find('\n') {
                         let abs = join_pos + nl;
-                        let mut end = abs + 1;
-                        while end < ctx.buf.len() && ctx.buf.as_bytes()[end] == b' ' {
-                            end += 1;
-                        }
+                        let end = first_non_blank_at(ctx.buf.as_str(), abs + 1);
                         ctx.replace_range(abs, end, " ");
                         join_pos = abs;
                     } else {
@@ -1511,12 +1503,15 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                     *ctx.cpos = if spec.kind == TextObjectKind::Paragraph {
                         *ctx.mode = VimMode::VisualLine;
                         if end > start {
-                            line_start(ctx.buf.as_str(), prev_char_boundary(ctx.buf.as_str(), end))
+                            line_start(
+                                ctx.buf.as_str(),
+                                prev_grapheme_boundary(ctx.buf.as_str(), end),
+                            )
                         } else {
                             start
                         }
                     } else if end > 0 {
-                        prev_char_boundary(ctx.buf.as_str(), end)
+                        prev_grapheme_boundary(ctx.buf.as_str(), end)
                     } else {
                         end
                     };
@@ -1700,17 +1695,10 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
             {
                 ctx.save_undo();
-                let toggled: String = ctx.buf.as_str()[start..end]
-                    .chars()
-                    .map(|ch| {
-                        if ch.is_uppercase() {
-                            ch.to_lowercase().next().unwrap_or(ch)
-                        } else {
-                            ch.to_uppercase().next().unwrap_or(ch)
-                        }
-                    })
-                    .collect();
+                let toggled = toggle_case(smelt_buffer::text::slice(ctx.buf.as_str(), start..end));
                 ctx.replace_range(start, end, &toggled);
+                *ctx.cpos = start;
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             exit_visual(ctx);
             Action::Consumed
@@ -1722,6 +1710,8 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 let upper = ctx.buf.as_str()[start..end].to_uppercase();
                 ctx.replace_range(start, end, &upper);
+                *ctx.cpos = start;
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             exit_visual(ctx);
             Action::Consumed
@@ -1733,6 +1723,8 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 let lower = ctx.buf.as_str()[start..end].to_lowercase();
                 ctx.replace_range(start, end, &lower);
+                *ctx.cpos = start;
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             exit_visual(ctx);
             Action::Consumed
@@ -1750,10 +1742,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     if let Some(nl) = ctx.buf.as_str()[pos..remaining.min(ctx.buf.len())].find('\n')
                     {
                         let abs = pos + nl;
-                        let mut ws_end = abs + 1;
-                        while ws_end < ctx.buf.len() && ctx.buf.as_bytes()[ws_end] == b' ' {
-                            ws_end += 1;
-                        }
+                        let ws_end = first_non_blank_at(ctx.buf.as_str(), abs + 1);
                         let removed = ws_end - abs;
                         ctx.replace_range(abs, ws_end, " ");
                         remaining -= removed - 1; // replaced N chars with 1
@@ -1982,7 +1971,7 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         KeyCode::Enter => Some('\n'),
         _ => None,
     };
-    if let Some(c) = replacement_char {
+    if let Some(c) = replacement_char.filter(|c| *c != ATTACHMENT_MARKER) {
         if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
             let n = ctx.vim_state.take_count();
             ctx.vim_state.record_change(RepeatCommand::Replace {
@@ -1990,18 +1979,20 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                 replacement: c,
             });
             ctx.save_undo();
-            let mut pos = *ctx.cpos;
+
+            let start = *ctx.cpos;
+            let mut end = start;
+            let mut replacement = String::new();
             for _ in 0..n {
-                if pos >= ctx.buf.len() {
+                if end >= ctx.buf.len() {
                     break;
                 }
-                let old = ctx.buf.as_str()[pos..].chars().next().unwrap();
-                let end = pos + old.len_utf8();
-                let replacement = c.to_string();
-                ctx.replace_range(pos, end, &replacement);
-                pos += replacement.len();
+                end = next_grapheme_boundary(ctx.buf.as_str(), end);
+                replacement.push(c);
             }
-            *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), pos).max(*ctx.cpos);
+            ctx.replace_range(start, end, &replacement);
+            let replacement_end = start + replacement.len();
+            *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), replacement_end).max(start);
             clamp_normal(ctx.buf.as_str(), ctx.cpos);
         }
     }
@@ -2252,8 +2243,8 @@ fn surround_pair(c: char) -> Option<(&'static str, &'static str)> {
 }
 
 fn add_surround(ctx: &mut VimContext<'_>, start: usize, end: usize, open: &str, close: &str) {
-    let start = smelt_buffer::text::snap(ctx.buf.as_str(), start.min(ctx.buf.len()));
-    let end = smelt_buffer::text::snap(ctx.buf.as_str(), end.min(ctx.buf.len()));
+    let start = smelt_buffer::text::snap_grapheme(ctx.buf.as_str(), start.min(ctx.buf.len()));
+    let end = smelt_buffer::text::snap_grapheme(ctx.buf.as_str(), end.min(ctx.buf.len()));
     if start > end {
         return;
     }
@@ -2594,7 +2585,7 @@ fn enter_normal(ctx: &mut VimContext<'_>) {
     // Leaving insert mode moves cursor left one, unless at start of line.
     let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
     if *ctx.cpos > sol {
-        *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), *ctx.cpos);
+        *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), *ctx.cpos);
     }
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
@@ -3148,6 +3139,32 @@ mod tests {
     }
 
     #[test]
+    fn surround_edits_remove_complete_delimiter_graphemes() {
+        let mut deleted = TestHarness::new("say \"\u{301}hello\"\u{301} now");
+        deleted.cpos = "say \"\u{301}".len();
+        deleted.handle(key('d'));
+        deleted.handle(key('s'));
+        deleted.handle(key('"'));
+        assert_eq!(deleted.buf, "say hello now");
+        assert_eq!(
+            smelt_buffer::text::snap_grapheme(&deleted.buf, deleted.cpos),
+            deleted.cpos
+        );
+
+        let mut changed = TestHarness::new("say '\u{301}hello'\u{301} now");
+        changed.cpos = "say '\u{301}".len();
+        changed.handle(key('c'));
+        changed.handle(key('s'));
+        changed.handle(key('\''));
+        changed.handle(key('"'));
+        assert_eq!(changed.buf, "say \"hello\" now");
+        assert_eq!(
+            smelt_buffer::text::snap_grapheme(&changed.buf, changed.cpos),
+            changed.cpos
+        );
+    }
+
+    #[test]
     fn q_alias_deletes_nearest_quote_surrounding() {
         let mut h = TestHarness::new(r#"say `hello` and 'bye'"#);
         h.cpos = 5;
@@ -3266,6 +3283,31 @@ mod tests {
     }
 
     #[test]
+    fn paste_cursor_stays_on_a_grapheme_boundary_after_resegmentation() {
+        let mut after = TestHarness::new("a");
+        after
+            .clipboard
+            .kill_ring
+            .set_with_linewise("\u{301}".to_string(), false);
+        after.handle(key('p'));
+        assert_eq!(after.buf, "a\u{301}");
+        assert_eq!(after.cpos, 0);
+
+        let mut before = TestHarness::new("🇨🇦");
+        before
+            .clipboard
+            .kill_ring
+            .set_with_linewise("🇧".to_string(), false);
+        before.handle(key('P'));
+        assert_eq!(before.buf, "🇧🇨🇦");
+        assert_eq!(before.cpos, 0);
+        assert_eq!(
+            smelt_buffer::text::snap_grapheme(&before.buf, before.cpos),
+            before.cpos
+        );
+    }
+
+    #[test]
     fn test_tilde() {
         let mut h = TestHarness::new("hello");
         h.handle(key('~'));
@@ -3280,6 +3322,27 @@ mod tests {
         h.handle(key('X'));
         assert_eq!(h.buf, "Xello");
         assert_eq!(h.cpos, 0);
+    }
+
+    #[test]
+    fn replace_and_tilde_operate_on_complete_graphemes() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let mut replace = TestHarness::new(&format!("{grapheme}z"));
+            replace.handle(key('r'));
+            replace.handle(key('x'));
+            assert_eq!(replace.buf, "xz", "{grapheme:?}");
+        }
+
+        let mut toggle = TestHarness::new("e\u{301}x");
+        toggle.handle(key('~'));
+        assert_eq!(toggle.buf, "E\u{301}x");
+        assert_eq!(toggle.cpos, "E\u{301}".len());
+
+        let mut counted = TestHarness::new("ßx");
+        counted.handle(key('2'));
+        counted.handle(key('~'));
+        assert_eq!(counted.buf, "SSX");
+        assert_eq!(counted.cpos, 2);
     }
 
     #[test]
@@ -3599,6 +3662,16 @@ mod tests {
         h.handle(key('e'));
         h.handle(key('~'));
         assert_eq!(h.buf, "HELLO world");
+
+        let mut expanded = TestHarness::new("ßx");
+        expanded.handle(key('v'));
+        expanded.handle(key('~'));
+        assert_eq!(expanded.buf, "SSx");
+
+        let mut decomposed = TestHarness::new("e\u{301}x");
+        decomposed.handle(key('v'));
+        decomposed.handle(key('~'));
+        assert_eq!(decomposed.buf, "E\u{301}x");
     }
 
     #[test]
@@ -3762,6 +3835,17 @@ mod tests {
         h.handle(key('e'));
         h.handle(key('u'));
         assert_eq!(h.buf, "hello world");
+    }
+
+    #[test]
+    fn visual_case_mapping_keeps_cursor_on_a_grapheme_boundary() {
+        let mut h = TestHarness::new("İx");
+        h.handle(key('v'));
+        h.handle(key('l'));
+        h.handle(key('u'));
+
+        assert_eq!(h.buf, "i\u{307}x");
+        assert_eq!(h.cpos, 0);
     }
 
     #[test]
@@ -4181,6 +4265,17 @@ mod tests {
     }
 
     #[test]
+    fn replace_count_uses_original_grapheme_ranges_when_replacements_join() {
+        let mut h = TestHarness::new("🇦🇧🇨🇩x");
+        h.handle(key('2'));
+        h.handle(key('r'));
+        h.handle(key('🇺'));
+
+        assert_eq!(h.buf, "🇺🇺x");
+        assert_eq!(h.cpos, 0);
+    }
+
+    #[test]
     fn test_capital_p_cursor_on_last_pasted_char() {
         let mut h = TestHarness::new("world");
         h.clipboard
@@ -4204,6 +4299,15 @@ mod tests {
         let mut h = TestHarness::new("aaa\nbbb\nccc");
         h.handle(key('J'));
         assert_eq!(h.buf, "aaa bbb\nccc");
+    }
+
+    #[test]
+    fn join_removes_complete_leading_whitespace_graphemes() {
+        let mut h = TestHarness::new("aaa\n \u{301}bbb");
+        h.handle(key('J'));
+        assert_eq!(h.buf, "aaa bbb");
+        assert!(h.buf.is_char_boundary(h.cpos));
+        assert_eq!(smelt_buffer::text::snap_grapheme(&h.buf, h.cpos), h.cpos);
     }
 
     #[test]

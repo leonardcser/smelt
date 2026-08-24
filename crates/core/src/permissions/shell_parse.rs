@@ -6,7 +6,7 @@ use brush_parser::ast::{
 };
 use brush_parser::word::{self, WordPiece, WordPieceWithSource};
 use brush_parser::{tokenize_str, Parser, ParserOptions, SourceSpan, Token};
-use smelt_buffer::text::{byte_of_char, slice};
+use smelt_buffer::text::{byte_of_char, slice, trim_whitespace};
 
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
@@ -291,12 +291,16 @@ fn command_text(command: &ast::Command, source: &str) -> String {
                 || simple.prefix.as_ref().and_then(|prefix| prefix.0.first())
                     .is_some_and(|item| matches!(item, CommandPrefixOrSuffixItem::IoRedirect(_)))
     ) {
-        return command.to_string().trim().to_string();
+        let rendered = command.to_string();
+        return trim_whitespace(&rendered).to_owned();
     }
     command_span(command)
-        .map(|span| source_span_text(source, &span).trim().to_string())
+        .map(|span| trim_whitespace(source_span_text(source, &span)).to_owned())
         .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| command.to_string().trim().to_string())
+        .unwrap_or_else(|| {
+            let rendered = command.to_string();
+            trim_whitespace(&rendered).to_owned()
+        })
 }
 
 fn command_span(command: &ast::Command) -> Option<SourceSpan> {
@@ -380,9 +384,11 @@ fn combine_spans(first: Option<SourceSpan>, second: Option<SourceSpan>) -> Optio
 }
 
 fn source_span_text<'a>(source: &'a str, span: &SourceSpan) -> &'a str {
-    let start = byte_of_char(source, span.start.index);
-    let end = byte_of_char(source, span.end.index);
-    slice(source, start..end)
+    let range = smelt_buffer::text::covering_grapheme_range(
+        source,
+        byte_of_char(source, span.start.index)..byte_of_char(source, span.end.index),
+    );
+    slice(source, range)
 }
 
 fn collect_nested_program(program: &ast::Program, source: &str, out: &mut Vec<String>) {
@@ -587,7 +593,7 @@ fn collect_piece_commands(pieces: &[WordPieceWithSource], out: &mut Vec<String>)
 
 fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
     let Ok(tokens) = tokenize_str(command) else {
-        let trimmed = command.trim();
+        let trimmed = trim_whitespace(command);
         return (!trimmed.is_empty())
             .then(|| (trimmed.to_string(), None))
             .into_iter()
@@ -607,14 +613,15 @@ fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
         } else {
             continue;
         };
-        let operator_start = byte_of_char(command, span.start.index);
-        let text = slice(command, start..operator_start).trim();
+        let operator_start =
+            smelt_buffer::text::snap_grapheme(command, byte_of_char(command, span.start.index));
+        let text = trim_whitespace(slice(command, start..operator_start));
         if !text.is_empty() {
             out.push((text.to_string(), Some(separator)));
         }
-        start = byte_of_char(command, span.end.index);
+        start = smelt_buffer::text::ceil_grapheme(command, byte_of_char(command, span.end.index));
     }
-    let trailing = slice(command, start..command.len()).trim();
+    let trailing = trim_whitespace(slice(command, start..command.len()));
     if !trailing.is_empty() {
         out.push((trailing.to_string(), None));
     }
@@ -804,4 +811,44 @@ pub(super) fn is_single_cd(command: &str) -> bool {
             matches!(pieces.as_slice(), [piece] if matches!(&piece.piece, WordPiece::Text(text) if text == "cd"))
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_spans_expand_to_complete_graphemes() {
+        let leading = "echo  \u{301}value";
+        let tokens = tokenize_str(leading).unwrap();
+        let Token::Word(_, leading_span) = &tokens[1] else {
+            panic!("expected second word token");
+        };
+        assert_eq!(source_span_text(leading, leading_span), " \u{301}value");
+
+        let trailing = "echo value\u{600} ";
+        let tokens = tokenize_str(trailing).unwrap();
+        let Token::Word(_, trailing_span) = &tokens[1] else {
+            panic!("expected second word token");
+        };
+        assert_eq!(source_span_text(trailing, trailing_span), "value\u{600} ");
+    }
+
+    #[test]
+    fn tokenized_split_removes_complete_operator_graphemes() {
+        assert_eq!(
+            tokenized_split("left;\u{301} right"),
+            vec![
+                ("left".to_string(), Some(";".to_string())),
+                ("right".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            tokenized_split("left\u{600}; right"),
+            vec![
+                ("left".to_string(), Some(";".to_string())),
+                ("right".to_string(), None),
+            ]
+        );
+    }
 }

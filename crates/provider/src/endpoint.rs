@@ -5,10 +5,15 @@ pub struct ApiBaseNormalizationHint {
     pub endpoint: &'static str,
 }
 
-fn trim_api_base(api_base: &str) -> &str {
-    api_base
-        .trim()
-        .trim_end_matches(|ch: char| ch == '/' || ch.is_whitespace())
+pub(crate) fn trim_api_base(api_base: &str) -> &str {
+    let base = smelt_buffer::text::trim_start_whitespace(api_base);
+    let end = smelt_buffer::cell_width::grapheme_indices(base)
+        .rev()
+        .take_while(|(_, grapheme)| *grapheme == "/" || grapheme.chars().all(char::is_whitespace))
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(base.len());
+    &base[..end]
 }
 
 fn strip_known_endpoint(base: &str) -> Option<(&str, &'static str)> {
@@ -78,6 +83,14 @@ mod tests {
         assert_eq!(
             endpoint_url("https://api.anthropic.com/v1/messages/", "messages"),
             "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn api_base_trimming_keeps_graphemes_atomic() {
+        assert_eq!(
+            normalize_api_base(" \u{301}host\u{600}/"),
+            " \u{301}host\u{600}/"
         );
     }
 

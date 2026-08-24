@@ -1094,6 +1094,17 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_paste_preserves_unicode_split_inside_a_scalar() {
+        let text = "e\u{301}中👩\u{200d}💻9\u{fe0f}🇨🇦";
+        let input = format!("\x1b[200~{text}\x1b[201~").into_bytes();
+        let split = b"\x1b[200~e".len() + 1;
+        let mut p = Parser::new();
+
+        assert!(p.advance(&input[..split]).is_empty());
+        assert_eq!(p.advance(&input[split..]), vec![Event::Paste(text.into())]);
+    }
+
+    #[test]
     fn alt_char_uses_escape_prefix() {
         let mut p = Parser::new();
         assert!(p.advance(b"\x1bd").into_iter().any(|ev| matches!(

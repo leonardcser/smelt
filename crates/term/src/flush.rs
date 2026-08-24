@@ -1,4 +1,4 @@
-use super::grid::{char_width, to_crossterm_color, CellUpdate, Style};
+use super::grid::{to_crossterm_color, CellSymbol, CellUpdate, Style};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
@@ -21,13 +21,16 @@ pub fn flush_diff<'a, W: Write>(
             emit_style_diff(w, &current, &update.cell.style)?;
             current = update.cell.style;
         }
-        let printable = printable_symbol(update.cell.symbol);
-        let overflow = update.x.saturating_add(char_width(printable)) > update.row_width;
-        let symbol = if overflow { ' ' } else { printable };
-        let mut buf = [0u8; 4];
-        let s = symbol.encode_utf8(&mut buf);
-        w.write_all(s.as_bytes())?;
-        cursor_x = update.x.saturating_add(char_width(symbol));
+        let printable = printable_symbol(&update.cell.symbol);
+        let width = update.cell.symbol.width();
+        let overflow = update.x.saturating_add(width) > update.row_width;
+        let (symbol, width) = if overflow {
+            (" ", 1)
+        } else {
+            (printable, width)
+        };
+        w.write_all(symbol.as_bytes())?;
+        cursor_x = update.x.saturating_add(width);
         cursor_y = update.y;
     }
 
@@ -39,11 +42,11 @@ pub fn flush_diff<'a, W: Write>(
     Ok(())
 }
 
-fn printable_symbol(symbol: char) -> char {
-    if symbol.is_control() {
-        ' '
+fn printable_symbol(symbol: &CellSymbol) -> &str {
+    if symbol.as_str().chars().any(char::is_control) {
+        " "
     } else {
-        symbol
+        symbol.as_str()
     }
 }
 
@@ -416,6 +419,29 @@ mod tests {
     }
 
     #[test]
+    fn flush_streams_complete_graphemes_and_tracks_their_width() {
+        for (grapheme, width) in [
+            ("a\u{308}", 1),
+            ("👩\u{200d}💻", 2),
+            ("9\u{fe0f}", 2),
+            ("🇨🇦", 2),
+        ] {
+            let prev = Grid::new(10, 1);
+            let mut curr = Grid::new(10, 1);
+            let end = curr.put_str(0, 0, grapheme, Style::default());
+            assert_eq!(end, width);
+            curr.set(end, 0, 'X', Style::default());
+
+            let s = flush_to_string(&curr, &prev);
+
+            assert!(
+                s.contains(&format!("\x1b[1;1H{grapheme}X")),
+                "grapheme and following cell should stream in one run: {s:?}"
+            );
+        }
+    }
+
+    #[test]
     fn flush_streams_private_use_icons_as_narrow_glyphs() {
         let prev = Grid::new(10, 1);
         let mut curr = Grid::new(10, 1);
@@ -434,7 +460,7 @@ mod tests {
         let prev = Grid::new(2, 1);
         let mut curr = Grid::new(2, 1);
         let cell = curr.cell_mut(1, 0).expect("right edge cell");
-        cell.symbol = '漢';
+        cell.symbol = CellSymbol::new("漢");
         cell.style = Style::default();
 
         let s = flush_to_string(&curr, &prev);

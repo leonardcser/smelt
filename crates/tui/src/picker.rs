@@ -136,7 +136,7 @@ pub(crate) fn open(
             overlay: overlay_id,
             placement,
             reversed,
-            max_label: max_label_chars(&items),
+            max_label: max_label_width(&items),
             items,
             selected,
             materialized: 0..0,
@@ -159,7 +159,7 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     let Some(mut state) = app.overlays.take_picker(leaf) else {
         return;
     };
-    state.max_label = max_label_chars(&items);
+    state.max_label = max_label_width(&items);
     state.items = items;
     state.selected = clamp_selected(selected, state.items.len());
     state.materialized = 0..0;
@@ -416,10 +416,12 @@ fn anchor_for(ui: &crate::smelt_edit::Ui, placement: PickerPlacement, height: u1
 }
 
 /// Longest `prefix + label` width across the item set, for description alignment.
-fn max_label_chars(items: &[PickerItem]) -> usize {
+fn max_label_width(items: &[PickerItem]) -> usize {
     items
         .iter()
-        .map(|i| i.prefix.chars().count() + i.label.chars().count())
+        .map(|item| {
+            smelt_buffer::cell_width::joined_text_width([item.prefix.as_str(), item.label.as_str()])
+        })
         .max()
         .unwrap_or(0)
 }
@@ -458,7 +460,10 @@ fn write_buffer_range(
                 visual_row as usize
             };
             let item = &items[src_idx];
-            let label_chars = item.prefix.chars().count() + item.label.chars().count();
+            let label_width = smelt_buffer::cell_width::joined_text_width([
+                item.prefix.as_str(),
+                item.label.as_str(),
+            ]);
 
             out.print(&" ".repeat(INDENT));
 
@@ -473,7 +478,7 @@ fn write_buffer_range(
                 out.pop_style();
             }
             if let Some(desc) = item.description.as_deref() {
-                let pad = max_label.saturating_sub(label_chars) + DESC_GAP;
+                let pad = max_label.saturating_sub(label_width) + DESC_GAP;
                 out.print(&" ".repeat(pad));
                 out.push(None, Style::new().dim());
                 out.print(desc);
@@ -649,28 +654,40 @@ mod tests {
         assert_eq!(scroll, 2);
     }
 
-    // ── max_label_chars ──────────────────────────────────────────────────
+    // ── max_label_width ──────────────────────────────────────────────────
 
     #[test]
-    fn max_label_chars_sums_prefix_and_label_widths() {
+    fn max_label_width_sums_prefix_and_label_widths() {
         let items = vec![
             PickerItem::new("abc").with_prefix("# "),
             PickerItem::new("xy").with_prefix(">> "),
         ];
         // "# abc" = 5 chars, ">> xy" = 5 chars. Max = 5.
-        assert_eq!(max_label_chars(&items), 5);
+        assert_eq!(max_label_width(&items), 5);
     }
 
     #[test]
-    fn max_label_chars_counts_chars_not_bytes_for_unicode() {
-        // "日本語" = 3 chars, 9 bytes. Verify chars().count() semantics.
-        let items = vec![PickerItem::new("日本語")];
-        assert_eq!(max_label_chars(&items), 3);
+    fn max_label_width_uses_terminal_cells_for_unicode() {
+        let items = vec![
+            PickerItem::new("日本語"),
+            PickerItem::new("e\u{301}e\u{301}e\u{301}e\u{301}"),
+            PickerItem::new("👩\u{200d}💻x"),
+        ];
+
+        assert_eq!(max_label_width(&items), 6);
+        assert_eq!(
+            max_label_width(&[PickerItem::new("\u{fe0f}").with_prefix("9")]),
+            2
+        );
+        assert_eq!(
+            max_label_width(&[PickerItem::new("\u{fe0e}").with_prefix("⌚")]),
+            1
+        );
     }
 
     #[test]
-    fn max_label_chars_returns_zero_for_empty_list() {
-        assert_eq!(max_label_chars(&[]), 0);
+    fn max_label_width_returns_zero_for_empty_list() {
+        assert_eq!(max_label_width(&[]), 0);
     }
 
     // ── anchor_for ───────────────────────────────────────────────────────

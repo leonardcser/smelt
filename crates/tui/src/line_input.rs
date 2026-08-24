@@ -50,7 +50,7 @@ pub(crate) enum EditCommand {
 
 impl LineEdit {
     pub(crate) fn new(text: String, cursor: usize) -> Self {
-        let cursor = text::snap(&text, cursor);
+        let cursor = text::snap_grapheme(&text, cursor);
         Self {
             text,
             cursor,
@@ -63,9 +63,9 @@ impl LineEdit {
         cursor: usize,
         selection_anchor: Option<usize>,
     ) -> Self {
-        let cursor = text::snap(&text, cursor);
+        let cursor = text::snap_grapheme(&text, cursor);
         let selection_anchor = selection_anchor
-            .map(|anchor| text::snap(&text, anchor))
+            .map(|anchor| text::snap_grapheme(&text, anchor))
             .filter(|anchor| *anchor != cursor);
         Self {
             text,
@@ -118,11 +118,11 @@ impl LineEdit {
             EditCommand::DeleteToStart => self.delete_to(0),
             EditCommand::DeleteToEnd => self.delete_to(self.text.len()),
             EditCommand::MoveLeft { select } => {
-                let new = text::prev_char_boundary(&self.text, self.cursor);
+                let new = text::prev_grapheme_boundary(&self.text, self.cursor);
                 self.move_to(new, select);
             }
             EditCommand::MoveRight { select } => {
-                let new = text::next_char_boundary(&self.text, self.cursor);
+                let new = text::next_grapheme_boundary(&self.text, self.cursor);
                 self.move_to(new, select);
             }
             EditCommand::MoveWordLeft { select } => self.move_to(self.prev_word_boundary(), select),
@@ -150,16 +150,15 @@ impl LineEdit {
         if self.replace_selection("") {
             return;
         }
-        let start = text::prev_char_boundary(&self.text, self.cursor);
+        let start = text::prev_grapheme_boundary(&self.text, self.cursor);
         self.replace_selection_or_range(start..self.cursor, "");
-        self.cursor = start;
     }
 
     fn delete_forward(&mut self) {
         if self.replace_selection("") {
             return;
         }
-        let end = text::next_char_boundary(&self.text, self.cursor);
+        let end = text::next_grapheme_boundary(&self.text, self.cursor);
         self.replace_selection_or_range(self.cursor..end, "");
     }
 
@@ -169,7 +168,6 @@ impl LineEdit {
         }
         let start = self.prev_word_boundary();
         self.replace_selection_or_range(start..self.cursor, "");
-        self.cursor = start;
     }
 
     fn delete_word_forward(&mut self) {
@@ -184,36 +182,38 @@ impl LineEdit {
         if self.replace_selection("") {
             return;
         }
-        let target = text::snap(&self.text, target);
+        let target = text::snap_grapheme(&self.text, target);
         let (start, end) = if target <= self.cursor {
             (target, self.cursor)
         } else {
             (self.cursor, target)
         };
         self.replace_selection_or_range(start..end, "");
-        self.cursor = start;
     }
 
     fn replace_selection(&mut self, with: &str) -> bool {
         let Some(range) = self.selection_range() else {
             return false;
         };
-        self.cursor = range.start + with.len();
-        text::replace_range(&mut self.text, range, with);
-        self.cursor = text::snap(&self.text, self.cursor);
-        self.selection_anchor = None;
+        self.replace_selection_or_range(range, with);
         true
     }
 
     fn replace_selection_or_range(&mut self, range: std::ops::Range<usize>, with: &str) {
-        let start = text::snap(&self.text, range.start);
+        let range = text::snapped_grapheme_range(&self.text, range);
+        let start = range.start;
         text::replace_range(&mut self.text, range, with);
-        self.cursor = text::snap(&self.text, start + with.len());
+        let cursor = start + with.len();
+        self.cursor = if with.is_empty() {
+            text::snap_grapheme(&self.text, cursor)
+        } else {
+            text::ceil_grapheme(&self.text, cursor)
+        };
         self.selection_anchor = None;
     }
 
     fn move_to(&mut self, pos: usize, select: bool) {
-        let pos = text::snap(&self.text, pos);
+        let pos = text::snap_grapheme(&self.text, pos);
         if select {
             if self.selection_anchor.is_none() && pos != self.cursor {
                 self.selection_anchor = Some(self.cursor);
@@ -228,12 +228,12 @@ impl LineEdit {
     }
 
     fn prev_word_boundary(&self) -> usize {
-        let mut pos = text::snap(&self.text, self.cursor);
+        let mut pos = text::snap_grapheme(&self.text, self.cursor);
         if pos == 0 {
             return 0;
         }
         while pos > 0 {
-            let prev = text::prev_char_boundary(&self.text, pos);
+            let prev = text::prev_grapheme_boundary(&self.text, pos);
             let ch = text::slice(&self.text, prev..pos).chars().next();
             if !matches!(ch, Some(c) if c.is_whitespace()) {
                 break;
@@ -243,13 +243,13 @@ impl LineEdit {
         if pos == 0 {
             return 0;
         }
-        let prev = text::prev_char_boundary(&self.text, pos);
+        let prev = text::prev_grapheme_boundary(&self.text, pos);
         let word = text::slice(&self.text, prev..pos)
             .chars()
             .next()
             .is_some_and(is_word_char);
         while pos > 0 {
-            let prev = text::prev_char_boundary(&self.text, pos);
+            let prev = text::prev_grapheme_boundary(&self.text, pos);
             let ch = text::slice(&self.text, prev..pos).chars().next();
             if ch.is_some_and(is_word_char) != word || ch.is_some_and(char::is_whitespace) {
                 break;
@@ -260,13 +260,13 @@ impl LineEdit {
     }
 
     fn next_word_boundary(&self) -> usize {
-        let mut pos = text::snap(&self.text, self.cursor);
+        let mut pos = text::snap_grapheme(&self.text, self.cursor);
         let len = self.text.len();
         if pos >= len {
             return len;
         }
         while pos < len {
-            let next = text::next_char_boundary(&self.text, pos);
+            let next = text::next_grapheme_boundary(&self.text, pos);
             let ch = text::slice(&self.text, pos..next).chars().next();
             if !matches!(ch, Some(c) if c.is_whitespace()) {
                 break;
@@ -276,13 +276,13 @@ impl LineEdit {
         if pos >= len {
             return len;
         }
-        let next = text::next_char_boundary(&self.text, pos);
+        let next = text::next_grapheme_boundary(&self.text, pos);
         let word = text::slice(&self.text, pos..next)
             .chars()
             .next()
             .is_some_and(is_word_char);
         while pos < len {
-            let next = text::next_char_boundary(&self.text, pos);
+            let next = text::next_grapheme_boundary(&self.text, pos);
             let ch = text::slice(&self.text, pos..next).chars().next();
             if ch.is_some_and(is_word_char) != word || ch.is_some_and(char::is_whitespace) {
                 break;
@@ -411,6 +411,65 @@ mod tests {
         edit.apply(EditCommand::Backspace);
         assert_eq!(edit.text(), "a日b");
         assert_eq!(edit.cursor(), 4);
+    }
+
+    #[test]
+    fn cursor_selection_and_deletion_keep_graphemes_atomic() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let text = format!("a{grapheme}b");
+            let start = 1;
+            let end = start + grapheme.len();
+            let mut edit = LineEdit::new(text.clone(), start);
+
+            edit.apply(EditCommand::MoveRight { select: true });
+            assert_eq!(edit.selection_range(), Some(start..end), "{grapheme:?}");
+            edit.apply(EditCommand::Backspace);
+            assert_eq!(edit.text(), "ab", "{grapheme:?}");
+
+            let mut edit = LineEdit::new(text, end);
+            edit.apply(EditCommand::Backspace);
+            assert_eq!(edit.text(), "ab", "{grapheme:?}");
+            assert_eq!(edit.cursor(), start, "{grapheme:?}");
+        }
+    }
+
+    #[test]
+    fn pasted_graphemes_are_preserved_exactly() {
+        let pasted = "besta\u{308}tigt 👩\u{200d}💻 9\u{fe0f}";
+        let mut edit = LineEdit::new(String::new(), 0);
+        edit.apply(EditCommand::InsertText(pasted.into()));
+        assert_eq!(edit.text(), pasted);
+        assert_eq!(edit.cursor(), pasted.len());
+    }
+
+    #[test]
+    fn insert_cursor_moves_after_graphemes_formed_with_following_text() {
+        for (inserted, following) in [
+            ("e", "\u{301}z"),
+            ("9", "\u{fe0f}z"),
+            ("👩", "\u{200d}💻z"),
+            ("🇨", "🇦z"),
+        ] {
+            let mut edit = LineEdit::new(following.into(), 0);
+            edit.apply(EditCommand::InsertText(inserted.into()));
+            assert_eq!(edit.text(), format!("{inserted}{following}"));
+            assert_eq!(
+                text::snap_grapheme(edit.text(), edit.cursor()),
+                edit.cursor()
+            );
+            assert_eq!(edit.cursor(), text::next_grapheme_boundary(edit.text(), 0));
+        }
+    }
+
+    #[test]
+    fn deletion_cursor_stays_valid_when_neighbors_form_a_grapheme() {
+        let mut edit = LineEdit::new("🇨 🇦z".into(), "🇨 ".len());
+        edit.apply(EditCommand::Backspace);
+        assert_eq!(edit.text(), "🇨🇦z");
+        assert_eq!(
+            text::snap_grapheme(edit.text(), edit.cursor()),
+            edit.cursor()
+        );
     }
 
     #[test]

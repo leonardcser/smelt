@@ -1779,7 +1779,7 @@ impl<'a> Turn<'a> {
             if partial_text.is_empty() && partial_reasoning.is_empty() {
                 if reasoning_parts.is_empty() {
                     if let Some(ref reasoning) = reasoning {
-                        let trimmed = reasoning.trim();
+                        let trimmed = smelt_buffer::text::trim_whitespace(reasoning);
                         if !trimmed.is_empty() {
                             self.emit(EngineEvent::Reasoning {
                                 kind: ReasoningKind::Raw,
@@ -1800,7 +1800,8 @@ impl<'a> Turn<'a> {
                 }
 
                 if let Some(ref content) = content {
-                    let trimmed = content.as_text().trim();
+                    let content_text = content.as_text();
+                    let trimmed = smelt_buffer::text::trim_whitespace(content_text);
                     if !trimmed.is_empty() {
                         self.emit(EngineEvent::Text {
                             content: trimmed.to_string(),
@@ -3046,9 +3047,9 @@ fn reasoning_part_id(item_id: &str, part_index: u32, kind: ReasoningKind) -> Str
 }
 
 fn leading_bold_title(source: &str) -> Option<(&str, &str)> {
-    let after_open = source.trim_start().strip_prefix("**")?;
+    let after_open = smelt_buffer::text::trim_start_whitespace(source).strip_prefix("**")?;
     let close = after_open.find("**")?;
-    let title = after_open[..close].trim();
+    let title = smelt_buffer::text::trim_whitespace(&after_open[..close]);
     (!title.is_empty()).then_some((title, &after_open[close + 2..]))
 }
 
@@ -3057,7 +3058,7 @@ fn streaming_summary_title(source: &str) -> Option<String> {
 }
 
 fn normalize_reasoning_part(kind: ReasoningKind, source: &str) -> (Option<String>, String) {
-    let source = source.trim();
+    let source = smelt_buffer::text::trim_whitespace(source);
     if kind == ReasoningKind::Raw {
         return (None, source.to_string());
     }
@@ -3073,7 +3074,10 @@ fn normalize_reasoning_part(kind: ReasoningKind, source: &str) -> (Option<String
         .filter(|line| line.trim() != "<!-- -->")
         .collect::<Vec<_>>()
         .join("\n");
-    (Some(title.to_string()), content.trim().to_string())
+    (
+        Some(title.to_string()),
+        smelt_buffer::text::trim_whitespace(&content).to_string(),
+    )
 }
 
 fn send_reasoning_part_finished(

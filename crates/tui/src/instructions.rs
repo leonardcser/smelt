@@ -1,3 +1,4 @@
+use smelt_buffer::text;
 use std::path::{Path, PathBuf};
 
 const FILENAME: &str = "AGENTS.md";
@@ -44,7 +45,7 @@ fn render_sections(files: &[(PathBuf, String)]) -> Option<String> {
     let sections: Vec<String> = files
         .iter()
         .filter_map(|(path, content)| {
-            let trimmed = content.trim();
+            let trimmed = text::trim_whitespace(content);
             if trimmed.is_empty() {
                 None
             } else {
@@ -121,5 +122,12 @@ mod tests {
         let files = vec![pair("/x/AGENTS.md", "\n\n  hello\nworld  \n\n")];
         let out = render_sections(&files).unwrap();
         assert_eq!(out, "Instructions from /x/AGENTS.md:\nhello\nworld");
+    }
+
+    #[test]
+    fn render_sections_never_trims_part_of_a_grapheme() {
+        let files = vec![pair("/x/AGENTS.md", " \u{301}rule\u{600} ")];
+        let out = render_sections(&files).unwrap();
+        assert_eq!(out, "Instructions from /x/AGENTS.md:\n \u{301}rule\u{600} ");
     }
 }

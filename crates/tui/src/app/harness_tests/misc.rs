@@ -4,7 +4,21 @@ use crate::app::transcript_scroll_trace::{
     TranscriptProjectionTargetTrace, TranscriptRecordTraceRange, TranscriptScrollIntent,
     TranscriptScrollTraceFrame, TranscriptTraceAnchor,
 };
+use crate::app::TuiApp;
 use crate::smelt_edit::RowIndex;
+
+#[test]
+fn notification_highlight_uses_terminal_width_for_unicode() {
+    let summary = "besta\u{308}tigt 日本 👩\u{200d}💻";
+    let (line, _, _, msg_start, msg_end) =
+        TuiApp::notification_parts(smelt_core::messages::MessageKind::Info, summary, 80);
+
+    assert!(line.trim_end().ends_with(summary));
+    assert_eq!(
+        msg_end - msg_start,
+        smelt_buffer::cell_width::text_width_u16(summary)
+    );
+}
 
 #[test]
 fn lua_paint_callback_uses_scoped_tui_host_after_ui_paint() {
@@ -723,6 +737,53 @@ fn cancellation_discards_queued_provider_output_and_lifecycle_events() {
         "deferred completion must not apply after cancellation"
     );
     assert!(!app.agent_running());
+}
+
+#[test]
+fn streaming_tool_output_preserves_decomposed_unicode_across_frames() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 22);
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    let call_id = "unicode-stream".to_string();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: call_id.clone(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::from([(
+            "command".into(),
+            serde_json::json!("unicode output"),
+        )]),
+        called_at_ms: 0,
+    }));
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id,
+        call_id: call_id.clone(),
+        line: "[1/2] Bestellung 10500 besta".into(),
+    }));
+    app.render_silent();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id,
+        call_id: call_id.clone(),
+        line: "\u{308}tigt.pdf\n[2/2] Commande 10551 confirme".into(),
+    }));
+    app.render_silent();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id,
+        call_id,
+        line: "\u{301}e.pdf\n".into(),
+    }));
+
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("[1/2] Bestellung 10500 besta\u{308}tigt.pdf"),
+        "frame: {frame}"
+    );
+    assert!(
+        frame.contains("[2/2] Commande 10551 confirme\u{301}e.pdf"),
+        "frame: {frame}"
+    );
 }
 
 #[test]
@@ -1911,7 +1972,7 @@ fn transcript_h_and_l_move_row_cursor_horizontally() {
     app.type_char('l');
     assert_eq!(
         app.transcript_window().row_cursor.unwrap().byte_col,
-        crate::smelt_edit::text::next_char_boundary(&row, start.byte_col)
+        crate::smelt_edit::text::next_grapheme_boundary(&row, start.byte_col)
     );
 
     app.type_char('h');
@@ -1943,7 +2004,7 @@ fn transcript_line_end_uses_absolute_document_row() {
 
     assert_eq!(
         app.transcript_window().row_cursor.unwrap().byte_col,
-        crate::smelt_edit::text::prev_char_boundary(&row, row.len())
+        crate::smelt_edit::text::prev_grapheme_boundary(&row, row.len())
     );
 }
 

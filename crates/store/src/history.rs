@@ -3,8 +3,7 @@ use std::ops::Range;
 use protocol::HistoryItem;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use smelt_buffer::text;
-use unicode_width::UnicodeWidthStr;
+use smelt_buffer::{cell_width, text};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -166,12 +165,7 @@ pub struct StoredTranscriptBlock {
 fn estimated_text_row_profile(text: &str) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] {
     let mut rows = [0_u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()];
     for line in text.lines() {
-        let cells = if line.is_ascii() {
-            line.len()
-        } else {
-            UnicodeWidthStr::width(line)
-        }
-        .max(1) as u64;
+        let cells = cell_width::text_width(line).max(1) as u64;
         for (total, width) in rows.iter_mut().zip(TRANSCRIPT_EXTENT_PROFILE_WIDTHS) {
             *total = total.saturating_add(cells.div_ceil(u64::from(width)));
         }
@@ -460,12 +454,13 @@ fn object_ref_json(hash: &str, raw_size: u64) -> Value {
 
 pub(crate) fn collect_text(value: &Value, max_bytes: usize) -> String {
     let mut out = String::new();
-    collect_text_inner(value, &mut out, max_bytes);
+    let mut truncated = false;
+    collect_text_inner(value, &mut out, max_bytes, &mut truncated);
     out
 }
 
-fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize) {
-    if out.len() >= max_bytes {
+fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize, truncated: &mut bool) {
+    if *truncated || out.len() >= max_bytes {
         return;
     }
     match value {
@@ -475,12 +470,14 @@ fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize) {
             }
             out.push_str(value);
             if out.len() > max_bytes {
-                out.truncate(text::snap(out, max_bytes));
+                let keep = text::grapheme_prefix(out, max_bytes).len();
+                text::replace_range(out, keep..out.len(), "");
+                *truncated = true;
             }
         }
         Value::Array(values) => {
             for value in values {
-                collect_text_inner(value, out, max_bytes);
+                collect_text_inner(value, out, max_bytes, truncated);
             }
         }
         Value::Object(map) => {
@@ -490,7 +487,7 @@ fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize) {
             let mut keys = map.keys().collect::<Vec<_>>();
             keys.sort_unstable();
             for key in keys {
-                collect_text_inner(&map[key], out, max_bytes);
+                collect_text_inner(&map[key], out, max_bytes, truncated);
             }
         }
         _ => {}
@@ -552,10 +549,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collect_text_truncates_at_utf8_boundaries() {
+    fn collect_text_truncates_at_grapheme_boundaries() {
         let value = json!({"text": "ab🙂cd"});
         assert_eq!(collect_text(&value, 5), "ab");
         assert_eq!(collect_text(&value, 6), "ab🙂");
+
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let value = json!({"text": format!("a{grapheme}b")});
+            assert_eq!(collect_text(&value, grapheme.len()), "a", "{grapheme:?}");
+        }
+
+        let values = json!(["abce\u{301}", "later"]);
+        assert_eq!(collect_text(&values, 4), "abc");
     }
 
     #[test]

@@ -161,7 +161,6 @@ impl PaintRegistry {
 trait PaintSurface {
     fn width(&self) -> u16;
     fn height(&self) -> u16;
-    fn set(&mut self, col: u16, row: u16, symbol: char, style: crate::smelt_edit::Style);
     fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style);
     fn fill(
         &mut self,
@@ -178,10 +177,6 @@ impl PaintSurface for GridSlice<'_> {
 
     fn height(&self) -> u16 {
         GridSlice::height(self)
-    }
-
-    fn set(&mut self, col: u16, row: u16, symbol: char, style: crate::smelt_edit::Style) {
-        GridSlice::set(self, col, row, symbol, style);
     }
 
     fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style) {
@@ -232,8 +227,8 @@ impl PaintLayer {
                     continue;
                 }
                 let cell = self.grid.cell(col, row);
-                if cell.symbol != '\0' {
-                    slice.set(col, row, cell.symbol, cell.style);
+                if !cell.symbol.is_continuation() {
+                    slice.set_symbol(col, row, cell.symbol.as_str(), cell.style);
                 }
             }
         }
@@ -247,17 +242,6 @@ impl PaintSurface for PaintLayer {
 
     fn height(&self) -> u16 {
         self.grid.height()
-    }
-
-    fn set(&mut self, col: u16, row: u16, symbol: char, style: crate::smelt_edit::Style) {
-        if col >= self.grid.width() || row >= self.grid.height() {
-            return;
-        }
-        self.grid.set(col, row, symbol, style);
-        self.mark_rect(Rect::new(row, col, 1, 1));
-        if col + 1 < self.grid.width() && self.grid.cell(col + 1, row).symbol == '\0' {
-            self.mark_rect(Rect::new(row, col + 1, 1, 1));
-        }
     }
 
     fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style) {
@@ -287,6 +271,31 @@ fn with_slice<R>(f: impl FnOnce(&mut dyn PaintSurface) -> R) -> LuaResult<R> {
     Ok(CURRENT_SLICE.with(f))
 }
 
+fn one_grapheme_or_space(text: &str) -> LuaResult<&str> {
+    let mut graphemes = smelt_buffer::cell_width::graphemes(text);
+    let symbol = graphemes.next().unwrap_or(" ");
+    if graphemes.next().is_some() {
+        return Err(LuaError::RuntimeError(
+            "smelt.paint: set symbol must be one grapheme cluster".into(),
+        ));
+    }
+    Ok(symbol)
+}
+
+fn one_scalar_or_space(text: Option<&str>) -> LuaResult<char> {
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return Ok(' ');
+    };
+    let mut chars = text.chars();
+    let symbol = chars.next().expect("non-empty string has a scalar");
+    if chars.next().is_some() {
+        return Err(LuaError::RuntimeError(
+            "smelt.paint: fill_rect symbol must be one Unicode scalar".into(),
+        ));
+    }
+    Ok(symbol)
+}
+
 /// Marker userdata enabling idiomatic `slice:set(...)` call syntax.
 /// Methods delegate to [`with_slice`] at call time rather than carrying the borrow.
 pub(crate) struct PaintSliceUd;
@@ -298,12 +307,12 @@ impl mlua::UserData for PaintSliceUd {
         methods.add_method(
             "set",
             |_, _, (row, col, ch, style): (u16, u16, String, Option<mlua::Table>)| {
-                let symbol = ch.chars().next().unwrap_or(' ');
+                let symbol = one_grapheme_or_space(&ch)?;
                 let resolved_style = match style {
                     Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
                     None => crate::smelt_edit::Style::new(),
                 };
-                with_slice(|s| s.set(col, row, symbol, resolved_style))
+                with_slice(|s| s.put_str(col, row, symbol, resolved_style))
             },
         );
         methods.add_method(
@@ -328,7 +337,7 @@ impl mlua::UserData for PaintSliceUd {
                 Option<String>,
                 Option<mlua::Table>,
             )| {
-                let symbol = ch.as_deref().and_then(|s| s.chars().next()).unwrap_or(' ');
+                let symbol = one_scalar_or_space(ch.as_deref())?;
                 let resolved_style = match style {
                     Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
                     None => crate::smelt_edit::Style::new(),
@@ -349,9 +358,9 @@ pub fn register_paint_slice_docs() {
         fields: smelt_core::class_methods! {
             "width" => fn() -> i64, "Return the slice width in cells.",
             "height" => fn() -> i64, "Return the slice height in cells.",
-            "set" => fn(row: u16, col: u16, ch: String, style: Option<mlua::Table>) -> (), "Write a single character with optional style at (row, col).",
+            "set" => fn(row: u16, col: u16, ch: String, style: Option<mlua::Table>) -> (), "Write exactly one grapheme cluster with optional style at (row, col).",
             "put_str" => fn(row: u16, col: u16, text: String, style: Option<mlua::Table>) -> (), "Write a string with optional style at (row, col).",
-            "fill_rect" => fn(row: u16, col: u16, w: u16, h: u16, ch: Option<String>, style: Option<mlua::Table>) -> (), "Fill a rectangle with an optional character and style.",
+            "fill_rect" => fn(row: u16, col: u16, w: u16, h: u16, ch: Option<String>, style: Option<mlua::Table>) -> (), "Fill a rectangle with one optional Unicode scalar and style.",
         },
     });
 }
@@ -467,7 +476,7 @@ mod tests {
     #[test]
     fn paint_layer_preserves_untouched_cells_and_applies_explicit_blanks() {
         let mut layer = PaintLayer::new(3, 1);
-        PaintSurface::set(&mut layer, 1, 0, ' ', crate::smelt_edit::Style::default());
+        PaintSurface::put_str(&mut layer, 1, 0, " ", crate::smelt_edit::Style::default());
         let mut grid = Grid::new(3, 1);
         grid.fill(
             Rect::new(0, 0, 3, 1),
@@ -495,6 +504,36 @@ mod tests {
     }
 
     #[test]
+    fn lua_set_writes_one_complete_grapheme() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let lua = Lua::new();
+            let slice = lua.create_userdata(PaintSliceUd).unwrap();
+            lua.globals().set("slice", slice).unwrap();
+            lua.globals().set("grapheme", grapheme).unwrap();
+            let mut layer = PaintLayer::new(4, 1);
+
+            scope_slice(&mut layer, || {
+                lua.load("slice:set(0, 0, grapheme)").exec().unwrap();
+            });
+
+            assert_eq!(layer.grid.cell(0, 0).symbol, grapheme);
+        }
+    }
+
+    #[test]
+    fn lua_paint_rejects_ambiguous_symbols() {
+        let lua = Lua::new();
+        let slice = lua.create_userdata(PaintSliceUd).unwrap();
+        lua.globals().set("slice", slice).unwrap();
+        let mut layer = PaintLayer::new(4, 1);
+
+        scope_slice(&mut layer, || {
+            assert!(lua.load("slice:set(0, 0, 'ab')").exec().is_err());
+            assert!(lua.load("slice:fill_rect(0, 0, 2, 1, 'é')").exec().is_err());
+        });
+    }
+
+    #[test]
     fn scoped_slice_rejects_aliases_and_restores_nested_scope() {
         let mut outer_grid = crate::smelt_edit::Grid::new(3, 1);
         let mut outer = outer_grid.slice_mut(crate::smelt_edit::Rect::new(0, 0, 3, 1));
@@ -505,7 +544,7 @@ mod tests {
             assert_eq!(with_slice(|slice| slice.width()).unwrap(), 3);
             with_slice(|slice| {
                 assert!(with_slice(|_| ()).is_err());
-                slice.set(0, 0, 'a', crate::smelt_edit::Style::new());
+                slice.put_str(0, 0, "a", crate::smelt_edit::Style::new());
             })
             .unwrap();
 

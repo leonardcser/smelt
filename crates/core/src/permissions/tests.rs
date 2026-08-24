@@ -9,6 +9,36 @@ use protocol::AgentMode;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn command_grant_display_only_strips_standalone_space_graphemes() {
+    let grant = |pattern: &str| PermissionGrant::Command {
+        tool: "bash".to_string(),
+        pattern: pattern.to_string(),
+    };
+
+    assert_eq!(
+        PermissionGrant::display_subjects(
+            &[grant("git status"), grant("git diff"), grant("git log")],
+            Path::new("/home/test"),
+        ),
+        "git status, diff, log"
+    );
+    assert_eq!(
+        PermissionGrant::display_subjects(
+            &[grant("git status"), grant("git \u{301}diff")],
+            Path::new("/home/test"),
+        ),
+        "git status, git \u{301}diff"
+    );
+    assert_eq!(
+        PermissionGrant::display_subjects(
+            &[grant("git\u{600} status"), grant("git\u{600} diff")],
+            Path::new("/home/test"),
+        ),
+        "git\u{600} status, git\u{600} diff"
+    );
+}
+
 fn resolved_tool_path(path: &str, base_dir: &Path) -> PathBuf {
     resolve_tool_path(path, base_dir)
         .resolved()

@@ -465,7 +465,7 @@ fn compact_request_audit(req: &mut RequestAuditIntent, raw_payload_bytes: usize)
 }
 
 fn audit_summary_text(text: &str) -> String {
-    smelt_buffer::text::slice(text, 0..MAX_AUDIT_SUMMARY_TEXT_BYTES).to_string()
+    smelt_buffer::text::grapheme_prefix(text, MAX_AUDIT_SUMMARY_TEXT_BYTES).to_string()
 }
 
 fn reject_audit(cause: PersistenceCause) -> Result<(), PersistenceCause> {

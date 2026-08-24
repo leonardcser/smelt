@@ -182,7 +182,7 @@ impl TuiApp {
     /// are normalized to prompt-command syntax so Lua APIs keep their historical shape,
     /// while explicit `:`, `/`, and `!` prefixes keep their typed meaning.
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
-        let trimmed = line.trim_start();
+        let trimmed = smelt_buffer::text::trim_start_whitespace(line);
         let normalized: std::borrow::Cow<str> =
             if trimmed.starts_with('/') || trimmed.starts_with(':') || trimmed.starts_with('!') {
                 std::borrow::Cow::Borrowed(line)

@@ -18,7 +18,7 @@ mod tests {
     use smelt_buffer::cell_width;
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
-    use smelt_core::content::LayoutContext;
+    use smelt_core::content::{markdown_stream::thinking_summary, LayoutContext};
     use smelt_core::theme::Theme;
     use smelt_core::transcript_model::{gap_between, Block, ToolState, ToolStatus, ViewState};
     use std::collections::HashMap;
@@ -27,26 +27,6 @@ mod tests {
     const BLOCK_GUTTER_SPACE: &str = "  ";
     const CHROME_INNER_PAD: usize = 1;
     const THINKING_GUTTER: &str = "│ ";
-
-    fn thinking_summary(content: &str) -> (String, usize) {
-        let mut label = None;
-        let mut lines = 0usize;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            lines += 1;
-            if label.is_none()
-                && trimmed.starts_with("**")
-                && trimmed.ends_with("**")
-                && trimmed.len() > 4
-            {
-                label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
-            }
-        }
-        (label.unwrap_or_else(|| "thinking".to_string()), lines)
-    }
 
     fn mk_collector_buf() -> (Buffer, Theme) {
         (

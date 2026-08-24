@@ -115,28 +115,11 @@ fn truncate_middle_to_bytes(content: &str, max_bytes: usize) -> String {
 }
 
 fn prefix_with_byte_budget(content: &str, max_bytes: usize) -> String {
-    let mut out = String::new();
-    for ch in content.chars() {
-        if out.len() + ch.len_utf8() > max_bytes {
-            break;
-        }
-        out.push(ch);
-    }
-    out
+    smelt_buffer::text::grapheme_prefix(content, max_bytes).to_string()
 }
 
 fn suffix_with_byte_budget(content: &str, max_bytes: usize) -> String {
-    let mut start = content.len();
-    let mut used = 0;
-    for (idx, ch) in content.char_indices().rev() {
-        let len = ch.len_utf8();
-        if used + len > max_bytes {
-            break;
-        }
-        start = idx;
-        used += len;
-    }
-    content[start..].to_string()
+    smelt_buffer::text::grapheme_suffix(content, max_bytes).to_string()
 }
 
 #[cfg(test)]
@@ -215,6 +198,14 @@ mod tests {
 
         assert!(out.len() <= max_tool_output_bytes());
         assert!(out.contains(TRUNCATION_NOTICE));
+    }
+
+    #[test]
+    fn byte_budget_truncation_keeps_grapheme_clusters_atomic() {
+        assert_eq!(prefix_with_byte_budget("e\u{301}x", 1), "");
+        assert_eq!(suffix_with_byte_budget("xe\u{301}", 2), "");
+        assert_eq!(prefix_with_byte_budget("👩\u{200d}💻x", 8), "");
+        assert_eq!(suffix_with_byte_budget("x🇨🇦", 4), "");
     }
 
     fn invocation(call_id: &str, content: String) -> ToolInvocation {

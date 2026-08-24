@@ -1,3 +1,5 @@
+use smelt_buffer::text;
+
 /// Marker prefix on synthetic user messages that announce a mode change.
 /// The TUI's set_mode handler emits these; the transcript renderer keys
 /// on the prefix to display the note as a small inline pill instead of
@@ -9,7 +11,7 @@ pub const MODE_NOTE_PREFIX: &str = "[smelt:mode] ";
 /// mode switches. The human-facing body comes from the Lua mode registry;
 /// this wrapper keeps the model-visible marker stable.
 pub fn mode_change_note(note: &str) -> String {
-    format!("{MODE_NOTE_PREFIX}{}", note.trim())
+    format!("{MODE_NOTE_PREFIX}{}", text::trim_whitespace(note))
 }
 
 /// Marker prefix on synthetic user messages that announce durable runtime
@@ -23,7 +25,7 @@ pub const CONTEXT_NOTE_PREFIX: &str = "[smelt:context] ";
 pub fn context_note(note: &str) -> String {
     format!(
         "{CONTEXT_NOTE_PREFIX}Session context replaces earlier session context:\n{}",
-        note.trim()
+        text::trim_whitespace(note)
     )
 }
 
@@ -39,7 +41,7 @@ pub fn named_context_note(name: &str, note: &str) -> String {
     let name = serde_json::to_string(name).expect("serialize context note name");
     format!(
         "{CONTEXT_NOTE_PREFIX}Named context {name} replaces earlier context with the same name:\n{}",
-        note.trim()
+        text::trim_whitespace(note)
     )
 }
 
@@ -60,5 +62,23 @@ pub const PROCESS_STATUS_NOTE_PREFIX: &str = "[smelt:process] ";
 /// process exits. The visible body is kept separate from its stable marker so
 /// session restore can recover the original transcript block kind.
 pub fn process_status_note(note: &str) -> String {
-    format!("{PROCESS_STATUS_NOTE_PREFIX}{}", note.trim())
+    format!(
+        "{PROCESS_STATUS_NOTE_PREFIX}{}",
+        text::trim_whitespace(note)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_trimming_keeps_graphemes_atomic() {
+        let body = " \u{301}status\u{600} ";
+        assert_eq!(mode_change_note(body), format!("{MODE_NOTE_PREFIX}{body}"));
+        assert_eq!(
+            process_status_note(body),
+            format!("{PROCESS_STATUS_NOTE_PREFIX}{body}")
+        );
+    }
 }

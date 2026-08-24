@@ -243,10 +243,10 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = TestApp::builder().with_vim(false).build();
-    app
-            .push_transcript_block(smelt_core::transcript_model::Block::Text {
-                content: "```text\nalpha\nbeta\ngamma\n```\n\nIt avoids background weirdness, looks good in most themes.".into(),
-            });
+    let expected = "Bestellung 10500 besta\u{308}tigt.pdf 日本 👩\u{200d}💻 🇨🇦";
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: format!("```text\nalpha\nbeta\ngamma\n```\n\n{expected}").into(),
+    });
     app.render_silent();
 
     let transcript_win = app.transcript_window();
@@ -262,7 +262,7 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
     let line_idx = buf
         .lines()
         .iter()
-        .position(|line| line.contains("It avoids background weirdness"))
+        .position(|line| line.contains("Bestellung 10500"))
         .expect("target line rendered");
     assert!(line_idx >= scroll_top, "target line should be visible");
     let row = vp.rect.top + (line_idx - scroll_top) as u16;
@@ -288,10 +288,7 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
         })));
     }
 
-    assert_eq!(
-        app.core_probe().clipboard.kill_ring.current(),
-        "It avoids background weirdness, looks good in most themes."
-    );
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), expected);
 }
 
 #[test]

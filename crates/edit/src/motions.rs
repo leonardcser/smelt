@@ -1,8 +1,8 @@
 //! Pure cursor-motion primitives over `&str` byte positions.
 
 use super::text::{
-    byte_to_cell, cell_to_byte, line_end, line_start, next_char_boundary, prev_char_boundary,
-    CharClass,
+    byte_to_cell, cell_to_byte, line_end, line_start, next_grapheme_boundary,
+    prev_grapheme_boundary, snap_grapheme, CharClass,
 };
 
 /// Direction + variant for `f`/`F`/`t`/`T`-style find-char motions.
@@ -34,7 +34,7 @@ pub(crate) fn move_left(buf: &str, cpos: usize) -> usize {
     if cpos <= sol {
         return cpos; // Don't cross line boundary.
     }
-    prev_char_boundary(buf, cpos)
+    prev_grapheme_boundary(buf, cpos)
 }
 
 /// Move right, staying within the current line and not landing on '\n'.
@@ -44,19 +44,19 @@ pub(crate) fn move_right_normal(buf: &str, cpos: usize) -> usize {
     }
     let eol = line_end(buf, cpos);
     let last_on_line = if eol > line_start(buf, cpos) {
-        prev_char_boundary(buf, eol)
+        prev_grapheme_boundary(buf, eol)
     } else {
         eol // Empty line - stay put.
     };
     if cpos >= last_on_line {
         return cpos;
     }
-    next_char_boundary(buf, cpos)
+    next_grapheme_boundary(buf, cpos)
 }
 
 /// Move right inclusive (for operator motions on `l`).
 pub(crate) fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
-    next_char_boundary(buf, cpos).min(buf.len())
+    next_grapheme_boundary(buf, cpos).min(buf.len())
 }
 
 pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
@@ -67,7 +67,7 @@ pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
 pub(crate) fn line_end_normal(buf: &str, cpos: usize) -> usize {
     let end = line_end(buf, cpos);
     if end > line_start(buf, cpos) {
-        prev_char_boundary(buf, end)
+        prev_grapheme_boundary(buf, end)
     } else {
         end
     }
@@ -81,11 +81,12 @@ pub(crate) fn first_non_blank_at(buf: &str, from: usize) -> usize {
     let eol = line_end(buf, from);
     let mut pos = from;
     while pos < eol {
-        let c = buf[pos..].chars().next().unwrap();
+        let next = next_grapheme_boundary(buf, pos);
+        let c = buf[pos..next].chars().next().unwrap();
         if c != ' ' && c != '\t' {
             break;
         }
-        pos += c.len_utf8();
+        pos = next;
     }
     pos
 }
@@ -161,14 +162,14 @@ pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Opt
     match kind {
         FindKind::Forward | FindKind::ForwardTill => {
             // When `cpos` sits on the line's terminating `\n` (insert mode at
-            // end-of-line),  `next_char_boundary` advances past the newline
+            // end-of-line),  `next_grapheme_boundary` advances past the newline
             // while `eol` stays put, which inverts the slice range. Clamp.
-            let start = next_char_boundary(buf, cpos).min(eol);
-            for (i, c) in buf[start..eol].char_indices() {
-                if c == ch {
+            let start = next_grapheme_boundary(buf, cpos).min(eol);
+            for (i, grapheme) in smelt_buffer::cell_width::grapheme_indices(&buf[start..eol]) {
+                if grapheme.starts_with(ch) {
                     let pos = start + i;
                     return Some(match kind {
-                        FindKind::ForwardTill => prev_char_boundary(buf, pos).max(cpos),
+                        FindKind::ForwardTill => prev_grapheme_boundary(buf, pos).max(cpos),
                         _ => pos,
                     });
                 }
@@ -177,11 +178,11 @@ pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Opt
         }
         FindKind::Backward | FindKind::BackwardTill => {
             let search = &buf[sol..cpos];
-            for (i, c) in search.char_indices().rev() {
-                if c == ch {
+            for (i, grapheme) in smelt_buffer::cell_width::grapheme_indices(search).rev() {
+                if grapheme.starts_with(ch) {
                     let pos = sol + i;
                     return Some(match kind {
-                        FindKind::BackwardTill => next_char_boundary(buf, pos).min(cpos),
+                        FindKind::BackwardTill => next_grapheme_boundary(buf, pos).min(cpos),
                         _ => pos,
                     });
                 }
@@ -195,8 +196,8 @@ pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Opt
 pub(crate) fn repeat_find(buf: &str, mut pos: usize, kind: FindKind, ch: char, n: usize) -> usize {
     for _ in 0..n {
         let search_pos = match kind {
-            FindKind::ForwardTill => next_char_boundary(buf, pos),
-            FindKind::BackwardTill => prev_char_boundary(buf, pos),
+            FindKind::ForwardTill => next_grapheme_boundary(buf, pos),
+            FindKind::BackwardTill => prev_grapheme_boundary(buf, pos),
             _ => pos,
         };
         if let Some(p) = find_char(buf, search_pos, kind, ch) {
@@ -268,7 +269,7 @@ pub(crate) fn advance_chars(buf: &str, pos: usize, n: usize) -> usize {
         if p >= buf.len() {
             break;
         }
-        p = next_char_boundary(buf, p);
+        p = next_grapheme_boundary(buf, p);
     }
     p
 }
@@ -279,7 +280,7 @@ pub(crate) fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
         if p == 0 {
             break;
         }
-        p = prev_char_boundary(buf, p);
+        p = prev_grapheme_boundary(buf, p);
     }
     p
 }
@@ -291,22 +292,24 @@ pub(crate) fn clamp_normal(buf: &str, cpos: &mut usize) {
         *cpos = 0;
         return;
     }
+    *cpos = snap_grapheme(buf, *cpos);
     if *cpos >= buf.len() {
         *cpos = if buf.ends_with('\n') {
             buf.len()
         } else {
-            prev_char_boundary(buf, buf.len())
+            prev_grapheme_boundary(buf, buf.len())
         };
     } else if buf.as_bytes()[*cpos] == b'\n' && *cpos > 0 {
         // Cursor must not sit on an interior '\n'.
         let sol = line_start(buf, *cpos);
         if *cpos > sol {
-            *cpos = prev_char_boundary(buf, *cpos);
+            *cpos = prev_grapheme_boundary(buf, *cpos);
         }
     }
-    debug_assert!(
-        *cpos <= buf.len() && buf.is_char_boundary(*cpos),
-        "clamp_normal postcondition: cpos {} not on char boundary in buf len {}",
+    debug_assert_eq!(
+        snap_grapheme(buf, *cpos),
+        *cpos,
+        "clamp_normal postcondition: cpos {} not on grapheme boundary in buf len {}",
         *cpos,
         buf.len()
     );
@@ -351,6 +354,17 @@ mod tests {
         // "a漢b": boundaries 0,1,4,5. From 4 (start of b) we land on 1 (start of 漢).
         assert_eq!(move_left("a漢b", 4), 1);
         assert_eq!(move_left("a漢b", 1), 0);
+    }
+
+    #[test]
+    fn horizontal_motion_keeps_graphemes_atomic() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}"] {
+            let text = format!("a{grapheme}b");
+            let start = 1;
+            let end = start + grapheme.len();
+            assert_eq!(move_right_normal(&text, start), end, "{grapheme:?}");
+            assert_eq!(move_left(&text, end), start, "{grapheme:?}");
+        }
     }
 
     #[test]
@@ -408,6 +422,8 @@ mod tests {
     fn first_non_blank_skips_leading_whitespace_to_first_content_char() {
         assert_eq!(first_non_blank("  abc", 3), 2);
         assert_eq!(first_non_blank("\t\thello", 4), 2);
+        assert_eq!(first_non_blank(" \u{301}hello", 4), " \u{301}".len());
+        assert_eq!(first_non_blank("\u{600} hello", 4), 0);
         assert_eq!(first_non_blank("abc", 1), 0);
     }
 

@@ -211,7 +211,7 @@ pub fn redact(input: &str) -> String {
             if let Some(sep_pos) = matched.find('=').or_else(|| matched.find(':')) {
                 let value_start = caps.start() + sep_pos + 1;
                 let value_str = &matched[sep_pos + 1..];
-                let trimmed = value_str.trim_start();
+                let trimmed = smelt_buffer::text::trim_start_whitespace(value_str);
                 let trim_offset = value_str.len() - trimmed.len();
                 let actual_start = value_start + trim_offset;
 
@@ -248,6 +248,14 @@ pub fn redact(input: &str) -> String {
 
     if ranges.is_empty() {
         return input.to_string();
+    }
+
+    // A matched scalar can share a terminal glyph with adjacent text. Redact the
+    // complete grapheme so the replacement never leaves an orphaned mark.
+    for range in &mut ranges {
+        let covered = smelt_buffer::text::covering_grapheme_range(input, range.start..range.end);
+        range.start = covered.start;
+        range.end = covered.end;
     }
 
     // Merge overlapping ranges, keeping the label of the first (highest-confidence) match.
@@ -492,6 +500,18 @@ mod tests {
         let input = "export GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
         let result = redact(input);
         assert!(!result.contains("ghp_"));
+        assert_redacted_with(&result, "github_pat");
+    }
+
+    #[test]
+    fn redaction_ranges_expand_to_complete_graphemes() {
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let input = format!("\u{600}{token}\u{301}");
+        let result = redact(&input);
+
+        assert!(!result.contains(token));
+        assert!(!result.contains('\u{600}'));
+        assert!(!result.contains('\u{301}'));
         assert_redacted_with(&result, "github_pat");
     }
 

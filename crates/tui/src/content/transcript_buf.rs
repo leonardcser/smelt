@@ -4006,8 +4006,8 @@ fn append_copy_chunk(
         } else {
             text.len()
         };
-        let start_byte = smelt_buffer::text::snap(text, start_col.min(text.len()));
-        let end_byte = smelt_buffer::text::snap(text, end_col.min(text.len()));
+        let start_byte = smelt_buffer::text::snap_grapheme(text, start_col.min(text.len()));
+        let end_byte = smelt_buffer::text::snap_grapheme(text, end_col.min(text.len()));
         let cell_start = smelt_buffer::text::byte_to_cell(text, start_byte);
         let cell_end = smelt_buffer::text::byte_to_cell(text, end_byte);
         let highlight_row = highlights.get(local).map(Vec::as_slice).unwrap_or(&[]);
@@ -4082,6 +4082,61 @@ pub(crate) mod tests {
     };
 
     static NEXT_INVOCATION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    #[test]
+    fn document_copy_ranges_never_split_grapheme_clusters() {
+        let materialized = |text: String| MaterializedTranscriptRange {
+            row_base: 0,
+            total_rows: 1,
+            rebuild: RenderedBufferRebuild {
+                lines: vec![text],
+                ..RenderedBufferRebuild::default()
+            },
+            layout: Vec::new(),
+            row_identities: Vec::new(),
+        };
+
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let text = format!("a{grapheme}b");
+            let inside = 1 + grapheme.chars().next().unwrap().len_utf8();
+
+            let mut head = CopyRangeAccumulator::new(0, 0);
+            append_copy_chunk(
+                &mut head,
+                materialized(text.clone()),
+                DocRange {
+                    start: crate::smelt_edit::DocPosition {
+                        row: 0,
+                        byte_col: 0,
+                    },
+                    end: crate::smelt_edit::DocPosition {
+                        row: 0,
+                        byte_col: inside,
+                    },
+                },
+                0,
+            );
+            assert_eq!(head.finish(), "a", "{grapheme:?}");
+
+            let mut tail = CopyRangeAccumulator::new(0, 0);
+            append_copy_chunk(
+                &mut tail,
+                materialized(text.clone()),
+                DocRange {
+                    start: crate::smelt_edit::DocPosition {
+                        row: 0,
+                        byte_col: inside,
+                    },
+                    end: crate::smelt_edit::DocPosition {
+                        row: 0,
+                        byte_col: text.len(),
+                    },
+                },
+                0,
+            );
+            assert_eq!(tail.finish(), format!("{grapheme}b"));
+        }
+    }
 
     fn next_invocation_id() -> protocol::InvocationId {
         protocol::InvocationId::new(
@@ -8192,8 +8247,7 @@ pub(crate) mod tests {
         while content.len() < RESUME_RECORD_BLOCK_TEXT_BYTES {
             content.push_str(paragraph);
         }
-        content.truncate(RESUME_RECORD_BLOCK_TEXT_BYTES);
-        content
+        smelt_buffer::text::grapheme_prefix(&content, RESUME_RECORD_BLOCK_TEXT_BYTES).to_string()
     }
 
     fn resume_block_record(

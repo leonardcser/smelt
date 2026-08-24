@@ -2,13 +2,13 @@
 
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
 use crate::smelt_edit::VimMode;
-use smelt_buffer::text::{next_char_boundary, prev_char_boundary, slice};
+use smelt_buffer::text::{next_grapheme_boundary, prev_grapheme_boundary, slice};
 use smelt_core::attachment::AttachmentId;
 
 impl PromptState {
     /// Shrink prompt source over `range` and keep every byte-offset
     /// anchor valid: drop attachment_ids whose markers lived in the range,
-    /// drain the source bytes, then clamp cpos / selection_anchor /
+    /// remove the source bytes, then clamp cpos / selection_anchor /
     /// visual_anchor onto the new source. Use this whenever the range is
     /// computed from offsets that might also live in other anchors.
     pub(super) fn safe_shrink(&mut self, ctx: &mut PromptCtx<'_>, range: std::ops::Range<usize>) {
@@ -50,7 +50,8 @@ impl PromptState {
             self.replace_selection_for_insert(ctx);
         }
         let p = ctx.buf.text_mut().insert(ctx.win.cpos(), c);
-        ctx.win.set_cpos(p + c.len_utf8());
+        let cursor = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), p + c.len_utf8());
+        ctx.win.set_cpos(cursor);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -74,16 +75,18 @@ impl PromptState {
             }
             let cpos = ctx.win.cpos();
             self.safe_shrink(ctx, start..cpos);
-            ctx.win.set_cpos(start);
+            let cursor = smelt_buffer::text::snap_grapheme(ctx.buf.source(), start);
+            ctx.win.set_cpos(cursor);
             return;
         }
-        let prev = prev_char_boundary(ctx.buf.source(), ctx.win.cpos());
+        let prev = prev_grapheme_boundary(ctx.buf.source(), ctx.win.cpos());
         if prev == 0 {
             self.from_paste = false;
         }
         let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, prev..cpos);
-        ctx.win.set_cpos(prev);
+        let cursor = smelt_buffer::text::snap_grapheme(ctx.buf.source(), prev);
+        ctx.win.set_cpos(cursor);
     }
 
     /// Byte offset of the opening `"` when the cursor is just after the closing `"` of a `"@path"` token.
@@ -95,7 +98,11 @@ impl PromptState {
         }
         let inner = &before[..before.len() - 1];
         let at_pos = inner.rfind("@\"")?;
-        if at_pos > 0 && !slice(src, 0..at_pos).ends_with(char::is_whitespace) {
+        if at_pos > 0
+            && !smelt_buffer::cell_width::graphemes(slice(src, 0..at_pos))
+                .next_back()
+                .is_some_and(|grapheme| grapheme.chars().all(char::is_whitespace))
+        {
             return None;
         }
         if inner[at_pos + 2..].contains('"') {
@@ -118,7 +125,8 @@ impl PromptState {
         }
         let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, target..cpos);
-        ctx.win.set_cpos(target);
+        let cursor = smelt_buffer::text::snap_grapheme(ctx.buf.source(), target);
+        ctx.win.set_cpos(cursor);
     }
 
     pub(super) fn delete_char_forward(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -126,7 +134,7 @@ impl PromptState {
             return;
         }
         let cpos = ctx.win.cpos();
-        let next = next_char_boundary(ctx.buf.source(), cpos);
+        let next = next_grapheme_boundary(ctx.buf.source(), cpos);
         self.safe_shrink(ctx, cpos..next);
     }
 
@@ -170,7 +178,8 @@ impl PromptState {
         let cpos = ctx.win.cpos();
         let killed = ctx.buf.copy_range(start..cpos);
         self.safe_shrink(ctx, start..cpos);
-        ctx.win.set_cpos(start);
+        let cursor = smelt_buffer::text::snap_grapheme(ctx.buf.source(), start);
+        ctx.win.set_cpos(cursor);
         self.kill_and_copy(killed, clipboard);
     }
 
@@ -181,7 +190,8 @@ impl PromptState {
             .unwrap_or(0);
         let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, start..cpos);
-        ctx.win.set_cpos(start);
+        let cursor = smelt_buffer::text::snap_grapheme(ctx.buf.source(), start);
+        ctx.win.set_cpos(cursor);
     }
 
     pub(super) fn uppercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -201,7 +211,8 @@ impl PromptState {
         // still need a clamp because case mapping can change byte length
         // (e.g. ß → SS).
         ctx.buf.text_mut().replace_range(cpos..end, &upper);
-        ctx.win.set_cpos(cpos + new_len);
+        let cursor = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), cpos + new_len);
+        ctx.win.set_cpos(cursor);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -218,7 +229,8 @@ impl PromptState {
         let lower: String = slice(ctx.buf.source(), cpos..end).to_lowercase();
         let new_len = lower.len();
         ctx.buf.text_mut().replace_range(cpos..end, &lower);
-        ctx.win.set_cpos(cpos + new_len);
+        let cursor = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), cpos + new_len);
+        ctx.win.set_cpos(cursor);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -245,7 +257,8 @@ impl PromptState {
         let cpos = ctx.win.cpos();
         let cap_len = cap.len();
         ctx.buf.text_mut().replace_range(cpos..end, &cap);
-        ctx.win.set_cpos(cpos + cap_len);
+        let cursor = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), cpos + cap_len);
+        ctx.win.set_cpos(cursor);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -329,13 +342,16 @@ impl PromptState {
             self.from_paste = true;
         }
         let p = ctx.buf.text_mut().insert_str(ctx.win.cpos(), &data);
-        ctx.win.set_cpos(p + data.len());
+        let cursor = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), p + data.len());
+        ctx.win.set_cpos(cursor);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn insert_attachment_id(&mut self, ctx: &mut PromptCtx<'_>, id: AttachmentId) {
         let p = ctx.buf.text_mut().insert_marker(ctx.win.cpos(), id);
-        ctx.win.set_cpos(p + ATTACHMENT_MARKER.len_utf8());
+        let cursor =
+            smelt_buffer::text::ceil_grapheme(ctx.buf.source(), p + ATTACHMENT_MARKER.len_utf8());
+        ctx.win.set_cpos(cursor);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 

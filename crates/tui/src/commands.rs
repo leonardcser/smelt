@@ -92,10 +92,12 @@ pub(crate) fn prompt_quit_alias(line: &str) -> bool {
 
 fn parse_for_context<'a>(line: &'a str, ctx: CommandContext) -> ParsedCommand<'a> {
     if ctx.source == CommandSource::Prompt
-        && line.trim_start().starts_with(':')
+        && smelt_buffer::text::trim_start_whitespace(line).starts_with(':')
         && !prompt_quit_alias(line)
     {
-        return ParsedCommand::Bare { text: line.trim() };
+        return ParsedCommand::Bare {
+            text: smelt_buffer::text::trim_whitespace(line),
+        };
     }
     parse_command_line(line)
 }
@@ -130,7 +132,7 @@ fn ex_command_effect(
     arg: Option<&str>,
     ctx: CommandContext,
 ) -> CommandEffect {
-    let name = name.trim();
+    let name = smelt_buffer::text::trim_whitespace(name);
     match name {
         "q" | "quit" => {
             if bang {
@@ -394,7 +396,7 @@ impl TuiApp {
         raw: &str,
         sink: ShellSink,
     ) -> Option<ExecHandle> {
-        let cmd = raw.trim();
+        let cmd = smelt_buffer::text::trim_whitespace(raw);
         if cmd.is_empty() {
             return None;
         }
@@ -416,7 +418,6 @@ impl TuiApp {
         let cmd = cmd.to_string();
         let cwd = self.workspace.cwd_path().to_owned();
         tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
             let mut command = tokio::process::Command::new("sh");
             command
                 .arg("-c")
@@ -436,8 +437,10 @@ impl TuiApp {
 
             let stdout = child.stdout.take().unwrap();
             let stderr = child.stderr.take().unwrap();
-            let mut stdout_lines = tokio::io::BufReader::new(stdout).lines();
-            let mut stderr_lines = tokio::io::BufReader::new(stderr).lines();
+            let mut stdout_reader =
+                smelt_core::process::LossyLines::new(tokio::io::BufReader::new(stdout));
+            let mut stderr_reader =
+                smelt_core::process::LossyLines::new(tokio::io::BufReader::new(stderr));
             let mut stdout_done = false;
             let mut stderr_done = false;
 
@@ -450,13 +453,13 @@ impl TuiApp {
                         let _ = tx.send(ExecEvent::Done(Some(130)));
                         return;
                     }
-                    line = stdout_lines.next_line(), if !stdout_done => {
+                    line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(l)) => { let _ = tx.send(ExecEvent::Output(l)); }
                             _ => { stdout_done = true; }
                         }
                     }
-                    line = stderr_lines.next_line(), if !stderr_done => {
+                    line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
                             Ok(Some(l)) => { let _ = tx.send(ExecEvent::Output(l)); }
                             _ => { stderr_done = true; }
@@ -1372,6 +1375,27 @@ mod tests {
         assert_eq!(output, vec![shell_cwd.to_string_lossy().into_owned()]);
     }
 
+    #[tokio::test]
+    async fn shell_escape_preserves_unicode_and_replaces_invalid_utf8() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut handle = app
+            .app
+            .start_shell_escape("printf 'besta\\314\\210tigt\\n\\377x\\n'")
+            .expect("shell escape starts");
+
+        let mut output = Vec::new();
+        while let Some(event) = handle.rx.recv().await {
+            match event {
+                ExecEvent::Output(line) => output.push(line),
+                ExecEvent::Done(code) => {
+                    assert_eq!(code, Some(0));
+                    break;
+                }
+            }
+        }
+        assert_eq!(output, vec!["besta\u{308}tigt", "\u{fffd}x"]);
+    }
+
     #[test]
     fn empty_or_whitespace_lines_parse_as_empty() {
         assert_eq!(parse_command_line(""), ParsedCommand::Empty);
@@ -1411,6 +1435,24 @@ mod tests {
         assert_eq!(
             parse_command_line("/model claude-haiku"),
             slash("model", Some("claude-haiku"))
+        );
+    }
+
+    #[test]
+    fn command_parser_never_splits_whitespace_graphemes() {
+        assert_eq!(
+            parse_command_line("/name\u{600}  arg"),
+            slash("name\u{600} ", Some("arg"))
+        );
+        assert_eq!(
+            parse_command_line("/name  \u{301}arg"),
+            slash("name", Some(" \u{301}arg"))
+        );
+        assert_eq!(
+            parse_command_line(" \u{301}!echo"),
+            ParsedCommand::Bare {
+                text: " \u{301}!echo"
+            }
         );
     }
 

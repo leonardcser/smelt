@@ -9,58 +9,56 @@ pub struct AtFileRef {
 }
 
 pub fn parse_at_file_refs(text: &str) -> Vec<AtFileRef> {
+    let mut graphemes = smelt_buffer::cell_width::grapheme_indices(text).peekable();
     let mut refs = Vec::new();
-    let mut chars = text.char_indices().peekable();
-    let mut prev: Option<char> = None;
+    let mut previous_is_boundary = true;
 
-    while let Some((_, ch)) = chars.next() {
-        if ch != '@' || prev.is_some_and(|c| !c.is_whitespace()) {
-            prev = Some(ch);
+    while let Some((_, grapheme)) = graphemes.next() {
+        let is_whitespace = grapheme.chars().all(char::is_whitespace);
+        if !grapheme.starts_with('@') || !previous_is_boundary {
+            previous_is_boundary = is_whitespace;
             continue;
         }
 
-        let Some((token_start, first)) = chars.peek().copied() else {
+        let Some((token_start, first)) = graphemes.next() else {
             break;
         };
-
-        if first == '"' {
-            chars.next();
-            let path_start = token_start + first.len_utf8();
-            let mut end = None;
-            for (idx, c) in chars.by_ref() {
-                if c == '"' {
-                    end = Some(idx);
+        if first.starts_with('"') {
+            let path_start = token_start + first.len();
+            let mut closing = None;
+            for (start, grapheme) in graphemes.by_ref() {
+                if grapheme.contains('"') {
+                    closing = Some((start, grapheme));
                     break;
                 }
             }
-            if let Some(path_end) = end {
-                if path_end > path_start {
-                    refs.push(AtFileRef {
-                        end: path_end + '"'.len_utf8(),
-                        token: text[path_start..path_end].to_string(),
-                    });
-                }
-                prev = Some('"');
-            } else {
+            let Some((path_end, closing)) = closing else {
                 break;
-            }
-        } else {
-            let path_start = token_start;
-            let mut path_end = text.len();
-            while let Some((idx, c)) = chars.peek().copied() {
-                if c.is_whitespace() {
-                    path_end = idx;
-                    break;
-                }
-                chars.next();
-            }
+            };
             if path_end > path_start {
                 refs.push(AtFileRef {
-                    end: path_end,
+                    end: path_end + closing.len(),
                     token: text[path_start..path_end].to_string(),
                 });
             }
-            prev = text[path_end..].chars().next();
+            previous_is_boundary = false;
+        } else if first.chars().all(char::is_whitespace) {
+            previous_is_boundary = true;
+        } else {
+            let path_start = token_start;
+            let mut path_end = text.len();
+            while let Some(&(start, grapheme)) = graphemes.peek() {
+                if grapheme.chars().all(char::is_whitespace) {
+                    path_end = start;
+                    break;
+                }
+                graphemes.next();
+            }
+            refs.push(AtFileRef {
+                end: path_end,
+                token: text[path_start..path_end].to_string(),
+            });
+            previous_is_boundary = false;
         }
     }
     refs
@@ -190,6 +188,36 @@ mod tests {
                 .map(|r| r.token)
                 .collect::<Vec<_>>(),
             vec!["資料/メモ.txt"]
+        );
+    }
+
+    #[test]
+    fn file_ref_tokens_and_endpoints_never_split_graphemes() {
+        let quoted = parse_at_file_refs("read @\"\u{301}missing\u{600}\" next")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(quoted.token, "missing");
+
+        let plain = parse_at_file_refs("read @missing\u{600}  next")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(plain.token, "missing\u{600} ");
+
+        for (text, reference) in [
+            ("read @\"\u{301}missing\u{600}\" next", quoted),
+            ("read @missing\u{600}  next", plain),
+        ] {
+            assert_eq!(
+                smelt_buffer::text::snap_grapheme(text, reference.end),
+                reference.end
+            );
+        }
+        assert!(parse_at_file_refs("read  \u{301}@missing").is_empty());
+        assert_eq!(
+            parse_at_file_refs("read @\u{301}missing")[0].token,
+            "missing"
         );
     }
 

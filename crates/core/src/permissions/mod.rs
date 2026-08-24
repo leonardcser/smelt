@@ -273,11 +273,19 @@ impl PermissionGrant {
                         if let Some(head) = &command_head {
                             subject
                                 .strip_prefix(head)
-                                .and_then(|rest| rest.strip_prefix(' '))
+                                .and_then(|rest| {
+                                    let separator =
+                                        smelt_buffer::cell_width::graphemes(rest).next()?;
+                                    (separator == " ").then(|| &rest[separator.len()..])
+                                })
                                 .unwrap_or(&subject)
                                 .to_string()
                         } else {
-                            command_head = subject.split_whitespace().next().map(str::to_string);
+                            let head_end = smelt_buffer::cell_width::grapheme_indices(&subject)
+                                .find(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
+                                .map(|(start, _)| start)
+                                .unwrap_or(subject.len());
+                            command_head = (head_end > 0).then(|| subject[..head_end].to_string());
                             subject
                         }
                     }
@@ -1503,7 +1511,7 @@ pub fn shell_parser_decide(rs: &RuleSet, command: &str, _mode: AgentMode) -> Dec
 }
 
 fn shell_parser_decide_match(rs: &RuleSet, command: &str) -> Option<Decision> {
-    let command = command.trim();
+    let command = smelt_buffer::text::trim_whitespace(command);
     let subcmds = split_shell_commands(command);
     if subcmds.len() <= 1 {
         if is_cd_command(command) {

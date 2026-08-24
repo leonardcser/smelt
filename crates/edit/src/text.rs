@@ -1,8 +1,9 @@
 //! Pure text-motion helpers over `&str` buffers and byte positions.
 
 pub use smelt_buffer::text::{
-    byte_of_char, byte_to_cell, cell_to_byte, char_pos, next_char_boundary, prev_char_boundary,
-    snap,
+    byte_of_char, byte_to_cell, ceil_grapheme, cell_to_byte, char_pos, contained_grapheme_range,
+    covering_grapheme_range, next_char_boundary, next_grapheme_boundary, prev_char_boundary,
+    prev_grapheme_boundary, slice_snapped_graphemes, snap, snap_grapheme, snapped_grapheme_range,
 };
 pub use smelt_buffer::wrap::wrap_line;
 
@@ -74,68 +75,80 @@ pub fn char_class(c: char, mode: CharClass) -> u8 {
     }
 }
 
+fn grapheme_class(grapheme: &str, mode: CharClass) -> u8 {
+    grapheme
+        .chars()
+        .next()
+        .map(|ch| char_class(ch, mode))
+        .unwrap_or(0)
+}
+
 pub fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
-    let cpos = snap(buf, cpos);
-    let chars: Vec<(usize, char)> = buf[cpos..].char_indices().collect();
-    if chars.is_empty() {
+    let cpos = snap_grapheme(buf, cpos);
+    let graphemes: Vec<(usize, &str)> =
+        smelt_buffer::cell_width::grapheme_indices(&buf[cpos..]).collect();
+    if graphemes.is_empty() {
         return cpos;
     }
     let mut i = 0;
-    let start_class = char_class(chars[0].1, mode);
-    while i < chars.len() && char_class(chars[i].1, mode) == start_class {
+    let start_class = grapheme_class(graphemes[0].1, mode);
+    while i < graphemes.len() && grapheme_class(graphemes[i].1, mode) == start_class {
         i += 1;
     }
-    while i < chars.len() && char_class(chars[i].1, mode) == 0 {
+    while i < graphemes.len() && grapheme_class(graphemes[i].1, mode) == 0 {
         i += 1;
     }
-    if i < chars.len() {
-        cpos + chars[i].0
+    if i < graphemes.len() {
+        cpos + graphemes[i].0
     } else {
         buf.len()
     }
 }
 
 pub fn word_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
-    let cpos = snap(buf, cpos);
+    let cpos = snap_grapheme(buf, cpos);
     if cpos == 0 {
         return 0;
     }
-    let chars: Vec<(usize, char)> = buf[..cpos].char_indices().collect();
-    if chars.is_empty() {
+    let graphemes: Vec<(usize, &str)> =
+        smelt_buffer::cell_width::grapheme_indices(&buf[..cpos]).collect();
+    if graphemes.is_empty() {
         return 0;
     }
-    let mut i = chars.len() - 1;
-    while i > 0 && char_class(chars[i].1, mode) == 0 {
+    let mut i = graphemes.len() - 1;
+    while i > 0 && grapheme_class(graphemes[i].1, mode) == 0 {
         i -= 1;
     }
-    let target_class = char_class(chars[i].1, mode);
-    while i > 0 && char_class(chars[i - 1].1, mode) == target_class {
+    let target_class = grapheme_class(graphemes[i].1, mode);
+    while i > 0 && grapheme_class(graphemes[i - 1].1, mode) == target_class {
         i -= 1;
     }
-    chars[i].0
+    graphemes[i].0
 }
 
 pub fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
-    let next = next_char_boundary(buf, cpos);
+    let cpos = snap_grapheme(buf, cpos);
+    let next = next_grapheme_boundary(buf, cpos);
     if next >= buf.len() {
         return cpos;
     }
-    let chars: Vec<(usize, char)> = buf[next..].char_indices().collect();
-    if chars.is_empty() {
+    let graphemes: Vec<(usize, &str)> =
+        smelt_buffer::cell_width::grapheme_indices(&buf[next..]).collect();
+    if graphemes.is_empty() {
         return cpos;
     }
     let mut i = 0;
-    while i < chars.len() && char_class(chars[i].1, mode) == 0 {
+    while i < graphemes.len() && grapheme_class(graphemes[i].1, mode) == 0 {
         i += 1;
     }
-    if i >= chars.len() {
-        return prev_char_boundary(buf, buf.len());
+    if i >= graphemes.len() {
+        return prev_grapheme_boundary(buf, buf.len());
     }
-    let target_class = char_class(chars[i].1, mode);
-    while i + 1 < chars.len() && char_class(chars[i + 1].1, mode) == target_class {
+    let target_class = grapheme_class(graphemes[i].1, mode);
+    while i + 1 < graphemes.len() && grapheme_class(graphemes[i + 1].1, mode) == target_class {
         i += 1;
     }
-    next + chars[i].0
+    next + graphemes[i].0
 }
 
 pub fn line_start(buf: &str, cpos: usize) -> usize {
@@ -178,7 +191,7 @@ fn token_range_at_transparent<F>(
 where
     F: Fn(char) -> bool,
 {
-    let pos = snap(buf, pos);
+    let pos = snap_grapheme(buf, pos);
     let is_trans = |p: usize| transparent.binary_search(&p).is_ok();
     if pos >= buf.len() {
         return None;
@@ -189,11 +202,7 @@ where
     }
     let mut start = pos;
     while start > 0 {
-        let prev = buf[..start]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let prev = prev_grapheme_boundary(buf, start);
         let c = buf[prev..].chars().next()?;
         if !is_word(c) && !is_trans(prev) {
             break;
@@ -206,18 +215,18 @@ where
         if !is_word(c) && !is_trans(end) {
             break;
         }
-        end += c.len_utf8();
+        end = next_grapheme_boundary(buf, end);
     }
     while start < end {
         let c = buf[start..].chars().next()?;
         if is_trans(start) && !is_word(c) {
-            start += c.len_utf8();
+            start = next_grapheme_boundary(buf, start);
         } else {
             break;
         }
     }
     while end > start {
-        let prev = buf[..end].char_indices().next_back().map(|(i, _)| i)?;
+        let prev = prev_grapheme_boundary(buf, end);
         let c = buf[prev..].chars().next()?;
         if is_trans(prev) && !is_word(c) {
             end = prev;
@@ -283,6 +292,20 @@ mod tests {
         assert_eq!(word_range_at_transparent(s, 4, &[]), Some((0, 5)));
         assert_eq!(word_range_at_transparent(s, 6, &[]), Some((6, 11)));
         assert_eq!(word_range_at_transparent(s, 5, &[]), None); // on the space
+    }
+
+    #[test]
+    fn word_motions_and_ranges_do_not_split_graphemes() {
+        let text = "confirme\u{301}e next";
+        let next = text.find("next").unwrap();
+        let accent = text.find('\u{301}').unwrap();
+
+        assert_eq!(word_forward_pos(text, 0, CharClass::Word), next);
+        assert_eq!(word_backward_pos(text, next, CharClass::Word), 0);
+        assert_eq!(
+            word_range_at_transparent(text, accent, &[]),
+            Some((0, next - 1))
+        );
     }
 
     #[test]

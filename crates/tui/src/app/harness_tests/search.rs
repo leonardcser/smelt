@@ -138,6 +138,38 @@ fn begin_slow_persisted_search(app: &mut TestApp) {
     app.type_text("needle");
 }
 
+#[test]
+fn transcript_search_renders_and_edits_unicode_by_grapheme() {
+    let mut app = searchable_transcript_app();
+    let input = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: format!("prefix {input} suffix").into(),
+    });
+    app.render_silent();
+    app.type_char('/');
+    app.type_text(input);
+    wait_for_search_query(&mut app, input);
+
+    let frame = app.render_to_frame().text();
+    for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+        assert!(frame.contains(grapheme), "frame: {frame}");
+    }
+    assert!(app
+        .overlays_probe()
+        .search_session()
+        .is_some_and(|session| session.query == input));
+
+    app.press(KeyCode::Left);
+    app.press(KeyCode::Backspace);
+    app.press(KeyCode::Delete);
+    wait_for_search_query(&mut app, "e\u{301}👩\u{200d}💻");
+
+    assert!(app
+        .overlays_probe()
+        .search_session()
+        .is_some_and(|session| session.query == "e\u{301}👩\u{200d}💻"));
+}
+
 fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTranscriptBlock {
     smelt_store::StoredTranscriptBlock {
         block_idx,

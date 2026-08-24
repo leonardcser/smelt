@@ -95,8 +95,10 @@ impl TuiApp {
         // not repark the insertion point after every typed character.
         if self.prompt_buf().source() == current_text && self.prompt_win().cpos() != cursor_before {
             let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-            pctx.win
-                .set_cpos(smelt_buffer::text::snap(pctx.buf.source(), cursor_before));
+            pctx.win.set_cpos(smelt_buffer::text::snap_grapheme(
+                pctx.buf.source(),
+                cursor_before,
+            ));
             pctx.win.clear_selection_anchor();
             pctx.win.clamp_anchors_to_source(pctx.buf.source());
         }

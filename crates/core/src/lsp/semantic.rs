@@ -455,7 +455,9 @@ impl SourcePreviewCache {
                     .map(|text| text.lines().map(str::to_string).collect())
             })
             .as_ref()?;
-        trim_preview(lines.get(line.saturating_sub(1) as usize)?.trim())
+        trim_preview(smelt_buffer::text::trim_whitespace(
+            lines.get(line.saturating_sub(1) as usize)?,
+        ))
     }
 }
 
@@ -789,11 +791,10 @@ pub(super) fn display_path(file_path: &str, cwd: &Path, home: &Path) -> String {
 }
 
 fn trim_preview(preview: &str) -> Option<String> {
-    if preview.chars().count() > 200 {
-        Some(format!(
-            "{}…",
-            preview.chars().take(200).collect::<String>()
-        ))
+    let mut graphemes = smelt_buffer::cell_width::graphemes(preview);
+    let head: String = graphemes.by_ref().take(200).collect();
+    if graphemes.next().is_some() {
+        Some(format!("{head}…"))
     } else {
         Some(preview.to_string())
     }

@@ -58,7 +58,8 @@ impl PromptCopier {
 
 impl BufferCopy for PromptCopier {
     fn copy(&self, buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput {
-        let raw = &src[range.start..range.end];
+        let range = smelt_buffer::text::snapped_grapheme_range(src, range);
+        let raw = smelt_buffer::text::slice(src, range.clone());
         self.expand_attachments(buf, src, raw, range.start)
     }
 }
@@ -75,7 +76,7 @@ impl PromptCopier {
             return CopyOutput::same(raw.to_string());
         }
         // Count markers before `range_start` to align with `buf.attachment_ids`.
-        let mut att_idx = src[..range_start]
+        let mut att_idx = smelt_buffer::text::slice(src, 0..range_start)
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
@@ -259,7 +260,7 @@ impl BufferParser for PromptBufferParser {
         // Determine if we need special command/exec styling on the first line.
         let command_token_end = self
             .commands
-            .command_token(source.trim())
+            .command_token(smelt_buffer::text::trim_whitespace(source))
             .map(|token| token.chars().count())
             .unwrap_or(0);
         let single_line = !source.contains('\n');
@@ -313,9 +314,11 @@ impl BufferParser for PromptBufferParser {
 
         for (li, (line, kinds)) in visual_lines.iter().enumerate() {
             let mut col = 0u16;
-            for (i, (ch, kind)) in line.chars().zip(kinds.iter()).enumerate() {
-                let ch_width = cell_width::char_width_u16(ch);
-                let next_col = col.saturating_add(ch_width);
+            let mut char_index = 0usize;
+            for grapheme in cell_width::graphemes(line) {
+                let kind = kinds.get(char_index).copied().unwrap_or(SpanKind::Plain);
+                let width = cell_width::text_width_u16(grapheme);
+                let next_col = col.saturating_add(width);
                 match kind {
                     SpanKind::Attachment | SpanKind::AtRef => {
                         if next_col > col {
@@ -329,7 +332,7 @@ impl BufferParser for PromptBufferParser {
                         }
                     }
                     SpanKind::Plain => {
-                        if li == 0 && i < command_token_end && next_col > col {
+                        if li == 0 && char_index < command_token_end && next_col > col {
                             buf.add_highlight_group_with_meta(
                                 li,
                                 col,
@@ -338,7 +341,11 @@ impl BufferParser for PromptBufferParser {
                                 SpanMeta::default(),
                             );
                         }
-                        if (is_exec || is_exec_invalid) && li == 0 && i == 0 && ch == '!' {
+                        if (is_exec || is_exec_invalid)
+                            && li == 0
+                            && char_index == 0
+                            && grapheme == "!"
+                        {
                             buf.add_highlight_group_with_meta(
                                 li,
                                 col,
@@ -350,6 +357,7 @@ impl BufferParser for PromptBufferParser {
                     }
                 }
                 col = next_col;
+                char_index += grapheme.chars().count();
             }
         }
 
@@ -411,6 +419,25 @@ mod tests {
         assert_eq!(buf.get_line(0), Some("a    b"));
         assert_eq!(buf.display_cursor_pos(2), (0, 5));
         assert_eq!(buf.byte_at_display_pos(0, 5), 2);
+    }
+
+    #[test]
+    fn parser_projects_grapheme_boundaries_to_terminal_cells() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let parser = Arc::new(PromptBufferParser::new(store));
+        let mut buf = make_buf_with_parser(parser);
+        let source = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
+        buf.set_source(source.into());
+        buf.ensure_rendered_at(80);
+
+        let mut col = 0usize;
+        assert_eq!(buf.display_cursor_pos(0), (0, 0));
+        for (byte, grapheme) in cell_width::grapheme_indices(source) {
+            let end = byte + grapheme.len();
+            col += cell_width::text_width(grapheme);
+            assert_eq!(buf.display_cursor_pos(end), (0, col));
+            assert_eq!(buf.byte_at_display_pos(0, col), end);
+        }
     }
 
     #[test]
@@ -548,6 +575,20 @@ mod tests {
         let out = buf.copy_range(0..5);
         assert_eq!(out.kill_ring, "hello");
         assert_eq!(out.clipboard, "hello");
+    }
+
+    #[test]
+    fn prompt_copier_expands_stale_ranges_to_grapheme_boundaries() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let copier = PromptCopier::new(store);
+        let mut buf = Buffer::new(smelt_buffer::buffer::BufId(0), BufCreateOpts::default());
+        buf.set_copier(Arc::new(copier));
+        buf.set_source("ae\u{301}b".into());
+
+        let out = buf.copy_range(2.."ae\u{301}".len());
+
+        assert_eq!(out.kill_ring, "e\u{301}");
+        assert_eq!(out.clipboard, "e\u{301}");
     }
 
     #[test]

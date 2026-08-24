@@ -115,20 +115,7 @@ pub fn limit_text_tail_with_max_bytes(text: &str, max_bytes: usize) -> String {
 }
 
 fn suffix_with_byte_budget(content: &str, max_bytes: usize) -> String {
-    if content.len() <= max_bytes {
-        return content.to_string();
-    }
-    let mut start = content.len();
-    let mut used = 0;
-    for (idx, ch) in content.char_indices().rev() {
-        let len = ch.len_utf8();
-        if used + len > max_bytes {
-            break;
-        }
-        start = idx;
-        used += len;
-    }
-    content[start..].to_string()
+    smelt_buffer::text::grapheme_suffix(content, max_bytes).to_string()
 }
 
 #[cfg(test)]
@@ -155,6 +142,17 @@ mod tests {
         let text = output.format_text();
         assert!(text.contains(TRUNCATION_NOTICE));
         assert!(text.ends_with("eféXYZ"));
+    }
+
+    #[test]
+    fn truncation_never_starts_inside_a_grapheme() {
+        let mut output = OutputLimiter::new(10, 5);
+        output.push_line("abce\u{301}XYZ".to_string());
+
+        let text = output.format_text();
+
+        assert!(text.ends_with("XYZ"));
+        assert!(!text.ends_with("\u{301}XYZ"));
     }
 
     #[test]

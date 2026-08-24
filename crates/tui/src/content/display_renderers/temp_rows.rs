@@ -60,7 +60,8 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
     highlights.sort_by_key(|h| h.col_start);
 
     let text_width = display_width_u16(text);
-    let mut emitted_cols: u16 = 0;
+    let start_width = out.current_line_width();
+    let max_line_cols = start_width.saturating_add(max_cols);
     let mut col_idx: u16 = 0;
 
     for h in highlights.iter() {
@@ -71,19 +72,10 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
             let end = h.col_start.min(text_width);
             let plain = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
             let style = style_overlay.map(|overlay| overlay_style(None, overlay));
-            let used = emit_clipped(
-                out,
-                plain,
-                style,
-                SpanMeta::default(),
-                max_cols,
-                emitted_cols,
-            );
-            emitted_cols = emitted_cols.saturating_add(used);
-            col_idx = end;
-            if emitted_cols >= max_cols {
-                return emitted_cols;
+            if !emit_to_line_width(out, plain, style, SpanMeta::default(), max_line_cols) {
+                return out.current_line_width().saturating_sub(start_width);
             }
+            col_idx = end;
         }
         let end = h.col_end.min(text_width);
         if end <= col_idx {
@@ -94,43 +86,25 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
             Some(out.theme().resolve(h.hl)),
             style_overlay.unwrap_or_default(),
         );
-        let used = emit_clipped(
-            out,
-            segment,
-            Some(style),
-            h.meta.clone(),
-            max_cols,
-            emitted_cols,
-        );
-        emitted_cols = emitted_cols.saturating_add(used);
-        col_idx = end;
-        if emitted_cols >= max_cols {
-            return emitted_cols;
+        if !emit_to_line_width(out, segment, Some(style), h.meta.clone(), max_line_cols) {
+            return out.current_line_width().saturating_sub(start_width);
         }
+        col_idx = end;
     }
-    if col_idx < text_width && emitted_cols < max_cols {
-        let tail = smelt_buffer::text::slice_cells(text, col_idx as usize, text_width as usize);
+    if col_idx < text_width || (col_idx == 0 && text_width == 0 && !text.is_empty()) {
+        let tail = if text_width == 0 {
+            text
+        } else {
+            smelt_buffer::text::slice_cells(text, col_idx as usize, text_width as usize)
+        };
         let style = style_overlay.map(|overlay| overlay_style(None, overlay));
-        let used = emit_clipped(
-            out,
-            tail,
-            style,
-            SpanMeta::default(),
-            max_cols,
-            emitted_cols,
-        );
-        emitted_cols = emitted_cols.saturating_add(used);
+        emit_to_line_width(out, tail, style, SpanMeta::default(), max_line_cols);
     }
-    emitted_cols
+    out.current_line_width().saturating_sub(start_width)
 }
 
 fn display_width_u16(text: &str) -> u16 {
     display_width(text).min(u16::MAX as usize) as u16
-}
-
-fn char_display_width(ch: char) -> u16 {
-    let mut buf = [0; 4];
-    display_width(ch.encode_utf8(&mut buf)).min(u16::MAX as usize) as u16
 }
 
 fn overlay_style(
@@ -147,38 +121,24 @@ fn overlay_style(
     style
 }
 
-fn emit_clipped(
+fn emit_to_line_width(
     out: &mut LineBuilder,
     segment: &str,
     style: Option<smelt_core::style::Style>,
     meta: SpanMeta,
-    max_cols: u16,
-    already: u16,
-) -> u16 {
-    let budget = max_cols.saturating_sub(already);
-    if budget == 0 {
-        return 0;
+    max_line_cols: u16,
+) -> bool {
+    let keep = out.fitting_prefix_len(segment, max_line_cols);
+    if keep == 0 {
+        return segment.is_empty();
     }
-    let mut byte_end = 0usize;
-    let mut emitted_width = 0u16;
-    for (byte_start, ch) in segment.char_indices() {
-        let char_width = char_display_width(ch);
-        if emitted_width.saturating_add(char_width) > budget {
-            break;
-        }
-        byte_end = byte_start.saturating_add(ch.len_utf8());
-        emitted_width = emitted_width.saturating_add(char_width);
-    }
-    let clipped = smelt_buffer::text::slice(segment, 0..byte_end);
-    if clipped.is_empty() {
-        return 0;
-    }
+    let text = smelt_buffer::text::slice(segment, 0..keep);
     if let Some(style) = style {
-        out.append_resolved_span(clipped, style, meta);
+        out.append_resolved_span(text, style, meta);
     } else {
-        out.print(clipped);
+        out.print(text);
     }
-    emitted_width
+    keep == segment.len()
 }
 
 #[cfg(test)]

@@ -494,7 +494,7 @@ impl MarkdownStream {
         id: Option<BlockId>,
         content: String,
     ) {
-        let trimmed = content.trim().to_string();
+        let trimmed = smelt_buffer::text::trim_whitespace(&content).to_string();
         if let Some(id) = id {
             let already_final = history.block(id).is_some_and(|block| match (kind, block) {
                 (MarkdownStreamKind::Text, Block::Text { content })
@@ -520,14 +520,35 @@ fn append_line(content: &mut String, line: &str) {
     content.push_str(line);
 }
 
-pub(crate) fn thinking_title(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    let inner = trimmed.strip_prefix("**")?.strip_suffix("**")?;
-    (!inner.trim().is_empty()).then_some(inner.trim())
+pub fn thinking_title(line: &str) -> Option<&str> {
+    let trimmed = smelt_buffer::text::trim_whitespace(line);
+    trimmed.strip_prefix("**")?.strip_suffix("**")?;
+    let inner = smelt_buffer::text::slice(
+        trimmed,
+        smelt_buffer::text::contained_grapheme_range(trimmed, 2..trimmed.len() - 2),
+    );
+    let inner = smelt_buffer::text::trim_whitespace(inner);
+    (!inner.is_empty()).then_some(inner)
+}
+
+/// Label inferred from the first bold-only line and the non-blank line count.
+pub fn thinking_summary(content: &str) -> (String, usize) {
+    let mut label = None;
+    let mut lines = 0usize;
+    for line in content.lines() {
+        if smelt_buffer::text::trim_whitespace(line).is_empty() {
+            continue;
+        }
+        lines += 1;
+        if label.is_none() {
+            label = thinking_title(line).map(str::to_owned);
+        }
+    }
+    (label.unwrap_or_else(|| "thinking".to_string()), lines)
 }
 
 fn thinking_title_candidate(line: &str) -> Candidate {
-    let trimmed = line.trim();
+    let trimmed = smelt_buffer::text::trim_whitespace(line);
     if trimmed.is_empty() {
         return Candidate::Not;
     }
@@ -563,7 +584,7 @@ pub fn markdown_opening_fence(line: &str) -> Option<MarkdownFence> {
     Some(MarkdownFence {
         marker,
         len,
-        info: rest.trim().to_string(),
+        info: smelt_buffer::text::trim_whitespace(rest).to_string(),
     })
 }
 
@@ -642,11 +663,11 @@ pub fn markdown_table_delimiter(line: &str) -> bool {
 }
 
 fn is_streaming_table_row(line: &str) -> bool {
-    line.trim_start().starts_with('|')
+    smelt_buffer::text::trim_start_whitespace(line).starts_with('|')
 }
 
 fn table_delimiter_candidate(line: &str) -> Candidate {
-    let trimmed = line.trim();
+    let trimmed = smelt_buffer::text::trim_whitespace(line);
     if trimmed.is_empty() {
         return Candidate::Pending;
     }
@@ -673,7 +694,7 @@ fn table_delimiter_candidate(line: &str) -> Candidate {
 }
 
 fn table_delimiter_cell_candidate(cell: &str) -> Candidate {
-    let trimmed = cell.trim();
+    let trimmed = smelt_buffer::text::trim_whitespace(cell);
     if trimmed.is_empty() {
         return Candidate::Pending;
     }
@@ -887,6 +908,16 @@ mod tests {
         assert_eq!(
             thinking_at(&history, 1),
             "**Assessing directory exclusions**\nbody"
+        );
+    }
+
+    #[test]
+    fn thinking_title_removes_complete_delimiter_graphemes() {
+        assert_eq!(thinking_title("**\u{301}title**"), Some("title"));
+        assert_eq!(thinking_title("**title\u{600}**"), Some("title"));
+        assert_eq!(
+            thinking_summary("\n**\u{301}title\u{600}**\nbody"),
+            ("title".into(), 2)
         );
     }
 

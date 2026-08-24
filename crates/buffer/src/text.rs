@@ -1,35 +1,34 @@
 //! Pure text helpers for byte↔cell mapping.
 
-/// Byte offset → terminal column.
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+
+/// Byte offset → terminal column, snapped to the start of its grapheme.
 pub fn byte_to_cell(line: &str, byte: usize) -> usize {
-    let mut p = byte.min(line.len());
-    while p > 0 && !line.is_char_boundary(p) {
-        p -= 1;
-    }
-    crate::cell_width::text_width(&line[..p])
+    let byte = snap_grapheme(line, byte);
+    crate::cell_width::text_width(&line[..byte])
 }
 
 /// Terminal column → byte offset at which the preceding text occupies `cell` columns.
 ///
-/// This is the inverse of [`byte_to_cell`]: widths are measured on whole string
-/// prefixes so presentation selectors and ZWJ/combining sequences are handled
-/// the same way in both directions.
+/// Exact cell boundaries map after the preceding grapheme. A cell inside a wide
+/// grapheme maps to that grapheme's start, so the result can never split a
+/// combining sequence, variation-selector glyph, flag, or ZWJ emoji.
 pub fn cell_to_byte(line: &str, cell: usize) -> usize {
     if cell == 0 {
         return 0;
     }
 
-    let mut exact = None;
-    for (b, ch) in line.char_indices() {
-        let end = b + ch.len_utf8();
-        let width = crate::cell_width::text_width(&line[..end]);
-        if width == cell {
-            exact = Some(end);
-        } else if width > cell {
-            return exact.unwrap_or(end);
+    let mut boundary = 0usize;
+    let mut width = 0usize;
+    for (byte, grapheme) in crate::cell_width::grapheme_indices(line) {
+        let end = byte + grapheme.len();
+        width = width.saturating_add(crate::cell_width::text_width(grapheme));
+        if width > cell {
+            return boundary;
         }
+        boundary = end;
     }
-    exact.unwrap_or(line.len())
+    line.len()
 }
 
 /// Slice a string by terminal display columns.
@@ -87,6 +86,163 @@ pub fn next_char_boundary(s: &str, pos: usize) -> usize {
     p
 }
 
+/// Snap a byte offset to the start of its containing grapheme cluster.
+/// Exact grapheme boundaries and the end of the string are preserved.
+pub fn snap_grapheme(s: &str, pos: usize) -> usize {
+    let pos = snap(s, pos);
+    if pos == s.len() {
+        return pos;
+    }
+    crate::cell_width::grapheme_indices(s)
+        .take_while(|(start, _)| *start <= pos)
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(0)
+}
+
+/// Snap a byte offset to the nearest following grapheme boundary. Exact
+/// boundaries are preserved. This is useful after insertion, when the byte just
+/// after the inserted text can become the middle of a grapheme by joining with
+/// text that was already to its right.
+pub fn ceil_grapheme(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    if pos == s.len() {
+        return pos;
+    }
+    for (start, grapheme) in crate::cell_width::grapheme_indices(s) {
+        if pos == start {
+            return start;
+        }
+        let end = start + grapheme.len();
+        if pos < end {
+            return end;
+        }
+    }
+    s.len()
+}
+
+/// Byte offset of the grapheme boundary before `pos`. Returns 0 at start.
+pub fn prev_grapheme_boundary(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    if pos == 0 {
+        return 0;
+    }
+
+    let mut previous = 0;
+    for (start, _) in crate::cell_width::grapheme_indices(s) {
+        if start >= pos {
+            return previous;
+        }
+        previous = start;
+    }
+    previous
+}
+
+/// Byte offset of the grapheme boundary after `pos`. Returns `s.len()` at end.
+pub fn next_grapheme_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let pos = snap(s, pos);
+    crate::cell_width::grapheme_indices(s)
+        .map(|(start, grapheme)| start + grapheme.len())
+        .find(|end| *end > pos)
+        .unwrap_or(s.len())
+}
+
+/// Bytes at the start of `next` that join the final grapheme in `previous`.
+pub fn joining_grapheme_prefix_len(previous: &str, next: &str) -> usize {
+    let Some((previous_start, previous_grapheme)) =
+        crate::cell_width::grapheme_indices(previous).next_back()
+    else {
+        return 0;
+    };
+    if next.is_empty() {
+        return 0;
+    }
+
+    // Include the previous grapheme in the cursor's chunk so rules such as
+    // extended-pictographic + ZWJ can inspect both sides of the text boundary.
+    let mut joined = String::with_capacity(previous_grapheme.len() + next.len());
+    joined.push_str(previous_grapheme);
+    joined.push_str(next);
+
+    let boundary = previous.len();
+    let mut cursor = GraphemeCursor::new(previous_start, boundary + next.len(), true);
+    loop {
+        match cursor.next_boundary(&joined, previous_start) {
+            Ok(Some(end)) => return end.saturating_sub(boundary).min(next.len()),
+            Ok(None) => return next.len(),
+            Err(GraphemeIncomplete::PreContext(offset)) => {
+                cursor.provide_context(&previous[..offset], 0);
+            }
+            Err(
+                GraphemeIncomplete::NextChunk
+                | GraphemeIncomplete::PrevChunk
+                | GraphemeIncomplete::InvalidOffset,
+            ) => return joining_grapheme_prefix_len_contiguous(previous, next),
+        }
+    }
+}
+
+fn joining_grapheme_prefix_len_contiguous(previous: &str, next: &str) -> usize {
+    let mut joined = String::with_capacity(previous.len() + next.len());
+    joined.push_str(previous);
+    joined.push_str(next);
+    let consumed = crate::cell_width::grapheme_indices(&joined)
+        .find_map(|(start, grapheme)| {
+            let end = start + grapheme.len();
+            (start < previous.len() && end > previous.len()).then_some(end - previous.len())
+        })
+        .unwrap_or(0);
+    consumed
+}
+
+/// Longest prefix whose complete grapheme clusters fit within `max_bytes`.
+pub fn grapheme_prefix(s: &str, max_bytes: usize) -> &str {
+    &s[..snap_grapheme(s, max_bytes)]
+}
+
+/// Longest suffix whose complete grapheme clusters fit within `max_bytes`.
+pub fn grapheme_suffix(s: &str, max_bytes: usize) -> &str {
+    let start = crate::cell_width::grapheme_indices(s)
+        .rev()
+        .take_while(|(start, _)| s.len() - start <= max_bytes)
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(s.len());
+    &s[start..]
+}
+
+/// Trim leading whitespace without splitting a grapheme cluster.
+///
+/// A cluster is removed only when every scalar in it is whitespace. This
+/// preserves unusual but valid clusters such as a space plus a combining mark.
+pub fn trim_start_whitespace(s: &str) -> &str {
+    let start = crate::cell_width::grapheme_indices(s)
+        .take_while(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
+        .map(|(start, grapheme)| start + grapheme.len())
+        .last()
+        .unwrap_or(0);
+    &s[start..]
+}
+
+/// Trim trailing whitespace without splitting a grapheme cluster.
+pub fn trim_end_whitespace(s: &str) -> &str {
+    let end = crate::cell_width::grapheme_indices(s)
+        .rev()
+        .take_while(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Trim leading and trailing whitespace without splitting grapheme clusters.
+pub fn trim_whitespace(s: &str) -> &str {
+    trim_end_whitespace(trim_start_whitespace(s))
+}
+
 /// Byte offset → character index. Tolerates a `byte_idx` that lands mid-char
 /// (it snaps backwards) and clamps past `s.len()`.
 pub fn char_pos(s: &str, byte_idx: usize) -> usize {
@@ -115,6 +271,35 @@ pub fn slice(s: &str, range: core::ops::Range<usize>) -> &str {
         return "";
     }
     &s[start..end]
+}
+
+/// Cursor range with both endpoints snapped backward to grapheme boundaries.
+pub fn snapped_grapheme_range(s: &str, range: core::ops::Range<usize>) -> core::ops::Range<usize> {
+    let start = snap_grapheme(s, range.start);
+    let end = snap_grapheme(s, range.end);
+    start..end.max(start)
+}
+
+/// Smallest grapheme-aligned range that contains every byte in `range`.
+pub fn covering_grapheme_range(s: &str, range: core::ops::Range<usize>) -> core::ops::Range<usize> {
+    let start = snap_grapheme(s, range.start);
+    let end = ceil_grapheme(s, range.end);
+    start..end.max(start)
+}
+
+/// Largest grapheme-aligned range fully contained in `range`.
+pub fn contained_grapheme_range(
+    s: &str,
+    range: core::ops::Range<usize>,
+) -> core::ops::Range<usize> {
+    let start = ceil_grapheme(s, range.start);
+    let end = snap_grapheme(s, range.end);
+    start..end.max(start)
+}
+
+/// Borrow a cursor range after snapping both endpoints backward.
+pub fn slice_snapped_graphemes(s: &str, range: core::ops::Range<usize>) -> &str {
+    slice(s, snapped_grapheme_range(s, range))
 }
 
 /// Replace `s[range]` with `with`. Snaps endpoints to char boundaries and
@@ -169,6 +354,32 @@ mod tests {
         #[allow(clippy::reversed_empty_ranges)]
         let r = 4..2;
         assert_eq!(slice("hello", r), "");
+    }
+
+    #[test]
+    fn grapheme_range_policies_never_return_partial_clusters() {
+        let text = "ae\u{301}🇨🇦x";
+        assert_eq!(
+            slice_snapped_graphemes(text, 2..text.len() - 1),
+            "e\u{301}🇨🇦"
+        );
+        assert_eq!(slice_snapped_graphemes(text, 3..text.len() - 2), "e\u{301}");
+        assert_eq!(
+            slice(text, covering_grapheme_range(text, 3..text.len() - 2)),
+            "e\u{301}🇨🇦"
+        );
+        assert_eq!(
+            slice(text, contained_grapheme_range(text, 2..text.len() - 1)),
+            "🇨🇦"
+        );
+        assert_eq!(
+            snapped_grapheme_range(text, text.len()..1),
+            text.len()..text.len()
+        );
+        assert_eq!(
+            covering_grapheme_range(text, text.len()..1),
+            text.len()..text.len()
+        );
     }
 
     #[test]
@@ -271,6 +482,118 @@ mod tests {
         assert_eq!(next_char_boundary(s, 1000), 2);
     }
 
+    #[test]
+    fn grapheme_boundaries_keep_terminal_glyphs_atomic() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let text = format!("a{grapheme}b");
+            let start = 1;
+            let end = start + grapheme.len();
+
+            assert_eq!(next_grapheme_boundary(&text, start), end, "{grapheme:?}");
+            assert_eq!(prev_grapheme_boundary(&text, end), start, "{grapheme:?}");
+            assert_eq!(ceil_grapheme(&text, start), start, "{grapheme:?}");
+            assert_eq!(ceil_grapheme(&text, end), end, "{grapheme:?}");
+            for byte in start..end {
+                assert_eq!(snap_grapheme(&text, byte), start, "{grapheme:?} at {byte}");
+                if byte > start {
+                    assert_eq!(ceil_grapheme(&text, byte), end, "{grapheme:?} at {byte}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joining_prefix_follows_resegmentation_across_text_boundaries() {
+        for (previous, next, expected) in [
+            ("e", "\u{301}x", "\u{301}".len()),
+            ("9", "\u{fe0f}x", "\u{fe0f}".len()),
+            ("👩", "\u{200d}💻x", "\u{200d}💻".len()),
+            ("🇨", "🇦x", "🇦".len()),
+            ("\u{600}", " x", " ".len()),
+            ("a", "bc", 0),
+        ] {
+            assert_eq!(
+                joining_grapheme_prefix_len(previous, next),
+                expected,
+                "previous={previous:?} next={next:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn joining_prefix_matches_contiguous_segmentation_at_every_split() {
+        for text in [
+            "e\u{301}x",
+            "9\u{fe0f}x",
+            "👩\u{200d}💻x",
+            "🇦🇧🇨🇩🇪x",
+            "\u{600}\u{600} x",
+            "\u{915}\u{94d}\u{937}x",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦x",
+        ] {
+            for split in text
+                .char_indices()
+                .map(|(offset, _)| offset)
+                .chain(core::iter::once(text.len()))
+            {
+                let expected = crate::cell_width::grapheme_indices(text)
+                    .find_map(|(start, grapheme)| {
+                        let end = start + grapheme.len();
+                        (start < split && split < end).then(|| end - split)
+                    })
+                    .unwrap_or(0);
+                assert_eq!(
+                    joining_grapheme_prefix_len(&text[..split], &text[split..]),
+                    expected,
+                    "text={text:?} split={split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grapheme_boundaries_tolerate_stale_offsets() {
+        let text = "e\u{301}x";
+        assert_eq!(prev_grapheme_boundary(text, usize::MAX), "e\u{301}".len());
+        assert_eq!(next_grapheme_boundary(text, usize::MAX), text.len());
+        assert_eq!(snap_grapheme(text, usize::MAX), text.len());
+    }
+
+    #[test]
+    fn byte_budgets_keep_grapheme_clusters_atomic() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let text = format!("a{grapheme}b");
+            let budget_inside = 1 + grapheme.len() - 1;
+
+            assert_eq!(grapheme_prefix(&text, budget_inside), "a", "{grapheme:?}");
+            assert_eq!(grapheme_suffix(&text, budget_inside), "b", "{grapheme:?}");
+            assert_eq!(
+                grapheme_prefix(&text, 1 + grapheme.len()),
+                format!("a{grapheme}")
+            );
+            assert_eq!(
+                grapheme_suffix(&text, grapheme.len() + 1),
+                format!("{grapheme}b")
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_trimming_keeps_graphemes_atomic() {
+        assert_eq!(trim_start_whitespace(" \ttext"), "text");
+        assert_eq!(trim_end_whitespace("text \r\n"), "text");
+        assert_eq!(trim_whitespace(" \ttext \r\n"), "text");
+
+        let leading = " \u{301}text";
+        let trailing = "text\u{600} ";
+        assert_eq!(trim_start_whitespace(leading), leading);
+        assert_eq!(trim_end_whitespace(trailing), trailing);
+        assert_eq!(
+            trim_whitespace(" \u{301}text\u{600} "),
+            " \u{301}text\u{600} "
+        );
+    }
+
     // ── byte_to_cell / cell_to_byte ───────────────────────────────────────
     // Conversions between byte offsets and terminal display columns. Wide
     // chars (CJK, most emoji) occupy 2 cells.
@@ -314,13 +637,31 @@ mod tests {
     }
 
     #[test]
-    fn cell_to_byte_handles_wide_chars_after_origin() {
+    fn cell_to_byte_snaps_cells_inside_wide_graphemes_to_their_start() {
         let s = "中x";
         assert_eq!(cell_to_byte(s, 0), 0);
-        assert_eq!(cell_to_byte(s, 1), "中".len());
+        assert_eq!(cell_to_byte(s, 1), 0);
         assert_eq!(cell_to_byte(s, 2), "中".len());
         assert_eq!(cell_to_byte(s, 3), s.len());
         assert_eq!(cell_to_byte(s, 99), s.len());
+    }
+
+    #[test]
+    fn cell_and_byte_coordinates_never_split_graphemes() {
+        for grapheme in ["9\u{fe0f}", "👩\u{200d}💻", "🇨🇦"] {
+            assert_eq!(crate::cell_width::text_width(grapheme), 2);
+            assert_eq!(cell_to_byte(grapheme, 1), 0, "{grapheme:?}");
+            assert_eq!(cell_to_byte(grapheme, 2), grapheme.len(), "{grapheme:?}");
+        }
+        for (text, split) in [
+            ("e\u{301}x", "e".len()),
+            ("9\u{fe0f}x", "9".len()),
+            ("👩\u{200d}💻x", "👩".len()),
+            ("🇨🇦x", "🇨".len()),
+        ] {
+            assert_eq!(byte_to_cell(text, split), 0, "{text:?}");
+        }
+        assert_eq!(slice_cells("⌚\u{fe0e}X", 0, 1), "⌚\u{fe0e}");
     }
 
     #[test]

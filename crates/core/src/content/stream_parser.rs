@@ -561,6 +561,46 @@ mod tests {
             .expect("materialized test block")
     }
 
+    #[test]
+    fn tool_output_line_chunks_preserve_graphemes_split_at_boundaries() {
+        let (mut parser, mut history) = setup();
+        parser.start_tool(
+            &mut history,
+            ToolStart {
+                invocation_id: INVOCATION_ID,
+                call_id: "unicode".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::empty(),
+                args: HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
+            Instant::now(),
+        );
+
+        for chunk in [
+            "besta",
+            "\u{308}tigt 👩",
+            "\u{200d}💻 9",
+            "\u{fe0f} 🇨",
+            "🇦",
+            "next line",
+        ] {
+            parser.append_active_output_line(&mut history, INVOCATION_ID, chunk.to_string());
+        }
+
+        let state = history
+            .tool_state(history.order[0])
+            .expect("tool state should exist");
+        assert_eq!(
+            state
+                .output
+                .as_ref()
+                .map(|output| output.content.snapshot()),
+            Some("besta\u{308}tigt 👩\u{200d}💻 9\u{fe0f} 🇨🇦\nnext line".to_string())
+        );
+    }
+
     // -- Text streaming -----------------------------------------------
 
     #[test]
@@ -1176,6 +1216,22 @@ mod tests {
         );
         parser.finalize_exec(&mut history);
         assert_eq!(history.status(exec_id), Some(Status::Done));
+    }
+
+    #[test]
+    fn exec_finalization_never_splits_trailing_graphemes() {
+        let (mut parser, mut history) = setup();
+        parser.start_exec(&mut history, "printf".into());
+        parser.append_exec_output(&mut history, "value\u{600} \n".to_string());
+        parser.finalize_exec(&mut history);
+
+        assert_eq!(
+            block_at(&history, 0),
+            &Block::Exec {
+                command: "printf".into(),
+                output: "value\u{600} ".into(),
+            }
+        );
     }
 
     // -- Turn flush ---------------------------------------------------

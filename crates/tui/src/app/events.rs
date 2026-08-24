@@ -780,7 +780,9 @@ impl TuiApp {
         self.redact_user_submission(&mut content, &mut display);
         let text = content.text_content().into_owned();
         if content.image_count() == 0 {
-            if let Some(outcome) = self.try_command_while_running(text.trim(), target) {
+            if let Some(outcome) =
+                self.try_command_while_running(smelt_buffer::text::trim_whitespace(&text), target)
+            {
                 self.commit_prompt_submission(edit);
                 return outcome;
             }
@@ -1077,7 +1079,7 @@ impl TuiApp {
             return InputOutcome::Continue;
         }
 
-        let trimmed = input.trim();
+        let trimmed = smelt_buffer::text::trim_whitespace(input);
         self.prompt.push_history(input.to_string());
 
         let is_from_paste = self.prompt.skip_shell_escape();
@@ -1834,10 +1836,10 @@ impl TuiApp {
         let cpos = self.ui.win(win_id).expect("window").cpos();
         let mv: Option<usize> = match action {
             KeyAction::MoveLeft | KeyAction::SelectLeft => {
-                Some(crate::smelt_edit::text::prev_char_boundary(&text, cpos))
+                Some(crate::smelt_edit::text::prev_grapheme_boundary(&text, cpos))
             }
             KeyAction::MoveRight | KeyAction::SelectRight => {
-                Some(crate::smelt_edit::text::next_char_boundary(&text, cpos))
+                Some(crate::smelt_edit::text::next_grapheme_boundary(&text, cpos))
             }
             KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
                 Some(crate::smelt_edit::text::line_start(&text, cpos))
@@ -1864,8 +1866,8 @@ impl TuiApp {
             KeyAction::CopySelection => {
                 let win = self.ui.win(win_id).expect("window");
                 if let Some((s, e)) = win.selection_range(buf) {
-                    let s = crate::smelt_edit::text::snap(&text, s);
-                    let e = crate::smelt_edit::text::snap(&text, e);
+                    let s = crate::smelt_edit::text::snap_grapheme(&text, s);
+                    let e = crate::smelt_edit::text::snap_grapheme(&text, e);
                     if s < e {
                         let out = buf.copy_range(s..e);
                         if !out.clipboard.is_empty() {

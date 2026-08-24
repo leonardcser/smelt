@@ -225,6 +225,60 @@ impl<'a> LineBuilder<'a> {
         self.layout_width
     }
 
+    /// Display width of the incomplete row, including graphemes completed by
+    /// text appended across style and renderer boundaries.
+    pub fn current_line_width(&self) -> u16 {
+        self.cur_visible_cols
+    }
+
+    /// Number of leading bytes in `text` that complete a grapheme started by
+    /// the current row. Returns zero when the append boundary is already a
+    /// grapheme boundary.
+    pub fn boundary_grapheme_prefix_len(&self, text: &str) -> usize {
+        smelt_buffer::text::joining_grapheme_prefix_len(&self.cur_text, text)
+    }
+
+    /// Return the longest byte prefix of `text` that keeps the incomplete row
+    /// within `max_cols`. The prefix ends on a grapheme boundary in the joined
+    /// row, which can fall inside a grapheme as segmented in `text` alone.
+    pub fn fitting_prefix_len(&self, text: &str, max_cols: u16) -> usize {
+        if text.is_empty() || self.cur_visible_cols > max_cols {
+            return 0;
+        }
+        if self.boundary_grapheme_prefix_len(text) == 0 {
+            let mut cells = self.cur_visible_cols as usize;
+            let mut fit = 0usize;
+            for (start, grapheme) in cell_width::grapheme_indices(text) {
+                cells = cells.saturating_add(display_width(grapheme));
+                if cells > max_cols as usize {
+                    break;
+                }
+                fit = start + grapheme.len();
+            }
+            return fit;
+        }
+
+        let boundary = self.cur_text.len();
+        let mut joined = String::with_capacity(boundary + text.len());
+        joined.push_str(&self.cur_text);
+        joined.push_str(text);
+
+        let mut cells = 0usize;
+        let mut fit = 0usize;
+        for (start, grapheme) in cell_width::grapheme_indices(&joined) {
+            cells = cells.saturating_add(display_width(grapheme));
+            let end = start + grapheme.len();
+            if end <= boundary {
+                continue;
+            }
+            if cells > max_cols as usize {
+                break;
+            }
+            fit = end - boundary;
+        }
+        fit.min(text.len())
+    }
+
     /// Commit any pending line and return rendering metadata.
     pub fn finish(mut self) -> Outcome {
         if self.has_pending_content || self.cur_decoration_present() || self.cur_visible_cols > 0 {
@@ -548,7 +602,7 @@ impl<'a> LineBuilder<'a> {
     fn append_span_styled(&mut self, text: &str, meta: SpanMeta) {
         let resolved = self.resolve_current();
         let style_default = style_is_default(&resolved);
-        let meta_default = meta.selectable && meta.copy_as.is_none();
+        let meta_default = meta == SpanMeta::default();
         if style_default && meta_default {
             self.append_text(text);
             return;
@@ -559,7 +613,7 @@ impl<'a> LineBuilder<'a> {
 
     fn append_span_resolved(&mut self, text: &str, style: Style, meta: SpanMeta) {
         let style_default = style_is_default(&style);
-        let meta_default = meta.selectable && meta.copy_as.is_none();
+        let meta_default = meta == SpanMeta::default();
         if style_default && meta_default {
             self.append_text(text);
             return;
@@ -569,24 +623,57 @@ impl<'a> LineBuilder<'a> {
     }
 
     fn append_text(&mut self, text: &str) {
-        let cols_before = self.cur_visible_cols;
+        let old_len = self.cur_text.len();
+        let old_cols = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let cols_after = cols_before.saturating_add(display_width(text) as u16);
-        self.cur_visible_cols = cols_after;
-        if !text.is_empty() {
-            self.has_pending_content = true;
+        self.cur_visible_cols = display_width(&self.cur_text).min(u16::MAX as usize) as u16;
+        if text.is_empty() {
+            return;
+        }
+        self.has_pending_content = true;
+
+        let boundary_cols = cell_width::grapheme_indices(&self.cur_text)
+            .find(|(byte, grapheme)| *byte < old_len && *byte + grapheme.len() > old_len)
+            .map(|(byte, grapheme)| {
+                display_width(&self.cur_text[..byte + grapheme.len()]).min(u16::MAX as usize) as u16
+            });
+        if let Some(boundary_cols) = boundary_cols {
+            self.resize_trailing_highlight(old_cols, boundary_cols);
         }
     }
 
     fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta) {
-        let cols_before = self.cur_visible_cols;
+        let old_len = self.cur_text.len();
+        let old_cols = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let cols_after = cols_before.saturating_add(display_width(text) as u16);
+        let cols_after = display_width(&self.cur_text).min(u16::MAX as usize) as u16;
         self.cur_visible_cols = cols_after;
         if text.is_empty() {
             return;
         }
         self.has_pending_content = true;
+
+        // A style boundary can land inside a grapheme when streaming or when
+        // independently styled producers emit its scalars. The complete
+        // cluster belongs to the style of its first scalar, so begin this
+        // highlight at the next grapheme boundary.
+        let mut style_byte_start = old_len;
+        for (byte, grapheme) in cell_width::grapheme_indices(&self.cur_text) {
+            let end = byte + grapheme.len();
+            if byte < old_len && end > old_len {
+                style_byte_start = end;
+                break;
+            }
+            if byte >= old_len {
+                break;
+            }
+        }
+        let cols_before =
+            display_width(&self.cur_text[..style_byte_start]).min(u16::MAX as usize) as u16;
+
+        // Completing a boundary grapheme can expand or contract its width.
+        // Keep the preceding style attached to the complete terminal glyph.
+        self.resize_trailing_highlight(old_cols, cols_before);
         if cols_after == cols_before {
             return;
         }
@@ -600,6 +687,22 @@ impl<'a> LineBuilder<'a> {
         }
         self.cur_highlights
             .push((cols_before, cols_after, hl, meta));
+    }
+
+    fn resize_trailing_highlight(&mut self, old_end: u16, new_end: u16) {
+        if old_end == new_end {
+            return;
+        }
+        let mut remove_empty = false;
+        if let Some(last) = self.cur_highlights.last_mut() {
+            if last.1 == old_end {
+                last.1 = new_end;
+                remove_empty = last.0 >= last.1;
+            }
+        }
+        if remove_empty {
+            self.cur_highlights.pop();
+        }
     }
 
     /// Map the active (group, style) to an interned [`HlGroup`].
@@ -925,6 +1028,121 @@ mod tests {
         assert_eq!(display_width(""), 0);
         assert_eq!(display_width("abc"), 3);
         assert_eq!(display_width("日本"), 4);
+    }
+
+    #[test]
+    fn styled_prints_keep_cross_run_graphemes_atomic() {
+        let block = test_util::render_test(80, |out| {
+            out.push_fg(Color::Red);
+            out.print("9");
+            out.pop_style();
+            out.push_fg(Color::Blue);
+            out.print("\u{fe0f}");
+            out.pop_style();
+            out.print("X");
+            out.newline();
+        });
+
+        assert_eq!(block.lines[0].text, "9\u{fe0f}X");
+        assert_eq!(block.lines[0].spans[0].text, "9\u{fe0f}");
+        assert_eq!(block.lines[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(block.lines[0].spans[1].text, "X");
+        assert_eq!(block.outcome.max_line_width, 3);
+    }
+
+    #[test]
+    fn styled_prints_use_first_scalar_style_for_complex_graphemes() {
+        let block = test_util::render_test(80, |out| {
+            for parts in [
+                ("e", "\u{301}", ""),
+                ("👩", "\u{200d}", "💻"),
+                ("🇨", "🇦", ""),
+            ] {
+                out.push_fg(Color::Red);
+                out.print(parts.0);
+                out.pop_style();
+                out.push_fg(Color::Blue);
+                out.print(parts.1);
+                out.pop_style();
+                out.push_fg(Color::Green);
+                out.print(parts.2);
+                out.pop_style();
+                out.print("X");
+                out.newline();
+            }
+        });
+
+        for (line, grapheme) in block.lines.iter().zip(["e\u{301}", "👩\u{200d}💻", "🇨🇦"])
+        {
+            assert_eq!(line.spans[0].text, grapheme);
+            assert_eq!(line.spans[0].style.fg, Some(Color::Red));
+            assert_eq!(line.spans[1].text, "X");
+            assert_eq!(line.spans[1].style, Style::default());
+        }
+    }
+
+    #[test]
+    fn completing_grapheme_repairs_contracting_highlight_width() {
+        assert_eq!(display_width("⌚"), 2);
+        assert_eq!(display_width("⌚\u{fe0e}"), 1);
+        let block = test_util::render_test(80, |out| {
+            out.push_fg(Color::Red);
+            out.print("⌚");
+            out.pop_style();
+            out.print("\u{fe0e}");
+            out.print("X");
+            out.newline();
+        });
+
+        assert_eq!(block.lines[0].spans[0].text, "⌚\u{fe0e}");
+        assert_eq!(block.lines[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(block.lines[0].spans[1].text, "X");
+        assert_eq!(block.lines[0].spans[1].style, Style::default());
+        assert_eq!(block.outcome.max_line_width, 2);
+    }
+
+    #[test]
+    fn fitting_prefix_len_respects_clipping_and_joined_graphemes() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.print("ab");
+        assert_eq!(lb.fitting_prefix_len("c中d", 4), "c".len());
+
+        let cases = [
+            ("e", "\u{301}x", 1, "\u{301}".len()),
+            ("9", "\u{fe0f}x", 2, "\u{fe0f}".len()),
+            ("👩", "\u{200d}💻x", 2, "\u{200d}💻".len()),
+            ("👩\u{200d}", "💻x", 2, "💻".len()),
+            ("🇨", "🇦x", 2, "🇦".len()),
+            ("\u{600}", " x", 2, " ".len()),
+            ("\r", "\nx", 1, "\n".len()),
+        ];
+        for (current, text, max_cols, expected) in cases {
+            let mut buf = fresh_buf();
+            let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+            lb.print(current);
+            assert_eq!(
+                lb.boundary_grapheme_prefix_len(text),
+                expected,
+                "current={current:?} text={text:?}"
+            );
+            assert_eq!(
+                lb.fitting_prefix_len(text, max_cols),
+                expected,
+                "current={current:?} text={text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_action_metadata_is_not_discarded() {
+        let action = crate::buffer::SpanAction::OpenUrl("https://example.com".into());
+        let block = test_util::render_test(80, |out| {
+            out.print_with_meta("link", SpanMeta::action(action.clone()));
+        });
+
+        assert_eq!(block.lines[0].spans[0].meta.action, Some(action));
     }
 
     #[test]

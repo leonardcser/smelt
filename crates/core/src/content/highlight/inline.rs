@@ -519,15 +519,35 @@ fn inline_visual_width(text: &str, options: &InlineOptions) -> usize {
     inline_spans_width(&parse_inline_spans_with_options(text, false, options))
 }
 
+fn max_word_width(text: &str) -> usize {
+    let mut max_width = 0usize;
+    let mut start = 0usize;
+    for (byte, grapheme) in smelt_buffer::cell_width::grapheme_indices(text) {
+        if grapheme == " " {
+            max_width = max_width.max(display_width(&text[start..byte]));
+            start = byte + grapheme.len();
+        }
+    }
+    max_width.max(display_width(&text[start..]))
+}
+
 /// Visual width of the longest unwrappable segment; used for minimum column widths.
 fn min_visual_width(text: &str, options: &InlineOptions) -> usize {
+    let line = InlineLine::new(
+        parse_inline_spans_with_options(text, false, options)
+            .into_iter()
+            .map(|span| {
+                let is_code = span.style.group == Some(intern("SmeltAccent"));
+                InlineRun::new(span.text, is_code, span.break_policy)
+            })
+            .collect(),
+    );
     let mut max_w = 0usize;
-    for span in parse_inline_spans_with_options(text, false, options) {
-        let is_code = span.style.group == Some(intern("SmeltAccent"));
-        if is_code {
-            max_w = max_w.max(display_width(&span.text));
+    for run in line.runs {
+        if run.meta {
+            max_w = max_w.max(display_width(&run.text));
         } else {
-            max_w = max_w.max(span.text.split(' ').map(display_width).max().unwrap_or(0));
+            max_w = max_w.max(max_word_width(&run.text));
         }
     }
     max_w
@@ -1135,7 +1155,7 @@ pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
 }
 
 pub fn inline_spans_width(spans: &[InlineSpan]) -> usize {
-    spans.iter().map(|s| display_width(&s.text)).sum()
+    smelt_buffer::cell_width::joined_text_width(spans.iter().map(|span| span.text.as_str()))
 }
 
 #[cfg(test)]
@@ -1930,7 +1950,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_spans_width_sums_cell_widths() {
+    fn minimum_width_joins_graphemes_across_markdown_styles() {
+        let options = InlineOptions::default();
+        assert_eq!(min_visual_width("`9`\u{fe0f}", &options), 2);
+        assert_eq!(min_visual_width("`⌚`\u{fe0e}", &options), 1);
+    }
+
+    #[test]
+    fn inline_spans_width_measures_adjacent_text() {
         let spans = vec![
             InlineSpan {
                 text: "ab".into(),
@@ -2079,6 +2106,22 @@ mod tests {
         assert!(joined.contains('┃'));
         assert!(joined.contains("H1"));
         assert!(joined.contains('a'));
+    }
+
+    #[test]
+    fn render_markdown_table_keeps_streaming_grapheme_fragments_aligned() {
+        let rows = vec![vec!["H".to_string()], vec!["👩\u{200d}".to_string()]];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, &[], 80, false, None, "");
+        });
+        let widths: Vec<_> = block
+            .lines
+            .iter()
+            .filter(|line| !line.text.is_empty())
+            .map(|line| display_width(&line.text))
+            .collect();
+
+        assert!(widths.iter().all(|width| *width == widths[0]), "{widths:?}");
     }
 
     #[test]

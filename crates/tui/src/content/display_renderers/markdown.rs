@@ -2014,7 +2014,7 @@ fn fallback_markdown_line_spans(
     dim: bool,
     inline_options: &InlineOptions,
 ) -> Vec<InlineSpan> {
-    let trimmed = line.trim_start();
+    let trimmed = smelt_buffer::text::trim_start_whitespace(line);
     let body = if kind == MarkdownTextKind::List {
         split_markdown_list_prefix(trimmed).1
     } else {
@@ -2034,7 +2034,7 @@ fn markdown_line_spans(
     kind: MarkdownTextKind,
     dim: bool,
 ) -> Vec<InlineSpan> {
-    let trimmed = line.trim_start();
+    let trimmed = smelt_buffer::text::trim_start_whitespace(line);
     let leading_ws = &line[..line.len() - trimmed.len()];
     let mut line_spans = Vec::new();
 

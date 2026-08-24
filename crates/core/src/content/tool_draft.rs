@@ -370,6 +370,8 @@ struct DraftJsonParser {
     nested_in_string: bool,
     nested_escaped: bool,
     active_field: Option<usize>,
+    preview_truncated: bool,
+    raw_value_truncated: bool,
 }
 
 impl DraftJsonParser {
@@ -562,6 +564,7 @@ impl DraftJsonParser {
 
     fn begin_string(&mut self, arguments: &mut ToolArguments, result: &mut ParseAppend) {
         self.active_field = Some(self.begin_field(arguments, result));
+        self.preview_truncated = false;
         arguments
             .preview
             .insert(self.key.clone(), serde_json::Value::String(String::new()));
@@ -575,6 +578,7 @@ impl DraftJsonParser {
         result: &mut ParseAppend,
     ) {
         self.raw_value.clear();
+        self.raw_value_truncated = false;
         self.active_field = Some(self.begin_field(arguments, result));
         self.push_raw_value_char(arguments, ch, buffers);
     }
@@ -758,7 +762,7 @@ impl DraftJsonParser {
     }
 
     fn push_decoded_value(
-        &self,
+        &mut self,
         arguments: &mut ToolArguments,
         ch: char,
         buffers: &mut Vec<(ContentId, String)>,
@@ -771,17 +775,12 @@ impl DraftJsonParser {
             push_field_char(buffers, field.content.id(), ch);
         }
         if let Some(serde_json::Value::String(preview)) = arguments.preview.get_mut(&self.key) {
-            if preview.len() < LUA_ARGUMENT_PREVIEW_BYTES {
-                let previous_len = preview.len();
-                preview.push(ch);
-                if preview.len() > LUA_ARGUMENT_PREVIEW_BYTES {
-                    preview.truncate(smelt_buffer::text::snap(
-                        preview,
-                        LUA_ARGUMENT_PREVIEW_BYTES,
-                    ));
-                }
-                result.presentation_changed |= preview.len() != previous_len;
-            }
+            result.presentation_changed |= push_bounded_grapheme_char(
+                preview,
+                &mut self.preview_truncated,
+                ch,
+                LUA_ARGUMENT_PREVIEW_BYTES,
+            );
         }
     }
 
@@ -791,15 +790,12 @@ impl DraftJsonParser {
         ch: char,
         buffers: &mut Vec<(ContentId, String)>,
     ) {
-        if self.raw_value.len() < STRUCTURED_ARGUMENT_PREVIEW_BYTES {
-            self.raw_value.push(ch);
-            if self.raw_value.len() > STRUCTURED_ARGUMENT_PREVIEW_BYTES {
-                self.raw_value.truncate(smelt_buffer::text::snap(
-                    &self.raw_value,
-                    STRUCTURED_ARGUMENT_PREVIEW_BYTES,
-                ));
-            }
-        }
+        push_bounded_grapheme_char(
+            &mut self.raw_value,
+            &mut self.raw_value_truncated,
+            ch,
+            STRUCTURED_ARGUMENT_PREVIEW_BYTES,
+        );
         if let Some(field) = self
             .active_field
             .and_then(|field_index| arguments.string_fields.get(field_index))
@@ -860,6 +856,25 @@ impl DraftJsonParser {
     }
 }
 
+fn push_bounded_grapheme_char(
+    buffer: &mut String,
+    truncated: &mut bool,
+    ch: char,
+    max_bytes: usize,
+) -> bool {
+    if *truncated {
+        return false;
+    }
+    let previous_len = buffer.len();
+    buffer.push(ch);
+    if buffer.len() > max_bytes {
+        let keep = smelt_buffer::text::grapheme_prefix(buffer, max_bytes).len();
+        smelt_buffer::text::replace_range(buffer, keep..buffer.len(), "");
+        *truncated = true;
+    }
+    buffer.len() != previous_len
+}
+
 fn push_field_char(buffers: &mut Vec<(ContentId, String)>, content_id: ContentId, ch: char) {
     if let Some((_, buffer)) = buffers.last_mut().filter(|(id, _)| *id == content_id) {
         buffer.push(ch);
@@ -888,7 +903,8 @@ fn bounded_preview(value: &str) -> String {
     if value.len() <= LUA_ARGUMENT_PREVIEW_BYTES {
         return value.to_owned();
     }
-    let mut preview = smelt_buffer::text::slice(value, 0..LUA_ARGUMENT_PREVIEW_BYTES).to_owned();
+    let mut preview =
+        smelt_buffer::text::grapheme_prefix(value, LUA_ARGUMENT_PREVIEW_BYTES).to_owned();
     preview.push_str("\n…");
     preview
 }
@@ -905,8 +921,8 @@ fn cap_structured_value(value: &serde_json::Value, budget: &mut usize) -> serde_
     *budget = budget.saturating_sub(1);
     match value {
         serde_json::Value::String(value) => {
-            let keep = value.len().min(LUA_ARGUMENT_PREVIEW_BYTES).min(*budget);
-            let mut preview = smelt_buffer::text::slice(value, 0..keep).to_owned();
+            let max_bytes = value.len().min(LUA_ARGUMENT_PREVIEW_BYTES).min(*budget);
+            let mut preview = smelt_buffer::text::grapheme_prefix(value, max_bytes).to_owned();
             *budget = budget.saturating_sub(preview.len());
             if preview.len() < value.len() && *budget > 0 {
                 preview.push('…');
@@ -1015,6 +1031,27 @@ mod tests {
         assert_eq!(
             structured.arguments.get("head_limit"),
             Some(&serde_json::json!(25))
+        );
+    }
+
+    #[test]
+    fn bounded_argument_preview_drops_a_grapheme_completed_past_the_limit() {
+        let mut draft = ToolDraft::new("stream".into(), Some("call".into()), "grep".into());
+        let prefix = "a".repeat(LUA_ARGUMENT_PREVIEW_BYTES - 1);
+        draft.append(format!(r#"{{"path":"{prefix}e"#));
+        let continued = draft.append("\u{301}ignored".into());
+
+        assert!(continued.presentation_changed);
+        assert_eq!(
+            draft
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some(prefix.as_str())
+        );
+        assert_eq!(
+            draft.string_field("path").unwrap().content.snapshot(),
+            format!("{prefix}e\u{301}ignored")
         );
     }
 

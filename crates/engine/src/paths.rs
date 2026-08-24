@@ -119,7 +119,8 @@ pub fn git_root(cwd: &std::path::Path) -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let root_text = String::from_utf8_lossy(&output.stdout);
+    let root = PathBuf::from(smelt_buffer::text::trim_whitespace(&root_text));
     let home = home_dir();
     if root == home || root.as_os_str() == "/" {
         return None;
@@ -138,7 +139,8 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let branch = String::from_utf8_lossy(&output.stdout);
+    let branch = smelt_buffer::text::trim_whitespace(&branch).to_owned();
     if branch.is_empty() || branch == "HEAD" {
         return None;
     }

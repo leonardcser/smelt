@@ -25,10 +25,19 @@ enum Op {
         pos: u32,
         text: String,
     },
+    InsertCurated {
+        pos: u32,
+        grapheme: u8,
+    },
     Replace {
         start: u32,
         end: u32,
         text: String,
+    },
+    ReplaceCurated {
+        start: u32,
+        end: u32,
+        grapheme: u8,
     },
     SetCursor {
         pos: u32,
@@ -108,6 +117,9 @@ fn run(input: Input) {
             Op::Insert { pos, text } => {
                 insert_via_dispatch(&mut ui, buf, win, pos as usize, &plain_text(&text))
             }
+            Op::InsertCurated { pos, grapheme } => {
+                insert_via_dispatch(&mut ui, buf, win, pos as usize, curated_grapheme(grapheme))
+            }
             Op::Replace { start, end, text } => replace_via_dispatch(
                 &mut ui,
                 buf,
@@ -116,9 +128,22 @@ fn run(input: Input) {
                 end as usize,
                 &plain_text(&text),
             ),
+            Op::ReplaceCurated {
+                start,
+                end,
+                grapheme,
+            } => replace_via_dispatch(
+                &mut ui,
+                buf,
+                win,
+                start as usize,
+                end as usize,
+                curated_grapheme(grapheme),
+            ),
             Op::SetCursor { pos } => {
                 let source = ui.buf_mut(buf).unwrap().source().to_string();
-                let p = smelt_buffer::text::snap(&source, (pos as usize).min(source.len()));
+                let p =
+                    smelt_buffer::text::snap_grapheme(&source, (pos as usize).min(source.len()));
                 ui.win_mut(win).unwrap().set_cpos(p);
             }
             Op::KeyChar {
@@ -179,6 +204,19 @@ fn plain_text(s: &str) -> String {
     s.replace(smelt_buffer::ATTACHMENT_MARKER, "")
 }
 
+fn curated_grapheme(index: u8) -> &'static str {
+    const GRAPHEMES: &[&str] = &[
+        "e\u{301}",
+        "9\u{fe0f}",
+        "👩\u{200d}💻",
+        "🇨🇦",
+        "\u{600} ",
+        "\u{915}\u{94d}\u{937}",
+        "👨\u{200d}👩\u{200d}👧\u{200d}👦",
+    ];
+    GRAPHEMES[index as usize % GRAPHEMES.len()]
+}
+
 fn insert_via_dispatch(
     ui: &mut Ui,
     buf: smelt_edit::BufId,
@@ -187,7 +225,7 @@ fn insert_via_dispatch(
     text: &str,
 ) {
     let source = ui.buf(buf).unwrap().source();
-    let pos = smelt_buffer::text::snap(source, pos);
+    let pos = pos.min(source.len());
     let window = ui.win_mut(win).unwrap();
     window.set_cpos(pos);
     window.clear_selection_anchor();
@@ -203,8 +241,8 @@ fn replace_via_dispatch(
     text: &str,
 ) {
     let source = ui.buf(buf).unwrap().source();
-    let start = smelt_buffer::text::snap(source, start);
-    let end = smelt_buffer::text::snap(source, end).max(start);
+    let start = start.min(source.len());
+    let end = end.min(source.len()).max(start);
     let window = ui.win_mut(win).unwrap();
     window.set_selection_anchor(Some(start));
     window.set_cpos(end);
@@ -274,9 +312,9 @@ fn assert_window_invariants(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit
         w.cpos()
     );
     assert_eq!(
-        smelt_buffer::text::snap(&source, w.cpos()),
+        smelt_buffer::text::snap_grapheme(&source, w.cpos()),
         w.cpos(),
-        "cursor mid-char"
+        "cursor inside grapheme"
     );
     if let Some(anchor) = w.selection_anchor() {
         assert!(
@@ -284,9 +322,9 @@ fn assert_window_invariants(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit
             "selection anchor beyond source: {anchor} > {len}"
         );
         assert_eq!(
-            smelt_buffer::text::snap(&source, anchor),
+            smelt_buffer::text::snap_grapheme(&source, anchor),
             anchor,
-            "selection anchor mid-char"
+            "selection anchor inside grapheme"
         );
     }
 }

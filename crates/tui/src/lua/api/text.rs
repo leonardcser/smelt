@@ -3,8 +3,8 @@
 //! count). Render helpers live in `smelt.render`.
 
 use mlua::prelude::*;
-use smelt_buffer::cell_width;
-use smelt_core::content::width::{pad_to_cells, truncate_to_cells};
+use smelt_buffer::{cell_width, text};
+use smelt_core::content::width::{pad_left_to_cells, pad_right_to_cells, truncate_to_cells};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
@@ -14,22 +14,12 @@ fn lossy_utf8(bytes: &[u8]) -> String {
 
 fn head_bytes(bytes: &[u8], max_bytes: usize) -> String {
     let s = lossy_utf8(bytes);
-    smelt_buffer::text::slice(&s, 0..max_bytes).to_string()
+    text::grapheme_prefix(&s, max_bytes).to_string()
 }
 
 fn tail_bytes(bytes: &[u8], max_bytes: usize) -> String {
     let s = lossy_utf8(bytes);
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let start = s.len() - max_bytes;
-    let snapped = smelt_buffer::text::snap(&s, start);
-    let start = if snapped == start {
-        start
-    } else {
-        smelt_buffer::text::next_char_boundary(&s, start)
-    };
-    smelt_buffer::text::slice(&s, start..s.len()).to_string()
+    text::grapheme_suffix(&s, max_bytes).to_string()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,25 +117,47 @@ fn wrap_prefixed_text(prefix: &str, text: &str, cont_prefix: &str, width: usize)
     if width == 0 {
         return vec![format!("{prefix}{text}")];
     }
+    if text.is_empty() {
+        return vec![prefix.to_string()];
+    }
 
     let mut rows = Vec::new();
+    let mut remaining = text;
     let mut current_prefix = prefix;
-    let mut current = String::new();
-    let mut used = cell_width::text_width(current_prefix);
-
-    for ch in text.chars() {
-        let ch_width = cell_width::char_width(ch);
-        if !current.is_empty() && used + ch_width > width {
-            rows.push(format!("{current_prefix}{current}"));
-            current_prefix = cont_prefix;
-            current.clear();
-            used = cell_width::text_width(current_prefix);
+    loop {
+        let (row, consumed) = prefixed_row(current_prefix, remaining, width);
+        rows.push(row);
+        if consumed >= remaining.len() {
+            break;
         }
-        current.push(ch);
-        used += ch_width;
+        debug_assert!(consumed > 0, "a wrapped row must consume text");
+        remaining = text::slice(remaining, consumed..remaining.len());
+        current_prefix = cont_prefix;
     }
-    rows.push(format!("{current_prefix}{current}"));
     rows
+}
+
+fn prefixed_row(prefix: &str, text: &str, width: usize) -> (String, usize) {
+    let mut joined = String::with_capacity(prefix.len() + text.len());
+    joined.push_str(prefix);
+    joined.push_str(text);
+
+    let mut row = prefix.to_string();
+    let mut consumed = 0usize;
+    for (start, grapheme) in cell_width::grapheme_indices(&joined) {
+        let end = start + grapheme.len();
+        if end <= prefix.len() {
+            continue;
+        }
+        let consumed_end = end - prefix.len();
+        let piece = text::slice(text, consumed..consumed_end);
+        if consumed > 0 && cell_width::joined_text_width([row.as_str(), piece]) > width {
+            break;
+        }
+        row.push_str(piece);
+        consumed = consumed_end;
+    }
+    (row, consumed)
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -192,7 +204,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "truncate",
-        "Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = \"head\"|\"tail\", prefix?, suffix? }`; use `{ keep = \"tail\" }` for recent-message snippets. Lua string slicing is byte-based and can split multi-byte characters; this function snaps to UTF-8 boundaries and also accepts already-invalid Lua byte strings.",
+        "Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = \"head\"|\"tail\", prefix?, suffix? }`; use `{ keep = \"tail\" }` for recent-message snippets. Lua string slicing is byte-based and can split Unicode text; this function keeps complete grapheme clusters and also accepts already-invalid Lua byte strings.",
         &["s", "max_bytes", "opts"],
         |_, (s, max_bytes, opts): (mlua::LuaString, usize, Option<mlua::Value>)| -> LuaResult<String> {
             let bytes = s.as_bytes();
@@ -251,20 +263,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 ));
             }
             let trimmed = truncate_to_cells(&s, width, &suffix);
-            let gap = width.saturating_sub(cell_width::text_width(trimmed.as_str()));
-            if gap == 0 {
-                return Ok(trimmed);
-            }
+            let body_width = cell_width::text_width(&trimmed);
+            let gap = width.saturating_sub(body_width);
             let out = match align.as_str() {
-                "right" => format!("{}{trimmed}", pad_to_cells(&fill, fill_w, gap)),
+                "right" => pad_left_to_cells(&trimmed, &fill, width),
                 "center" => {
-                    let left_w = gap / 2;
-                    let left = pad_to_cells(&fill, fill_w, left_w);
-                    let right = pad_to_cells(&fill, fill_w, gap - left_w);
-                    format!("{left}{trimmed}{right}")
+                    let with_left =
+                        pad_left_to_cells(&trimmed, &fill, body_width + gap / 2);
+                    pad_right_to_cells(&with_left, &fill, width)
                 }
-                _ => format!("{trimmed}{}", pad_to_cells(&fill, fill_w, gap)),
+                _ => pad_right_to_cells(&trimmed, &fill, width),
             };
+            debug_assert_eq!(cell_width::text_width(&out), width);
             Ok(out)
         },
     )?;
@@ -335,6 +345,20 @@ mod tests {
     }
 
     #[test]
+    fn truncate_bytes_keeps_grapheme_clusters_atomic() {
+        let head = TruncateOptions::default();
+        let tail = TruncateOptions {
+            keep: Keep::Tail,
+            ..TruncateOptions::default()
+        };
+
+        assert_eq!(truncate_bytes("e\u{301}x".as_bytes(), 1, &head), "");
+        assert_eq!(truncate_bytes("xe\u{301}".as_bytes(), 2, &tail), "");
+        assert_eq!(truncate_bytes("👩\u{200d}💻x".as_bytes(), 8, &head), "");
+        assert_eq!(truncate_bytes("x🇨🇦".as_bytes(), 4, &tail), "");
+    }
+
+    #[test]
     fn lua_truncate_accepts_invalid_byte_strings() {
         let lua = Lua::new();
         let smelt = lua.create_table().unwrap();
@@ -371,6 +395,45 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(out, "hello w…");
+    }
+
+    #[test]
+    fn wrap_prefixed_preserves_graphemes_crossing_prefix_boundaries() {
+        for (prefix, text, width, first) in [
+            ("e", "\u{301}x", 1, "e\u{301}"),
+            ("9", "\u{fe0f}x", 2, "9\u{fe0f}"),
+            ("👩", "\u{200d}💻x", 2, "👩\u{200d}💻"),
+            ("🇨", "🇦x", 2, "🇨🇦"),
+        ] {
+            let rows = wrap_prefixed_text(prefix, text, "", width);
+            assert_eq!(rows, vec![first, "x"], "{prefix:?} + {text:?}");
+            assert!(
+                rows.iter().all(|row| cell_width::text_width(row) <= width),
+                "{rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lua_fit_is_exact_for_wide_and_boundary_joining_fill() {
+        let lua = Lua::new();
+        let smelt = lua.create_table().unwrap();
+        register(&lua, &smelt).unwrap();
+        let text: mlua::Table = smelt.get("text").unwrap();
+        let fit: mlua::Function = text.get("fit").unwrap();
+
+        for (body, fill, align) in [
+            ("x", "中", "left"),
+            ("9", "\u{fe0f} ", "left"),
+            ("💻", "x\u{200d}", "right"),
+            ("9", "\u{fe0f} ", "center"),
+        ] {
+            let opts = lua.create_table().unwrap();
+            opts.set("fill", fill).unwrap();
+            opts.set("align", align).unwrap();
+            let out: String = fit.call((body, 5usize, opts)).unwrap();
+            assert_eq!(cell_width::text_width(&out), 5, "{out:?}");
+        }
     }
 
     #[test]

@@ -1,4 +1,6 @@
 use super::geometry::Rect;
+use compact_str::CompactString;
+use smelt_style::cell_width;
 pub use smelt_style::style::{Color, Style};
 
 /// Convert `Color` to crossterm's `Color` at the SGR-emit boundary.
@@ -36,46 +38,133 @@ pub enum TextAlign {
 }
 
 pub fn display_width(text: &str) -> u16 {
-    unicode_width::UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+    cell_width::text_width_u16(text)
 }
 
 pub fn truncate_width(text: &str, max_width: u16) -> String {
     let mut out = String::new();
-    write_text(0, max_width, text, |_, ch| out.push(ch));
+    write_text(0, max_width, text, |_, grapheme| out.push_str(grapheme));
     out
 }
 
-pub(crate) fn char_width(ch: char) -> u16 {
-    unicode_width::UnicodeWidthChar::width(ch)
-        .unwrap_or(1)
-        .max(1)
-        .min(u16::MAX as usize) as u16
+fn symbol_width(symbol: &str) -> u16 {
+    cell_width::text_width_u16(symbol)
 }
 
-fn write_text(mut col: u16, limit: u16, text: &str, mut write: impl FnMut(u16, char)) -> u16 {
-    for ch in text.chars() {
-        let width = char_width(ch);
+fn write_text(mut col: u16, limit: u16, text: &str, mut write: impl FnMut(u16, &str)) -> u16 {
+    for grapheme in cell_width::graphemes(text) {
+        let width = symbol_width(grapheme);
         if col.saturating_add(width) > limit {
             break;
         }
-        write(col, ch);
+        write(col, grapheme);
         col = col.saturating_add(width);
     }
     col.min(limit)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+fn write_line(
+    mut col: u16,
+    limit: u16,
+    line: &crate::line::Line<'_>,
+    mut write: impl FnMut(u16, &str, Style),
+) -> u16 {
+    let capacity = line.spans.iter().map(|span| span.text.len()).sum();
+    let mut text = String::with_capacity(capacity);
+    let mut span_ends = Vec::with_capacity(line.spans.len());
+    for span in &line.spans {
+        text.push_str(span.text.as_ref());
+        span_ends.push((text.len(), span.style));
+    }
+
+    let mut span_index = 0;
+    for (byte, grapheme) in cell_width::grapheme_indices(&text) {
+        while span_ends
+            .get(span_index)
+            .is_some_and(|(end, _)| byte >= *end)
+        {
+            span_index += 1;
+        }
+        let width = symbol_width(grapheme);
+        if col.saturating_add(width) > limit {
+            break;
+        }
+        let style = span_ends
+            .get(span_index)
+            .map(|(_, style)| *style)
+            .unwrap_or_default();
+        write(col, grapheme, style);
+        col = col.saturating_add(width);
+    }
+    col.min(limit)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellSymbol(CompactString);
+
+impl CellSymbol {
+    const CONTINUATION: &'static str = "\0";
+
+    pub(crate) fn new(symbol: &str) -> Self {
+        Self(CompactString::from(symbol))
+    }
+
+    fn continuation() -> Self {
+        Self::new(Self::CONTINUATION)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn is_continuation(&self) -> bool {
+        self.as_str() == Self::CONTINUATION
+    }
+
+    pub fn width(&self) -> u16 {
+        if self.is_continuation() {
+            0
+        } else {
+            symbol_width(self.as_str())
+        }
+    }
+
+    fn push_str(&mut self, suffix: &str) {
+        self.0.push_str(suffix);
+    }
+}
+
+impl PartialEq<char> for CellSymbol {
+    fn eq(&self, other: &char) -> bool {
+        let mut chars = self.as_str().chars();
+        chars.next() == Some(*other) && chars.next().is_none()
+    }
+}
+
+impl PartialEq<&str> for CellSymbol {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
-    pub symbol: char,
+    pub symbol: CellSymbol,
     pub style: Style,
+}
+
+impl Cell {
+    fn new(symbol: &str, style: Style) -> Self {
+        Self {
+            symbol: CellSymbol::new(symbol),
+            style,
+        }
+    }
 }
 
 impl Default for Cell {
     fn default() -> Self {
-        Self {
-            symbol: ' ',
-            style: Style::default(),
-        }
+        Self::new(" ", Style::default())
     }
 }
 
@@ -148,7 +237,62 @@ impl Grid {
     }
 
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
-        self.write_cell(x, y, Cell { symbol, style });
+        let mut buf = [0; 4];
+        self.set_symbol(x, y, symbol.encode_utf8(&mut buf), style);
+    }
+
+    pub fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {
+        if y >= self.height {
+            return;
+        }
+        let mut graphemes = cell_width::graphemes(symbol);
+        let Some(first) = graphemes.next() else {
+            return;
+        };
+        if graphemes.next().is_none() {
+            self.write_symbol_clipped(x, y, first, style, self.width);
+        } else {
+            write_text(x, self.width, symbol, |col, grapheme| {
+                self.write_symbol_clipped(col, y, grapheme, style, self.width)
+            });
+        }
+    }
+
+    fn write_symbol_clipped(
+        &mut self,
+        x: u16,
+        y: u16,
+        symbol: &str,
+        style: Style,
+        right_limit: u16,
+    ) {
+        if symbol_width(symbol) == 0 {
+            self.append_zero_width(x, y, symbol, right_limit);
+        } else {
+            self.write_cell_clipped(x, y, Cell::new(symbol, style), right_limit);
+        }
+    }
+
+    fn append_zero_width(&mut self, x: u16, y: u16, symbol: &str, right_limit: u16) {
+        if x == 0 || x > self.width || y >= self.height {
+            return;
+        }
+        let mut lead_x = x - 1;
+        if self.cell(lead_x, y).symbol.is_continuation() {
+            let Some(previous) = lead_x.checked_sub(1) else {
+                return;
+            };
+            lead_x = previous;
+        }
+        let idx = self.idx(lead_x, y);
+        if self.cells[idx].symbol.is_continuation() {
+            return;
+        }
+
+        let mut combined = self.cells[idx].symbol.clone();
+        combined.push_str(symbol);
+        let style = self.cells[idx].style;
+        self.write_cell_clipped(lead_x, y, Cell::new(combined.as_str(), style), right_limit);
     }
 
     /// Single mutation entry point. Every cell write - `set`, `put_char`,
@@ -175,62 +319,49 @@ impl Grid {
     ///
     /// Cleared cells inherit the new cell's style so a styled background
     /// stays visually contiguous across the now-narrow run.
-    fn write_cell(&mut self, x: u16, y: u16, new_cell: Cell) {
-        self.write_cell_clipped(x, y, new_cell, self.width);
-    }
-
     fn write_cell_clipped(&mut self, x: u16, y: u16, new_cell: Cell, right_limit: u16) {
         if x >= self.width || y >= self.height {
             return;
         }
         let right_limit = right_limit.min(self.width);
-        let new_cell = if char_width(new_cell.symbol) == 2 && x + 1 >= right_limit {
-            Cell {
-                symbol: ' ',
-                style: new_cell.style,
-            }
+        let new_cell = if new_cell.symbol.width() == 2 && x + 1 >= right_limit {
+            Cell::new(" ", new_cell.style)
         } else {
             new_cell
         };
+        let new_width = new_cell.symbol.width();
+        let new_style = new_cell.style;
         let idx = self.idx(x, y);
-        let old_symbol = self.cells[idx].symbol;
+        let old_width = self.cells[idx].symbol.width();
+        let old_was_continuation = self.cells[idx].symbol.is_continuation();
 
-        if x + 1 < self.width && char_width(old_symbol) == 2 {
+        if x + 1 < self.width && old_width == 2 {
             let cont = self.idx(x + 1, y);
-            if self.cells[cont].symbol == '\0' {
-                self.cells[cont] = Cell {
-                    symbol: ' ',
-                    style: new_cell.style,
-                };
+            if self.cells[cont].symbol.is_continuation() {
+                self.cells[cont] = Cell::new(" ", new_style);
             }
         }
-        if old_symbol == '\0' && x > 0 {
+        if old_was_continuation && x > 0 {
             let lead = self.idx(x - 1, y);
-            if char_width(self.cells[lead].symbol) == 2 {
-                self.cells[lead] = Cell {
-                    symbol: ' ',
-                    style: new_cell.style,
-                };
+            if self.cells[lead].symbol.width() == 2 {
+                self.cells[lead] = Cell::new(" ", new_style);
             }
         }
 
         self.cells[idx] = new_cell;
 
-        if char_width(new_cell.symbol) == 2 && x + 1 < self.width {
+        if new_width == 2 && x + 1 < self.width {
             let cont = self.idx(x + 1, y);
-            let displaced = self.cells[cont].symbol;
-            if char_width(displaced) == 2 && x + 2 < self.width {
+            let displaced_width = self.cells[cont].symbol.width();
+            if displaced_width == 2 && x + 2 < self.width {
                 let dispcont = self.idx(x + 2, y);
-                if self.cells[dispcont].symbol == '\0' {
-                    self.cells[dispcont] = Cell {
-                        symbol: ' ',
-                        style: new_cell.style,
-                    };
+                if self.cells[dispcont].symbol.is_continuation() {
+                    self.cells[dispcont] = Cell::new(" ", new_style);
                 }
             }
             self.cells[cont] = Cell {
-                symbol: '\0',
-                style: new_cell.style,
+                symbol: CellSymbol::continuation(),
+                style: new_style,
             };
         }
     }
@@ -239,7 +370,9 @@ impl Grid {
         if y >= self.height {
             return x.min(self.width);
         }
-        write_text(x, self.width, text, |col, ch| self.set(col, y, ch, style))
+        write_text(x, self.width, text, |col, grapheme| {
+            self.write_symbol_clipped(col, y, grapheme, style, self.width)
+        })
     }
 
     /// Overwrites `symbol` and `style.fg`; preserves the existing cell's
@@ -249,13 +382,22 @@ impl Grid {
     }
 
     fn put_char_clipped(&mut self, x: u16, y: u16, symbol: char, fg: Color, right_limit: u16) {
+        let mut buf = [0; 4];
+        self.put_symbol_clipped(x, y, symbol.encode_utf8(&mut buf), fg, right_limit);
+    }
+
+    fn put_symbol_clipped(&mut self, x: u16, y: u16, symbol: &str, fg: Color, right_limit: u16) {
         if x >= self.width || y >= self.height {
+            return;
+        }
+        if symbol_width(symbol) == 0 {
+            self.append_zero_width(x, y, symbol, right_limit);
             return;
         }
         let idx = self.idx(x, y);
         let mut style = self.cells[idx].style;
         style.fg = Some(fg);
-        self.write_cell_clipped(x, y, Cell { symbol, style }, right_limit);
+        self.write_cell_clipped(x, y, Cell::new(symbol, style), right_limit);
     }
 
     /// String form of [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
@@ -263,34 +405,38 @@ impl Grid {
         if y >= self.height {
             return x.min(self.width);
         }
-        write_text(x, self.width, text, |col, ch| self.put_char(col, y, ch, fg))
+        write_text(x, self.width, text, |col, grapheme| {
+            self.put_symbol_clipped(col, y, grapheme, fg, self.width)
+        })
     }
 
     /// Paint a [`Line`] of styled spans at `(x, y)`, clipping at the right edge.
+    /// Graphemes that cross span boundaries use the style of their first scalar.
     pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
-        let mut col = x;
-        for span in &line.spans {
-            if col >= self.width {
-                break;
-            }
-            let before = col;
-            col = self.put_str(col, y, span.text.as_ref(), span.style);
-            if col == before {
-                break;
-            }
+        if y >= self.height {
+            return x.min(self.width);
         }
-        col.min(self.width)
+        write_line(x, self.width, line, |col, grapheme, style| {
+            self.write_symbol_clipped(col, y, grapheme, style, self.width)
+        })
     }
 
     pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
-        let new_cell = Cell { symbol, style };
+        let mut buf = [0; 4];
+        let symbol = symbol.encode_utf8(&mut buf);
+        let symbol = if symbol_width(symbol) == 0 {
+            " "
+        } else {
+            symbol
+        };
+        let new_cell = Cell::new(symbol, style);
         let right = area.right().min(self.width);
-        let symbol_width = char_width(symbol);
+        let width = new_cell.symbol.width();
         for row in area.top..area.bottom().min(self.height) {
             let mut col = area.left;
             while col < right {
-                self.write_cell_clipped(col, row, new_cell, right);
-                let step = if symbol_width == 2 && col.saturating_add(1) < right {
+                self.write_cell_clipped(col, row, new_cell.clone(), right);
+                let step = if width == 2 && col.saturating_add(1) < right {
                     2
                 } else {
                     1
@@ -325,7 +471,7 @@ impl Grid {
         self.cells.iter().enumerate().filter_map(move |(i, cell)| {
             // Skip wide-char continuation cells (`\0`); the preceding wide
             // glyph already covers both visual columns on the terminal.
-            if cell.symbol == '\0' {
+            if cell.symbol.is_continuation() {
                 return None;
             }
             let prev_cell = prev.cells.get(i)?;
@@ -419,20 +565,37 @@ impl<'a> GridSlice<'a> {
     }
 
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
-        if x < self.area.width && y < self.area.height {
-            self.grid.write_cell_clipped(
+        let mut buf = [0; 4];
+        self.set_symbol(x, y, symbol.encode_utf8(&mut buf), style);
+    }
+
+    pub fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {
+        if x >= self.area.width || y >= self.area.height {
+            return;
+        }
+        let mut graphemes = cell_width::graphemes(symbol);
+        let Some(first) = graphemes.next() else {
+            return;
+        };
+        if graphemes.next().is_none() {
+            self.grid.write_symbol_clipped(
                 self.area.left + x,
                 self.area.top + y,
-                Cell { symbol, style },
+                first,
+                style,
                 self.area.right(),
             );
+        } else {
+            self.write_str_at(x, y, symbol, None, style);
         }
     }
 
     /// Read a cell at slice-local coords; returns default `Cell` when out of bounds.
     pub fn cell(&self, x: u16, y: u16) -> Cell {
         if x < self.area.width && y < self.area.height {
-            *self.grid.cell(self.area.left + x, self.area.top + y)
+            self.grid
+                .cell(self.area.left + x, self.area.top + y)
+                .clone()
         } else {
             Cell::default()
         }
@@ -468,9 +631,9 @@ impl<'a> GridSlice<'a> {
             .min(self.area.width);
         let abs_left = self.area.left;
         let right = self.area.right();
-        write_text(x, limit, text, |col, ch| {
+        write_text(x, limit, text, |col, grapheme| {
             self.grid
-                .write_cell_clipped(abs_left + col, abs_y, Cell { symbol: ch, style }, right)
+                .write_symbol_clipped(abs_left + col, abs_y, grapheme, style, right)
         })
     }
 
@@ -556,23 +719,18 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Slice-local [`Grid::put_line`]: paint spans left-to-right, clipping at the slice edge.
+    /// Slice-local [`Grid::put_line`]: paint styled graphemes left-to-right.
     pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
         if y >= self.area.height {
             return x.min(self.area.width);
         }
-        let mut col = x;
-        for span in &line.spans {
-            if col >= self.area.width {
-                break;
-            }
-            let before = col;
-            col = self.put_str(col, y, span.text.as_ref(), span.style);
-            if col == before {
-                break;
-            }
-        }
-        col.min(self.area.width)
+        let abs_y = self.area.top + y;
+        let abs_left = self.area.left;
+        let right = self.area.right();
+        write_line(x, self.area.width, line, |col, grapheme, style| {
+            self.grid
+                .write_symbol_clipped(abs_left + col, abs_y, grapheme, style, right)
+        })
     }
 
     /// Slice-local [`Grid::put_str_fg`]: overwrites symbol + fg per char, preserves bg and attrs.
@@ -583,9 +741,9 @@ impl<'a> GridSlice<'a> {
         let abs_y = self.area.top + y;
         let abs_left = self.area.left;
         let right = self.area.right();
-        write_text(x, self.area.width, text, |col, ch| {
+        write_text(x, self.area.width, text, |col, grapheme| {
             self.grid
-                .put_char_clipped(abs_left + col, abs_y, ch, fg, right)
+                .put_symbol_clipped(abs_left + col, abs_y, grapheme, fg, right)
         })
     }
 
@@ -622,9 +780,79 @@ mod tests {
         let mut grid = Grid::new(4, 1);
         grid.set(0, 0, '\u{e6b2}', Style::default());
 
-        assert_eq!(char_width('\u{e6b2}'), 1);
+        assert_eq!(cell_width::char_width('\u{e6b2}'), 1);
         assert_eq!(grid.cell(0, 0).symbol, '\u{e6b2}');
         assert_eq!(grid.cell(1, 0).symbol, ' ');
+    }
+
+    #[test]
+    fn put_str_uses_terminal_width_for_decomposed_accents() {
+        let mut grid = Grid::new(80, 1);
+        let text = "Bestellung 10500 besta\u{308}tigt.pdf";
+
+        let end = grid.put_str(0, 0, text, Style::default());
+
+        assert_eq!(end, display_width(text));
+    }
+
+    #[test]
+    fn set_symbol_preserves_invariants_for_multiple_graphemes() {
+        let mut grid = Grid::new(5, 1);
+
+        grid.set_symbol(0, 0, "a👩\u{200d}💻b", Style::default());
+
+        assert_eq!(grid.cell(0, 0).symbol, "a");
+        assert_eq!(grid.cell(1, 0).symbol, "👩\u{200d}💻");
+        assert!(grid.cell(2, 0).symbol.is_continuation());
+        assert_eq!(grid.cell(3, 0).symbol, "b");
+    }
+
+    #[test]
+    fn scalar_writes_repair_continuations_when_combining_changes_width() {
+        let mut grid = Grid::new(4, 1);
+
+        grid.set(0, 0, '9', Style::default());
+        grid.set(1, 0, '\u{fe0f}', Style::default());
+
+        assert_eq!(grid.cell(0, 0).symbol, "9\u{fe0f}");
+        assert!(grid.cell(1, 0).symbol.is_continuation());
+
+        grid.set(0, 0, '⌚', Style::default());
+        assert!(grid.cell(1, 0).symbol.is_continuation());
+        grid.set(2, 0, '\u{fe0e}', Style::default());
+
+        assert_eq!(grid.cell(0, 0).symbol, "⌚\u{fe0e}");
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
+    }
+
+    #[test]
+    fn put_line_keeps_graphemes_split_across_style_spans_atomic() {
+        use crate::line::{Line, Span};
+
+        for spans in [
+            vec![Span::raw("e"), Span::styled("\u{301}", Style::new().bold())],
+            vec![
+                Span::raw("👩"),
+                Span::styled("\u{200d}", Style::new().bold()),
+                Span::raw("💻"),
+            ],
+            vec![
+                Span::raw("9"),
+                Span::styled("\u{fe0f}", Style::new().bold()),
+            ],
+        ] {
+            let line = Line::from_spans(spans);
+            let mut grid = Grid::new(8, 1);
+
+            let end = grid.put_line(0, 0, &line);
+
+            assert_eq!(end, line.width());
+            let text: String = line.spans.iter().map(|span| span.text.as_ref()).collect();
+            assert_eq!(grid.cell(0, 0).symbol, text.as_str());
+            if end == 2 {
+                assert!(grid.cell(1, 0).symbol.is_continuation());
+            }
+        }
     }
 
     #[test]
@@ -1070,21 +1298,21 @@ mod tests {
                 let cell = grid.cell(x, y);
                 if cell.symbol == '\0' {
                     assert!(x > 0, "continuation at column 0 has no leading cell");
-                    let lead = grid.cell(x - 1, y).symbol;
+                    let lead = &grid.cell(x - 1, y).symbol;
                     assert_eq!(
-                        char_width(lead),
+                        lead.width(),
                         2,
                         "orphaned continuation at ({x}, {y}); leading cell symbol is {lead:?}"
                     );
                 }
-                if char_width(cell.symbol) == 2 {
+                if cell.symbol.width() == 2 {
                     assert!(
                         x + 1 < grid.width(),
                         "wide char at ({x}, {y}) cannot fit a continuation cell"
                     );
-                    let cont = grid.cell(x + 1, y).symbol;
+                    let cont = &grid.cell(x + 1, y).symbol;
                     assert_eq!(
-                        cont, '\0',
+                        cont, &'\0',
                         "wide char at ({x}, {y}) is missing continuation; got {cont:?}"
                     );
                 }

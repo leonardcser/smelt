@@ -102,7 +102,7 @@ pub fn image_label_from_path(path: &str) -> String {
 /// Normalize a terminal-pasted path: handles quoting, backslash-escaped spaces,
 /// and `file://` URLs. Returns `None` for multi-line input.
 pub fn normalize_pasted_path(data: &str) -> Option<String> {
-    let trimmed = data.trim();
+    let trimmed = smelt_buffer::text::trim_whitespace(data);
     if trimmed.is_empty() || trimmed.contains('\n') {
         return None;
     }
@@ -277,6 +277,14 @@ mod tests {
         assert_eq!(
             normalize_pasted_path("  /a/b.png\t").as_deref(),
             Some("/a/b.png")
+        );
+    }
+
+    #[test]
+    fn normalize_pasted_path_keeps_whitespace_graphemes_atomic() {
+        assert_eq!(
+            normalize_pasted_path(" \u{301}image\u{600} ").as_deref(),
+            Some(" \u{301}image\u{600} ")
         );
     }
 

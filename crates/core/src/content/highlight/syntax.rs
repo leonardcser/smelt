@@ -8,7 +8,7 @@ use syntect::parsing::SyntaxReference;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::buffer::SpanMeta;
-use crate::content::builder::{display_width, wrapped_segments, LineBuilder};
+use crate::content::builder::{wrapped_segments, LineBuilder};
 use crate::content::code_block::CodeBlock;
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
@@ -328,7 +328,8 @@ fn print_split_regions(
     regions: &[(Style, String)],
     bg: Option<Color>,
 ) -> usize {
-    let mut col = 0;
+    let col =
+        smelt_buffer::cell_width::joined_text_width(regions.iter().map(|(_, text)| text.as_str()));
     out.save_style();
     for (style, text) in regions {
         if text.is_empty() {
@@ -344,7 +345,6 @@ fn print_split_regions(
         };
         out.set_fg(fg);
         out.print(text);
-        col += display_width(text.as_str());
     }
     out.pop_style();
     col
@@ -353,7 +353,7 @@ fn print_split_regions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::builder::test_util::render_test;
+    use crate::content::builder::{display_width, test_util::render_test};
     use crate::content::BoxContext;
     use crate::theme::HlGroup;
     use syntect::highlighting::Color as SyntectColor;

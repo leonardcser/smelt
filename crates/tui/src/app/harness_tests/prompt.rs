@@ -1084,6 +1084,33 @@ fn prompt_window_wraps_parser_output() {
 }
 
 #[test]
+fn pasted_prompt_unicode_renders_and_edits_by_grapheme() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let input = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
+    app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+        input.to_string(),
+    )));
+
+    assert_eq!(app.state().prompt_text, input);
+    assert_eq!(app.prompt_cpos(), input.len());
+    let frame = app.render_to_frame().text();
+    for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+        assert!(frame.contains(grapheme), "frame: {frame}");
+    }
+
+    app.press(KeyCode::Left);
+    app.press(KeyCode::Backspace);
+    app.press(KeyCode::Delete);
+
+    let expected = "e\u{301}👩\u{200d}💻";
+    assert_eq!(app.state().prompt_text, expected);
+    assert_eq!(app.prompt_cpos(), expected.len());
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("e\u{301}"), "frame: {frame}");
+    assert!(frame.contains("👩\u{200d}💻"), "frame: {frame}");
+}
+
+#[test]
 fn pasted_missing_image_path_stays_text() {
     let mut app = TestApp::builder().with_vim(false).build();
     let dir = tempfile::tempdir().unwrap();

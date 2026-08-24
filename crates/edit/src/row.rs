@@ -146,7 +146,7 @@ pub trait DisplayDocument {
             .rows
             .into_iter()
             .next()?;
-        let byte_col = text::snap(&row.text, pos.byte_col.min(row.text.len()));
+        let byte_col = text::snap_grapheme(&row.text, pos.byte_col.min(row.text.len()));
         let cell = text::byte_to_cell(&row.text, byte_col);
         row.actions
             .into_iter()
@@ -269,24 +269,17 @@ fn first_forward_match(
     for (offset, row) in rows.iter().enumerate() {
         let row_index = start.saturating_add(offset as RowIndex);
         for (byte_col, _) in row.text.match_indices(query) {
+            let Some(range) = complete_row_match(row, row_index, byte_col, byte_col + query.len())
+            else {
+                continue;
+            };
             if min_pos.is_some_and(|pos| {
-                row_index < pos.row || (row_index == pos.row && byte_col < pos.byte_col)
+                range.start.row < pos.row
+                    || (range.start.row == pos.row && range.start.byte_col < pos.byte_col)
             }) {
                 continue;
             }
-            let end_col = byte_col + query.len();
-            if row_match_is_selectable(row, byte_col, end_col) {
-                return Some(DocRange {
-                    start: DocPosition {
-                        row: row_index,
-                        byte_col,
-                    },
-                    end: DocPosition {
-                        row: row_index,
-                        byte_col: end_col,
-                    },
-                });
-            }
+            return Some(range);
         }
     }
     None
@@ -302,24 +295,17 @@ fn first_backward_match(
         let row_index = start.saturating_add(offset as RowIndex);
         let matches = row.text.match_indices(query).collect::<Vec<_>>();
         for (byte_col, _) in matches.into_iter().rev() {
+            let Some(range) = complete_row_match(row, row_index, byte_col, byte_col + query.len())
+            else {
+                continue;
+            };
             if max_pos.is_some_and(|pos| {
-                row_index > pos.row || (row_index == pos.row && byte_col > pos.byte_col)
+                range.start.row > pos.row
+                    || (range.start.row == pos.row && range.start.byte_col > pos.byte_col)
             }) {
                 continue;
             }
-            let end_col = byte_col + query.len();
-            if row_match_is_selectable(row, byte_col, end_col) {
-                return Some(DocRange {
-                    start: DocPosition {
-                        row: row_index,
-                        byte_col,
-                    },
-                    end: DocPosition {
-                        row: row_index,
-                        byte_col: end_col,
-                    },
-                });
-            }
+            return Some(range);
         }
     }
     None
@@ -367,17 +353,32 @@ pub fn row_match_is_selectable(row: &DisplayRow, byte_col: usize, end_col: usize
         .any(|range| range.start <= byte_col && end_col <= range.end)
 }
 
+fn complete_row_match(
+    row: &DisplayRow,
+    row_index: RowIndex,
+    byte_col: usize,
+    end_col: usize,
+) -> Option<DocRange> {
+    let range = text::covering_grapheme_range(&row.text, byte_col..end_col);
+    row_match_is_selectable(row, range.start, range.end)
+        .then(|| doc_range_for_match(row_index, range.start, range.end))
+}
+
 pub fn display_row_matches<'a>(
     row: &'a DisplayRow,
     row_index: RowIndex,
     query: &'a str,
 ) -> impl Iterator<Item = DocRange> + 'a {
+    let mut previous = None;
     row.text
         .match_indices(query)
         .filter_map(move |(byte_col, _)| {
-            let end_col = byte_col + query.len();
-            row_match_is_selectable(row, byte_col, end_col)
-                .then(|| doc_range_for_match(row_index, byte_col, end_col))
+            let range = complete_row_match(row, row_index, byte_col, byte_col + query.len())?;
+            if previous == Some(range) {
+                return None;
+            }
+            previous = Some(range);
+            Some(range)
         })
 }
 
@@ -450,14 +451,20 @@ impl DisplayDocument for StaticRowsDocument {
             if start_row == end_row {
                 let start = range.start.byte_col.min(range.end.byte_col);
                 let end = range.start.byte_col.max(range.end.byte_col);
-                out.push_str(smelt_buffer::text::slice(&row.text, start..end));
+                out.push_str(smelt_buffer::text::slice_snapped_graphemes(
+                    &row.text,
+                    start..end,
+                ));
             } else if row_idx == range.start.row {
-                out.push_str(smelt_buffer::text::slice(
+                out.push_str(smelt_buffer::text::slice_snapped_graphemes(
                     &row.text,
                     range.start.byte_col..row.text.len(),
                 ));
             } else if row_idx == range.end.row {
-                out.push_str(smelt_buffer::text::slice(&row.text, 0..range.end.byte_col));
+                out.push_str(smelt_buffer::text::slice_snapped_graphemes(
+                    &row.text,
+                    0..range.end.byte_col,
+                ));
             } else {
                 out.push_str(&row.text);
             }
@@ -525,14 +532,17 @@ pub(crate) fn copy_buffer_doc_range(buf: &Buffer, range: DocRange) -> Option<Cop
         if start_row == end_row {
             let start = range.start.byte_col.min(range.end.byte_col);
             let end = range.start.byte_col.max(range.end.byte_col);
-            out.push_str(smelt_buffer::text::slice(row, start..end));
+            out.push_str(smelt_buffer::text::slice_snapped_graphemes(row, start..end));
         } else if row_idx == range.start.row {
-            out.push_str(smelt_buffer::text::slice(
+            out.push_str(smelt_buffer::text::slice_snapped_graphemes(
                 row,
                 range.start.byte_col..row.len(),
             ));
         } else if row_idx == range.end.row {
-            out.push_str(smelt_buffer::text::slice(row, 0..range.end.byte_col));
+            out.push_str(smelt_buffer::text::slice_snapped_graphemes(
+                row,
+                0..range.end.byte_col,
+            ));
         } else {
             out.push_str(row);
         }
@@ -563,7 +573,8 @@ impl DisplayRows {
             .iter()
             .flat_map(|row| {
                 row.selectable_ranges.iter().filter_map(|range| {
-                    let text = smelt_buffer::text::slice(&row.text, range.clone());
+                    let text =
+                        smelt_buffer::text::slice_snapped_graphemes(&row.text, range.clone());
                     (!text.is_empty()).then(|| text.to_string())
                 })
             })
@@ -707,6 +718,26 @@ mod tests {
     }
 
     #[test]
+    fn row_document_copy_snaps_stale_offsets_to_graphemes() {
+        let grapheme = "e\u{301}";
+        let mut doc = StaticRowsDocument::from_text_rows(vec![format!("{grapheme}x")]);
+        let copied = doc
+            .copy_range(TextRange::Rows(DocRange {
+                start: DocPosition {
+                    row: 0,
+                    byte_col: 1,
+                },
+                end: DocPosition {
+                    row: 0,
+                    byte_col: grapheme.len(),
+                },
+            }))
+            .expect("copy range");
+
+        assert_eq!(copied.kill_ring, grapheme);
+    }
+
+    #[test]
     fn search_next_match_scans_document_chunks_until_first_match() {
         struct CountingDoc {
             rows: Vec<DisplayRow>,
@@ -838,6 +869,34 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn display_search_matches_expand_to_complete_graphemes() {
+        let text = "e\u{301} 🇨🇦 9\u{fe0f}".to_string();
+        let row = DisplayRow::new(text.clone(), std::iter::once(0..text.len()).collect());
+        for (query, grapheme) in [
+            ("e", "e\u{301}"),
+            ("\u{301}", "e\u{301}"),
+            ("🇨", "🇨🇦"),
+            ("9", "9\u{fe0f}"),
+        ] {
+            let start = text.find(grapheme).unwrap();
+            assert_eq!(
+                display_row_matches(&row, 4, query).collect::<Vec<_>>(),
+                vec![DocRange {
+                    start: DocPosition {
+                        row: 4,
+                        byte_col: start,
+                    },
+                    end: DocPosition {
+                        row: 4,
+                        byte_col: start + grapheme.len(),
+                    },
+                }],
+                "query={query:?}"
+            );
+        }
     }
 
     #[test]

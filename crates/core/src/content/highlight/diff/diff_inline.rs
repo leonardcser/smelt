@@ -96,6 +96,20 @@ fn merge_small_gap(line: &str, left: &DiffByteRange, right: &DiffByteRange) -> b
         && changed_chars >= gap_chars.saturating_mul(2)
 }
 
+fn expand_highlights_to_graphemes(line: &str, ranges: Vec<DiffByteRange>) -> Vec<DiffByteRange> {
+    let ranges = ranges
+        .into_iter()
+        .map(|range| {
+            let range = text::covering_grapheme_range(line, range.start..range.end);
+            DiffByteRange {
+                start: range.start,
+                end: range.end,
+            }
+        })
+        .collect();
+    sorted_merged_ranges(ranges)
+}
+
 fn coalesce_highlight_ranges(line: &str, ranges: Vec<DiffByteRange>) -> Vec<DiffByteRange> {
     let mut ranges = sorted_merged_ranges(ranges);
     for _ in 0..4 {
@@ -190,7 +204,10 @@ pub(super) fn inline_highlights_for_pair(
         new_ranges = coalesce_highlight_ranges(new, new_ranges);
     }
 
-    (old_ranges, new_ranges)
+    (
+        expand_highlights_to_graphemes(old, old_ranges),
+        expand_highlights_to_graphemes(new, new_ranges),
+    )
 }
 
 fn pairing_similarity(old: &str, new: &str) -> f32 {
@@ -395,6 +412,25 @@ mod tests {
     fn keeps_distant_inline_ranges_separate() {
         let merged = coalesce_highlight_ranges("aa......bb", ranges(&[(0, 2), (8, 10)]));
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn inline_highlights_expand_to_complete_graphemes() {
+        for grapheme in ["e\u{301}", "9\u{fe0f}", "👩\u{200d}💻", "🇨🇦"] {
+            let text = format!("a{grapheme}z");
+            let start = 1;
+            let inside = start + grapheme.chars().next().unwrap().len_utf8();
+            let expanded = expand_highlights_to_graphemes(
+                &text,
+                ranges(&[(inside, (inside + 1).min(start + grapheme.len()))]),
+            );
+
+            assert_eq!(expanded.len(), 1);
+            assert_eq!(
+                (expanded[0].start, expanded[0].end),
+                (start, start + grapheme.len())
+            );
+        }
     }
 
     #[test]

@@ -68,13 +68,15 @@ impl Transcript {
             } => {
                 let summary_titles: Vec<_> = summary_titles
                     .into_iter()
-                    .map(|title| title.trim().to_string())
+                    .map(|title| smelt_buffer::text::trim_whitespace(&title).to_string())
                     .filter(|title| !title.is_empty())
                     .collect();
                 let title = summary_titles
                     .last()
                     .cloned()
-                    .or_else(|| title.map(|title| title.trim().to_string()))
+                    .or_else(|| {
+                        title.map(|title| smelt_buffer::text::trim_whitespace(&title).to_string())
+                    })
                     .filter(|title| !title.is_empty());
                 let content = content.into_trimmed();
                 if title.is_none() && content.is_empty() {
@@ -88,7 +90,7 @@ impl Transcript {
                 }
             }
             Block::Compacted { summary } => {
-                let t = summary.trim();
+                let t = smelt_buffer::text::trim_whitespace(&summary);
                 if t.is_empty() {
                     return None;
                 }
@@ -97,7 +99,7 @@ impl Transcript {
                 }
             }
             Block::CompactionPreview { summary } => Block::CompactionPreview {
-                summary: summary.trim().to_string(),
+                summary: smelt_buffer::text::trim_whitespace(&summary).to_string(),
             },
             other => other,
         })
@@ -303,6 +305,18 @@ mod tests {
         });
         match block_at(&t.history, 0) {
             Block::Text { content } => assert_eq!(content, "hello"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn push_trims_only_complete_whitespace_graphemes() {
+        let mut t = Transcript::new();
+        t.push(Block::Text {
+            content: " \u{301}hello\u{600} ".into(),
+        });
+        match block_at(&t.history, 0) {
+            Block::Text { content } => assert_eq!(content, " \u{301}hello\u{600} "),
             _ => panic!("expected Text"),
         }
     }

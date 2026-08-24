@@ -925,13 +925,13 @@ pub fn paint_chrome_with(
                     }
                     let span_style = merge_title_span_style(title_style, span.style);
                     let mut written = false;
-                    for ch in span.text.chars() {
-                        let cw = crate::grid::char_width(ch);
-                        if col + cw > limit {
+                    for grapheme in smelt_style::cell_width::graphemes(span.text.as_ref()) {
+                        let width = smelt_style::cell_width::text_width_u16(grapheme);
+                        if col + width > limit {
                             break;
                         }
-                        grid.set(col, area.top, ch, span_style);
-                        col += cw;
+                        grid.set_symbol(col, area.top, grapheme, span_style);
+                        col += width;
                         written = true;
                     }
                     if !written {

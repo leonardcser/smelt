@@ -24,7 +24,7 @@ pub fn render_text_window(content: &str, offset: usize, limit: usize) -> Option<
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let line = smelt_buffer::text::slice(line, 0..TEXT_WINDOW_LINE_LIMIT);
+                let line = smelt_buffer::text::grapheme_prefix(line, TEXT_WINDOW_LINE_LIMIT);
                 format!("{:4}\t{}", start + i + 1, line)
             })
             .collect::<Vec<_>>()
@@ -48,13 +48,15 @@ pub(crate) fn read_to_string_limited(
     let mut file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.by_ref()
-        .take(max_bytes.saturating_add(1) as u64)
+        .take(max_bytes.saturating_add(4) as u64)
         .read_to_end(&mut bytes)?;
     let truncated = bytes.len() > max_bytes;
-    if truncated {
-        bytes.truncate(max_bytes);
-    }
-    let content = String::from_utf8_lossy(&bytes).into_owned();
+    let decoded = String::from_utf8_lossy(&bytes);
+    let content = if truncated {
+        smelt_buffer::text::grapheme_prefix(&decoded, max_bytes).to_string()
+    } else {
+        decoded.into_owned()
+    };
     Ok(LimitedRead { content, truncated })
 }
 
@@ -291,12 +293,60 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn render_text_window_truncates_long_lines_on_char_boundary() {
-        let long = format!("{}é", "a".repeat(TEXT_WINDOW_LINE_LIMIT));
+    fn render_text_window_truncates_long_lines_on_grapheme_boundary() {
+        let long = format!("{}e\u{301}x", "a".repeat(TEXT_WINDOW_LINE_LIMIT - 1));
         let rendered = render_text_window(&long, 1, 1).unwrap();
         assert_eq!(
             rendered,
-            format!("   1\t{}", "a".repeat(TEXT_WINDOW_LINE_LIMIT))
+            format!("   1\t{}", "a".repeat(TEXT_WINDOW_LINE_LIMIT - 1))
+        );
+    }
+
+    #[test]
+    fn limited_text_reads_do_not_expose_partial_graphemes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unicode.txt");
+        write(&path, "e\u{301}x").unwrap();
+
+        let partial = read_to_string_limited(&path, 1).unwrap();
+        assert!(partial.truncated);
+        assert_eq!(partial.content, "");
+
+        let complete = read_to_string_limited(&path, "e\u{301}".len()).unwrap();
+        assert!(complete.truncated);
+        assert_eq!(complete.content, "e\u{301}");
+    }
+
+    #[test]
+    fn limited_text_reads_drop_long_partial_graphemes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("clusters.txt");
+
+        for grapheme in ["e\u{301}", "9\u{fe0f}", "👩\u{200d}💻", "🇨🇦"] {
+            write(&path, format!("{grapheme}x")).unwrap();
+            for budget in 1..grapheme.len() {
+                let read = read_to_string_limited(&path, budget).unwrap();
+                assert!(read.truncated);
+                assert_eq!(read.content, "", "{grapheme:?} at {budget} bytes");
+            }
+
+            let read = read_to_string_limited(&path, grapheme.len()).unwrap();
+            assert!(read.truncated);
+            assert_eq!(read.content, grapheme);
+        }
+    }
+
+    #[test]
+    fn limited_text_reads_replace_invalid_utf8_before_grapheme_truncation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("invalid.txt");
+        std::fs::write(&path, b"a\xffb").unwrap();
+
+        assert_eq!(read_to_string_limited(&path, 1).unwrap().content, "a");
+        assert_eq!(read_to_string_limited(&path, 2).unwrap().content, "a");
+        assert_eq!(
+            read_to_string_limited(&path, 3).unwrap().content,
+            "a\u{fffd}b"
         );
     }
 

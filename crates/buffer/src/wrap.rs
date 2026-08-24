@@ -1,5 +1,5 @@
 /// Wrap `line` to `width` display columns, breaking at word boundaries.
-/// Words wider than `width` are broken character-by-character.
+/// Words wider than `width` are broken grapheme-by-grapheme.
 ///
 /// Returns byte ranges within `line`. When `line` contains newlines, each
 /// logical line is wrapped independently and embedded newlines force breaks
@@ -65,17 +65,17 @@ fn wrap_logical(
         visit(start, end);
         return;
     }
-    let bytes = line.as_bytes();
     let mut chunk_start = start;
     let mut chunk_end = start;
     let mut col = 0usize;
     let mut word_start = start;
-    let mut i = start;
-    while i <= end {
+    let boundaries = crate::cell_width::grapheme_indices(&line[start..end])
+        .map(|(offset, grapheme)| (start + offset, grapheme))
+        .chain(std::iter::once((end, "")));
+    for (i, grapheme) in boundaries {
         let at_end = i == end;
-        let at_space = !at_end && bytes[i] == b' ';
+        let at_space = grapheme == " ";
         if !(at_space || at_end) {
-            i += 1;
             continue;
         }
         // Process the word `line[word_start..i]`.
@@ -93,19 +93,20 @@ fn wrap_logical(
             }
         }
         if word_w > width {
-            // Char-break the word.
-            let mut idx = word_start;
-            for ch in line[word_start..word_end].chars() {
-                let end_idx = idx + ch.len_utf8();
-                let cw = crate::cell_width::text_width(&line[idx..end_idx]);
-                if col + cw > width && col > 0 {
+            // Grapheme-break the word.
+            for (offset, grapheme) in
+                crate::cell_width::grapheme_indices(&line[word_start..word_end])
+            {
+                let idx = word_start + offset;
+                let end_idx = idx + grapheme.len();
+                let grapheme_width = crate::cell_width::text_width(grapheme);
+                if col + grapheme_width > width && col > 0 {
                     visit(chunk_start, chunk_end);
                     chunk_start = idx;
                     col = 0;
                 }
                 chunk_end = end_idx;
-                col += cw;
-                idx = end_idx;
+                col += grapheme_width;
             }
         } else {
             chunk_end = word_end;
@@ -122,17 +123,14 @@ fn wrap_logical(
                 chunk_end = word_end + 1;
                 col += 1;
             }
-            i += 1;
-            word_start = i;
-        } else {
-            break;
+            word_start = word_end + 1;
         }
     }
     visit(chunk_start, chunk_end);
 }
 
 /// Wrap `line` to `width` display columns, breaking at word boundaries.
-/// Words wider than `width` are broken character-by-character.
+/// Words wider than `width` are broken grapheme-by-grapheme.
 pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     wrap_line_ranges(line, width)
         .into_iter()
@@ -184,6 +182,30 @@ mod wrap_tests {
         let r = wrap_line_ranges(s, 4);
         let chunks: Vec<&str> = r.iter().map(|(a, b)| &s[*a..*b]).collect();
         assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn oversized_word_wraps_only_between_graphemes() {
+        let source = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
+
+        assert_eq!(
+            wrap_line(source, 2),
+            ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"]
+        );
+    }
+
+    #[test]
+    fn spaces_inside_graphemes_are_not_word_boundaries() {
+        let source = "\u{600} x";
+        let boundaries: Vec<usize> = crate::cell_width::grapheme_indices(source)
+            .map(|(start, _)| start)
+            .chain(std::iter::once(source.len()))
+            .collect();
+
+        for (start, end) in wrap_line_ranges(source, 1) {
+            assert!(boundaries.contains(&start), "invalid start {start}");
+            assert!(boundaries.contains(&end), "invalid end {end}");
+        }
     }
 
     #[test]

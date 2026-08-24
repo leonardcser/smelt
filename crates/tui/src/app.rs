@@ -3020,16 +3020,17 @@ impl TuiApp {
 
         // The toast is a single visible row and clamps to the current
         // viewport width.
-        let prefix_w = indent.len() + label.len() + gap.len();
+        let prefix_w = smelt_buffer::cell_width::joined_text_width([indent, label, gap]);
         let available = width.saturating_sub(prefix_w);
         let summary =
             smelt_core::content::width::truncate_with_right_padding(summary, available, 2, "…");
         let line = format!("{indent}{label}{gap}{}", summary.text);
 
-        let label_start = indent.len() as u16;
-        let label_end = label_start + label.len() as u16;
-        let msg_start = label_end + gap.len() as u16;
-        let msg_end = msg_start + summary.body.chars().count() as u16;
+        let label_start = smelt_buffer::cell_width::text_width_u16(indent);
+        let label_end = smelt_buffer::cell_width::joined_text_width_u16([indent, label]);
+        let msg_start = smelt_buffer::cell_width::joined_text_width_u16([indent, label, gap]);
+        let msg_end =
+            smelt_buffer::cell_width::joined_text_width_u16([indent, label, gap, &summary.body]);
         (line, label_start, label_end, msg_start, msg_end)
     }
 
@@ -3355,7 +3356,7 @@ impl TuiApp {
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
-            let trimmed = msg.trim();
+            let trimmed = smelt_buffer::text::trim_whitespace(&msg);
             if let Some(cmd) = trimmed.strip_prefix('!') {
                 if let Some(handle) = self.start_shell_escape(cmd) {
                     self.overlays.install_execution(handle);

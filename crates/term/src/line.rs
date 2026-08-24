@@ -73,11 +73,12 @@ impl<'a> Line<'a> {
         self
     }
 
-    /// Total display width across all spans.
+    /// Total display width across all spans. Adjacent spans are measured as one
+    /// string so grapheme sequences split by a style boundary retain their width.
     pub fn width(&self) -> u16 {
-        self.spans
-            .iter()
-            .fold(0u16, |width, span| width.saturating_add(span.width()))
+        smelt_style::cell_width::joined_text_width_u16(
+            self.spans.iter().map(|span| span.text.as_ref()),
+        )
     }
 }
 
@@ -129,6 +130,16 @@ mod tests {
             Span::styled("cde", Style::new().fg(Color::Red)),
         ]);
         assert_eq!(l.width(), 5);
+    }
+
+    #[test]
+    fn line_width_joins_graphemes_across_style_boundaries() {
+        let line = Line::from_spans([
+            Span::raw("👩"),
+            Span::styled("\u{200d}", Style::new().bold()),
+            Span::raw("💻"),
+        ]);
+        assert_eq!(line.width(), 2);
     }
 
     #[test]

@@ -3,43 +3,50 @@
 //! Random mutation sequences over `smelt_term::Grid` that pin two
 //! correctness contracts:
 //!
-//! 1. **Wide-char continuation invariant** after every mutation:
-//!    - A `'\0'` continuation cell exists only at the column immediately
-//!      right of a wide char.
-//!    - Every wide char (visual width 2) within the grid has its right
-//!      neighbour set to `'\0'`.
+//! 1. **Wide-grapheme continuation invariant** after every mutation:
+//!    - A continuation cell exists only immediately right of a width-2
+//!      grapheme.
+//!    - Every width-2 grapheme within the grid has a continuation cell.
 //!
 //! 2. **Diff-replay parity** at frame boundaries: after computing
-//!    `curr.diff(&prev)` and feeding the updates back through `Grid::set`
-//!    on top of `prev`, the result must be cell-equal to `curr`. This
-//!    catches any future regression in `flush_diff`'s ability to faithfully
-//!    bring a terminal from the previous frame's state to the current
-//!    frame's - which is the property the reported "leftover glyphs"
-//!    bug violated.
+//!    `curr.diff(&prev)` and feeding complete-symbol updates back through
+//!    `Grid::set_symbol` on top of `prev`, the result must be cell-equal to
+//!    `curr`. This catches coordinate and stale-cell regressions in the same
+//!    updates consumed by `flush_diff`.
 //!
-//! The op palette intentionally mixes narrow and wide chars so within-frame
-//! `wide → narrow` overwrites (the exact pattern that produced the bug)
-//! happen frequently.
+//! The palette mixes narrow, wide, decomposed, variation-selector, ZWJ, and
+//! regional-indicator graphemes so width-changing overwrites happen often.
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use smelt_style::{
-    cell_width,
-    style::{Color, Style},
-};
+use smelt_style::style::{Color, Style};
 use smelt_term::geometry::Rect;
 use smelt_term::grid::Grid;
 
-/// A small char alphabet biased toward producing wide chars so overlap
-/// scenarios surface within a handful of operations.
-const PALETTE: &[char] = &[
-    ' ', '.', 'a', 'b', '#', // narrow
-    '漢', '字', '日', '本', '語', '日', '🌟', // wide (CJK + emoji)
+/// Graphemes used by string and complete-symbol writes.
+const GRAPHEMES: &[&str] = &[
+    " ",
+    ".",
+    "a",
+    "#",
+    "a\u{308}",
+    "漢",
+    "🌟",
+    "👩\u{200d}💻",
+    "9\u{fe0f}",
+    "🇨🇦",
 ];
 
+/// Scalars used by APIs whose contract intentionally accepts one `char`.
+const SCALARS: &[char] = &[' ', '.', 'a', '#', '漢', '🌟', '\u{308}', '\u{fe0f}'];
+
 fn pick_char(u: &mut Unstructured<'_>) -> char {
-    let idx = u.int_in_range(0..=(PALETTE.len() as u32 - 1)).unwrap_or(0) as usize;
-    PALETTE[idx]
+    let idx = u.int_in_range(0..=(SCALARS.len() as u32 - 1)).unwrap_or(0) as usize;
+    SCALARS[idx]
+}
+
+fn pick_grapheme_index(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
+    u.int_in_range(0..=(GRAPHEMES.len() as u8 - 1))
 }
 
 fn pick_style(u: &mut Unstructured<'_>) -> Style {
@@ -63,10 +70,10 @@ fn pick_style(u: &mut Unstructured<'_>) -> Style {
 
 #[derive(Debug)]
 enum Op {
-    Set {
+    SetSymbol {
         x: u16,
         y: u16,
-        ch: char,
+        symbol: u8,
         style: Style,
     },
     PutStr {
@@ -105,10 +112,10 @@ impl<'a> Arbitrary<'a> for Op {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let tag = u.int_in_range(0..=7u8)?;
         Ok(match tag {
-            0 => Op::Set {
+            0 => Op::SetSymbol {
                 x: u.int_in_range(0..=15)? as u16,
                 y: u.int_in_range(0..=5)? as u16,
-                ch: pick_char(u),
+                symbol: pick_grapheme_index(u)?,
                 style: pick_style(u),
             },
             1 => Op::PutStr {
@@ -155,16 +162,17 @@ fn bounded_palette_indices(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8
     let len = u.int_in_range(0..=8u8)?;
     let mut out = Vec::with_capacity(len as usize);
     for _ in 0..len {
-        out.push(u.int_in_range(0..=(PALETTE.len() as u8 - 1))?);
+        out.push(pick_grapheme_index(u)?);
     }
     Ok(out)
 }
 
+fn grapheme(index: u8) -> &'static str {
+    GRAPHEMES[(index as usize) % GRAPHEMES.len()]
+}
+
 fn indices_to_string(indices: &[u8]) -> String {
-    indices
-        .iter()
-        .map(|&i| PALETTE[(i as usize) % PALETTE.len()])
-        .collect()
+    indices.iter().map(|&index| grapheme(index)).collect()
 }
 
 #[derive(Arbitrary, Debug)]
@@ -180,34 +188,33 @@ fn assert_invariants(grid: &Grid, label: &str) {
     for y in 0..grid.height() {
         for x in 0..grid.width() {
             let cell = grid.cell(x, y);
-            if cell.symbol == '\0' {
+            if cell.symbol.is_continuation() {
                 assert!(x > 0, "[{label}] continuation at col 0 has no leading cell");
-                let lead = grid.cell(x - 1, y).symbol;
-                let w = cell_width::char_width(lead);
+                let lead = &grid.cell(x - 1, y).symbol;
+                let width = lead.width();
                 assert_eq!(
-                    w, 2,
-                    "[{label}] orphaned '\\0' at ({x},{y}); leading symbol {lead:?} has width {w}"
+                    width, 2,
+                    "[{label}] orphaned continuation at ({x},{y}); leading symbol {lead:?} has width {width}"
                 );
             }
-            let w = cell_width::char_width(cell.symbol);
-            if w == 2 {
+            let width = cell.symbol.width();
+            if width == 2 {
                 assert!(
                     x + 1 < grid.width(),
-                    "[{label}] wide char at ({x},{y}) cannot fit a continuation cell"
+                    "[{label}] wide grapheme at ({x},{y}) cannot fit a continuation cell"
                 );
-                let cont = grid.cell(x + 1, y).symbol;
-                assert_eq!(
-                    cont, '\0',
-                    "[{label}] wide char at ({x},{y}) missing continuation; got {cont:?}"
+                let cont = &grid.cell(x + 1, y).symbol;
+                assert!(
+                    cont.is_continuation(),
+                    "[{label}] wide grapheme at ({x},{y}) missing continuation; got {cont:?}"
                 );
             }
         }
     }
 }
 
-/// Apply `curr.diff(&prev)` updates on top of a clone of `prev` (using
-/// `Grid::set`, which is the same primitive `flush_diff` ultimately encodes
-/// to the terminal) and assert the result is cell-equal to `curr`.
+/// Apply `curr.diff(&prev)` updates on top of a clone of `prev` using complete
+/// grapheme symbols and assert the result is cell-equal to `curr`.
 ///
 /// This is the *property* the diff-flush pipeline must uphold: a terminal
 /// that started in `prev`'s state and received the diff stream ends up in
@@ -215,7 +222,12 @@ fn assert_invariants(grid: &Grid, label: &str) {
 fn assert_diff_replay_parity(prev: &Grid, curr: &Grid) {
     let mut replay = prev.clone();
     for update in curr.diff(prev) {
-        replay.set(update.x, update.y, update.cell.symbol, update.cell.style);
+        replay.set_symbol(
+            update.x,
+            update.y,
+            update.cell.symbol.as_str(),
+            update.cell.style,
+        );
     }
     for y in 0..curr.height() {
         for x in 0..curr.width() {
@@ -238,7 +250,12 @@ fuzz_target!(|input: FuzzInput| {
     // Cap ops so a degenerate fuzz seed can't spin forever.
     for op in input.ops.into_iter().take(128) {
         match op {
-            Op::Set { x, y, ch, style } => curr.set(x, y, ch, style),
+            Op::SetSymbol {
+                x,
+                y,
+                symbol,
+                style,
+            } => curr.set_symbol(x, y, grapheme(symbol), style),
             Op::PutStr { x, y, chars, style } => {
                 curr.put_str(x, y, &indices_to_string(&chars), style);
             }

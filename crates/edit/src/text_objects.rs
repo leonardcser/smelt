@@ -1,6 +1,8 @@
 //! Vim text-object selection (iw/aw, i"/a", i(/a(, ip/ap, etc.) over `&str` buffers.
 
-use super::text::{char_class, line_end, line_start, next_char_boundary, CharClass};
+use super::text::{
+    char_class, line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary, CharClass,
+};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +113,35 @@ pub(crate) fn text_object_for_spec(
     }
 }
 
+fn is_horizontal_space(grapheme: &str) -> bool {
+    grapheme
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, ' ' | '\t'))
+}
+
+fn following_horizontal_space_end(buf: &str, mut pos: usize, limit: usize) -> usize {
+    while pos < limit {
+        let next = next_grapheme_boundary(buf, pos);
+        if next > limit || !is_horizontal_space(&buf[pos..next]) {
+            break;
+        }
+        pos = next;
+    }
+    pos
+}
+
+fn preceding_horizontal_space_start(buf: &str, mut pos: usize, limit: usize) -> usize {
+    while pos > limit {
+        let previous = prev_grapheme_boundary(buf, pos);
+        if previous < limit || !is_horizontal_space(&buf[previous..pos]) {
+            break;
+        }
+        pos = previous;
+    }
+    pos
+}
+
 fn text_object_word(
     buf: &str,
     cpos: usize,
@@ -120,36 +151,40 @@ fn text_object_word(
     if buf.is_empty() || cpos >= buf.len() {
         return None;
     }
-    let chars: Vec<(usize, char)> = buf.char_indices().collect();
-    let ci = chars.iter().position(|(i, _)| *i >= cpos)?;
-    let cur_char = chars[ci].1;
+    let cpos = smelt_buffer::text::snap_grapheme(buf, cpos);
+    let graphemes: Vec<(usize, &str)> = smelt_buffer::cell_width::grapheme_indices(buf).collect();
+    let ci = graphemes.iter().position(|(byte, _)| *byte >= cpos)?;
+    let cur_grapheme = graphemes[ci].1;
+    let cur_char = cur_grapheme.chars().next()?;
     let cur_class = char_class(cur_char, mode);
 
-    if cur_char == '\n' {
-        let byte_pos = chars[ci].0;
+    if cur_grapheme == "\n" {
+        let byte_pos = graphemes[ci].0;
         return Some((byte_pos, byte_pos + 1));
     }
 
     let mut start = ci;
     while start > 0 {
-        let prev = chars[start - 1].1;
-        if prev == '\n' || char_class(prev, mode) != cur_class {
+        let prev = graphemes[start - 1].1;
+        let prev_char = prev.chars().next()?;
+        if prev == "\n" || char_class(prev_char, mode) != cur_class {
             break;
         }
         start -= 1;
     }
     let mut end = ci;
-    while end + 1 < chars.len() {
-        let next = chars[end + 1].1;
-        if next == '\n' || char_class(next, mode) != cur_class {
+    while end + 1 < graphemes.len() {
+        let next = graphemes[end + 1].1;
+        let next_char = next.chars().next()?;
+        if next == "\n" || char_class(next_char, mode) != cur_class {
             break;
         }
         end += 1;
     }
 
-    let byte_start = chars[start].0;
-    let byte_end = if end + 1 < chars.len() {
-        chars[end + 1].0
+    let byte_start = graphemes[start].0;
+    let byte_end = if end + 1 < graphemes.len() {
+        graphemes[end + 1].0
     } else {
         buf.len()
     };
@@ -158,18 +193,14 @@ fn text_object_word(
         Some((byte_start, byte_end))
     } else {
         // "a word" includes trailing whitespace, or leading if none trailing.
-        let mut a_end = byte_end;
-        while a_end < buf.len() && matches!(buf.as_bytes()[a_end], b' ' | b'\t') {
-            a_end += 1;
-        }
+        let a_end = following_horizontal_space_end(buf, byte_end, buf.len());
         if a_end > byte_end {
             Some((byte_start, a_end))
         } else {
-            let mut a_start = byte_start;
-            while a_start > 0 && matches!(buf.as_bytes()[a_start - 1], b' ' | b'\t') {
-                a_start -= 1;
-            }
-            Some((a_start, byte_end))
+            Some((
+                preceding_horizontal_space_start(buf, byte_start, 0),
+                byte_end,
+            ))
         }
     }
 }
@@ -185,19 +216,14 @@ fn text_object_quote(buf: &str, cpos: usize, inner: bool, quote: char) -> Option
 
     let line_s = line_start(buf, cpos);
     let line_e = line_end(buf, cpos);
-    let bytes = buf.as_bytes();
-    let mut a_end = delims.close_end;
-    while a_end < line_e && matches!(bytes[a_end], b' ' | b'\t') {
-        a_end += 1;
-    }
+    let a_end = following_horizontal_space_end(buf, delims.close_end, line_e);
     if a_end > delims.close_end {
         return Some((delims.open_start, a_end));
     }
-    let mut a_start = delims.open_start;
-    while a_start > line_s && matches!(bytes[a_start - 1], b' ' | b'\t') {
-        a_start -= 1;
-    }
-    Some((a_start, delims.close_end))
+    Some((
+        preceding_horizontal_space_start(buf, delims.open_start, line_s),
+        delims.close_end,
+    ))
 }
 
 fn find_next_quote(line: &str, from: usize, quote: char, respect_escape: bool) -> Option<usize> {
@@ -259,7 +285,7 @@ fn text_object_any_quote(buf: &str, cpos: usize, inner: bool) -> Option<(usize, 
 }
 
 fn nearest_quote_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
-    let cursor = smelt_buffer::text::snap(buf, cpos.min(buf.len()));
+    let cursor = smelt_buffer::text::snap_grapheme(buf, cpos.min(buf.len()));
     ['"', '\'', '`']
         .into_iter()
         .filter_map(|quote| quote_delimiters(buf, cursor, quote))
@@ -284,6 +310,24 @@ pub(crate) fn surrounding_delimiters(
     }
 }
 
+fn grapheme_delimiters(
+    buf: &str,
+    open_start: usize,
+    open_end: usize,
+    close_start: usize,
+    close_end: usize,
+) -> Option<SurroundDelimiters> {
+    let open = smelt_buffer::text::covering_grapheme_range(buf, open_start..open_end);
+    let close = smelt_buffer::text::covering_grapheme_range(buf, close_start..close_end);
+    let delimiters = SurroundDelimiters {
+        open_start: open.start,
+        open_end: open.end,
+        close_start: close.start,
+        close_end: close.end,
+    };
+    (delimiters.open_end <= delimiters.close_start).then_some(delimiters)
+}
+
 fn quote_delimiters(buf: &str, cpos: usize, quote: char) -> Option<SurroundDelimiters> {
     let line_s = line_start(buf, cpos);
     let line_e = line_end(buf, cpos);
@@ -297,22 +341,17 @@ fn quote_delimiters(buf: &str, cpos: usize, quote: char) -> Option<SurroundDelim
     }
     let open = open?;
     let close = find_next_quote(line, open + qlen, quote, true)?;
-    Some(SurroundDelimiters {
-        open_start: line_s + open,
-        open_end: line_s + open + qlen,
-        close_start: line_s + close,
-        close_end: line_s + close + qlen,
-    })
+    grapheme_delimiters(
+        buf,
+        line_s + open,
+        line_s + open + qlen,
+        line_s + close,
+        line_s + close + qlen,
+    )
 }
 
 fn pair_delimiters(buf: &str, cpos: usize, open: char, close: char) -> Option<SurroundDelimiters> {
-    let (outer_start, outer_end) = text_object_pair(buf, cpos, false, open, close)?;
-    Some(SurroundDelimiters {
-        open_start: outer_start,
-        open_end: outer_start + open.len_utf8(),
-        close_start: outer_end - close.len_utf8(),
-        close_end: outer_end,
-    })
+    find_pair_delimiters(buf, cpos, open, close)
 }
 
 #[derive(Clone, Debug)]
@@ -328,7 +367,7 @@ struct HtmlTag<'a> {
 // It is deliberately syntax-only: quoted attributes are skipped while looking
 // for `>`, self-closing tags are ignored, and malformed tags do not match.
 fn tag_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
-    let cursor = smelt_buffer::text::snap(buf, cpos.min(buf.len()));
+    let cursor = smelt_buffer::text::snap_grapheme(buf, cpos.min(buf.len()));
     let mut stack: Vec<HtmlTag<'_>> = Vec::new();
     let mut best: Option<SurroundDelimiters> = None;
     let mut i = 0usize;
@@ -348,13 +387,12 @@ fn tag_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
                 .rposition(|open| open.name.eq_ignore_ascii_case(tag.name))
             {
                 let open = stack.remove(open_idx);
-                if cursor >= open.start && cursor <= tag.end {
-                    let candidate = SurroundDelimiters {
-                        open_start: open.start,
-                        open_end: open.end,
-                        close_start: tag.start,
-                        close_end: tag.end,
-                    };
+                let Some(candidate) =
+                    grapheme_delimiters(buf, open.start, open.end, tag.start, tag.end)
+                else {
+                    continue;
+                };
+                if cursor >= candidate.open_start && cursor <= candidate.close_end {
                     let replace = best
                         .map(|current| {
                             candidate.close_end - candidate.open_start
@@ -517,17 +555,16 @@ fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, 
     Some((lines[range.start].0, lines[range.end - 1].1))
 }
 
-fn text_object_pair(
+fn find_pair_delimiters(
     buf: &str,
     cpos: usize,
-    inner: bool,
     open: char,
     close: char,
-) -> Option<(usize, usize)> {
+) -> Option<SurroundDelimiters> {
     let mut depth = 0i32;
     let mut open_pos = None;
-    let snapped = smelt_buffer::text::snap(buf, cpos);
-    let upper = next_char_boundary(buf, snapped);
+    let snapped = smelt_buffer::text::snap_grapheme(buf, cpos);
+    let upper = next_grapheme_boundary(buf, snapped);
     for (i, c) in buf[..upper].char_indices().rev() {
         if c == close && i != snapped {
             depth += 1;
@@ -549,16 +586,33 @@ fn text_object_pair(
         } else if c == close {
             if depth == 0 {
                 let close_pos = search_start + i;
-                return if inner {
-                    Some((open_pos + open.len_utf8(), close_pos))
-                } else {
-                    Some((open_pos, close_pos + close.len_utf8()))
-                };
+                return grapheme_delimiters(
+                    buf,
+                    open_pos,
+                    open_pos + open.len_utf8(),
+                    close_pos,
+                    close_pos + close.len_utf8(),
+                );
             }
             depth -= 1;
         }
     }
     None
+}
+
+fn text_object_pair(
+    buf: &str,
+    cpos: usize,
+    inner: bool,
+    open: char,
+    close: char,
+) -> Option<(usize, usize)> {
+    let delimiters = pair_delimiters(buf, cpos, open, close)?;
+    Some(if inner {
+        delimiters.inner_range()
+    } else {
+        delimiters.outer_range()
+    })
 }
 
 #[cfg(test)]
@@ -567,6 +621,15 @@ mod tests {
 
     fn slice(buf: &str, range: (usize, usize)) -> &str {
         &buf[range.0..range.1]
+    }
+
+    fn assert_grapheme_range(buf: &str, range: (usize, usize)) {
+        let boundaries: Vec<usize> = smelt_buffer::cell_width::grapheme_indices(buf)
+            .map(|(start, _)| start)
+            .chain(std::iter::once(buf.len()))
+            .collect();
+        assert!(boundaries.contains(&range.0), "invalid start: {range:?}");
+        assert!(boundaries.contains(&range.1), "invalid end: {range:?}");
     }
 
     #[test]
@@ -594,6 +657,21 @@ mod tests {
     }
 
     #[test]
+    fn word_objects_never_split_grapheme_clusters() {
+        let decomposed = "one e\u{301}cho two";
+        let start = decomposed.find("e\u{301}").unwrap();
+        let range = text_object(decomposed, start + 1, true, 'w').unwrap();
+        assert_eq!(slice(decomposed, range), "e\u{301}cho");
+
+        for grapheme in ["👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let text = format!("a {grapheme} z");
+            let start = text.find(grapheme).unwrap();
+            let range = text_object(&text, start, true, 'w').unwrap();
+            assert_eq!(slice(&text, range), grapheme);
+        }
+    }
+
+    #[test]
     fn aw_extends_to_trailing_whitespace_when_present() {
         let s = "the quick brown";
         let r = text_object(s, 5, false, 'w').unwrap();
@@ -605,6 +683,23 @@ mod tests {
         let s = "the quick";
         let r = text_object(s, 5, false, 'w').unwrap();
         assert_eq!(slice(s, r), " quick");
+    }
+
+    #[test]
+    fn aw_whitespace_extension_keeps_graphemes_atomic() {
+        for text in ["\u{600} word", " \u{301}word"] {
+            let range = text_object(text, text.find("word").unwrap(), false, 'w').unwrap();
+            assert_grapheme_range(text, range);
+        }
+        let combining_space = " \u{301}word";
+        let range = text_object(
+            combining_space,
+            combining_space.find("word").unwrap(),
+            false,
+            'w',
+        )
+        .unwrap();
+        assert_eq!(slice(combining_space, range), combining_space);
     }
 
     #[test]
@@ -729,6 +824,24 @@ mod tests {
         assert_eq!(slice(s, inner), "<div>inner</div>");
         let outer = text_object(s, 30, false, 't').unwrap();
         assert_eq!(slice(s, outer), s);
+    }
+
+    #[test]
+    fn delimiter_text_objects_include_complete_graphemes() {
+        for (text, kind) in [
+            ("\"\u{301}x\"\u{301}", '"'),
+            ("(\u{301}x)\u{301}", '('),
+            ("<b>\u{301}x</b>\u{301}", 't'),
+            ("\u{600}(x)", '('),
+        ] {
+            let cursor = text.find('x').unwrap();
+            let inner = text_object(text, cursor, true, kind).unwrap();
+            let outer = text_object(text, cursor, false, kind).unwrap();
+            assert_grapheme_range(text, inner);
+            assert_grapheme_range(text, outer);
+            assert_eq!(slice(text, inner), "x");
+            assert_eq!(slice(text, outer), text);
+        }
     }
 
     // ── pair: i( / a( / i{ / a{ / i[ / i< ───────────────────────────────

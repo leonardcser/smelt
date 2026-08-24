@@ -101,6 +101,41 @@ fn root_dialog_replaces_composer_and_restores_prompt_state() {
 }
 
 #[test]
+fn dialog_input_edits_and_renders_unicode_by_grapheme() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        local leaf, buf = smelt.dialog.input("custom answer", { wrap = true })
+        _G.__unicode_answer_buf = buf
+        smelt.dialog.open_handle({
+          title = "question",
+          focus = leaf,
+          panels = { { leaf = leaf, height = "fit" } },
+        })
+        "#
+    ));
+    let input = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
+
+    app.type_text(input);
+    let frame = app.render_to_frame().text();
+    for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+        assert!(frame.contains(grapheme), "frame: {frame}");
+    }
+
+    app.press(KeyCode::Left);
+    app.press(KeyCode::Backspace);
+    app.press(KeyCode::Delete);
+
+    let edited = app
+        .eval_lua::<String>("return _G.__unicode_answer_buf:line(1)")
+        .unwrap();
+    assert_eq!(edited, "e\u{301}👩\u{200d}💻");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("e\u{301}"), "frame: {frame}");
+    assert!(frame.contains("👩\u{200d}💻"), "frame: {frame}");
+}
+
+#[test]
 fn dialogs_dismiss_from_the_keyboard_without_mouse_focus() {
     let mut app = TestApp::builder().build();
 

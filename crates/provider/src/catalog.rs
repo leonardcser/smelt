@@ -215,7 +215,7 @@ fn api_key(api_base: &str) -> Option<String> {
 }
 
 fn normalize_api_url(api_base: &str) -> String {
-    api_base.trim().trim_end_matches('/').to_ascii_lowercase()
+    crate::endpoint::trim_api_base(api_base).to_ascii_lowercase()
 }
 
 fn model_slug(name: &str) -> String {

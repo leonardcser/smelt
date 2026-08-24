@@ -200,9 +200,9 @@ impl TuiApp {
 
     fn complete_reasoning_summary_part(&mut self, title: Option<String>, content: String) -> bool {
         let title = title
-            .map(|title| title.trim().to_string())
+            .map(|title| smelt_buffer::text::trim_whitespace(&title).to_string())
             .filter(|title| !title.is_empty());
-        let content = content.trim().to_string();
+        let content = smelt_buffer::text::trim_whitespace(&content).to_string();
         if title.is_none() && content.is_empty() {
             return false;
         }

@@ -344,7 +344,7 @@ impl ConversationLuaHost<'_> {
             Some(position) => {
                 let requested = position.max(0) as usize;
                 let context = crate::input::prompt_ctx_mut(&mut self.app.ui);
-                let snapped = smelt_buffer::text::snap(context.buf.source(), requested);
+                let snapped = smelt_buffer::text::snap_grapheme(context.buf.source(), requested);
                 context.win.set_cpos(snapped);
                 context.win.clear_selection_anchor();
                 context.win.clamp_anchors_to_source(context.buf.source());
@@ -358,10 +358,15 @@ impl ConversationLuaHost<'_> {
         let cursor = {
             let context = crate::input::prompt_ctx_mut(&mut self.app.ui);
             let source = context.buf.source();
-            let start = smelt_buffer::text::snap(source, start.max(0) as usize);
-            let end = smelt_buffer::text::snap(source, end.max(0) as usize).max(start);
+            let start = smelt_buffer::text::snap_grapheme(source, start.max(0) as usize);
+            let end = smelt_buffer::text::snap_grapheme(source, end.max(0) as usize).max(start);
             context.buf.text_mut().replace_range(start..end, text);
             let cursor = start + text.len();
+            let cursor = if text.is_empty() {
+                smelt_buffer::text::snap_grapheme(context.buf.source(), cursor)
+            } else {
+                smelt_buffer::text::ceil_grapheme(context.buf.source(), cursor)
+            };
             context.win.set_cpos(cursor);
             context.win.clear_selection_anchor();
             context.win.clamp_anchors_to_source(context.buf.source());

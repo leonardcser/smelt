@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
-use smelt_style::cell_width::{char_width, text_width};
+use smelt_style::cell_width::{grapheme_indices, joined_text_width, text_width};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreakPolicy {
@@ -18,7 +18,7 @@ pub enum BreakPolicy {
     BreakOnSpaces,
     /// Keep the run together. It may exceed the width when it starts a row.
     Unbreakable,
-    /// Preserve every character and break strictly by display width.
+    /// Preserve every grapheme and break strictly by display width.
     PreserveSpaces,
     /// Keep this run attached to the start of the next run. If the next run
     /// wraps to a new row, this run moves with it.
@@ -55,8 +55,42 @@ pub struct InlineLine<T> {
     pub runs: Vec<InlineRun<T>>,
 }
 
+/// A terminal cannot style or wrap individual scalars inside one grapheme.
+/// When a producer splits a grapheme across runs, assign the complete cluster
+/// to the run containing its first scalar and leave the later runs empty.
+fn normalize_graphemes_across_runs<T>(runs: &mut [InlineRun<T>]) {
+    if runs.len() < 2 {
+        return;
+    }
+
+    let capacity = runs.iter().map(|run| run.text.len()).sum();
+    let mut text = String::with_capacity(capacity);
+    let mut run_ends = Vec::with_capacity(runs.len());
+    for run in runs.iter() {
+        text.push_str(&run.text);
+        run_ends.push(text.len());
+    }
+    if text.is_empty() {
+        return;
+    }
+
+    for run in runs.iter_mut() {
+        run.text.clear();
+    }
+    let mut run_index = 0usize;
+    for (byte, grapheme) in grapheme_indices(&text) {
+        while run_ends.get(run_index).is_some_and(|end| byte >= *end) {
+            run_index += 1;
+        }
+        if let Some(run) = runs.get_mut(run_index) {
+            run.text.push_str(grapheme);
+        }
+    }
+}
+
 impl<T> InlineLine<T> {
-    pub fn new(runs: Vec<InlineRun<T>>) -> Self {
+    pub fn new(mut runs: Vec<InlineRun<T>>) -> Self {
+        normalize_graphemes_across_runs(&mut runs);
         Self { runs }
     }
 
@@ -65,7 +99,7 @@ impl<T> InlineLine<T> {
     }
 
     pub fn measure_unwrapped(&self) -> usize {
-        self.runs.iter().map(|run| text_width(&run.text)).sum()
+        joined_text_width(self.runs.iter().map(|run| run.text.as_str()))
     }
 
     /// Wrap the concatenated plain text into byte ranges using the transcript
@@ -121,7 +155,25 @@ impl<T: Clone> InlineLine<T> {
             return vec![row];
         }
 
-        let mut state = WrapState::new(first_cells, continuation_cells);
+        self.wrap_fragments_with_occupied_widths(first_cells, 0, continuation_cells, 0)
+    }
+
+    /// Wrap content after fixed chrome has already occupied cells on each row.
+    /// Empty first rows are retained when the first content grapheme only fits
+    /// after moving to a continuation row.
+    pub fn wrap_fragments_with_occupied_widths(
+        &self,
+        first_cells: usize,
+        first_occupied: usize,
+        continuation_cells: usize,
+        continuation_occupied: usize,
+    ) -> Vec<Vec<WrappedRun<T>>> {
+        let mut state = WrapState::new(
+            first_cells,
+            first_occupied,
+            continuation_cells,
+            continuation_occupied,
+        );
         for (run_index, run) in self.runs.iter().enumerate() {
             match run.break_policy {
                 BreakPolicy::Normal => append_normal_fragments(run_index, run, false, &mut state),
@@ -176,18 +228,25 @@ struct WrapState<T> {
     col: usize,
     first_cells: usize,
     continuation_cells: usize,
+    continuation_occupied: usize,
 }
 
 impl<T: Clone> WrapState<T> {
-    fn new(first_cells: usize, continuation_cells: usize) -> Self {
+    fn new(
+        first_cells: usize,
+        first_occupied: usize,
+        continuation_cells: usize,
+        continuation_occupied: usize,
+    ) -> Self {
         Self {
             rows: Vec::new(),
             cur: Vec::new(),
             pending_attach: Vec::new(),
             pending_attach_width: 0,
-            col: 0,
+            col: first_occupied.min(first_cells),
             first_cells,
             continuation_cells,
+            continuation_occupied: continuation_occupied.min(continuation_cells),
         }
     }
 
@@ -201,7 +260,7 @@ impl<T: Clone> WrapState<T> {
 
     fn push_row(&mut self) {
         self.rows.push(std::mem::take(&mut self.cur));
-        self.col = 0;
+        self.col = self.continuation_occupied;
     }
 
     fn append_fragment(&mut self, run_index: usize, range: Range<usize>, run: &InlineRun<T>) {
@@ -268,10 +327,13 @@ fn append_normal_fragments<T: Clone>(
     let text = run.text.as_str();
     while offset < text.len() {
         let relative = &text[offset..];
-        let word_rel_end = relative.find(' ').unwrap_or(relative.len());
+        let next_space = grapheme_indices(relative).find(|(_, grapheme)| *grapheme == " ");
         let word_start = offset;
-        let word_end = offset + word_rel_end;
-        let has_space = word_end < text.len();
+        let word_end = next_space
+            .as_ref()
+            .map(|(space, _)| offset + space)
+            .unwrap_or(text.len());
+        let has_space = next_space.is_some();
         let space_end = word_end + usize::from(has_space);
         let segment_width = text_width(&text[word_start..space_end]);
         let word_width = text_width(&text[word_start..word_end]);
@@ -283,7 +345,7 @@ fn append_normal_fragments<T: Clone>(
         }
 
         if word_width > state.max_cells() {
-            append_char_fragments(run_index, run, word_start..word_end, state);
+            append_grapheme_fragments(run_index, run, word_start..word_end, state);
         } else {
             state.append_fragment(run_index, word_start..word_end, run);
             state.col += word_width;
@@ -325,25 +387,24 @@ fn append_preserve_space_fragments<T: Clone>(
     run: &InlineRun<T>,
     state: &mut WrapState<T>,
 ) {
-    append_char_fragments(run_index, run, 0..run.text.len(), state);
+    append_grapheme_fragments(run_index, run, 0..run.text.len(), state);
 }
 
-fn append_char_fragments<T: Clone>(
+fn append_grapheme_fragments<T: Clone>(
     run_index: usize,
     run: &InlineRun<T>,
     range: Range<usize>,
     state: &mut WrapState<T>,
 ) {
-    let mut idx = range.start;
-    for ch in run.text[range].chars() {
-        let next = idx + ch.len_utf8();
-        let cw = char_width(ch);
-        if state.col + state.pending_width() + cw > state.max_cells() && state.col > 0 {
+    for (offset, grapheme) in grapheme_indices(&run.text[range.clone()]) {
+        let start = range.start + offset;
+        let end = start + grapheme.len();
+        let width = text_width(grapheme);
+        if state.col + state.pending_width() + width > state.max_cells() && state.col > 0 {
             state.push_row();
         }
-        state.append_fragment(run_index, idx..next, run);
-        state.col += cw;
-        idx = next;
+        state.append_fragment(run_index, start..end, run);
+        state.col += width;
     }
 }
 
@@ -389,12 +450,68 @@ mod tests {
     }
 
     #[test]
-    fn normal_breaks_oversized_words_by_character() {
+    fn normal_breaks_oversized_words_by_grapheme() {
         let line = InlineLine::plain("abcdef", ());
         assert_eq!(
             texts(line.wrap_ranges(3)),
             vec![vec![String::from("abc")], vec![String::from("def")]]
         );
+    }
+
+    #[test]
+    fn run_boundaries_never_split_graphemes() {
+        for (runs, expected, width) in [
+            (
+                vec![
+                    InlineRun::new("e", 1, BreakPolicy::Normal),
+                    InlineRun::new("\u{301}", 2, BreakPolicy::Normal),
+                ],
+                "e\u{301}",
+                1,
+            ),
+            (
+                vec![
+                    InlineRun::new("👩", 1, BreakPolicy::Normal),
+                    InlineRun::new("\u{200d}", 2, BreakPolicy::Normal),
+                    InlineRun::new("💻", 3, BreakPolicy::Normal),
+                ],
+                "👩\u{200d}💻",
+                2,
+            ),
+            (
+                vec![
+                    InlineRun::new("9", 1, BreakPolicy::Normal),
+                    InlineRun::new("\u{fe0f}", 2, BreakPolicy::Normal),
+                ],
+                "9\u{fe0f}",
+                2,
+            ),
+        ] {
+            let line = InlineLine::new(runs);
+
+            assert_eq!(line.measure_unwrapped(), width);
+            assert_eq!(line.runs[0].text, expected);
+            assert!(line.runs[1..].iter().all(|run| run.text.is_empty()));
+            assert_eq!(
+                line.wrap_ranges(width),
+                vec![vec![InlineRun::new(expected, 1, BreakPolicy::Normal)]]
+            );
+        }
+    }
+
+    #[test]
+    fn normal_wrap_never_breaks_at_a_space_inside_a_grapheme() {
+        let source = "\u{600} x";
+        let boundaries: Vec<usize> = grapheme_indices(source)
+            .map(|(start, _)| start)
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let line = InlineLine::plain(source, ());
+
+        for fragment in line.wrap_fragments(1).into_iter().flatten() {
+            assert!(boundaries.contains(&fragment.range.start));
+            assert!(boundaries.contains(&fragment.range.end));
+        }
     }
 
     #[test]

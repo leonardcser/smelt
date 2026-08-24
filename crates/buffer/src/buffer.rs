@@ -88,7 +88,7 @@ impl CopyOutput {
 /// Per-buffer transform from a byte range to a [`CopyOutput`].
 ///
 /// `src` is the resolved base string [`Buffer::copy_range`] picked (`source`
-/// when non-empty, else `text()`); `range` is in-bounds, on char boundaries,
+/// when non-empty, else `text()`); `range` is in-bounds, on grapheme boundaries,
 /// and addresses bytes in `src`. The buffer is passed alongside so impls can
 /// read sidecar state (attachment ids, decorations).
 pub trait BufferCopy: Send + Sync {
@@ -854,8 +854,8 @@ impl Buffer {
 
     /// Snapshot a byte range as a [`CopyOutput`]. The range is in the buffer's
     /// editable-byte space - `source` when the parser writes it, otherwise
-    /// `lines.join("\n")`. Endpoints are snapped and clamped; buffers without
-    /// a copier fall through to identity.
+    /// `lines.join("\n")`. Endpoints are snapped to grapheme boundaries and
+    /// clamped; buffers without a copier fall through to identity.
     pub fn copy_range(&self, range: std::ops::Range<usize>) -> CopyOutput {
         let owned;
         let src: &str = if self.source.is_empty() {
@@ -864,13 +864,10 @@ impl Buffer {
         } else {
             &self.source
         };
-        let len = src.len();
-        let start = crate::text::snap(src, range.start.min(len));
-        let end = crate::text::snap(src, range.end.min(len));
-        if start >= end {
+        let clamped = crate::text::snapped_grapheme_range(src, range);
+        if clamped.is_empty() {
             return CopyOutput::default();
         }
-        let clamped = start..end;
         match self.copier.clone() {
             Some(c) => c.copy(self, src, clamped),
             None => CopyOutput::same(src[clamped].to_string()),
@@ -1086,16 +1083,15 @@ impl Buffer {
                 let mut emitted_copy_as: std::collections::HashSet<usize> =
                     std::collections::HashSet::new();
                 let mut col: u16 = 0;
-                let mut byte_pos: usize = 0;
-                for ch in line.chars() {
-                    let cw = crate::cell_width::char_width_u16(ch);
-                    let ch_byte_end = byte_pos + ch.len_utf8();
-                    let in_byte_clip = ch_byte_end > bs && byte_pos < be;
+                for (byte_pos, grapheme) in crate::cell_width::grapheme_indices(line) {
+                    let width = crate::cell_width::text_width_u16(grapheme);
+                    let grapheme_byte_end = byte_pos + grapheme.len();
+                    let in_byte_clip = grapheme_byte_end > bs && byte_pos < be;
                     if in_byte_clip {
                         let mut unselectable = false;
                         let mut copy_as_hit: Option<(usize, &str)> = None;
                         for (idx, span) in row_spans.iter().enumerate() {
-                            if col >= span.col_start && col < span.col_end {
+                            if col < span.col_end && col.saturating_add(width) > span.col_start {
                                 if !span.meta.selectable {
                                     unselectable = true;
                                     break;
@@ -1111,12 +1107,11 @@ impl Buffer {
                                     out.push_str(s);
                                 }
                             } else {
-                                out.push(ch);
+                                out.push_str(grapheme);
                             }
                         }
                     }
-                    col = col.saturating_add(cw);
-                    byte_pos += ch.len_utf8();
+                    col = col.saturating_add(width);
                 }
             }
             // +1 accounts for the `\n` joiner between rows.
@@ -1155,6 +1150,7 @@ impl Buffer {
     /// byte space).
     pub fn display_byte_pos(&self, cpos: usize) -> (usize, usize) {
         if let Some(maps) = &self.projection_maps {
+            let cpos = crate::text::snap_grapheme(&self.source, cpos);
             let (row, char_col) = maps.cursor_pos(&self.source, cpos);
             let line = self.lines.get(row).map(String::as_str).unwrap_or("");
             return (row, crate::text::byte_of_char(line, char_col));
@@ -1169,7 +1165,11 @@ impl Buffer {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
-        (line_idx, cpos.saturating_sub(offsets[line_idx]))
+        let byte_col = crate::text::snap_grapheme(
+            &self.lines[line_idx],
+            cpos.saturating_sub(offsets[line_idx]),
+        );
+        (line_idx, byte_col)
     }
 
     /// Map an editable-space byte offset to a display `(row, col)`.
@@ -1180,13 +1180,11 @@ impl Buffer {
     /// display-character indexes internally.
     pub fn display_cursor_pos(&self, cpos: usize) -> (usize, usize) {
         if let Some(maps) = &self.projection_maps {
+            let cpos = crate::text::snap_grapheme(&self.source, cpos);
             let (row, char_col) = maps.cursor_pos(&self.source, cpos);
             let line = self.lines.get(row).map(String::as_str).unwrap_or("");
-            let col = line
-                .chars()
-                .take(char_col)
-                .map(crate::cell_width::char_width)
-                .sum();
+            let byte_col = crate::text::byte_of_char(line, char_col);
+            let col = crate::cell_width::text_width(crate::text::slice(line, 0..byte_col));
             return (row, col);
         }
         if self.lines.is_empty() {
@@ -1232,7 +1230,7 @@ impl Buffer {
 
     /// Map a display `(row, byte_col)` back to an editable-space byte offset.
     ///
-    /// `byte_col` is a byte offset inside `lines[row]`, snapped to a UTF-8
+    /// `byte_col` is a byte offset inside `lines[row]`, snapped to a grapheme
     /// boundary and clamped to that row. Use [`Self::byte_at_display_pos`] for
     /// terminal-cell columns.
     pub fn byte_at_display_byte_pos(&self, row: usize, byte_col: usize) -> usize {
@@ -1241,7 +1239,7 @@ impl Buffer {
         }
         let row = row.min(self.lines.len() - 1);
         let line = &self.lines[row];
-        let byte_col = crate::text::snap(line, byte_col.min(line.len()));
+        let byte_col = crate::text::snap_grapheme(line, byte_col.min(line.len()));
         if let Some(maps) = &self.projection_maps {
             let char_col = crate::text::char_pos(line, byte_col).min(line.chars().count());
             return maps.byte_at(&self.source, row, char_col);
@@ -1830,6 +1828,21 @@ mod tests {
         assert!(out.is_empty());
         let out = buf.copy_range(0..2);
         assert_eq!(out.kill_ring, "ab");
+    }
+
+    #[test]
+    fn copy_range_never_splits_grapheme_clusters() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let mut buf = make_buf();
+            buf.set_source(format!("a{grapheme}b"));
+            let inside = 1 + grapheme.chars().next().unwrap().len_utf8();
+
+            assert_eq!(buf.copy_range(0..inside).kill_ring, "a", "{grapheme:?}");
+            assert_eq!(
+                buf.copy_range(inside..buf.source().len()).kill_ring,
+                format!("{grapheme}b")
+            );
+        }
     }
 
     #[test]

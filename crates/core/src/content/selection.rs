@@ -9,16 +9,30 @@ pub fn truncate_str(s: &str, max: usize) -> String {
     let target = max.saturating_sub(1);
     let mut truncated = String::new();
     let mut col = 0;
-    for ch in s.chars() {
-        let w = cell_width::char_width(ch);
-        if col + w > target {
+    for grapheme in cell_width::graphemes(s) {
+        let width = cell_width::text_width(grapheme);
+        if col + width > target {
             break;
         }
-        truncated.push(ch);
-        col += w;
+        truncated.push_str(grapheme);
+        col += width;
     }
     truncated.push('…');
     truncated
+}
+
+pub(crate) fn trim_sentence_punctuation(s: &str) -> &str {
+    let end = cell_width::grapheme_indices(s)
+        .rev()
+        .take_while(|(_, grapheme)| {
+            grapheme
+                .chars()
+                .all(|ch| matches!(ch, ',' | '.' | ')' | ';' | ':' | '!' | '?'))
+        })
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(s.len());
+    &s[..end]
 }
 
 pub fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String, usize)> {
@@ -67,7 +81,7 @@ pub fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
     // Windows considers `file.` an alias for `file`, so checking the exact path
     // first would incorrectly retain the trailing punctuation there.
     if !token.starts_with("@\"") {
-        let trimmed = path.trim_end_matches([',', '.', ')', ';', ':', '!', '?']);
+        let trimmed = trim_sentence_punctuation(&path);
         if trimmed.len() < path.len()
             && !trimmed.is_empty()
             && std::path::Path::new(trimmed).exists()
@@ -86,6 +100,19 @@ mod tests {
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
+    }
+
+    #[test]
+    fn punctuation_trimming_keeps_graphemes_atomic() {
+        assert_eq!(trim_sentence_punctuation("path.txt?!"), "path.txt");
+        assert_eq!(
+            trim_sentence_punctuation("path.txt\u{600}!"),
+            "path.txt\u{600}!"
+        );
+        assert_eq!(
+            trim_sentence_punctuation("path.txt!\u{301}"),
+            "path.txt!\u{301}"
+        );
     }
 
     #[test]
@@ -108,6 +135,14 @@ mod tests {
         let out = truncate_str("日本語", 5);
         assert!(out.ends_with('…'));
         assert!(cell_width::text_width(out.as_str()) <= 5);
+    }
+
+    #[test]
+    fn truncate_str_keeps_multi_scalar_graphemes_atomic() {
+        assert_eq!(truncate_str("e\u{301}xyz", 3), "e\u{301}x…");
+        assert_eq!(truncate_str("👩\u{200d}💻xyz", 3), "👩\u{200d}💻…");
+        assert_eq!(truncate_str("9\u{fe0f}xyz", 3), "9\u{fe0f}…");
+        assert_eq!(truncate_str("🇨🇦xyz", 3), "🇨🇦…");
     }
 
     #[test]

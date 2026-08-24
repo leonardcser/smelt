@@ -13,7 +13,7 @@ pub(super) fn inline_file_reference(
     text: &str,
     options: &FileIconOptions,
 ) -> Option<FileReference> {
-    if text.trim() != text || text.contains("://") {
+    if smelt_buffer::text::trim_whitespace(text) != text || text.contains("://") {
         return None;
     }
     file_reference(text, options)
@@ -47,7 +47,7 @@ pub(super) fn url_action(text: &str) -> Option<SpanAction> {
 }
 
 fn file_reference(text: &str, options: &FileIconOptions) -> Option<FileReference> {
-    let candidate = text.trim_end_matches([',', '.', ')', ';', ':', '!', '?']);
+    let candidate = crate::content::selection::trim_sentence_punctuation(text);
     let (path_text, line, col) = strip_location_suffix(candidate);
     if path_text.is_empty() {
         return None;

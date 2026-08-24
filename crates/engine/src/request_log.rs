@@ -211,10 +211,7 @@ fn provider_error_to_log_error(
 }
 
 fn bounded_text(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    smelt_buffer::text::slice(text, 0..max_bytes).to_string()
+    smelt_buffer::text::grapheme_prefix(text, max_bytes).to_string()
 }
 
 fn truncate_error_body(body: &str) -> String {
@@ -222,7 +219,7 @@ fn truncate_error_body(body: &str) -> String {
     if body.len() <= LIMIT {
         return body.to_string();
     }
-    let mut out = smelt_buffer::text::slice(body, 0..LIMIT).to_string();
+    let mut out = smelt_buffer::text::grapheme_prefix(body, LIMIT).to_string();
     out.push_str("\n… truncated …");
     out
 }
@@ -382,15 +379,14 @@ mod tests {
     }
 
     #[test]
-    fn truncates_error_body_on_char_boundary() {
-        let mut body = "a".repeat(64 * 1024 - 1);
-        body.push('é');
-        body.push_str("tail");
+    fn truncates_error_body_on_grapheme_boundary() {
+        let prefix = "a".repeat(64 * 1024 - 1);
+        let body = format!("{prefix}e\u{301}tail");
 
         let truncated = truncate_error_body(&body);
 
-        assert!(truncated.ends_with("\n… truncated …"));
-        assert!(truncated.starts_with(&"a".repeat(64 * 1024 - 1)));
+        assert_eq!(truncated, format!("{prefix}\n… truncated …"));
+        assert_eq!(bounded_text("e\u{301}x", 1), "");
     }
 
     #[test]

@@ -56,7 +56,10 @@ impl Default for CommandCatalog {
 /// Returns `None` when `text` does not start with a non-empty slash command name.
 pub fn command_token(text: &str) -> Option<&str> {
     let rest = text.strip_prefix('/')?;
-    let name_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name_len = smelt_buffer::cell_width::grapheme_indices(rest)
+        .find(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
+        .map(|(start, _)| start)
+        .unwrap_or(rest.len());
     if name_len == 0 {
         return None;
     }
@@ -85,6 +88,12 @@ mod tests {
     fn command_token_rejects_whitespace_after_slash_without_skipping() {
         assert_eq!(command_token("/\u{2000}x"), None);
         assert_eq!(command_name("/\u{2000}x"), None);
+    }
+
+    #[test]
+    fn command_token_never_splits_whitespace_graphemes() {
+        assert_eq!(command_token("/name\u{600}  arg"), Some("/name\u{600} "));
+        assert_eq!(command_token("/ \u{301}name arg"), Some("/ \u{301}name"));
     }
 
     #[test]

@@ -56,7 +56,7 @@ fn yaml_to_json(yaml: &str) -> serde_json::Value {
     let mut current_arr: Vec<serde_json::Value> = Vec::new();
 
     for line in yaml.lines() {
-        let trimmed = line.trim();
+        let trimmed = smelt_buffer::text::trim_whitespace(line);
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
@@ -65,15 +65,15 @@ fn yaml_to_json(yaml: &str) -> serde_json::Value {
                 map.insert(k, serde_json::Value::Array(current_arr.clone()));
                 current_arr.clear();
             }
-            let key = key.trim().to_string();
-            let val = val.trim();
+            let key = smelt_buffer::text::trim_whitespace(key).to_owned();
+            let val = smelt_buffer::text::trim_whitespace(val);
             if val.is_empty() {
                 current_key = Some(key);
             } else {
                 map.insert(key, serde_json::Value::String(unquote(val)));
             }
         } else if let Some(rest) = trimmed.strip_prefix("-") {
-            let val = rest.trim();
+            let val = smelt_buffer::text::trim_whitespace(rest);
             current_arr.push(serde_json::Value::String(unquote(val)));
         }
     }
@@ -84,12 +84,16 @@ fn yaml_to_json(yaml: &str) -> serde_json::Value {
 }
 
 fn unquote(s: &str) -> String {
-    if s.len() >= 2 {
-        let first = s.chars().next().unwrap();
-        let last = s.chars().last().unwrap();
-        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-            return s[1..s.len() - 1].to_string();
-        }
+    let mut graphemes = smelt_buffer::cell_width::grapheme_indices(s);
+    let Some((_, first)) = graphemes.next() else {
+        return String::new();
+    };
+    let Some((last_start, last)) = graphemes.next_back() else {
+        return s.to_string();
+    };
+    let quote = first.chars().next().unwrap();
+    if matches!(quote, '"' | '\'') && last.ends_with(quote) {
+        return s[first.len()..last_start].to_string();
     }
     s.to_string()
 }
@@ -123,5 +127,17 @@ fn json_to_lua(lua: &Lua, v: serde_json::Value) -> LuaResult<mlua::Value> {
             }
             Ok(mlua::Value::Table(t))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frontmatter_values_keep_graphemes_atomic() {
+        let parsed = yaml_to_json("key:  \u{301}value\u{600} ");
+        assert_eq!(parsed["key"], " \u{301}value\u{600} ");
+        assert_eq!(unquote("\"\u{301}value\u{600}\""), "value");
     }
 }

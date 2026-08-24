@@ -421,11 +421,11 @@ fn all_selectable_in_range(
 fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize, out: &mut String) {
     let mut emitted_copy_as: Vec<usize> = Vec::new();
     let mut col = 0usize;
-    for ch in line.chars() {
-        let w = cell_width::char_width(ch);
-        let ch_end = col.saturating_add(w);
-        if ch_end <= c_start || col >= c_end {
-            col = ch_end;
+    for grapheme in cell_width::graphemes(line) {
+        let width = cell_width::text_width(grapheme);
+        let grapheme_end = col.saturating_add(width);
+        if grapheme_end <= c_start || col >= c_end {
+            col = grapheme_end;
             continue;
         }
         let mut selectable = true;
@@ -433,7 +433,7 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
         for (idx, span) in highlights.iter().enumerate() {
             let s = span.col_start as usize;
             let e = span.col_end as usize;
-            if ch_end <= s || col >= e {
+            if grapheme_end <= s || col >= e {
                 continue;
             }
             if !span.meta.selectable {
@@ -445,7 +445,7 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
             }
         }
         if !selectable {
-            col = ch_end;
+            col = grapheme_end;
             continue;
         }
         if let Some((idx, s)) = copy_as_hit {
@@ -454,9 +454,9 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
                 emitted_copy_as.push(idx);
             }
         } else {
-            out.push(ch);
+            out.push_str(grapheme);
         }
-        col = ch_end;
+        col = grapheme_end;
     }
 }
 

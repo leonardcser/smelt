@@ -5,6 +5,7 @@
 //! other. This module keeps the buffer-specific wrapping and `LineBuilder`
 //! emission helpers used by transcript rendering.
 
+use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Style;
 pub use smelt_ansi::{advance_ansi_state, parse_ansi, parse_ansi_with_state, AnsiSpan, AnsiState};
 
@@ -36,7 +37,21 @@ pub fn wrap_ansi_with_state(
     width: usize,
     state: &mut AnsiState,
 ) -> (Vec<AnsiSpan>, Vec<(usize, usize)>, Vec<usize>) {
-    let spans = parse_ansi_with_state(text, state);
+    let line = InlineLine::new(
+        parse_ansi_with_state(text, state)
+            .into_iter()
+            .map(|span| InlineRun::new(span.text, span.style, BreakPolicy::BreakOnSpaces))
+            .collect(),
+    );
+    let spans: Vec<AnsiSpan> = line
+        .runs
+        .into_iter()
+        .filter(|run| !run.text.is_empty())
+        .map(|run| AnsiSpan {
+            text: run.text,
+            style: run.meta,
+        })
+        .collect();
     let boundaries = span_boundaries(&spans);
     let ranges = if let [span] = spans.as_slice() {
         smelt_buffer::wrap::wrap_line_ranges(&span.text, width)
@@ -144,6 +159,39 @@ mod tests {
         assert_eq!(ranges, vec![(0, 0)]);
         assert_eq!(boundaries, vec![0]);
         assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn ansi_style_boundaries_never_split_graphemes() {
+        let ansi = concat!(
+            "e\x1b[31m\u{301}\x1b[0m ",
+            "👩\x1b[31m\u{200d}\x1b[32m💻\x1b[0m ",
+            "9\x1b[31m\u{fe0f}\x1b[0m ",
+            "🇨\x1b[31m🇦\x1b[0m"
+        );
+        let expected = "e\u{301} 👩\u{200d}💻 9\u{fe0f} 🇨🇦";
+
+        let (spans, ranges, boundaries) = wrap_ansi(ansi, 80);
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>(),
+            expected
+        );
+        assert!(spans.iter().all(|span| span.style == Style::default()));
+        assert_eq!(ranges, vec![(0, expected.len())]);
+        assert_eq!(boundaries.last().copied(), Some(expected.len()));
+    }
+
+    #[test]
+    fn ansi_grapheme_uses_the_style_of_its_first_scalar() {
+        let (spans, _, _) = wrap_ansi("\x1b[31me\x1b[0m\u{301}", 80);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "e\u{301}");
+        assert_eq!(spans[0].style.fg, Some(crate::style::Color::DarkRed));
     }
 
     #[test]

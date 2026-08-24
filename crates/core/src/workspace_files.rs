@@ -1168,7 +1168,7 @@ fn rank_entries_window(
     offset: usize,
     limit: usize,
 ) -> RankedEntries {
-    let query = query.trim();
+    let query = smelt_buffer::text::trim_whitespace(query);
     let mut ranked = if query.is_empty() {
         entries
             .iter()
@@ -1344,7 +1344,7 @@ fn search_item(kind: ItemKind, path: String, score: i32) -> Item {
 }
 
 fn exact_path_item(root: &Path, query: &str, include_dirs: bool) -> Option<Item> {
-    let query = query.trim();
+    let query = smelt_buffer::text::trim_whitespace(query);
     if query.is_empty() || query.contains("://") {
         return None;
     }
@@ -1384,8 +1384,19 @@ impl AsRef<str> for FileEntry {
     }
 }
 
+fn trim_path_input(path: &str) -> &str {
+    let path = smelt_buffer::text::trim_whitespace(path);
+    let end = smelt_buffer::cell_width::grapheme_indices(path)
+        .rev()
+        .take_while(|(_, grapheme)| *grapheme == "/")
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(path.len());
+    &path[..end]
+}
+
 fn safe_relative_path(path: &str) -> Result<PathBuf, String> {
-    let trimmed = path.trim().trim_end_matches('/');
+    let trimmed = trim_path_input(path);
     if trimmed.is_empty() {
         return Err("file accept path is empty".to_string());
     }
@@ -1509,6 +1520,9 @@ mod tests {
             PathBuf::from("src/main.rs")
         );
         assert_eq!(safe_relative_path("src/").unwrap(), PathBuf::from("src"));
+        assert_eq!(trim_path_input("src/\u{301}/"), "src/\u{301}");
+        assert_eq!(trim_path_input(" \u{301}src"), " \u{301}src");
+        assert_eq!(trim_path_input("src\u{600} "), "src\u{600} ");
         assert!(safe_relative_path("/tmp/main.rs").is_err());
         assert!(safe_relative_path("../main.rs").is_err());
         assert!(safe_relative_path("src/../main.rs").is_err());
@@ -2345,14 +2359,7 @@ mod tests {
     }
 
     fn truncate(s: &str, max_len: usize) -> String {
-        if s.chars().count() <= max_len {
-            return s.to_string();
-        }
-        let head = s
-            .chars()
-            .take(max_len.saturating_sub(1))
-            .collect::<String>();
-        format!("{head}…")
+        crate::content::width::truncate_to_cells(s, max_len, "…")
     }
 
     fn wait_until_ready(files: &mut WorkspaceFiles, cwd: &Path) {

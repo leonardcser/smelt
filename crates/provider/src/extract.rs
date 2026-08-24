@@ -1,4 +1,5 @@
 use protocol::{FunctionCall, ToolCall};
+use smelt_buffer::text;
 
 /// Extract `<tool_call>` blocks from text. Some backends (vLLM) embed tool call
 /// markup in `content` or `reasoning_content` instead of the `tool_calls` field.
@@ -18,13 +19,13 @@ pub fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>, Optio
         let after_open = &rest[open + "<tool_call>".len()..];
 
         if let Some(close) = after_open.find("</tool_call>") {
-            let raw = after_open[..close].trim();
+            let raw = text::trim_whitespace(&after_open[..close]);
             if let Some(tc) = parse_tool_call_json(raw, &mut idx) {
                 calls.push(tc);
             }
             rest = &after_open[close + "</tool_call>".len()..];
         } else {
-            let raw = after_open.trim();
+            let raw = text::trim_whitespace(after_open);
             if let Some(tc) = parse_tool_call_json(raw, &mut idx) {
                 calls.push(tc);
             }
@@ -34,7 +35,7 @@ pub fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>, Optio
     }
     cleaned.push_str(rest);
 
-    let cleaned = cleaned.trim().to_string();
+    let cleaned = text::trim_whitespace(&cleaned).to_owned();
     let cleaned = if cleaned.is_empty() {
         None
     } else {
@@ -73,11 +74,24 @@ fn parse_tool_call_json_inner(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     ))
 }
 
+fn strip_one_line_break(value: &str) -> &str {
+    let value = value
+        .strip_prefix("\r\n")
+        .or_else(|| value.strip_prefix('\r'))
+        .or_else(|| value.strip_prefix('\n'))
+        .unwrap_or(value);
+    value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\r'))
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value)
+}
+
 fn parse_tool_call_xml(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     let func_start = raw.find("<function=")?;
     let after_eq = &raw[func_start + "<function=".len()..];
     let name_end = after_eq.find('>')?;
-    let name = after_eq[..name_end].trim().to_string();
+    let name = text::trim_whitespace(&after_eq[..name_end]).to_owned();
     if name.is_empty() {
         return None;
     }
@@ -87,12 +101,10 @@ fn parse_tool_call_xml(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     while let Some(param_start) = rest.find("<parameter=") {
         let after_param_eq = &rest[param_start + "<parameter=".len()..];
         let key_end = after_param_eq.find('>')?;
-        let key = after_param_eq[..key_end].trim();
+        let key = text::trim_whitespace(&after_param_eq[..key_end]);
         let value_start = &after_param_eq[key_end + 1..];
         let value_end = value_start.find("</parameter>")?;
-        let value = value_start[..value_end].to_string();
-        let value = value.strip_prefix('\n').unwrap_or(&value).to_string();
-        let value = value.strip_suffix('\n').unwrap_or(&value).to_string();
+        let value = strip_one_line_break(&value_start[..value_end]).to_owned();
         params.insert(key.to_string(), serde_json::Value::String(value));
         rest = &value_start[value_end + "</parameter>".len()..];
     }
@@ -113,7 +125,7 @@ fn parse_tool_call_arg_kv(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     let func_start = raw.find("<function>")?;
     let after_tag = &raw[func_start + "<function>".len()..];
     let func_end = after_tag.find("</function>")?;
-    let name = after_tag[..func_end].trim().to_string();
+    let name = text::trim_whitespace(&after_tag[..func_end]).to_owned();
     if name.is_empty() {
         return None;
     }
@@ -123,15 +135,13 @@ fn parse_tool_call_arg_kv(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     while let Some(key_start) = rest.find("<arg_key>") {
         let after_key_tag = &rest[key_start + "<arg_key>".len()..];
         let key_end = after_key_tag.find("</arg_key>")?;
-        let key = after_key_tag[..key_end].trim().to_string();
+        let key = text::trim_whitespace(&after_key_tag[..key_end]).to_owned();
         rest = &after_key_tag[key_end + "</arg_key>".len()..];
 
         let val_start = rest.find("<arg_value>")?;
         let after_val_tag = &rest[val_start + "<arg_value>".len()..];
         let val_end = after_val_tag.find("</arg_value>")?;
-        let value = after_val_tag[..val_end].to_string();
-        let value = value.strip_prefix('\n').unwrap_or(&value).to_string();
-        let value = value.strip_suffix('\n').unwrap_or(&value).to_string();
+        let value = strip_one_line_break(&after_val_tag[..val_end]).to_owned();
         rest = &after_val_tag[val_end + "</arg_value>".len()..];
 
         if key != "thought" {
@@ -165,6 +175,19 @@ mod tests {
         assert_eq!(calls[0].function.name, "search");
         assert_eq!(calls[0].function.arguments, r#"{"query":"rust async"}"#);
         assert_eq!(cleaned.unwrap(), "Let me search for that.");
+    }
+
+    #[test]
+    fn extracted_visible_text_keeps_graphemes_atomic() {
+        let text =
+            " \u{301}answer\u{600} <tool_call>{\"name\":\"bash\",\"arguments\":{}}</tool_call>";
+        let (_, cleaned) = extract_tool_calls_from_text(Some(text));
+        assert_eq!(cleaned.as_deref(), Some(" \u{301}answer\u{600} "));
+    }
+
+    #[test]
+    fn tool_argument_line_break_trimming_keeps_crlf_atomic() {
+        assert_eq!(strip_one_line_break("\r\nvalue\r\n"), "value");
     }
 
     #[test]

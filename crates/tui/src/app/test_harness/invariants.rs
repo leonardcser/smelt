@@ -12,7 +12,7 @@ impl TestApp {
             return;
         };
         let source = buf.source();
-        let cpos = smelt_buffer::text::snap(source, win.cpos().min(source.len()));
+        let cpos = smelt_buffer::text::snap_grapheme(source, win.cpos().min(source.len()));
         assert_eq!(
             win.cpos(),
             cpos,
@@ -86,8 +86,8 @@ impl TestApp {
         self.assert_resource_invariants();
     }
 
-    /// UTF-8 / byte-offset correctness across every place a stale offset
-    /// could land mid-character: window cpos and selection anchor, undo
+    /// Grapheme / byte-offset correctness across every place a stale offset
+    /// could land inside a grapheme: window cpos and selection anchor, undo
     /// and redo entries, kill-ring source range, prompt completer anchor.
     pub fn assert_text_invariants(&self) {
         for (wid, win) in self.app.ui.iter_wins() {
@@ -124,11 +124,11 @@ impl TestApp {
                 win.cpos(),
                 src.len()
             );
-            let snapped = smelt_buffer::text::snap(src, win.cpos());
+            let snapped = smelt_buffer::text::snap_grapheme(src, win.cpos());
             assert_eq!(
                 snapped,
                 win.cpos(),
-                "window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
+                "window {:?} cpos {} not on grapheme boundary (snapped {})",
                 wid,
                 win.cpos(),
                 snapped
@@ -141,10 +141,10 @@ impl TestApp {
                     anchor,
                     src.len()
                 );
-                let snapped = smelt_buffer::text::snap(src, anchor);
+                let snapped = smelt_buffer::text::snap_grapheme(src, anchor);
                 assert_eq!(
                     snapped, anchor,
-                    "window {:?} selection_anchor {} not on UTF-8 char boundary (snapped {})",
+                    "window {:?} selection_anchor {} not on grapheme boundary (snapped {})",
                     wid, anchor, snapped
                 );
             }
@@ -164,10 +164,10 @@ impl TestApp {
                     entry.cpos,
                     entry.buf.len()
                 );
-                let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
+                let snapped = smelt_buffer::text::snap_grapheme(&entry.buf, entry.cpos);
                 assert_eq!(
                     snapped, entry.cpos,
-                    "buf {:?} undo[{}] cpos {} not on UTF-8 char boundary",
+                    "buf {:?} undo[{}] cpos {} not on grapheme boundary",
                     bid, i, entry.cpos
                 );
             }
@@ -180,10 +180,10 @@ impl TestApp {
                     entry.cpos,
                     entry.buf.len()
                 );
-                let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
+                let snapped = smelt_buffer::text::snap_grapheme(&entry.buf, entry.cpos);
                 assert_eq!(
                     snapped, entry.cpos,
-                    "buf {:?} redo[{}] cpos {} not on UTF-8 char boundary",
+                    "buf {:?} redo[{}] cpos {} not on grapheme boundary",
                     bid, i, entry.cpos
                 );
             }
@@ -213,7 +213,7 @@ impl TestApp {
             );
         }
 
-        // Vim visual_anchor must stay on a UTF-8 char boundary in the
+        // Vim visual_anchor must stay on a grapheme boundary in the
         // buffer's text-space. Visual ops snap before reading (see
         // `visual_anchor_at`), but the stored offset can still drift past
         // `text().len()` if the buffer shrinks under the anchor without
@@ -238,10 +238,10 @@ impl TestApp {
                 anchor,
                 text.len()
             );
-            let snapped = smelt_buffer::text::snap(&text, anchor);
+            let snapped = smelt_buffer::text::snap_grapheme(&text, anchor);
             assert_eq!(
                 snapped, anchor,
-                "window {:?} vim visual_anchor {} not on UTF-8 char boundary (snapped {})",
+                "window {:?} vim visual_anchor {} not on grapheme boundary (snapped {})",
                 wid, anchor, snapped
             );
         }

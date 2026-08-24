@@ -15,7 +15,7 @@ pub(super) fn solve_ir_hbox_widths(
 // `Constraint::Fit` uses renderer-defined intrinsic widths. Most leaves can
 // report their unwrapped content width; width-dependent leaves fall back to a
 // safe cap so a fit column never asks for more than the parent can provide.
-fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16 {
+pub(super) fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16 {
     match layout {
         BlockLayout::Empty => 0,
         BlockLayout::Leaf(leaf) => intrinsic_leaf_width(leaf, total_width),
@@ -56,17 +56,15 @@ fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
             .0
             .iter()
             .map(|line| {
-                line.iter()
-                    .map(|span| display_width_u16(&span.text))
-                    .fold(0u16, u16::saturating_add)
+                smelt_buffer::cell_width::joined_text_width_u16(
+                    line.iter().map(|span| span.text.as_str()),
+                )
             })
             .max()
             .unwrap_or(0),
-        IrLeaf::Line(spec) => spec
-            .spans
-            .iter()
-            .map(|span| display_width_u16(&span.text))
-            .fold(0u16, u16::saturating_add),
+        IrLeaf::Line(spec) => smelt_buffer::cell_width::joined_text_width_u16(
+            spec.spans.iter().map(|span| span.text.as_str()),
+        ),
         IrLeaf::Markdown(spec) => spec
             .content
             .lines()

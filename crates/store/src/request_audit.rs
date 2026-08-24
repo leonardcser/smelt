@@ -1282,10 +1282,7 @@ fn response_summary(response: &protocol::request_log::RequestResponse) -> Option
 }
 
 fn preview(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    smelt_buffer::text::slice(text, 0..max_bytes).to_string()
+    smelt_buffer::text::grapheme_prefix(text, max_bytes).to_string()
 }
 
 fn cost_micros(cost_usd: Option<f64>) -> Result<Option<i64>> {

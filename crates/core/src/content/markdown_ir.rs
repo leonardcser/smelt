@@ -241,7 +241,7 @@ fn parse_last_markdown_block_kind(source: &str) -> Option<MarkdownTextKind> {
     let mut fence: Option<(char, usize)> = None;
 
     for line in source.lines() {
-        let body = strip_markdown_indent(line.trim_end());
+        let body = strip_markdown_indent(smelt_buffer::text::trim_end_whitespace(line));
         let blank = body.trim().is_empty();
         let current = if let Some((marker, len)) = fence {
             if is_closing_fence(body, marker, len) {
@@ -282,8 +282,14 @@ fn parse_last_markdown_block_kind(source: &str) -> Option<MarkdownTextKind> {
 }
 
 fn strip_markdown_indent(line: &str) -> &str {
-    let spaces = line.bytes().take_while(|b| *b == b' ').take(3).count();
-    &line[spaces..]
+    let mut end = 0usize;
+    for (_, grapheme) in smelt_buffer::cell_width::grapheme_indices(line).take(3) {
+        if !grapheme.starts_with(' ') {
+            break;
+        }
+        end += grapheme.len();
+    }
+    &line[end..]
 }
 
 fn opening_fence(line: &str) -> Option<(char, usize)> {
@@ -305,7 +311,7 @@ fn is_closing_fence(line: &str, marker: char, open_len: usize) -> bool {
 }
 
 pub(crate) fn is_atx_heading(line: &str) -> bool {
-    let line = strip_markdown_indent(line.trim_end());
+    let line = strip_markdown_indent(smelt_buffer::text::trim_end_whitespace(line));
     let hashes = line.bytes().take_while(|b| *b == b'#').count();
     if hashes == 0 || hashes > 6 {
         return false;
@@ -316,7 +322,7 @@ pub(crate) fn is_atx_heading(line: &str) -> bool {
 }
 
 pub(crate) fn is_setext_underline(line: &str) -> bool {
-    let line = strip_markdown_indent(line.trim_end());
+    let line = strip_markdown_indent(smelt_buffer::text::trim_end_whitespace(line));
     let mut marker = None;
     let mut saw_marker = false;
     for b in line.bytes() {
@@ -339,7 +345,7 @@ pub(crate) fn is_setext_underline(line: &str) -> bool {
 }
 
 pub(crate) fn is_thematic_break(line: &str) -> bool {
-    let line = strip_markdown_indent(line.trim_end());
+    let line = strip_markdown_indent(smelt_buffer::text::trim_end_whitespace(line));
     let mut marker = None;
     let mut markers = 0usize;
     for b in line.bytes() {
@@ -580,7 +586,7 @@ fn structural_prefix_spans<'a>(
     }
 
     let line = smelt_buffer::text::slice(source, line_range.clone());
-    let trimmed = line.trim_start();
+    let trimmed = smelt_buffer::text::trim_start_whitespace(line);
     let prefix_start = line_range.start + line.len() - trimmed.len();
     let prefix_end = events
         .iter()
@@ -631,7 +637,7 @@ fn map_alignment(alignment: Alignment) -> ColumnAlignment {
 }
 
 fn trim_cell_source(source: &str, range: Range<usize>) -> String {
-    source.get(range).unwrap_or("").trim().to_string()
+    smelt_buffer::text::trim_whitespace(source.get(range).unwrap_or("")).to_string()
 }
 
 #[cfg(test)]
@@ -709,6 +715,21 @@ mod tests {
             .sum::<usize>();
         assert!(span_count >= 2_048);
         assert!(spans.dynamic_retained_bytes() > span_source.len());
+    }
+
+    #[test]
+    fn parse_markdown_table_trimming_keeps_graphemes_atomic() {
+        let source = "| \u{301}x | y\u{600}  |\n|---|---|\n";
+        let block = parse_markdown(source);
+        let rows = block.nodes.iter().find_map(|node| match node {
+            MarkdownNode::Table { rows, .. } => Some(rows),
+            _ => None,
+        });
+
+        assert_eq!(
+            rows,
+            Some(&vec![vec![" \u{301}x".into(), "y\u{600} ".into()],])
+        );
     }
 
     #[test]

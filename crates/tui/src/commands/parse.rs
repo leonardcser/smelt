@@ -23,13 +23,13 @@ pub(crate) enum ParsedCommand<'a> {
 }
 
 fn split_name_arg(body: &str) -> (&str, Option<&str>) {
-    match body.split_once(char::is_whitespace) {
-        Some((name, arg)) => {
-            let arg = arg.trim();
-            (name, if arg.is_empty() { None } else { Some(arg) })
-        }
-        None => (body, None),
-    }
+    let Some((start, separator)) = smelt_buffer::cell_width::grapheme_indices(body)
+        .find(|(_, grapheme)| grapheme.chars().all(char::is_whitespace))
+    else {
+        return (body, None);
+    };
+    let arg = smelt_buffer::text::trim_whitespace(&body[start + separator.len()..]);
+    (&body[..start], (!arg.is_empty()).then_some(arg))
 }
 
 /// Classify a raw command line without dispatching it. Prompt `/name` runs the
@@ -38,20 +38,20 @@ fn split_name_arg(body: &str) -> (&str, Option<&str>) {
 /// Statusline `/` and `?` search inputs are handled by the cmdline UI before
 /// command parsing.
 pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
-    let line = line.trim();
+    let line = smelt_buffer::text::trim_whitespace(line);
     if line.is_empty() {
         return ParsedCommand::Empty;
     }
     if let Some(rest) = line.strip_prefix('!') {
         return ParsedCommand::Shell {
-            script: rest.trim_start(),
+            script: smelt_buffer::text::trim_start_whitespace(rest),
             sink: ShellSink::Transcript,
         };
     }
     if let Some(body) = line.strip_prefix(':') {
         if let Some(rest) = body.strip_prefix('!') {
             return ParsedCommand::Shell {
-                script: rest.trim_start(),
+                script: smelt_buffer::text::trim_start_whitespace(rest),
                 sink: ShellSink::Overlay,
             };
         }

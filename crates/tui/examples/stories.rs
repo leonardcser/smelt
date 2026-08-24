@@ -294,13 +294,13 @@ fn truncate_with_ellipsis(text: &str, max_w: u16) -> String {
 
     let mut out = String::new();
     let mut used = 0;
-    for ch in text.chars() {
-        let ch_w = smelt_buffer::cell_width::char_width(ch);
-        if used + ch_w >= max_w {
+    for grapheme in smelt_buffer::cell_width::graphemes(text) {
+        let width = smelt_buffer::cell_width::text_width(grapheme);
+        if used + width >= max_w {
             break;
         }
-        out.push(ch);
-        used += ch_w;
+        out.push_str(grapheme);
+        used += width;
     }
     out.push('…');
     out

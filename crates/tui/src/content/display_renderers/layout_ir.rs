@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use super::markdown::{
     markdown_range_has_visible_text_with_options, measure_markdown_inner_with_options,
@@ -1409,29 +1410,49 @@ fn measure_text_spec(spec: &TextSpec, width: u16) -> usize {
         .sum()
 }
 
-fn wrap_styled_runs_with_widths(
-    spans: &[protocol::StyledSpan],
-    first_width: u16,
-    continuation_width: u16,
-) -> Vec<Vec<WrappedRun<usize>>> {
-    if spans.is_empty() {
-        return vec![Vec::new()];
-    }
-    let line = InlineLine::new(
-        spans
-            .iter()
-            .enumerate()
-            .map(|(idx, span)| InlineRun::new(span.text.clone(), idx, BreakPolicy::BreakOnSpaces))
-            .collect(),
-    );
-    line.wrap_fragments_with_widths(
-        first_width.max(1) as usize,
-        continuation_width.max(1) as usize,
-    )
+struct StyledLine {
+    styles: Arc<[protocol::StyledSpan]>,
+    inline: InlineLine<usize>,
 }
 
-fn wrap_styled_runs(
+impl StyledLine {
+    fn new(spans: &[protocol::StyledSpan]) -> Self {
+        let (styles, runs) = styled_line_parts(spans);
+        Self {
+            styles: styles.into(),
+            inline: InlineLine::new(runs),
+        }
+    }
+
+    fn from_parts(styles: Vec<protocol::StyledSpan>, runs: Vec<InlineRun<usize>>) -> Self {
+        Self {
+            styles: styles.into(),
+            inline: InlineLine { runs },
+        }
+    }
+
+    fn run(&self, index: usize) -> Option<(&protocol::StyledSpan, &InlineRun<usize>)> {
+        let run = self.inline.runs.get(index)?;
+        Some((self.styles.get(run.meta)?, run))
+    }
+}
+
+fn styled_line_parts(
     spans: &[protocol::StyledSpan],
+) -> (Vec<protocol::StyledSpan>, Vec<InlineRun<usize>>) {
+    let mut styles = Vec::with_capacity(spans.len());
+    let mut runs = Vec::with_capacity(spans.len());
+    for (index, span) in spans.iter().enumerate() {
+        let mut style = span.clone();
+        let text = std::mem::take(&mut style.text);
+        styles.push(style);
+        runs.push(InlineRun::new(text, index, BreakPolicy::BreakOnSpaces));
+    }
+    (styles, runs)
+}
+
+fn wrap_styled_line(
+    line: &StyledLine,
     width: u16,
     continuation_indent: u16,
 ) -> Vec<Vec<WrappedRun<usize>>> {
@@ -1440,7 +1461,16 @@ fn wrap_styled_runs(
     let continuation_width = width
         .saturating_sub(indent.min(width.saturating_sub(1)))
         .max(1);
-    wrap_styled_runs_with_widths(spans, width as u16, continuation_width as u16)
+    line.inline
+        .wrap_fragments_with_widths(width, continuation_width)
+}
+
+fn wrap_styled_runs(
+    spans: &[protocol::StyledSpan],
+    width: u16,
+    continuation_indent: u16,
+) -> Vec<Vec<WrappedRun<usize>>> {
+    wrap_styled_line(&StyledLine::new(spans), width, continuation_indent)
 }
 
 fn runs_continuation_indent(spec: &RunsSpec, width: u16) -> u16 {
@@ -1460,7 +1490,8 @@ fn render_runs_spec(
     let mut seen = 0usize;
     let mut rows = 0u16;
     'outer: for (line_index, spans) in spec.lines.0.iter().enumerate() {
-        let wrapped = wrap_styled_runs(spans, width, continuation_indent);
+        let line = StyledLine::new(spans);
+        let wrapped = wrap_styled_line(&line, width, continuation_indent);
         for segment in wrapped_segments(out, &wrapped) {
             if seen < row_start {
                 seen = seen.saturating_add(1);
@@ -1480,15 +1511,16 @@ fn render_runs_spec(
                     );
                 }
                 for fragment in row_fragments {
-                    let Some(span) = spans.get(fragment.run_index) else {
+                    let Some((style, run)) = line.run(fragment.run_index) else {
                         continue;
                     };
-                    print_styled_span_range(
+                    print_styled_text_range(
                         out,
-                        span,
+                        style,
+                        &run.text,
                         default_hl,
                         fragment.range.clone(),
-                        spec.syntax_highlights.spans(line_index, fragment.run_index),
+                        spec.syntax_highlights.spans(line_index, run.meta),
                     );
                 }
             });
@@ -2033,32 +2065,37 @@ fn print_row_gutter(out: &mut LineBuilder, gutter: &GutterSpec) {
     }
 }
 
-fn print_row_prefix(out: &mut LineBuilder, prefix: &[protocol::StyledSpan], max_cols: u16) {
-    let mut remaining = max_cols as usize;
-    for span in prefix {
-        if remaining == 0 {
-            break;
-        }
-        let piece = clipped_cell_prefix(&span.text, remaining);
-        print_styled_span_range(out, span, None, 0..piece.len(), None);
-        remaining = remaining.saturating_sub(display_width(piece));
-        if piece.len() < span.text.len() {
-            break;
-        }
-    }
-}
+fn print_row_prefix(out: &mut LineBuilder, prefix: &StyledLine, max_cols: u16, row_cols: u16) {
+    let start_width = out.current_line_width();
+    let prefix_limit = start_width.saturating_add(max_cols);
+    let row_limit = start_width.saturating_add(row_cols);
+    let mut at_append_boundary = true;
 
-fn clipped_cell_prefix(text: &str, max_cols: usize) -> &str {
-    if display_width(text) <= max_cols {
-        return text;
+    for index in 0..prefix.inline.runs.len() {
+        let Some((style, run)) = prefix.run(index) else {
+            continue;
+        };
+        let mut offset = 0usize;
+        if at_append_boundary && !run.text.is_empty() {
+            let boundary_len = out.boundary_grapheme_prefix_len(&run.text);
+            if boundary_len > 0 {
+                let boundary = smelt_buffer::text::slice(&run.text, 0..boundary_len);
+                if out.fitting_prefix_len(boundary, row_limit) < boundary_len {
+                    break;
+                }
+                print_styled_text_range(out, style, &run.text, None, 0..boundary_len, None);
+                offset = boundary_len;
+            }
+            at_append_boundary = false;
+        }
+
+        let remaining = smelt_buffer::text::slice(&run.text, offset..run.text.len());
+        let keep = out.fitting_prefix_len(remaining, prefix_limit);
+        print_styled_text_range(out, style, &run.text, None, offset..offset + keep, None);
+        if keep < remaining.len() {
+            break;
+        }
     }
-    let mut end = smelt_buffer::text::cell_to_byte(text, max_cols);
-    let mut prefix = smelt_buffer::text::slice(text, 0..end);
-    if display_width(prefix) > max_cols {
-        end = smelt_buffer::text::prev_char_boundary(text, end);
-        prefix = smelt_buffer::text::slice(text, 0..end);
-    }
-    prefix
 }
 
 fn row_prefix_child_widths(spec: &RowPrefixSpec, width: u16) -> (u16, u16) {
@@ -2070,12 +2107,96 @@ fn row_prefix_child_widths(spec: &RowPrefixSpec, width: u16) -> (u16, u16) {
     )
 }
 
-fn measure_row_prefix_runs(spec: &RunsSpec, first_width: u16, rest_width: u16) -> usize {
+struct RowPrefixRunLine {
+    first_prefix: StyledLine,
+    first_prefix_cols: u16,
+    rest_prefix_cols: u16,
+    child: StyledLine,
+    wrapped: Vec<Vec<WrappedRun<usize>>>,
+}
+
+fn compose_styled_lines(
+    prefix: &[protocol::StyledSpan],
+    child: &[protocol::StyledSpan],
+) -> (StyledLine, StyledLine, usize) {
+    let (prefix_styles, prefix_runs) = styled_line_parts(prefix);
+    let (child_styles, child_runs) = styled_line_parts(child);
+    let mut runs = InlineLine::new(prefix_runs).runs;
+    let prefix_style_count = prefix_styles.len();
+    let child_bytes = child_runs.iter().map(|run| run.text.len()).sum::<usize>();
+    runs.extend(InlineLine::new(child_runs).runs.into_iter().map(|mut run| {
+        run.meta = run.meta.saturating_add(prefix_style_count);
+        run
+    }));
+
+    let mut runs = InlineLine::new(runs).runs;
+    let child_start = runs.partition_point(|run| run.meta < prefix_style_count);
+    let mut child_runs = runs.split_off(child_start);
+    for run in &mut child_runs {
+        run.meta = run.meta.saturating_sub(prefix_style_count);
+    }
+    let retained_child_bytes = child_runs.iter().map(|run| run.text.len()).sum::<usize>();
+    (
+        StyledLine::from_parts(prefix_styles, runs),
+        StyledLine::from_parts(child_styles, child_runs),
+        child_bytes.saturating_sub(retained_child_bytes),
+    )
+}
+
+fn row_prefix_run_line(
+    row_prefix: &[protocol::StyledSpan],
+    rest_prefix: &StyledLine,
+    source_spans: &[protocol::StyledSpan],
+    width: u16,
+) -> RowPrefixRunLine {
+    let total_cells = width.max(1);
+    let (first_prefix, child, moved) = compose_styled_lines(row_prefix, source_spans);
+    let reserved_prefix_cells = if child.inline.is_empty() {
+        total_cells
+    } else {
+        total_cells.saturating_sub(1)
+    };
+    let first_prefix_cols = if moved > 0 {
+        total_cells
+    } else {
+        reserved_prefix_cells
+    };
+    let first_occupied = first_prefix
+        .inline
+        .measure_unwrapped()
+        .min(first_prefix_cols as usize);
+    let rest_occupied = rest_prefix
+        .inline
+        .measure_unwrapped()
+        .min(reserved_prefix_cells as usize);
+    let wrapped = child.inline.wrap_fragments_with_occupied_widths(
+        total_cells as usize,
+        first_occupied,
+        total_cells as usize,
+        rest_occupied,
+    );
+    RowPrefixRunLine {
+        first_prefix,
+        first_prefix_cols,
+        rest_prefix_cols: reserved_prefix_cells,
+        child,
+        wrapped,
+    }
+}
+
+fn measure_row_prefix_runs(spec: &RunsSpec, prefix: &RowPrefixSpec, width: u16) -> usize {
+    let rest_prefix = StyledLine::new(&prefix.rest);
     let mut rows = 0usize;
     for spans in &spec.lines.0 {
-        let line_first_width = if rows == 0 { first_width } else { rest_width };
+        let row_prefix = if rows == 0 {
+            &prefix.first
+        } else {
+            &prefix.rest
+        };
         rows = rows.saturating_add(
-            wrap_styled_runs_with_widths(spans, line_first_width, rest_width).len(),
+            row_prefix_run_line(row_prefix, &rest_prefix, spans, width)
+                .wrapped
+                .len(),
         );
     }
     rows
@@ -2087,11 +2208,8 @@ fn measure_row_prefix_special(
     width: u16,
     _inline_options: &InlineOptions,
 ) -> Option<usize> {
-    let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
     match child {
-        BlockLayout::Leaf(IrLeaf::Runs(spec)) => {
-            Some(measure_row_prefix_runs(spec, first_width, rest_width))
-        }
+        BlockLayout::Leaf(IrLeaf::Runs(spec)) => Some(measure_row_prefix_runs(spec, prefix, width)),
         BlockLayout::Cap { child, spec } => {
             let BlockLayout::Leaf(IrLeaf::Runs(runs)) = child.as_ref() else {
                 return None;
@@ -2099,7 +2217,7 @@ fn measure_row_prefix_special(
             if !layout_fits_exact_measure_budget(child, &mut ExactLayoutBudget::default()) {
                 return None;
             }
-            let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
+            let child_rows = measure_row_prefix_runs(runs, prefix, width);
             Some(cap_rows(child_rows, spec).row_count())
         }
         _ => None,
@@ -2119,19 +2237,19 @@ fn render_row_prefix_runs(
     if row_count == 0 {
         return 0;
     }
-    let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
     let default_hl = spec.hl_group.as_deref();
+    let rest_prefix = StyledLine::new(&prefix.rest);
     let row_end = row_start.saturating_add(row_count);
     let mut source_row = 0usize;
     let mut written = 0u16;
-    'lines: for spans in &spec.lines.0 {
-        let line_first_width = if source_row == 0 {
-            first_width
+    'lines: for (line_index, spans) in spec.lines.0.iter().enumerate() {
+        let row_prefix = if source_row == 0 {
+            &prefix.first
         } else {
-            rest_width
+            &prefix.rest
         };
-        let wrapped = wrap_styled_runs_with_widths(spans, line_first_width, rest_width);
-        for (segment_index, fragments) in wrapped.into_iter().enumerate() {
+        let line = row_prefix_run_line(row_prefix, &rest_prefix, spans, width);
+        for (segment_index, fragments) in line.wrapped.iter().enumerate() {
             if source_row >= row_end {
                 break 'lines;
             }
@@ -2139,18 +2257,29 @@ fn render_row_prefix_runs(
                 if let Some(gutter) = gutter {
                     print_row_gutter(out, gutter);
                 }
-                let (row_prefix, child_width) = if source_row == 0 {
-                    (&prefix.first, first_width)
+                let max_line_cols = out.current_line_width().saturating_add(width);
+                let (row_prefix, prefix_cols) = if segment_index == 0 {
+                    (&line.first_prefix, line.first_prefix_cols)
                 } else {
-                    (&prefix.rest, rest_width)
+                    (&rest_prefix, line.rest_prefix_cols)
                 };
-                print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
+                print_row_prefix(out, row_prefix, prefix_cols, width);
                 WrappedSegmentKind::from_index(segment_index).apply(out);
-                for fragment in &fragments {
-                    let Some(span) = spans.get(fragment.run_index) else {
+                for fragment in fragments {
+                    let Some((style, run)) = line.child.run(fragment.run_index) else {
                         continue;
                     };
-                    print_styled_span_range(out, span, default_hl, fragment.range.clone(), None);
+                    if !print_styled_text_range_clipped(
+                        out,
+                        style,
+                        &run.text,
+                        default_hl,
+                        fragment.range.clone(),
+                        spec.syntax_highlights.spans(line_index, run.meta),
+                        max_line_cols,
+                    ) {
+                        break;
+                    }
                 }
                 out.newline();
                 written = written.saturating_add(1);
@@ -2172,8 +2301,8 @@ fn render_row_prefix_runs_cap(
     row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
+    let child_rows = measure_row_prefix_runs(runs, prefix, width);
     let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
-    let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
     let rows = cap_rows(child_rows, cap);
     let mut written = 0u16;
     let mut selected_row = 0usize;
@@ -2219,13 +2348,22 @@ fn render_row_prefix_runs_cap(
                 if let Some(gutter) = gutter {
                     print_row_gutter(out, gutter);
                 }
+                let row_limit = out.current_line_width().saturating_add(width);
                 let (row_prefix, child_width) = if output_row == 0 {
                     (&prefix.first, first_width)
                 } else {
                     (&prefix.rest, rest_width)
                 };
-                print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
-                render_cap_marker_text(out, skipped, kept, total, direction, child_width);
+                let row_prefix = StyledLine::new(row_prefix);
+                print_row_prefix(out, &row_prefix, width.saturating_sub(child_width), width);
+                render_cap_marker_text(
+                    out,
+                    skipped,
+                    kept,
+                    total,
+                    direction,
+                    row_limit.saturating_sub(out.current_line_width()),
+                );
                 written = written.saturating_add(1);
             }
         }
@@ -2244,7 +2382,9 @@ fn render_cap_marker_text(
 ) {
     out.push_dim();
     let text = cap_marker_text(skipped, kept, total, direction);
-    out.print(clipped_cell_prefix(&text, max_cols as usize));
+    let max_line_cols = out.current_line_width().saturating_add(max_cols);
+    let keep = out.fitting_prefix_len(&text, max_line_cols);
+    out.print(smelt_buffer::text::slice(&text, 0..keep));
     out.pop_style();
     out.newline();
 }
@@ -2311,6 +2451,8 @@ fn render_ir_row_prefix(
     }
 
     let total = outcome.line_count;
+    let first_prefix = StyledLine::new(&spec.first);
+    let rest_prefix = StyledLine::new(&spec.rest);
     let mut rows = 0u16;
     for row in 0..total {
         let Ok(buffer_row) = u16::try_from(row) else {
@@ -2319,15 +2461,22 @@ fn render_ir_row_prefix(
         if let Some(gutter) = gutter {
             print_row_gutter(out, gutter);
         }
+        let row_limit = out.current_line_width().saturating_add(width);
         let source_row = row_start.saturating_add(row);
         let prefix = if source_row == 0 {
-            &spec.first
+            &first_prefix
         } else {
-            &spec.rest
+            &rest_prefix
         };
-        print_row_prefix(out, prefix, width.saturating_sub(child_width));
+        print_row_prefix(out, prefix, width.saturating_sub(child_width), width);
         apply_temp_decoration(out, &buf, row, true);
-        emit_buffer_row_clipped(&buf, buffer_row, child_width, out, None);
+        emit_buffer_row_clipped(
+            &buf,
+            buffer_row,
+            row_limit.saturating_sub(out.current_line_width()),
+            out,
+            None,
+        );
         out.newline();
         rows = rows.saturating_add(1);
     }
@@ -2335,7 +2484,7 @@ fn render_ir_row_prefix(
 }
 
 fn styled_spans_width(spans: &[protocol::StyledSpan]) -> usize {
-    spans.iter().map(|span| display_width(&span.text)).sum()
+    smelt_buffer::cell_width::joined_text_width(spans.iter().map(|span| span.text.as_str()))
 }
 
 fn print_styled_spans(
@@ -2344,25 +2493,54 @@ fn print_styled_spans(
     default_hl: Option<&str>,
     syntax_highlights: Option<&RetainedInlineSyntax>,
 ) {
-    for (index, span) in spans.iter().enumerate() {
-        print_styled_span_range(
+    let line = StyledLine::new(spans);
+    for index in 0..line.inline.runs.len() {
+        let Some((style, run)) = line.run(index) else {
+            continue;
+        };
+        print_styled_text_range(
             out,
-            span,
+            style,
+            &run.text,
             default_hl,
-            0..span.text.len(),
-            syntax_highlights.and_then(|highlights| highlights.spans(0, index)),
+            0..run.text.len(),
+            syntax_highlights.and_then(|highlights| highlights.spans(0, run.meta)),
         );
     }
 }
 
-fn print_styled_span_range(
+fn print_styled_text_range_clipped(
+    out: &mut LineBuilder,
+    style: &protocol::StyledSpan,
+    text: &str,
+    default_hl: Option<&str>,
+    range: std::ops::Range<usize>,
+    syntax_highlights: Option<&[InlineSyntaxSpan]>,
+    max_line_cols: u16,
+) -> bool {
+    let start = smelt_buffer::text::snap(text, range.start);
+    let piece = smelt_buffer::text::slice(text, start..range.end);
+    let keep = out.fitting_prefix_len(piece, max_line_cols);
+    print_styled_text_range(
+        out,
+        style,
+        text,
+        default_hl,
+        start..start + keep,
+        syntax_highlights,
+    );
+    keep == piece.len()
+}
+
+fn print_styled_text_range(
     out: &mut LineBuilder,
     span: &protocol::StyledSpan,
+    text: &str,
     default_hl: Option<&str>,
     range: std::ops::Range<usize>,
     syntax_highlights: Option<&[InlineSyntaxSpan]>,
 ) {
-    let piece = smelt_buffer::text::slice(&span.text, range.clone());
+    let piece = smelt_buffer::text::slice(text, range.clone());
     if piece.is_empty() {
         return;
     }
@@ -2391,7 +2569,7 @@ fn print_styled_span_range(
         Some(_) if span.selectable && syntax_highlights.is_some() => {
             print_retained_inline_syntax(
                 out,
-                &span.text,
+                text,
                 range,
                 syntax_highlights.expect("syntax highlights checked above"),
             );
@@ -2399,7 +2577,7 @@ fn print_styled_span_range(
         Some(lang) if span.selectable => {
             let _perf = smelt_perf::perf::begin("render:layout:inline_syntax");
             let mut highlighter = InlineSyntax::new(lang);
-            highlighter.print_line_range(out, &span.text, range);
+            highlighter.print_line_range(out, text, range);
         }
         _ if span.selectable => out.print(piece),
         _ => out.print_with_meta(piece, SpanMeta::unselectable()),
@@ -2413,18 +2591,26 @@ fn print_retained_inline_syntax(
     range: std::ops::Range<usize>,
     highlights: &[InlineSyntaxSpan],
 ) {
-    out.save_style();
+    let mut cursor = range.start;
     for highlight in highlights {
         let byte_start = highlight.byte_start.max(range.start);
         let byte_end = highlight.byte_end.min(range.end);
         if byte_start >= byte_end {
             continue;
         }
+        if cursor < byte_start {
+            out.print(smelt_buffer::text::slice(source, cursor..byte_start));
+        }
         let [r, g, b] = highlight.foreground;
+        out.save_style();
         out.set_fg(smelt_core::style::Color::Rgb { r, g, b });
         out.print(smelt_buffer::text::slice(source, byte_start..byte_end));
+        out.pop_style();
+        cursor = byte_end;
     }
-    out.pop_style();
+    if cursor < range.end {
+        out.print(smelt_buffer::text::slice(source, cursor..range.end));
+    }
 }
 
 mod chrome;
@@ -3629,7 +3815,8 @@ fn render_bounded_layout_edge_inner(
                 } else {
                     &spec.rest
                 };
-                print_row_prefix(out, prefix, prefix_width);
+                let prefix = StyledLine::new(prefix);
+                print_row_prefix(out, &prefix, prefix_width, width);
                 apply_temp_decoration(out, &buf, row, true);
                 let row = u16::try_from(row).expect("bounded row prefix exceeds temporary buffer");
                 emit_buffer_row_clipped(&buf, row, child_width, out, None);
@@ -4208,7 +4395,7 @@ mod tests {
     use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
     use smelt_core::content::block_layout::{
         CapKeep, CapMarker, CapSpec, Constraint, GutterSpec, HboxItem, LayoutLeaf, LineSpec,
-        MarkdownSpec, RowPrefixSpec, TextSpec,
+        MarkdownSpec, RowPrefixSpec, SeparatorSpec, TextSpec,
     };
 
     fn render_buffer(layout: &LayoutIr, width: u16) -> Buffer {
@@ -5691,6 +5878,232 @@ mod tests {
             vec!["head", "… 3 lines omitted …", "tail"]
         );
         assert_eq!(measure_layout_ir(&layout, 80), 3);
+    }
+
+    #[test]
+    fn protocol_styled_runs_keep_cross_span_graphemes_atomic() {
+        for (parts, grapheme) in [
+            (vec!["e", "\u{301}"], "e\u{301}"),
+            (vec!["👩", "\u{200d}", "💻"], "👩\u{200d}💻"),
+            (vec!["9", "\u{fe0f}"], "9\u{fe0f}"),
+            (vec!["⌚", "\u{fe0e}"], "⌚\u{fe0e}"),
+            (vec!["🇨", "🇦"], "🇨🇦"),
+        ] {
+            let mut spans: Vec<_> = parts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| protocol::StyledSpan {
+                    text: (*text).into(),
+                    fg: Some(format!("style-{index}")),
+                    ..Default::default()
+                })
+                .collect();
+            spans.push(protocol::StyledSpan {
+                text: "x".into(),
+                ..Default::default()
+            });
+
+            let line = StyledLine::new(&spans);
+            let (grapheme_style, _) = line
+                .inline
+                .runs
+                .iter()
+                .enumerate()
+                .find(|(_, run)| run.text == grapheme)
+                .and_then(|(index, _)| line.run(index))
+                .expect("complete grapheme assigned to one span");
+            assert_eq!(grapheme_style.fg.as_deref(), Some("style-0"));
+
+            let layout = BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                lines: protocol::StyledLines(vec![spans]),
+                hl_group: None,
+                continuation_indent: 0,
+                syntax_highlights: Default::default(),
+            }));
+            let width = display_width(grapheme).max(1) as u16;
+            let lines = render_lines(&layout, width);
+            assert_eq!(lines, vec![grapheme, "x"]);
+            assert_eq!(measure_layout_ir(&layout, width) as usize, lines.len());
+            assert_eq!(intrinsic_layout_width(&layout, 80), width + 1);
+        }
+    }
+
+    #[test]
+    fn hbox_children_share_grapheme_width_without_overflow() {
+        let line = |text: &str| {
+            BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                spans: vec![protocol::StyledSpan {
+                    text: text.into(),
+                    ..Default::default()
+                }],
+                hl_group: None,
+                syntax_highlights: Default::default(),
+            }))
+        };
+        let layout = BlockLayout::Hbox(vec![
+            HboxItem {
+                constraint: Constraint::Length(1),
+                layout: line("9"),
+                copy_owner: false,
+            },
+            HboxItem {
+                constraint: Constraint::Length(1),
+                layout: line("\u{fe0f}x"),
+                copy_owner: true,
+            },
+        ]);
+
+        let lines = render_lines(&layout, 2);
+        assert_eq!(lines, vec!["9\u{fe0f}"]);
+        assert!(lines.iter().all(|line| display_width(line) <= 2));
+    }
+
+    #[test]
+    fn row_prefix_and_child_share_grapheme_width() {
+        let layout = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                    text: "\u{fe0f}x".into(),
+                    ..Default::default()
+                }]]),
+                hl_group: None,
+                continuation_indent: 0,
+                syntax_highlights: Default::default(),
+            }))),
+            spec: RowPrefixSpec {
+                first: vec![protocol::StyledSpan {
+                    text: "9".into(),
+                    ..Default::default()
+                }],
+                rest: Vec::new(),
+            },
+        };
+
+        let lines = render_lines(&layout, 2);
+        assert_eq!(lines, vec!["9\u{fe0f}", "x"]);
+        assert!(lines.iter().all(|line| display_width(line) <= 2));
+        assert_eq!(measure_layout_ir(&layout, 2) as usize, lines.len());
+
+        let clipped_line = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                spans: vec![protocol::StyledSpan {
+                    text: "\u{fe0f}x".into(),
+                    ..Default::default()
+                }],
+                hl_group: None,
+                syntax_highlights: Default::default(),
+            }))),
+            spec: RowPrefixSpec {
+                first: vec![protocol::StyledSpan {
+                    text: "9".into(),
+                    ..Default::default()
+                }],
+                rest: Vec::new(),
+            },
+        };
+        assert_eq!(render_lines(&clipped_line, 2), vec!["9\u{fe0f}"]);
+
+        let ordinary_prefix = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                    text: "x".into(),
+                    ..Default::default()
+                }]]),
+                hl_group: None,
+                continuation_indent: 0,
+                syntax_highlights: Default::default(),
+            }))),
+            spec: RowPrefixSpec {
+                first: vec![protocol::StyledSpan {
+                    text: "**".into(),
+                    ..Default::default()
+                }],
+                rest: vec![protocol::StyledSpan {
+                    text: "**".into(),
+                    ..Default::default()
+                }],
+            },
+        };
+        assert_eq!(render_lines(&ordinary_prefix, 2), vec!["*x"]);
+
+        let gutter_join = BlockLayout::Gutter {
+            child: Box::new(BlockLayout::RowPrefix {
+                child: Box::new(BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                    lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                        text: "x".into(),
+                        ..Default::default()
+                    }]]),
+                    hl_group: None,
+                    continuation_indent: 0,
+                    syntax_highlights: Default::default(),
+                }))),
+                spec: RowPrefixSpec {
+                    first: vec![protocol::StyledSpan {
+                        text: "\u{fe0f}".into(),
+                        ..Default::default()
+                    }],
+                    rest: Vec::new(),
+                },
+            }),
+            spec: GutterSpec {
+                text: "9".into(),
+                styled: false,
+            },
+        };
+        let lines = render_lines(&gutter_join, 2);
+        assert_eq!(lines, vec!["9\u{fe0f}"]);
+        assert!(lines.iter().all(|line| display_width(line) <= 2));
+    }
+
+    #[test]
+    fn line_prefix_and_separator_share_cross_span_grapheme_widths() {
+        let split = || {
+            vec![
+                protocol::StyledSpan {
+                    text: "⌚".into(),
+                    fg: Some("first".into()),
+                    ..Default::default()
+                },
+                protocol::StyledSpan {
+                    text: "\u{fe0e}".into(),
+                    fg: Some("second".into()),
+                    ..Default::default()
+                },
+            ]
+        };
+
+        let line = BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+            spans: split(),
+            hl_group: None,
+            syntax_highlights: Default::default(),
+        }));
+        assert_eq!(render_lines(&line, 10), vec!["⌚\u{fe0e}"]);
+        assert_eq!(intrinsic_layout_width(&line, 10), 1);
+
+        let prefixed = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                spans: vec![protocol::StyledSpan {
+                    text: "x".into(),
+                    ..Default::default()
+                }],
+                hl_group: None,
+                syntax_highlights: Default::default(),
+            }))),
+            spec: RowPrefixSpec {
+                first: split(),
+                rest: split(),
+            },
+        };
+        assert_eq!(render_lines(&prefixed, 2), vec!["⌚\u{fe0e}x"]);
+        assert_eq!(intrinsic_layout_width(&prefixed, 10), 2);
+
+        let separator = BlockLayout::Leaf(LayoutLeaf::Separator(SeparatorSpec {
+            label: split(),
+            dim: false,
+            selectable: true,
+        }));
+        assert_eq!(render_lines(&separator, 1), vec!["⌚\u{fe0e}"]);
+        assert_eq!(intrinsic_layout_width(&separator, 10), 1);
     }
 
     #[test]

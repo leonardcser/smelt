@@ -10,13 +10,13 @@
 //!   live `Grid` (e.g. the storybook viewer).
 //!
 //! The text views collapse wide-char continuation cells (`\0`) to
-//! `' '` and `text()` `trim_end`s for diff cleanliness. The styles
-//! sidecar carries a `dim: W H` header so `parse` recovers cell
-//! dimensions losslessly - without it, a trailing wide-char
-//! continuation that `trim_end` ate would be unrecoverable.
+//! `' '` and `text()` removes trailing blank cells for diff cleanliness.
+//! The styles sidecar carries a `dim: W H` header so `parse` recovers cell
+//! dimensions losslessly - without it, a trailing wide-char continuation
+//! that was removed would be unrecoverable.
 
-use super::grid::{char_width, Cell, Grid, Style};
-use smelt_style::style::Color;
+use super::grid::{Cell, Grid, Style};
+use smelt_style::{cell_width, style::Color};
 
 /// Structured copy of one rendered frame. Wide-char continuation cells
 /// (`\0`) collapse to a space in `rows`.
@@ -39,12 +39,11 @@ impl SnapshotFrame {
             let mut row_styles = Vec::with_capacity(w as usize);
             for x in 0..w {
                 let cell: &Cell = grid.cell(x, y);
-                let ch = if cell.symbol == '\0' {
-                    ' '
+                if cell.symbol.is_continuation() {
+                    row.push(' ');
                 } else {
-                    cell.symbol
-                };
-                row.push(ch);
+                    row.push_str(cell.symbol.as_str());
+                }
                 row_styles.push(cell.style);
             }
             rows.push(row);
@@ -58,14 +57,21 @@ impl SnapshotFrame {
         }
     }
 
-    /// Rows joined by `\n` with trailing whitespace stripped per row.
+    /// Rows joined by `\n` with trailing blank cells stripped per row.
     pub fn text(&self) -> String {
         let mut out = String::with_capacity(self.rows.iter().map(|r| r.len() + 1).sum());
         for (i, row) in self.rows.iter().enumerate() {
             if i > 0 {
                 out.push('\n');
             }
-            out.push_str(row.trim_end());
+            let mut end = row.len();
+            for (start, grapheme) in cell_width::grapheme_indices(row).rev() {
+                if grapheme != " " {
+                    break;
+                }
+                end = start;
+            }
+            out.push_str(&row[..end]);
         }
         out
     }
@@ -73,7 +79,7 @@ impl SnapshotFrame {
     /// Style sidecar. First line is `dim: W H`; remaining lines are
     /// one styled run each as `row col len fg=… bg=… attrs=…`. The
     /// dim header makes [`parse`] losslessly recover cell dimensions
-    /// even when [`text`] has trimmed trailing wide-char continuations.
+    /// even when [`text`] has removed trailing wide-char continuations.
     pub fn styles_text(&self) -> String {
         let mut out = format!("dim: {} {}\n", self.width, self.height);
         for (y, row) in self.styles.iter().enumerate() {
@@ -165,25 +171,28 @@ impl SnapshotFrame {
             if y >= grid.height() {
                 break;
             }
-            let chars: Vec<char> = row.chars().collect();
-            let mut c: usize = 0;
-            while c < chars.len() {
-                let x = x_off.saturating_add(c as u16);
+            let mut graphemes = cell_width::graphemes(row).peekable();
+            let mut cell_index: usize = 0;
+            while let Some(grapheme) = graphemes.next() {
+                let x = x_off.saturating_add(cell_index as u16);
                 if x >= grid.width() {
                     break;
                 }
-                let ch = chars[c];
-                let cw = char_width(ch) as usize;
+                let width = cell_width::text_width(grapheme);
                 let style = self
                     .styles
                     .get(r)
-                    .and_then(|row| row.get(c).copied())
+                    .and_then(|row| row.get(cell_index).copied())
                     .unwrap_or_default();
-                grid.set(x, y, ch, style);
-                if cw == 2 {
-                    c += 2;
+                grid.set_symbol(x, y, grapheme, style);
+                if width == 2 {
+                    // Snapshot rows serialize the continuation cell as one space.
+                    if graphemes.peek() == Some(&" ") {
+                        graphemes.next();
+                    }
+                    cell_index += 2;
                 } else {
-                    c += 1;
+                    cell_index += 1;
                 }
             }
         }
@@ -234,50 +243,41 @@ fn parse_dim_header(styles_text: &str) -> Option<(u16, u16)> {
     Some((w, h))
 }
 
-/// Visual width of a serialized row, treating each char as one cell.
-/// `from_grid` stores one char per cell (collapsing `\0` to space), so
-/// `chars().count()` is the correct cell width - *except* when the
-/// last cell was a wide char's continuation (trimmed by `text()`).
-/// In that case the last char is a wide glyph with no trailing slot;
-/// we add one cell to compensate.
+/// Cell count of a serialized row. Each grapheme is one stored cell and a wide
+/// grapheme is followed by an explicit space for its continuation. `text()` can
+/// remove a final continuation space, so account for a trailing wide grapheme.
 fn row_visual_width(row: &str) -> u16 {
-    let chars: Vec<char> = row.chars().collect();
-    let mut cells = chars.len() as u16;
-    if let Some(&last) = chars.last() {
-        if char_width(last) as usize == 2 {
-            // The continuation slot is missing - `trim_end` ate the
-            // collapsed `\0`-as-space. Add it back.
-            cells = cells.saturating_add(1);
-        }
+    let graphemes: Vec<&str> = cell_width::graphemes(row).collect();
+    let mut cells = graphemes.len().min(u16::MAX as usize) as u16;
+    if graphemes
+        .last()
+        .is_some_and(|last| cell_width::text_width(last) == 2)
+    {
+        cells = cells.saturating_add(1);
     }
     cells
 }
 
-/// Reconstruct one cell-aligned row string of length exactly `width`.
-/// Walks chars from the (possibly trim-ended) line, inserts a space
-/// for the wide char's continuation slot if it was trimmed, and pads
-/// with spaces if the line is shorter than `width`.
+/// Reconstruct one cell-aligned serialized row. Grapheme sequences stay intact,
+/// wide graphemes own a following continuation space, and short rows are padded.
 fn parse_row(line: &str, width: u16) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(width as usize);
+    let mut graphemes = cell_width::graphemes(line).peekable();
+    let mut out = String::with_capacity(line.len().max(width as usize));
     let mut cells: u16 = 0;
-    let mut i = 0;
-    while i < chars.len() && cells < width {
-        let ch = chars[i];
-        let cw = char_width(ch);
-        out.push(ch);
+    while let Some(grapheme) = graphemes.next() {
+        if cells >= width {
+            break;
+        }
+        let grapheme_width = cell_width::text_width(grapheme);
+        out.push_str(grapheme);
         cells += 1;
-        if cw == 2 && cells < width {
-            if i + 1 < chars.len() && chars[i + 1] == ' ' {
-                out.push(' ');
-                i += 2;
-                cells += 1;
-                continue;
-            }
+        if grapheme_width == 2 && cells < width {
             out.push(' ');
             cells += 1;
+            if graphemes.peek() == Some(&" ") {
+                graphemes.next();
+            }
         }
-        i += 1;
     }
     while cells < width {
         out.push(' ');
@@ -454,8 +454,8 @@ mod tests {
 
     #[test]
     fn roundtrip_with_trailing_wide_char() {
-        // Row ends on a wide glyph - `trim_end` ate the continuation
-        // slot in `text()`; `dim:` header recovers width.
+        // Row ends on a wide glyph - text() removes the continuation
+        // slot; the `dim:` header recovers the width.
         let frame = snap_grid(|g| {
             g.put_str(0, 0, "你好", Style::default());
         });
@@ -463,6 +463,17 @@ mod tests {
         assert_eq!(parsed.width, 16);
         assert_eq!(parsed.rows[0].chars().count(), 16);
         assert_eq!(parsed.rows[0].chars().next(), Some('你'));
+    }
+
+    #[test]
+    fn text_keeps_spaces_inside_trailing_graphemes() {
+        let frame = snap_grid(|g| {
+            g.put_str(0, 0, "\u{600} ", Style::default());
+        });
+
+        assert_eq!(frame.text().lines().next(), Some("\u{600} "));
+        let parsed = SnapshotFrame::parse(&frame.text(), &frame.styles_text());
+        assert_eq!(parsed.rows, frame.rows);
     }
 
     #[test]

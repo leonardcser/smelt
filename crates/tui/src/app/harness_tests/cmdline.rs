@@ -20,6 +20,27 @@ fn cmdline_completion_stays_hidden_until_tab() {
 }
 
 #[test]
+fn cmdline_renders_and_edits_unicode_by_grapheme() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Char(':'));
+    let input = "e\u{301}👩\u{200d}💻9\u{fe0f}🇨🇦";
+
+    app.type_text(input);
+    assert_eq!(app.state().cmdline_text, input);
+    let frame = app.render_to_frame().text();
+    for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+        assert!(frame.contains(grapheme), "frame: {frame}");
+    }
+
+    app.press(KeyCode::Left);
+    app.press(KeyCode::Backspace);
+    app.press(KeyCode::Delete);
+
+    assert_eq!(app.state().cmdline_text, "e\u{301}👩\u{200d}💻");
+}
+
+#[test]
 fn cmdline_completion_renders_prompt_style_list_above_cmdline() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 10);

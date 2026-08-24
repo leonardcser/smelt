@@ -243,6 +243,8 @@ struct ContentEntry {
     byte_len: usize,
     char_len: usize,
     display_cells: usize,
+    display_tail_start: usize,
+    display_tail_cells: usize,
     line_starts: Vec<usize>,
     line_ascii_words: Vec<bool>,
     line_ascii_cells: Vec<bool>,
@@ -272,6 +274,65 @@ struct ContentEntry {
     text_layouts: Vec<ContentTextLayout>,
     file_layout_clock: u64,
     file_layouts: Vec<ContentFileLayout>,
+}
+
+struct ContentAppendMetrics {
+    char_offset: usize,
+    finalized_cells: usize,
+    tail_start: usize,
+    tail_cells: usize,
+    tail: String,
+}
+
+impl ContentAppendMetrics {
+    fn new(entry: &ContentEntry) -> Self {
+        let tail = entry
+            .slice(entry.display_tail_start..entry.byte_len)
+            .into_owned();
+        debug_assert_eq!(
+            smelt_buffer::cell_width::text_width(&tail),
+            entry.display_tail_cells
+        );
+        Self {
+            char_offset: entry.char_len,
+            finalized_cells: entry.display_cells.saturating_sub(entry.display_tail_cells),
+            tail_start: entry.display_tail_start,
+            tail_cells: entry.display_tail_cells,
+            tail,
+        }
+    }
+
+    fn push(&mut self, fragment: &str) {
+        if fragment.is_empty() {
+            return;
+        }
+        self.char_offset = self.char_offset.saturating_add(if fragment.is_ascii() {
+            fragment.len()
+        } else {
+            fragment.chars().count()
+        });
+        self.tail.push_str(fragment);
+
+        let combined_cells = smelt_buffer::cell_width::text_width(&self.tail);
+        let Some((last_start, last)) =
+            smelt_buffer::cell_width::grapheme_indices(&self.tail).next_back()
+        else {
+            return;
+        };
+        let tail_cells = smelt_buffer::cell_width::text_width(last);
+        self.finalized_cells = self
+            .finalized_cells
+            .saturating_add(combined_cells.saturating_sub(tail_cells));
+        self.tail_start = self.tail_start.saturating_add(last_start);
+        self.tail_cells = tail_cells;
+        if last_start != 0 {
+            smelt_buffer::text::replace_range(&mut self.tail, 0..last_start, "");
+        }
+    }
+
+    fn display_cells(&self) -> usize {
+        self.finalized_cells.saturating_add(self.tail_cells)
+    }
 }
 
 struct ContentTextLayout {
@@ -501,11 +562,32 @@ impl TranscriptContent {
             == Some(suffix)
     }
 
+    pub fn joining_grapheme_prefix_len(&self, next: &str) -> usize {
+        if next.is_empty() {
+            return 0;
+        }
+        let read = self.read();
+        if read
+            .entry
+            .chunks
+            .iter()
+            .rev()
+            .find_map(|chunk| chunk.chars().next_back())
+            == Some('\n')
+        {
+            return 0;
+        }
+        let previous = read
+            .entry
+            .slice(read.entry.display_tail_start..read.entry.byte_len);
+        smelt_buffer::text::joining_grapheme_prefix_len(&previous, next)
+    }
+
     pub fn trimmed_end_len(&self) -> usize {
         let read = self.read();
         let mut trimmed = 0usize;
         for chunk in read.entry.chunks.iter().rev() {
-            let chunk_trimmed = chunk.trim_end().len();
+            let chunk_trimmed = smelt_buffer::text::trim_end_whitespace(chunk).len();
             trimmed = trimmed.saturating_add(chunk.len().saturating_sub(chunk_trimmed));
             if chunk_trimmed != 0 {
                 break;
@@ -1211,6 +1293,8 @@ impl ContentEntry {
             byte_len: 0,
             char_len: 0,
             display_cells: 0,
+            display_tail_start: 0,
+            display_tail_cells: 0,
             line_starts: vec![0],
             line_ascii_words: vec![true],
             line_ascii_cells: vec![true],
@@ -1260,10 +1344,7 @@ impl ContentEntry {
 
         let dirty_line = self.line_starts.len().saturating_sub(1);
         let metadata_perf = smelt_perf::perf::begin("transcript:content:append_metadata");
-        let base_chars = self.char_len;
-        let base_cells = self.display_cells;
-        let mut chars = 0usize;
-        let mut cells = 0usize;
+        let mut metrics = ContentAppendMetrics::new(self);
         let mut local_start = 0usize;
         for segment in text.split_inclusive('\n') {
             let has_newline = segment.ends_with('\n');
@@ -1299,20 +1380,17 @@ impl ContentEntry {
             {
                 self.large_lines_have_ascii_cells = false;
             }
-            self.index_fragment_metrics(
-                body, body_start, base_chars, base_cells, &mut chars, &mut cells,
-            );
+            self.index_fragment_metrics(body, body_start, &mut metrics);
 
             if has_newline {
                 let absolute_end = body_end.saturating_add(1);
+                metrics.push("\n");
                 self.line_starts.push(absolute_end);
                 self.line_ascii_words.push(true);
                 self.line_ascii_cells.push(true);
                 self.line_plain_markdown.push(true);
                 self.line_blank.push(true);
-                chars = chars.saturating_add(1);
-                cells = cells.saturating_add(1);
-                self.record_checkpoint(absolute_end, base_chars, base_cells, chars, cells);
+                self.record_checkpoint(absolute_end, &metrics);
             }
             local_start = local_start.saturating_add(segment.len());
         }
@@ -1323,8 +1401,10 @@ impl ContentEntry {
         self.hash = self.hasher.finish();
         drop(hash_perf);
         self.byte_len = self.byte_len.saturating_add(text.len());
-        self.char_len = self.char_len.saturating_add(chars);
-        self.display_cells = self.display_cells.saturating_add(cells);
+        self.char_len = metrics.char_offset;
+        self.display_cells = metrics.display_cells();
+        self.display_tail_start = metrics.tail_start;
+        self.display_tail_cells = metrics.tail_cells;
         let file_layout_perf = smelt_perf::perf::begin("transcript:content:append_file_layouts");
         for layout in &mut self.file_layouts {
             layout.append(start, text);
@@ -1353,10 +1433,7 @@ impl ContentEntry {
         &mut self,
         fragment: &str,
         absolute_start: usize,
-        base_chars: usize,
-        base_cells: usize,
-        chars: &mut usize,
-        cells: &mut usize,
+        metrics: &mut ContentAppendMetrics,
     ) {
         let fragment_end = absolute_start.saturating_add(fragment.len());
         let mut consumed = 0usize;
@@ -1368,42 +1445,26 @@ impl ContentEntry {
             } else {
                 smelt_buffer::text::next_char_boundary(fragment, snapped)
             };
-            let measured = smelt_buffer::text::slice(fragment, consumed..boundary);
-            let (new_chars, new_cells) = content_fragment_metrics(measured);
-            *chars = (*chars).saturating_add(new_chars);
-            *cells = (*cells).saturating_add(new_cells);
+            metrics.push(smelt_buffer::text::slice(fragment, consumed..boundary));
             consumed = boundary;
-            self.record_checkpoint(
-                absolute_start.saturating_add(consumed),
-                base_chars,
-                base_cells,
-                *chars,
-                *cells,
-            );
+            self.record_checkpoint(absolute_start.saturating_add(consumed), metrics);
         }
 
-        let measured = smelt_buffer::text::slice(fragment, consumed..fragment.len());
-        let (new_chars, new_cells) = content_fragment_metrics(measured);
-        *chars = (*chars).saturating_add(new_chars);
-        *cells = (*cells).saturating_add(new_cells);
+        metrics.push(smelt_buffer::text::slice(
+            fragment,
+            consumed..fragment.len(),
+        ));
     }
 
-    fn record_checkpoint(
-        &mut self,
-        absolute_end: usize,
-        base_chars: usize,
-        base_cells: usize,
-        chars: usize,
-        cells: usize,
-    ) {
+    fn record_checkpoint(&mut self, absolute_end: usize, metrics: &ContentAppendMetrics) {
         if absolute_end < self.next_checkpoint {
             return;
         }
         self.checkpoints.push(ContentCheckpoint {
             byte_offset: absolute_end,
-            char_offset: base_chars.saturating_add(chars),
+            char_offset: metrics.char_offset,
             logical_line: self.line_starts.len().saturating_sub(1),
-            display_cells: base_cells.saturating_add(cells),
+            display_cells: metrics.display_cells(),
         });
         while self.next_checkpoint <= absolute_end {
             self.next_checkpoint = self.next_checkpoint.saturating_add(CHECKPOINT_BYTES);
@@ -1872,22 +1933,6 @@ impl ContentEntry {
         }
         self.revision = next_revision;
     }
-}
-
-fn content_fragment_metrics(fragment: &str) -> (usize, usize) {
-    if fragment.is_ascii() {
-        return (fragment.len(), fragment.len());
-    }
-    fragment.chars().fold((0usize, 0usize), |counts, ch| {
-        (
-            counts.0.saturating_add(1),
-            counts.1.saturating_add(if ch.is_ascii() {
-                1
-            } else {
-                smelt_buffer::cell_width::char_width(ch)
-            }),
-        )
-    })
 }
 
 fn is_markdown_syntax_byte(byte: u8) -> bool {
@@ -2514,15 +2559,12 @@ impl ContentRead<'_> {
     pub(crate) fn trimmed_range(&self, range: Range<usize>) -> Range<usize> {
         let start = range.start.min(self.len());
         let range = start..range.end.max(start).min(self.len());
-        let mut first = None;
-        let mut last = range.start;
-        self.entry.visit_chars(range.clone(), |offset, ch| {
-            if !ch.is_whitespace() {
-                first.get_or_insert(offset);
-                last = offset.saturating_add(ch.len_utf8());
-            }
-        });
-        first.map_or(range.end..range.end, |start| start..last)
+        let text = self.slice(range.clone());
+        let without_leading = smelt_buffer::text::trim_start_whitespace(&text);
+        let leading_bytes = text.len().saturating_sub(without_leading.len());
+        let trimmed = smelt_buffer::text::trim_end_whitespace(without_leading);
+        let start = range.start.saturating_add(leading_bytes);
+        start..start.saturating_add(trimmed.len())
     }
 
     pub(crate) fn byte_at(&self, offset: usize) -> Option<u8> {
@@ -2795,6 +2837,37 @@ mod tests {
         assert_eq!(read.line(1).as_deref(), Some("βeta"));
         assert_ne!(read.content_hash(), first_hash);
         assert_eq!(read.revision(), 2);
+    }
+
+    #[test]
+    fn display_cell_metadata_preserves_sequences_across_chunks() {
+        for text in [
+            "e\u{301}",
+            "👩\u{200d}💻",
+            "9\u{fe0f}",
+            "لٟٞأ",
+            "א\u{200d}ל",
+            "ᨕᨗ\u{200d}ᨐ",
+            "ⵏ⵿ⴾ",
+            "\r\n",
+            "🇨🇦🇺",
+            "left 👩\u{200d}💻 right",
+        ] {
+            let content = TranscriptContent::new();
+            for ch in text.chars() {
+                content.append_owned(ch.to_string());
+                let snapshot = content.snapshot();
+                assert_eq!(
+                    content.read().display_cells(),
+                    smelt_buffer::cell_width::text_width(&snapshot),
+                    "display-cell metadata drifted for {snapshot:?}"
+                );
+            }
+            assert_eq!(
+                TranscriptContent::from(text).read().display_cells(),
+                smelt_buffer::cell_width::text_width(text)
+            );
+        }
     }
 
     #[test]

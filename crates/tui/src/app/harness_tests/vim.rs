@@ -221,6 +221,24 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
 }
 
 #[test]
+fn keyboard_yank_in_readonly_viewer_preserves_grapheme_clusters() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    let expected = "besta\u{308}tigt 日本 👩\u{200d}💻 9\u{fe0f} 🇨🇦";
+    app.open_readonly_overlay_fixture(vec![expected.into()], None);
+    app.render_silent();
+
+    app.type_char('v');
+    app.type_char('$');
+    app.type_char('y');
+
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), expected);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
+        Some(expected)
+    );
+}
+
+#[test]
 fn vim_i_enters_insert_from_normal() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.press(KeyCode::Esc);

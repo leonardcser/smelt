@@ -17,7 +17,7 @@ impl TuiApp {
         }
         let buf = self.ui.buf(win.buf)?;
         let text = buf.text();
-        let cpos = smelt_buffer::text::snap(&text, win.cpos());
+        let cpos = smelt_buffer::text::snap_grapheme(&text, win.cpos());
         Some(
             smelt_buffer::text::slice(&text, 0..cpos)
                 .bytes()

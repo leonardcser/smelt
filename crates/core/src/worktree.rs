@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
+use smelt_buffer::text;
 
 #[derive(Debug, Clone)]
 pub struct WorktreeSpec<'a> {
@@ -84,7 +85,10 @@ const NOUNS: &[&str] = &[
 pub fn sanitize_name(input: &str) -> Option<String> {
     let mut out = String::new();
     let mut last_dash = false;
-    for ch in input.trim().chars().flat_map(char::to_lowercase) {
+    for ch in text::trim_whitespace(input)
+        .chars()
+        .flat_map(char::to_lowercase)
+    {
         let dash = ch.is_whitespace() || matches!(ch, '-' | '_' | '.' | '/');
         if ch.is_ascii_alphanumeric() {
             out.push(ch);
@@ -129,7 +133,7 @@ pub fn enter_or_create(cwd: &Path, spec: WorktreeSpec<'_>) -> Result<WorktreeInf
     };
     let base_name = requested.unwrap_or_else(generated_name);
     let default_base = default_base_ref(&root);
-    let base = spec.base.unwrap_or(&default_base).trim();
+    let base = text::trim_whitespace(spec.base.unwrap_or(&default_base));
     let base = if base.is_empty() {
         default_base.as_str()
     } else {
@@ -320,6 +324,11 @@ fn is_git_worktree(path: &Path) -> bool {
     git_success(path, ["rev-parse", "--is-inside-work-tree"])
 }
 
+fn trim_lossy(bytes: &[u8]) -> String {
+    let value = String::from_utf8_lossy(bytes);
+    text::trim_whitespace(&value).to_owned()
+}
+
 fn current_branch(path: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -329,7 +338,7 @@ fn current_branch(path: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let branch = trim_lossy(&output.stdout);
     if branch == "HEAD" || branch.is_empty() {
         None
     } else {
@@ -353,8 +362,7 @@ fn git_output<'a>(cwd: &Path, args: impl IntoIterator<Item = &'a str>) -> Result
 }
 
 fn git_stdout<'a>(cwd: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
-    git_command(cwd, args, std::iter::empty::<(&str, &str)>())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    git_command(cwd, args, std::iter::empty::<(&str, &str)>()).map(|out| trim_lossy(&out.stdout))
 }
 
 fn git_command<'a, 'b>(
@@ -371,8 +379,8 @@ fn git_command<'a, 'b>(
     if output.status.success() {
         return Ok(output);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = trim_lossy(&output.stderr);
+    let stdout = trim_lossy(&output.stdout);
     Err(if stderr.is_empty() { stdout } else { stderr })
 }
 
@@ -540,7 +548,7 @@ fn ensure_worktrees_excluded(root: &Path, worktree_root: &ResolvedWorktreeRoot) 
     if !output.status.success() {
         return;
     }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let raw = trim_lossy(&output.stdout);
     if raw.is_empty() {
         return;
     }

@@ -84,20 +84,20 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
 
     if let DocumentCommand::MoveCursorCol(delta) = command {
         let line = document_row_string(doc, pos.row)?;
-        pos.byte_col = text::snap(&line, pos.byte_col.min(line.len()));
+        pos.byte_col = text::snap_grapheme(&line, pos.byte_col.min(line.len()));
         if delta < 0 {
             for _ in 0..delta.unsigned_abs() {
-                pos.byte_col = text::prev_char_boundary(&line, pos.byte_col);
+                pos.byte_col = text::prev_grapheme_boundary(&line, pos.byte_col);
             }
         } else {
             for _ in 0..delta as usize {
-                pos.byte_col = text::next_char_boundary(&line, pos.byte_col);
+                pos.byte_col = text::next_grapheme_boundary(&line, pos.byte_col);
             }
             if !matches!(vim_mode, VimMode::Visual | VimMode::VisualLine)
                 && pos.byte_col > 0
                 && pos.byte_col >= line.len()
             {
-                pos.byte_col = text::prev_char_boundary(&line, line.len());
+                pos.byte_col = text::prev_grapheme_boundary(&line, line.len());
             }
         }
         return Some(DocumentCommand::GotoPosition(pos));
@@ -106,7 +106,7 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     if let DocumentCommand::LineEnd = command {
         let line = document_row_string(doc, pos.row)?;
         pos.byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
-            text::prev_char_boundary(&line, line.len())
+            text::prev_grapheme_boundary(&line, line.len())
         } else {
             line.len()
         };
@@ -536,14 +536,18 @@ impl Window {
             };
             let line_width = text::byte_to_cell(line, line.len()) as u16;
             let mut col_start = if abs_row == range.start.row {
-                text::byte_to_cell(line, text::snap(line, range.start.byte_col.min(line.len())))
-                    as u16
+                text::byte_to_cell(
+                    line,
+                    text::snap_grapheme(line, range.start.byte_col.min(line.len())),
+                ) as u16
             } else {
                 0
             };
             let mut col_end = if abs_row == range.end.row {
-                text::byte_to_cell(line, text::snap(line, range.end.byte_col.min(line.len())))
-                    as u16
+                text::byte_to_cell(
+                    line,
+                    text::snap_grapheme(line, range.end.byte_col.min(line.len())),
+                ) as u16
             } else {
                 line_width
             };
@@ -996,12 +1000,12 @@ impl Window {
                     let cursor = if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
                         self.set_vim_mode(VimMode::VisualLine);
                         if end > start {
-                            text::line_start(&source, text::prev_char_boundary(&source, end))
+                            text::line_start(&source, text::prev_grapheme_boundary(&source, end))
                         } else {
                             start
                         }
                     } else if end > 0 {
-                        text::prev_char_boundary(&source, end)
+                        text::prev_grapheme_boundary(&source, end)
                     } else {
                         end
                     };
@@ -1022,16 +1026,16 @@ impl Window {
                 let mut cpos = self.cpos();
                 if delta < 0 {
                     for _ in 0..(-delta) {
-                        cpos = text::prev_char_boundary(&text, cpos);
+                        cpos = text::prev_grapheme_boundary(&text, cpos);
                     }
                 } else {
                     for _ in 0..delta {
-                        cpos = text::next_char_boundary(&text, cpos);
+                        cpos = text::next_grapheme_boundary(&text, cpos);
                     }
                     if matches!(self.vim_mode(), VimMode::Normal) && cpos > 0 {
                         let line_end = text::line_end(&text, self.cpos());
                         if cpos >= line_end {
-                            cpos = text::prev_char_boundary(&text, line_end);
+                            cpos = text::prev_grapheme_boundary(&text, line_end);
                         }
                     }
                 }
@@ -1062,7 +1066,7 @@ impl Window {
         for _ in 0..count {
             let line_end = text::line_end(&text, end);
             end = if line_end < text.len() {
-                text::next_char_boundary(&text, line_end)
+                text::next_grapheme_boundary(&text, line_end)
             } else {
                 line_end
             };
@@ -1412,7 +1416,7 @@ impl DocumentViewExecutor {
                 match click_count {
                     2 => {
                         if let Some(row) = document_row_string(document, pos.row) {
-                            let snap_col = text::snap(&row, pos.byte_col.min(row.len()));
+                            let snap_col = text::snap_grapheme(&row, pos.byte_col.min(row.len()));
                             if let Some((start, end)) =
                                 text::big_word_range_at_transparent(&row, snap_col, &[])
                             {
@@ -1591,7 +1595,7 @@ fn document_position_cell<D: DisplayDocument + ?Sized>(
         .rows
         .into_iter()
         .next()?;
-    let byte_col = text::snap(&row.text, position.byte_col.min(row.text.len()));
+    let byte_col = text::snap_grapheme(&row.text, position.byte_col.min(row.text.len()));
     Some(text::byte_to_cell(&row.text, byte_col))
 }
 
@@ -1643,9 +1647,9 @@ fn advance_document_position_if_on_char<D: DisplayDocument + ?Sized>(
     else {
         return pos;
     };
-    let byte_col = text::snap(&row.text, pos.byte_col.min(row.text.len()));
+    let byte_col = text::snap_grapheme(&row.text, pos.byte_col.min(row.text.len()));
     if byte_col < row.text.len() && row.text.as_bytes()[byte_col] != b'\n' {
-        pos.byte_col = text::next_char_boundary(&row.text, byte_col);
+        pos.byte_col = text::next_grapheme_boundary(&row.text, byte_col);
     }
     pos
 }
@@ -1665,7 +1669,7 @@ fn document_text_object_range<D: DisplayDocument + ?Sized>(
         .rows
         .into_iter()
         .next()?;
-    let col = text::snap(&row.text, cursor.byte_col.min(row.text.len()));
+    let col = text::snap_grapheme(&row.text, cursor.byte_col.min(row.text.len()));
     let (start, end) = crate::text_objects::text_object_for_spec(&row.text, col, spec)?;
     Some(RowTextObjectSelection {
         start: DocPosition {
@@ -1787,7 +1791,7 @@ fn advance_doc_position_if_on_char(
         return pos;
     };
     if pos.byte_col < line.len() && line.as_bytes()[pos.byte_col] != b'\n' {
-        pos.byte_col = text::next_char_boundary(line, pos.byte_col);
+        pos.byte_col = text::next_grapheme_boundary(line, pos.byte_col);
     }
     pos
 }

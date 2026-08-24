@@ -5,19 +5,21 @@
 use crate::output_limit::{
     limit_text_tail_with_max_bytes, OutputLimiter, DEFAULT_MAX_BYTES, TRUNCATION_NOTICE,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+const OVERSIZED_GRAPHEME_NOTICE: &str =
+    "[process output truncated; oversized grapheme and following text discarded]";
 
 /// Defaults: 30s timeout, inherit env, no stdin, capture stdout+stderr.
 #[derive(Debug, Clone)]
@@ -152,8 +154,10 @@ where
 {
     use tokio::io::AsyncReadExt;
 
-    let mut retained = VecDeque::new();
+    let mut retained = String::new();
+    let mut pending_utf8 = Vec::with_capacity(4);
     let mut total_bytes = 0usize;
+    let mut retaining = true;
     let mut buf = [0u8; 8192];
     loop {
         let n = match reader.read(&mut buf).await {
@@ -162,21 +166,88 @@ where
             Err(_) => break,
         };
         total_bytes = total_bytes.saturating_add(n);
-        retained.extend(&buf[..n]);
-        while retained.len() > max_bytes {
-            retained.pop_front();
+        if retaining {
+            append_utf8_lossy(&mut retained, &mut pending_utf8, &buf[..n]);
+            retaining = trim_output_tail(&mut retained, max_bytes);
+            if !retaining {
+                pending_utf8.clear();
+            }
         }
     }
 
-    let retained_bytes = retained.len();
-    let bytes: Vec<u8> = retained.into_iter().collect();
-    let body = String::from_utf8_lossy(&bytes).into_owned();
-    if total_bytes <= retained_bytes {
-        return limit_text_tail_with_max_bytes(&body, max_bytes);
+    if retaining && !pending_utf8.is_empty() {
+        retained.push_str(&String::from_utf8_lossy(&pending_utf8));
+    }
+    let body = limit_text_tail_with_max_bytes(&retained, max_bytes);
+    if !retaining {
+        if body.is_empty() {
+            return format!("{OVERSIZED_GRAPHEME_NOTICE}: read {total_bytes} bytes");
+        }
+        return format!(
+            "{OVERSIZED_GRAPHEME_NOTICE}: retained {} of {total_bytes} bytes\n\n{body}",
+            body.len()
+        );
+    }
+    if total_bytes <= max_bytes {
+        return body;
     }
 
-    let body = limit_text_tail_with_max_bytes(&body, max_bytes);
+    let retained_bytes = body.len();
     format!("{TRUNCATION_NOTICE}: last {retained_bytes} of {total_bytes} bytes\n\n{body}")
+}
+
+/// Decode complete UTF-8 scalars while retaining a partial scalar for the next
+/// pipe read. Invalid sequences use the same replacement semantics as
+/// `String::from_utf8_lossy` without corrupting valid scalars split across reads.
+fn append_utf8_lossy(output: &mut String, pending: &mut Vec<u8>, bytes: &[u8]) {
+    pending.extend_from_slice(bytes);
+    let mut consumed = 0;
+    while consumed < pending.len() {
+        match std::str::from_utf8(&pending[consumed..]) {
+            Ok(valid) => {
+                output.push_str(valid);
+                consumed = pending.len();
+            }
+            Err(error) => {
+                let valid_end = consumed + error.valid_up_to();
+                output.push_str(std::str::from_utf8(&pending[consumed..valid_end]).unwrap());
+                consumed = valid_end;
+                let Some(invalid_len) = error.error_len() else {
+                    break;
+                };
+                output.push('\u{fffd}');
+                consumed += invalid_len;
+            }
+        }
+    }
+    pending.drain(..consumed);
+}
+
+/// Keep a bounded complete-grapheme suffix.
+///
+/// Returns `false` when the active trailing grapheme alone exceeds the budget.
+/// The caller must stop retaining later input because it cannot discard part of
+/// that grapheme while still guaranteeing atomic output.
+fn trim_output_tail(output: &mut String, max_bytes: usize) -> bool {
+    if output.len() <= max_bytes {
+        return true;
+    }
+
+    let Some((last_start, last)) = smelt_buffer::cell_width::grapheme_indices(output).next_back()
+    else {
+        return true;
+    };
+    let retaining = last.len() <= max_bytes;
+    if !retaining {
+        smelt_buffer::text::replace_range(output, last_start..output.len(), "");
+    }
+
+    let keep = smelt_buffer::text::grapheme_suffix(output, max_bytes).len();
+    let remove = output.len() - keep;
+    if remove > 0 {
+        smelt_buffer::text::replace_range(output, 0..remove, "");
+    }
+    retaining
 }
 
 /// Result of [`run_async`]: `Done` for natural completion or timeout,
@@ -278,11 +349,127 @@ pub fn spawn_shell_child(command: &str, shell: &ShellSpec, cwd: &Path) -> io::Re
     cmd.spawn()
 }
 
+const LINE_TRUNCATION_NOTICE: &str = "[line truncated; remainder discarded]";
+
+/// Buffered lines decoded with UTF-8 replacement semantics.
+///
+/// Valid scalars survive arbitrary pipe-read boundaries. Invalid byte sequences
+/// become U+FFFD without ending the stream, and a final unterminated line is
+/// returned normally. Lines larger than the configured byte limit retain a
+/// complete-grapheme prefix and discard input until the next newline.
+pub struct LossyLines<R> {
+    reader: R,
+    buffer: Vec<u8>,
+    discarding_line: bool,
+    max_line_bytes: usize,
+}
+
+impl<R> LossyLines<R>
+where
+    R: AsyncBufRead + Unpin,
+{
+    pub fn new(reader: R) -> Self {
+        Self::with_max_line_bytes(reader, DEFAULT_MAX_BYTES)
+    }
+
+    fn with_max_line_bytes(reader: R, max_line_bytes: usize) -> Self {
+        Self {
+            reader,
+            buffer: Vec::new(),
+            discarding_line: false,
+            max_line_bytes,
+        }
+    }
+
+    pub async fn next_line(&mut self) -> io::Result<Option<String>> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                self.discarding_line = false;
+                if self.buffer.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(self.take_line()));
+            }
+
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let content_len = newline.unwrap_or(available.len());
+            let consumed = newline.map_or(content_len, |offset| offset + 1);
+
+            if self.discarding_line {
+                self.reader.consume(consumed);
+                if newline.is_some() {
+                    self.discarding_line = false;
+                }
+                continue;
+            }
+
+            let remaining = self.max_line_bytes.saturating_sub(self.buffer.len());
+            let copied = content_len.min(remaining);
+            self.buffer.extend_from_slice(&available[..copied]);
+            let truncated = copied < content_len;
+            self.reader.consume(consumed);
+            debug_assert!(self.buffer.len() <= self.max_line_bytes);
+
+            if truncated {
+                let line = self.take_truncated_line();
+                self.discarding_line = newline.is_none();
+                return Ok(Some(line));
+            }
+            if newline.is_some() {
+                return Ok(Some(self.take_line()));
+            }
+        }
+    }
+
+    fn take_truncated_line(&mut self) -> String {
+        let complete_bytes = complete_utf8_prefix_len(&self.buffer);
+        let decoded = String::from_utf8_lossy(&self.buffer[..complete_bytes]);
+        let prefix_end = smelt_buffer::cell_width::grapheme_indices(&decoded)
+            .next_back()
+            .map(|(start, _)| start)
+            .unwrap_or(0);
+        let mut line = decoded[..prefix_end].to_string();
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(LINE_TRUNCATION_NOTICE);
+        self.buffer.clear();
+        line
+    }
+
+    fn take_line(&mut self) -> String {
+        if self.buffer.last() == Some(&b'\r') {
+            self.buffer.pop();
+        }
+        let line = String::from_utf8_lossy(&self.buffer).into_owned();
+        self.buffer.clear();
+        line
+    }
+}
+
+fn complete_utf8_prefix_len(bytes: &[u8]) -> usize {
+    let mut consumed = 0;
+    while consumed < bytes.len() {
+        match std::str::from_utf8(&bytes[consumed..]) {
+            Ok(_) => return bytes.len(),
+            Err(error) => {
+                consumed += error.valid_up_to();
+                let Some(invalid_len) = error.error_len() else {
+                    return consumed;
+                };
+                consumed += invalid_len;
+            }
+        }
+    }
+    consumed
+}
+
 fn detach_streaming_child(
     detach: StreamDetach,
     child: Child,
-    stdout_reader: Lines<BufReader<ChildStdout>>,
-    stderr_reader: Lines<BufReader<ChildStderr>>,
+    stdout_reader: LossyLines<BufReader<ChildStdout>>,
+    stderr_reader: LossyLines<BufReader<ChildStderr>>,
     output: OutputLimiter,
 ) -> String {
     detach.registry.adopt_streaming(
@@ -329,8 +516,8 @@ pub async fn run_streaming_with_shell(
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let mut stderr_reader = BufReader::new(stderr).lines();
+    let mut stdout_reader = LossyLines::new(BufReader::new(stdout));
+    let mut stderr_reader = LossyLines::new(BufReader::new(stderr));
     let mut output = OutputLimiter::default();
     let mut stdout_done = false;
     let mut stderr_done = false;
@@ -590,8 +777,8 @@ struct AdoptedChild {
     id: String,
     command: String,
     child: Child,
-    stdout_reader: Lines<BufReader<ChildStdout>>,
-    stderr_reader: Lines<BufReader<ChildStderr>>,
+    stdout_reader: LossyLines<BufReader<ChildStdout>>,
+    stderr_reader: LossyLines<BufReader<ChildStderr>>,
     started_at: Instant,
     initial_output: OutputLimiter,
 }
@@ -690,8 +877,8 @@ impl ProcessRegistry {
     pub fn spawn(&self, id: String, command: &str, mut child: Child, now: Instant) {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
-        let stdout_reader = BufReader::new(stdout).lines();
-        let stderr_reader = BufReader::new(stderr).lines();
+        let stdout_reader = LossyLines::new(BufReader::new(stdout));
+        let stderr_reader = LossyLines::new(BufReader::new(stderr));
         self.adopt_readers(AdoptedChild {
             id,
             command: command.to_string(),
@@ -707,8 +894,8 @@ impl ProcessRegistry {
         &self,
         command: &str,
         child: Child,
-        stdout_reader: Lines<BufReader<ChildStdout>>,
-        stderr_reader: Lines<BufReader<ChildStderr>>,
+        stdout_reader: LossyLines<BufReader<ChildStdout>>,
+        stderr_reader: LossyLines<BufReader<ChildStderr>>,
         now: Instant,
         initial_output: OutputLimiter,
     ) -> String {
@@ -761,13 +948,9 @@ impl ProcessRegistry {
             let mut stdout_done = false;
             let mut stderr_done = false;
             let mut child_done = false;
-            let mut completion_sent = false;
+            let mut exit_code = None;
 
-            let mut mark_finished = |code: Option<i32>| {
-                if completion_sent {
-                    return;
-                }
-                completion_sent = true;
+            let mark_finished = |code: Option<i32>| {
                 let should_notify = {
                     let mut map = registry.processes.lock().unwrap();
                     if let Some(p) = map.get_mut(&id) {
@@ -799,9 +982,8 @@ impl ProcessRegistry {
                     biased;
                     _ = kill_rx.recv(), if !child_done => {
                         kill_group_sigkill(&child);
-                        let code = child.wait().await.ok().and_then(|s| s.code());
+                        exit_code = child.wait().await.ok().and_then(|status| status.code());
                         child_done = true;
-                        mark_finished(code);
                     }
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
@@ -827,17 +1009,17 @@ impl ProcessRegistry {
                     }
                     _ = tokio::time::sleep(Duration::from_millis(100)), if !child_done => {
                         if let Ok(Some(status)) = child.try_wait() {
+                            exit_code = status.code();
                             child_done = true;
-                            mark_finished(status.code());
                         }
                     }
                 }
             }
 
             if !child_done {
-                let code = child.wait().await.ok().and_then(|s| s.code());
-                mark_finished(code);
+                exit_code = child.wait().await.ok().and_then(|status| status.code());
             }
+            mark_finished(exit_code);
         });
     }
 
@@ -963,6 +1145,81 @@ mod tests {
             stdin: None,
             max_output_bytes: None,
         }
+    }
+
+    #[tokio::test]
+    async fn lossy_lines_retains_partial_bytes_when_read_is_cancelled() {
+        use tokio::io::AsyncWriteExt;
+
+        let (reader, mut writer) = tokio::io::duplex(64);
+        let mut lines = LossyLines::new(BufReader::new(reader));
+        writer.write_all(b"partial").await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lines.next_line())
+                .await
+                .is_err()
+        );
+
+        writer.write_all(b" rest\n").await.unwrap();
+        assert_eq!(
+            lines.next_line().await.unwrap().as_deref(),
+            Some("partial rest")
+        );
+    }
+
+    #[tokio::test]
+    async fn lossy_lines_bounds_unterminated_grapheme_and_resumes_after_newline() {
+        use tokio::io::AsyncWriteExt;
+
+        let (reader, mut writer) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            let mut output = String::from("a");
+            output.extend(core::iter::repeat_n('\u{301}', 10_000));
+            output.push_str("\nok\n");
+            writer.write_all(output.as_bytes()).await.unwrap();
+        });
+        let mut lines = LossyLines::with_max_line_bytes(BufReader::new(reader), 32);
+
+        let truncated = lines.next_line().await.unwrap().unwrap();
+        assert_eq!(truncated, LINE_TRUNCATION_NOTICE);
+        assert!(lines.buffer.len() <= lines.max_line_bytes);
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("ok"));
+        assert_eq!(lines.next_line().await.unwrap(), None);
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_tail_keeps_grapheme_at_exact_budget_boundary() {
+        let text = "abce\u{301}XYZ";
+        let mut input = text.as_bytes();
+
+        let output = read_output_tail(&mut input, "e\u{301}XYZ".len()).await;
+
+        assert!(output.ends_with("e\u{301}XYZ"));
+    }
+
+    #[tokio::test]
+    async fn output_tail_drops_grapheme_that_crosses_budget_boundary() {
+        let text = "abce\u{301}XYZ";
+        let mut input = text.as_bytes();
+
+        let output = read_output_tail(&mut input, 5).await;
+
+        assert!(output.ends_with("XYZ"));
+        assert!(!output.ends_with("\u{301}XYZ"));
+    }
+
+    #[tokio::test]
+    async fn output_tail_stops_retaining_an_oversized_grapheme() {
+        let text = format!("a{}later", "\u{301}".repeat(10_000));
+        let mut input = text.as_bytes();
+
+        let output = read_output_tail(&mut input, 32).await;
+
+        assert!(output.contains(OVERSIZED_GRAPHEME_NOTICE));
+        assert!(!output.contains("later"));
+        assert!(!output.contains('\u{301}'));
     }
 
     #[cfg(unix)]
@@ -1109,12 +1366,98 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_process_with_oversized_grapheme_stays_bounded() {
+        let mut options = test_options();
+        options.max_output_bytes = Some(32);
+
+        let out = run(
+            "sh",
+            &[
+                "-c",
+                "printf a; i=0; while [ $i -lt 10000 ]; do printf '\\314\\201'; i=$((i + 1)); done; printf later",
+            ],
+            &options,
+        )
+        .await;
+
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains(OVERSIZED_GRAPHEME_NOTICE));
+        assert!(!out.stdout.contains("later"));
+        assert!(!out.stdout.contains('\u{301}'));
+    }
+
     #[tokio::test]
     async fn run_echo_captures_stdout() {
         let out = run("sh", &["-c", "echo hello"], &test_options()).await;
         assert!(out.stdout.contains("hello"));
         assert_eq!(out.exit_code, 0);
         assert!(!out.timed_out);
+    }
+
+    #[tokio::test]
+    async fn run_preserves_unicode_split_across_pipe_reads() {
+        let expected = "besta\u{308}tigt 日本 👩\u{200d}💻";
+        let out = run(
+            "sh",
+            &[
+                "-c",
+                "printf 'besta'; printf '\\314'; sleep 0.01; printf '\\210tigt 日本 👩‍💻'",
+            ],
+            &test_options(),
+        )
+        .await;
+
+        assert_eq!(out.stdout, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_preserves_unicode_lines_and_callbacks() {
+        let first = "besta\u{308}tigt 日本 👩\u{200d}💻";
+        let second = "confirme\u{301}e 🇨🇦";
+        let mut streamed = Vec::new();
+        let out = run_streaming_with_shell(
+            "printf 'besta'; printf '\\314'; sleep 0.01; printf '\\210tigt 日本 👩‍💻\\n'; printf 'confirmée 🇨🇦\\n' >&2",
+            StreamConfig {
+                timeout: Duration::from_secs(2),
+                shell: ShellSpec::default(),
+                cwd: test_cwd(),
+                cancel: None,
+                detach: None,
+                detach_on_timeout: false,
+                manual_detach: false,
+            },
+            |line| streamed.push(line),
+        )
+        .await;
+
+        assert!(!out.is_error);
+        assert_eq!(streamed, [first, second]);
+        assert_eq!(out.content, format!("{first}\n{second}"));
+    }
+
+    #[tokio::test]
+    async fn streaming_replaces_invalid_utf8_and_keeps_following_output() {
+        let mut streamed = Vec::new();
+        let out = run_streaming_with_shell(
+            "printf '\\377bad\\nok\\n'",
+            StreamConfig {
+                timeout: Duration::from_secs(2),
+                shell: ShellSpec::default(),
+                cwd: test_cwd(),
+                cancel: None,
+                detach: None,
+                detach_on_timeout: false,
+                manual_detach: false,
+            },
+            |line| streamed.push(line),
+        )
+        .await;
+
+        assert!(!out.is_error);
+        assert_eq!(streamed, ["\u{fffd}bad", "ok"]);
+        assert_eq!(out.content, "\u{fffd}bad\nok");
     }
 
     #[tokio::test]
@@ -1177,6 +1520,22 @@ mod tests {
         assert!(!out.timed_out);
         assert_eq!(lines, ["first", "βeta"]);
         assert_eq!(lines.join("\n"), out.content);
+    }
+
+    #[tokio::test]
+    async fn background_stream_replaces_invalid_utf8_in_unterminated_stderr() {
+        let registry = ProcessRegistry::new();
+        let child = spawn_shell_child(
+            "printf '\\376bad\\nlast' >&2",
+            &ShellSpec::default(),
+            &test_cwd(),
+        )
+        .unwrap();
+        let id = registry.child_id(&child);
+        registry.spawn(id.clone(), "invalid stderr", child, Instant::now());
+
+        let output = wait_for_snapshot(&registry, &id, |output| !output.running).await;
+        assert_eq!(output.text, "\u{fffd}bad\nlast");
     }
 
     #[tokio::test]
@@ -1416,6 +1775,24 @@ mod tests {
         assert_eq!(snapshot.exit_code, Some(0));
         assert!(snapshot.text.contains("done"));
         assert_eq!(registry.running_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn registry_snapshot_preserves_background_unicode_output() {
+        let registry = ProcessRegistry::new();
+        let child = spawn_shell_child(
+            "printf 'Commande 10551 confirme'; printf '\\314'; sleep 0.01; printf '\\201e.pdf 🇨🇦\\n'",
+            &ShellSpec::default(),
+            &test_cwd(),
+        )
+        .unwrap();
+        let id = registry.child_id(&child);
+        registry.spawn(id.clone(), "unicode output", child, Instant::now());
+
+        let snapshot = wait_for_snapshot(&registry, &id, |out| !out.running).await;
+
+        assert_eq!(snapshot.text, "Commande 10551 confirme\u{301}e.pdf 🇨🇦");
+        assert_eq!(snapshot.exit_code, Some(0));
     }
 
     #[cfg(unix)]

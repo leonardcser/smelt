@@ -1371,7 +1371,7 @@ fn thinking_summary_label(content: &TranscriptContent) -> (String, usize) {
         let Some(line) = read.line(line_index) else {
             continue;
         };
-        let trimmed = line.trim();
+        let trimmed = smelt_buffer::text::trim_whitespace(&line);
         if trimmed.is_empty() {
             continue;
         }
@@ -1384,7 +1384,7 @@ fn thinking_summary_label(content: &TranscriptContent) -> (String, usize) {
             label = trimmed
                 .strip_prefix("**")
                 .and_then(|inner| inner.strip_suffix("**"))
-                .map(str::trim)
+                .map(smelt_buffer::text::trim_whitespace)
                 .filter(|inner| !inner.is_empty())
                 .map(str::to_string);
         }
@@ -1554,10 +1554,7 @@ pub fn transcript_block_row_with_block_idx(
 }
 
 fn preview(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    smelt_buffer::text::slice(text, 0..max_bytes).to_string()
+    smelt_buffer::text::grapheme_prefix(text, max_bytes).to_string()
 }
 
 const STORED_SELECTOR_VALUE_MAX_BYTES: usize = 512;
@@ -3990,7 +3987,7 @@ impl BlockHistory {
         let needs_separator = line_start
             && start != 0
             && match channel {
-                ContentChannel::ToolOutput => true,
+                ContentChannel::ToolOutput => content.joining_grapheme_prefix_len(&chunk) == 0,
                 ContentChannel::ExecOutput => !content.ends_with('\n'),
                 _ => unreachable!("output line channels were validated"),
             };

@@ -86,7 +86,7 @@ impl KillRing {
     }
 
     /// Yank the current kill into `buf` at `cpos`. Returns new cpos.
-    /// `cpos` is snapped to a char boundary.
+    /// `cpos` is snapped to a grapheme boundary.
     pub fn yank(
         &mut self,
         buf: &mut crate::attached::AttachedTextMut<'_>,
@@ -95,11 +95,12 @@ impl KillRing {
         if self.current.is_empty() {
             return None;
         }
+        let cpos = crate::text::snap_grapheme(buf.as_str(), cpos);
         let cpos = buf.insert_str(cpos, &self.current);
-        let end = cpos + self.current.len();
-        self.last_yank = Some((cpos, end));
+        let inserted_end = cpos + self.current.len();
+        self.last_yank = Some((cpos, inserted_end));
         self.pop_idx = 0;
-        Some(end)
+        Some(crate::text::ceil_grapheme(buf.as_str(), inserted_end))
     }
 
     /// Replace the last yank with the next history entry. Returns new cpos.
@@ -108,6 +109,9 @@ impl KillRing {
         if self.history.is_empty() {
             return None;
         }
+        // Keep the exact inserted byte range: either edge can now sit inside a
+        // grapheme formed with neighboring source text. Expanding to that
+        // grapheme would make yank-pop delete bytes that were never yanked.
         let start = crate::text::snap(buf.as_str(), start);
         let end = crate::text::snap(buf.as_str(), end).max(start);
         let text = self.history[self.pop_idx % self.history.len()].clone();
@@ -115,7 +119,7 @@ impl KillRing {
         buf.replace_range(start..end, &text);
         self.last_yank = Some((start, new_end));
         self.pop_idx = (self.pop_idx + 1) % self.history.len();
-        Some(new_end)
+        Some(crate::text::ceil_grapheme(buf.as_str(), new_end))
     }
 
     /// Clear last-yank tracking.
@@ -321,6 +325,29 @@ mod tests {
         let end = with_attached(&mut buf, |a| kr.yank(a, 3)).expect("yank into 'ab|cd' at byte 3");
         assert_eq!(buf, "ab|xyzcd");
         assert_eq!(end, 6, "cursor lands at byte after 'xyz'");
+    }
+
+    #[test]
+    fn yank_and_yank_pop_preserve_graphemes_formed_with_following_text() {
+        for (yanked, following) in [
+            ("e", "\u{301}z"),
+            ("9", "\u{fe0f}z"),
+            ("👩", "\u{200d}💻z"),
+            ("🇨", "🇦z"),
+        ] {
+            let mut kr = KillRing::new();
+            kr.kill("x".into());
+            kr.kill(yanked.into());
+            let mut buf = following.to_string();
+
+            let cursor = with_attached(&mut buf, |a| kr.yank(a, 0)).unwrap();
+            assert_eq!(buf, format!("{yanked}{following}"));
+            assert_eq!(crate::text::snap_grapheme(&buf, cursor), cursor);
+
+            let cursor = with_attached(&mut buf, |a| kr.yank_pop(a)).unwrap();
+            assert_eq!(buf, format!("x{following}"));
+            assert_eq!(crate::text::snap_grapheme(&buf, cursor), cursor);
+        }
     }
 
     #[test]

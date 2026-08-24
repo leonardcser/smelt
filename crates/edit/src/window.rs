@@ -934,8 +934,11 @@ impl Window {
         self.vim_pending_input().is_some()
     }
 
-    pub fn shift_vim_visual_anchor(&mut self, delta: usize) {
-        self.surface.text_mut().vim_state.shift_visual_anchor(delta);
+    pub fn shift_vim_visual_anchor(&mut self, delta: usize, source: &str) {
+        self.surface
+            .text_mut()
+            .vim_state
+            .shift_visual_anchor(delta, source);
     }
 
     pub fn clear_vim_visual_anchor(&mut self) {
@@ -1488,7 +1491,7 @@ impl Window {
         if self.layout_matches(buf) {
             if let Some((lrow, chunk_idx)) = self.layout.logical_at_visual(vrow) {
                 let line = buf.get_line(lrow).unwrap_or("");
-                let byte = text::snap(line, byte_col.min(line.len()));
+                let byte = text::snap_grapheme(line, byte_col.min(line.len()));
                 let chunk_start = self
                     .layout
                     .chunks_of(lrow)
@@ -1500,7 +1503,7 @@ impl Window {
             }
         }
         let line = buf.get_line(vrow).unwrap_or("");
-        text::byte_to_cell(line, text::snap(line, byte_col.min(line.len())))
+        text::byte_to_cell(line, text::snap_grapheme(line, byte_col.min(line.len())))
     }
 
     /// Project `cpos` to a visual `(row, cell_col)` through this window's
@@ -1532,8 +1535,8 @@ impl Window {
             TextHitKind::TrailingChrome {
                 nearest: Some(nearest),
             } => {
-                let nearest = text::snap(text, nearest.min(text.len()));
-                text::prev_char_boundary(text, nearest).min(endpoint)
+                let nearest = text::snap_grapheme(text, nearest.min(text.len()));
+                text::prev_grapheme_boundary(text, nearest).min(endpoint)
             }
             _ => endpoint,
         }
@@ -1883,9 +1886,9 @@ impl Window {
     }
 
     /// Set cursor from a byte offset in a single-line buffer. The byte offset is
-    /// snapped to a UTF-8 boundary and the displayed column is measured in cells.
+    /// snapped to a grapheme boundary and the displayed column is measured in cells.
     pub fn set_cursor_byte_single_line(&mut self, line: &str, byte: usize) {
-        let byte = text::snap(line, byte);
+        let byte = text::snap_grapheme(line, byte);
         let text_state = self.text_state_mut();
         text_state.cursor_col = text::byte_to_cell(line, byte) as u16;
         text_state.cursor_row = 0;
@@ -1931,7 +1934,7 @@ impl Window {
         if should_commit {
             let end = self.text_state().drag_endpoint.unwrap_or(0);
             let source = Self::coordinate_text(buf);
-            let cpos = text::snap(source.as_ref(), end.min(source.len()));
+            let cpos = text::snap_grapheme(source.as_ref(), end.min(source.len()));
             let text = self.text_state_mut();
             text.cpos = cpos;
             text.selection_anchor = None;
@@ -1974,18 +1977,17 @@ impl Window {
     }
 
     /// Snap-clamp every byte-offset anchor (`cpos`, `selection_anchor`,
-    /// `vim_state.visual_anchor`) into `source` and onto a char boundary.
+    /// `vim_state.visual_anchor`) into `source` and onto a grapheme boundary.
     /// Call after any in-place source shrink so a delete that consumed the
-    /// bytes those offsets used to point at can't outlive them. Wholesale
-    /// swaps belong in `PromptState::install_source`; this is for
-    /// surgical edits (drains, replace-range) where keeping the cursor's
-    /// neighborhood is the point.
+    /// glyph those offsets used to point at can't outlive it. Wholesale swaps
+    /// belong in `PromptState::install_source`; this is for surgical edits where
+    /// keeping the cursor's neighborhood is the point.
     pub fn clamp_anchors_to_source(&mut self, source: &str) {
         let len = source.len();
         let text = self.text_state_mut();
-        text.cpos = text::snap(source, text.cpos.min(len));
+        text.cpos = text::snap_grapheme(source, text.cpos.min(len));
         if let Some(a) = text.selection_anchor {
-            let snapped = text::snap(source, a.min(len));
+            let snapped = text::snap_grapheme(source, a.min(len));
             text.selection_anchor = if snapped == text.cpos {
                 None
             } else {
@@ -1993,26 +1995,18 @@ impl Window {
             };
         }
         text.vim_state.clamp_visual_anchor(source);
-        debug_assert!(
-            text.cpos <= len && source.is_char_boundary(text.cpos),
-            "clamp_anchors_to_source postcondition: cpos {} not on char boundary in source len {}",
-            text.cpos,
-            len
-        );
-        debug_assert!(
-            text.selection_anchor
-                .is_none_or(|a| a <= len && source.is_char_boundary(a)),
-            "clamp_anchors_to_source postcondition: selection_anchor {:?} not on char boundary",
-            text.selection_anchor
-        );
+        debug_assert_eq!(text::snap_grapheme(source, text.cpos), text.cpos);
+        debug_assert!(text
+            .selection_anchor
+            .is_none_or(|a| { a <= len && text::snap_grapheme(source, a) == a }));
     }
 
     /// Resolve the shift-selection range against `src`. Both endpoints are clamped to
-    /// `src.len()` and snapped to char boundaries - a stale anchor that survived a
+    /// `src.len()` and snapped to grapheme boundaries - a stale anchor that survived a
     /// source mutation degrades to `None` instead of producing an out-of-bounds slice.
     pub fn selection_range_at(&self, cpos: usize, src: &str) -> Option<(usize, usize)> {
-        let a = text::snap(src, self.selection_anchor()?);
-        let c = text::snap(src, cpos);
+        let a = text::snap_grapheme(src, self.selection_anchor()?);
+        let c = text::snap_grapheme(src, cpos);
         let (lo, hi) = if a <= c { (a, c) } else { (c, a) };
         (lo != hi).then_some((lo, hi))
     }
@@ -2025,8 +2019,8 @@ impl Window {
         cursor_includes_cell: bool,
     ) -> Option<(usize, usize)> {
         let anchor_includes_cell = self.text_state().selection_anchor_includes_cell;
-        let a = text::snap(src, self.selection_anchor()?);
-        let c = text::snap(src, cpos);
+        let a = text::snap_grapheme(src, self.selection_anchor()?);
+        let c = text::snap_grapheme(src, cpos);
         let (lo, hi, include_hi) = if a <= c {
             (a, c, cursor_includes_cell)
         } else {
@@ -2232,11 +2226,11 @@ impl Window {
     }
 
     /// Stage `[start, end)` as a mouse-selected range with the drag endpoint at `end`
-    /// (or the last char's start byte for vim, since `visual_range` is inclusive).
+    /// (or the last grapheme's start byte for vim, since `visual_range` is inclusive).
     /// `mouse_up` decides whether to commit the endpoint into `cpos`.
     fn finish_range_select(&mut self, start: usize, end: usize, buf: &Buffer, _viewport_rows: u16) {
         let endpoint = if self.vim_enabled() {
-            smelt_buffer::text::prev_char_boundary(&buf.text(), end).max(start)
+            smelt_buffer::text::prev_grapheme_boundary(&buf.text(), end).max(start)
         } else {
             end
         };
@@ -2627,7 +2621,7 @@ impl Window {
             if let Some(press) = self.text_state_mut().pending_press.take() {
                 self.pin_current_scroll();
                 let press_includes_cell = self.text_state().pending_press_includes_cell;
-                let press = text::snap(text, press.min(text.len()));
+                let press = text::snap_grapheme(text, press.min(text.len()));
                 if self.vim_enabled() {
                     self.begin_visual(VimMode::Visual, press);
                 } else {
@@ -2682,9 +2676,9 @@ impl Window {
                 // may have shifted (streaming delta into the transcript,
                 // resize-driven re-layout). Snap in the same coordinate space
                 // that produced the endpoint so the committed cpos never lands
-                // past EOF or mid-codepoint.
+                // past EOF or inside a grapheme.
                 let text = Self::coordinate_text(buf);
-                let mut cpos = text::snap(text.as_ref(), end.min(text.len()));
+                let mut cpos = text::snap_grapheme(text.as_ref(), end.min(text.len()));
                 if self.vim_enabled() && matches!(self.vim_mode(), VimMode::Normal) {
                     super::motions::clamp_normal(text.as_ref(), &mut cpos);
                 }
@@ -2723,9 +2717,8 @@ impl Window {
         let Some((ws, we)) = self.text_state_mut().drag_anchor_word else {
             return;
         };
-        // Vim cursor sits on the last char's start byte; `prev_char_boundary`
-        // is the correct step for ASCII and multibyte alike.
-        let last_of = |end: usize| smelt_buffer::text::prev_char_boundary(text, end).max(ws);
+        // Vim cursor sits on the last grapheme's start byte.
+        let last_of = |end: usize| smelt_buffer::text::prev_grapheme_boundary(text, end).max(ws);
         let p = self.effective_endpoint();
         let (new_endpoint, new_anchor) = if p >= we {
             let far = super::text::word_range_at_transparent(text, p, ctx.soft_breaks)
@@ -2752,7 +2745,7 @@ impl Window {
         let Some((ls, le)) = self.text_state_mut().drag_anchor_line else {
             return;
         };
-        let last_of = |end: usize| smelt_buffer::text::prev_char_boundary(text, end).max(ls);
+        let last_of = |end: usize| smelt_buffer::text::prev_grapheme_boundary(text, end).max(ls);
         let p = self.effective_endpoint();
         let (new_endpoint, new_anchor) = if p >= le {
             let far = super::text::line_range_at(text, p, ctx.hard_breaks)
@@ -2839,7 +2832,7 @@ impl Window {
             // renders and invariant checks see valid anchors.
             let text = buf.text();
             let cpos = self.cpos();
-            self.set_cpos(text::snap(&text, cpos.min(text.len())));
+            self.set_cpos(text::snap_grapheme(&text, cpos.min(text.len())));
             self.text_state_mut().vim_state.clamp_visual_anchor(&text);
         } else {
             buf.sync_after_edit(width);
@@ -3120,7 +3113,7 @@ impl Window {
     }
 
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
-        use smelt_buffer::cell_width::char_width_u16;
+        use smelt_buffer::cell_width::{graphemes, text_width_u16};
 
         let width = slice.width();
         let height = slice.height();
@@ -3176,8 +3169,8 @@ impl Window {
                 &selection_owned[..]
             };
         // Reused per-row scratch - avoids `height` allocations of each Vec.
-        let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
-        let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);
+        let mut col_to_grapheme: Vec<usize> = Vec::with_capacity(content_width as usize);
+        let mut painted_graphemes: Vec<&str> = Vec::with_capacity(content_width as usize);
         let mut spans_buf: Vec<smelt_buffer::buffer::Span> = Vec::new();
         let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
         let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
@@ -3252,13 +3245,13 @@ impl Window {
                     if let Some(g) = cell {
                         let style = merge_styles(base_row_style, g.style);
                         let mut c: u16 = 0;
-                        for ch in g.text.chars() {
-                            let cw = char_width_u16(ch);
-                            if c + cw > gutter_width {
+                        for grapheme in graphemes(&g.text) {
+                            let grapheme_width = text_width_u16(grapheme);
+                            if c + grapheme_width > gutter_width {
                                 break;
                             }
-                            slice.set(c, row, ch, style);
-                            c += cw;
+                            slice.set_symbol(c, row, grapheme, style);
+                            c += grapheme_width;
                         }
                         // Pad to gutter_width with the gutter's base style so
                         // partial cells inherit chrome bg, never `fill_bg`.
@@ -3271,13 +3264,14 @@ impl Window {
             let Some(line) = layout.visual_line(buf.lines(), visual_row) else {
                 continue;
             };
-            col_to_char.clear();
-            line_chars.clear();
-            line_chars.extend(line.chars());
+            col_to_grapheme.clear();
+            painted_graphemes.clear();
             // Two-axis pan: `src_col` walks the source row in cell space (drives
             // skip/clip against `scroll_left`); `dst_col` is where each surviving
-            // glyph lands in the viewport. A wide char straddling the left edge
-            // collapses to a leading space so wide-char cells aren't smeared.
+            // glyph lands in the viewport. A wide grapheme straddling the left edge
+            // collapses to a leading space so it cannot smear across the boundary.
+            // `painted_graphemes` records that clipped symbol so later style passes
+            // repaint exactly what the base pass emitted.
             //
             // `to_viewport_col` translates a span/selection column (in source-row
             // cell space, after chunk_cell_offset for wrapped continuations) into
@@ -3292,28 +3286,31 @@ impl Window {
             };
             let mut src_col: u16 = 0;
             let mut dst_col: u16 = 0;
-            for (ci, ch) in line_chars.iter().enumerate() {
-                let cw = char_width_u16(*ch);
-                if src_col.saturating_add(cw) <= scroll_left {
-                    src_col = src_col.saturating_add(cw);
+            for grapheme in graphemes(line) {
+                let width = text_width_u16(grapheme);
+                if src_col.saturating_add(width) <= scroll_left {
+                    src_col = src_col.saturating_add(width);
                     continue;
                 }
-                let (painted, eff_cw) = if src_col < scroll_left {
-                    let visible = src_col.saturating_add(cw).saturating_sub(scroll_left);
-                    (' ', visible)
+                let (painted, visible_width) = if src_col < scroll_left {
+                    let visible = src_col.saturating_add(width).saturating_sub(scroll_left);
+                    (" ", visible)
                 } else {
-                    (*ch, cw)
+                    (grapheme, width)
                 };
-                if dst_col.saturating_add(eff_cw) > content_width {
+                if dst_col.saturating_add(visible_width) > content_width {
                     break;
                 }
-                slice.set(content_offset + dst_col, row, painted, row_style);
-                col_to_char.push(ci);
-                for _ in 1..eff_cw {
-                    col_to_char.push(ci);
+                slice.set_symbol(content_offset + dst_col, row, painted, row_style);
+                if visible_width > 0 {
+                    let grapheme_index = painted_graphemes.len();
+                    painted_graphemes.push(painted);
+                    for _ in 0..visible_width {
+                        col_to_grapheme.push(grapheme_index);
+                    }
                 }
-                dst_col = dst_col.saturating_add(eff_cw);
-                src_col = src_col.saturating_add(cw);
+                dst_col = dst_col.saturating_add(visible_width);
+                src_col = src_col.saturating_add(width);
             }
             let content_end_col = dst_col;
             spans_buf.clear();
@@ -3336,8 +3333,8 @@ impl Window {
                         row,
                         start,
                         end,
-                        &col_to_char,
-                        &line_chars,
+                        &col_to_grapheme,
+                        &painted_graphemes,
                         style,
                         None,
                     );
@@ -3391,8 +3388,8 @@ impl Window {
                                     row,
                                     start,
                                     end,
-                                    &col_to_char,
-                                    &line_chars,
+                                    &col_to_grapheme,
+                                    &painted_graphemes,
                                     style,
                                     mask_slice,
                                 );
@@ -3419,7 +3416,7 @@ impl Window {
                     .map(|g| ctx.theme.get(g))
                     .unwrap_or_default();
                 let style = merge_styles(row_style, base);
-                let vt_width: u16 = vt.text.chars().map(char_width_u16).sum();
+                let vt_width = text_width_u16(&vt.text);
                 let start_col = match vt.pos {
                     VirtTextPos::Eol => content_end_col,
                     VirtTextPos::Inline | VirtTextPos::Overlay => (vt.col as u16)
@@ -3428,13 +3425,13 @@ impl Window {
                     VirtTextPos::RightAlign => content_width.saturating_sub(vt_width),
                 };
                 let mut c = start_col;
-                for ch in vt.text.chars() {
-                    let cw = char_width_u16(ch);
-                    if c + cw > content_width {
+                for grapheme in graphemes(&vt.text) {
+                    let grapheme_width = text_width_u16(grapheme);
+                    if c + grapheme_width > content_width {
                         break;
                     }
-                    slice.set(content_offset + c, row, ch, style);
-                    c += cw;
+                    slice.set_symbol(content_offset + c, row, grapheme, style);
+                    c += grapheme_width;
                 }
             }
         }
@@ -3474,12 +3471,11 @@ impl Window {
                     if dst_col < content_width {
                         let under = slice.cell(content_offset + dst_col, screen_row).symbol;
                         let cursor_col = content_offset + dst_col;
-                        let painted = if under == '\0' || under == ' ' {
-                            glyph
+                        if under.is_continuation() || under == ' ' {
+                            slice.set(cursor_col, screen_row, glyph, style);
                         } else {
-                            under
-                        };
-                        slice.set(cursor_col, screen_row, painted, style);
+                            slice.set_symbol(cursor_col, screen_row, under.as_str(), style);
+                        }
                         slice.set_terminal_cursor_position(cursor_col, screen_row);
                     }
                 }
@@ -3489,9 +3485,9 @@ impl Window {
 }
 
 fn include_cursor_cell(buf: &Buffer, src: &str, pos: usize) -> usize {
-    let pos = text::snap(src, pos.min(src.len()));
+    let pos = text::snap_grapheme(src, pos.min(src.len()));
     if cursor_cell_selectable(buf, pos) && pos < src.len() && src.as_bytes()[pos] != b'\n' {
-        text::next_char_boundary(src, pos)
+        text::next_grapheme_boundary(src, pos)
     } else {
         pos
     }
@@ -3573,8 +3569,8 @@ fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
     }
 }
 
-/// Skips wide-char continuation cells: their `col_to_char` index repeats the leading
-/// cell, and `Grid::set` for a wide char also marks the next slot as `\0`, so a second
+/// Skips wide-grapheme continuation cells: their `col_to_grapheme` index repeats the
+/// leading cell, and `Grid::set_symbol` marks the next slot as `\0`, so a second
 /// paint at the continuation column would clobber the cell after the wide char.
 /// `mask`, when present, gates each column (used by selection paint to honor
 /// `selectable = false` spans).
@@ -3585,8 +3581,8 @@ fn paint_span_cells(
     row: u16,
     start: u16,
     end: u16,
-    col_to_char: &[usize],
-    line_chars: &[char],
+    col_to_grapheme: &[usize],
+    painted_graphemes: &[&str],
     style: Style,
     mask: Option<&[bool]>,
 ) {
@@ -3596,12 +3592,18 @@ fn paint_span_cells(
                 continue;
             }
         }
-        let ci = col_to_char.get(c as usize).copied();
-        if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
+        let grapheme_index = col_to_grapheme.get(c as usize).copied();
+        if c > 0
+            && grapheme_index.is_some()
+            && grapheme_index == col_to_grapheme.get((c - 1) as usize).copied()
+        {
             continue;
         }
-        let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
-        slice.set(pad_left + c, row, ch, style);
+        let grapheme = grapheme_index
+            .and_then(|index| painted_graphemes.get(index))
+            .copied()
+            .unwrap_or(" ");
+        slice.set_symbol(pad_left + c, row, grapheme, style);
     }
 }
 
@@ -6407,6 +6409,39 @@ mod tests {
         assert!(!grid.cell(5, 0).style.dim);
         // Cell before the span - not dim.
         assert!(!grid.cell(1, 0).style.dim);
+    }
+
+    #[test]
+    fn render_preserves_decomposed_graphemes_through_style_passes() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["a\u{308}b".into()]);
+        buf.add_highlight(0, 0, 1, crate::SpanStyle::new().bold());
+        let w = make_win();
+        let mut grid = Grid::new(4, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 4, 1));
+
+        w.render(&buf, &mut slice, &ctx());
+
+        assert_eq!(grid.cell(0, 0).symbol, "a\u{308}");
+        assert!(grid.cell(0, 0).style.bold);
+        assert_eq!(grid.cell(1, 0).symbol, 'b');
+    }
+
+    #[test]
+    fn render_style_pass_keeps_partially_panned_wide_grapheme_clipped() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["界x".into()]);
+        buf.add_highlight(0, 0, 2, crate::SpanStyle::new().bold());
+        let mut w = make_win();
+        w.scroll_left = 1;
+        let mut grid = Grid::new(2, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 2, 1));
+
+        w.render(&buf, &mut slice, &ctx());
+
+        assert_eq!(grid.cell(0, 0).symbol, ' ');
+        assert!(grid.cell(0, 0).style.bold);
+        assert_eq!(grid.cell(1, 0).symbol, 'x');
     }
 
     #[test]

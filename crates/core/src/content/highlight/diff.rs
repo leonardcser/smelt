@@ -13,7 +13,7 @@ use syntect::highlighting::HighlightState;
 use syntect::parsing::ParseState;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
-use crate::content::builder::{display_width, LineBuilder};
+use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
@@ -978,7 +978,8 @@ fn print_syntax_spans(
     row_bg: Option<Color>,
     inline_bg: Option<Color>,
 ) -> usize {
-    let mut col = 0;
+    let col =
+        smelt_buffer::cell_width::joined_text_width(spans.iter().map(|span| span.text.as_str()));
     for span in spans {
         if span.text.is_empty() {
             continue;
@@ -997,7 +998,6 @@ fn print_syntax_spans(
             b: span.meta.fg.2,
         });
         out.print(&span.text);
-        col += display_width(span.text.as_str());
     }
     out.reset_style();
     col
@@ -2538,7 +2538,7 @@ mod split_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::builder::test_util::render_test;
+    use crate::content::builder::{display_width, test_util::render_test};
 
     fn chunks(parts: &[&str]) -> Vec<SharedContentSlice> {
         parts

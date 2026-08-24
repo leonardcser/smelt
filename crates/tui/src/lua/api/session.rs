@@ -381,7 +381,7 @@ pub(super) fn register(
         "Set or clear a named hidden model-visible context note. `context_note(name, text)` creates or replaces that note for future turns; `context_note(name, nil)` clears it. Named notes do not replace each other, so plugins can maintain independent steering state. UiHost-only.",
         &["name", "text", "opts"],
         |_, (name, text, _opts): (String, Option<String>, Option<mlua::Table>)| -> LuaResult<()> {
-            let name = name.trim().to_string();
+            let name = smelt_buffer::text::trim_whitespace(&name).to_owned();
             if name.is_empty() {
                 return Err(LuaError::RuntimeError(
                     "smelt.session.context_note: name must be non-empty".into(),
@@ -399,13 +399,13 @@ pub(super) fn register(
             let name: String = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("name").ok().flatten())
-                .map(|s| s.trim().to_string())
+                .map(|s| smelt_buffer::text::trim_whitespace(&s).to_owned())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| mlua::Error::external("name is required"))?;
             let base: Option<String> = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("base").ok().flatten())
-                .map(|s| s.trim().to_string())
+                .map(|s| smelt_buffer::text::trim_whitespace(&s).to_owned())
                 .filter(|s| !s.is_empty());
             let (info, pending) = crate::lua::with_session_host(|host| {
                 host.enter_worktree(name.as_str(), base.as_deref())
@@ -450,7 +450,7 @@ pub(super) fn register(
         "Request a coherent project-context transition. Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots commit together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ cwd, pending }`.",
         &["path"],
         |lua, path: String| -> LuaResult<mlua::Table> {
-            let path = std::path::PathBuf::from(path.trim());
+            let path = std::path::PathBuf::from(smelt_buffer::text::trim_whitespace(&path));
             let (cwd, pending) = crate::lua::with_session_host(|host| host.change_cwd(path))
                 .map_err(mlua::Error::external)?;
             let out = lua.create_table()?;

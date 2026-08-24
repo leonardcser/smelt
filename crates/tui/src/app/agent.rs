@@ -566,7 +566,7 @@ impl TuiApp {
         let model_target = self.resolve_model_target()?;
         let content = self.expand_at_file_refs(content);
         let text = content.text_content();
-        let submitted = match text.trim() {
+        let submitted = match smelt_buffer::text::trim_whitespace(&text) {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
@@ -922,7 +922,7 @@ impl TuiApp {
         if self.block_read_only_mutation("submit a turn to this read-only session") {
             return None;
         }
-        let submitted = match evaluated.trim() {
+        let submitted = match smelt_buffer::text::trim_whitespace(&evaluated) {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };

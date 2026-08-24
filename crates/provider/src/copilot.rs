@@ -377,7 +377,7 @@ pub async fn fetch_available_models(
     access_token: &str,
     api_base: &str,
 ) -> Result<Vec<CopilotModel>, String> {
-    let url = format!("{}/models", api_base.trim_end_matches('/'));
+    let url = format!("{}/models", crate::endpoint::trim_api_base(api_base));
     let mut req = client
         .get(&url)
         .header("Accept", "application/json")

@@ -140,7 +140,10 @@ fn rewind_source_and_attachments(
             .iter()
             .find_map(|label| text.find(label).map(|pos| (pos, label.len())))
         {
-            text.replace_range(pos..pos + len, &ATTACHMENT_MARKER.to_string());
+            let range = smelt_buffer::text::covering_grapheme_range(&text, pos..pos + len);
+            let mut marker = [0; 4];
+            let marker = ATTACHMENT_MARKER.encode_utf8(&mut marker);
+            smelt_buffer::text::replace_range(&mut text, range, marker);
         } else {
             if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
                 text.push(' ');
@@ -214,8 +217,8 @@ impl PromptState {
             .map(|(s, e)| {
                 let src = ctx.buf.source();
                 (
-                    smelt_buffer::text::snap(src, s),
-                    smelt_buffer::text::snap(src, e),
+                    smelt_buffer::text::snap_grapheme(src, s),
+                    smelt_buffer::text::snap_grapheme(src, e),
                 )
             })
             .filter(|&(s, e)| s < e)
@@ -306,8 +309,8 @@ impl PromptState {
 
     /// Wholesale buffer swap. Installs `text` + `ids` atomically (via
     /// `AttachedTextMut::install`, which debug-asserts that marker count in
-    /// `text` matches `ids.len()`). Clamps `cpos` to a char boundary, clears
-    /// selection + vim visual anchors.
+    /// `text` matches `ids.len()`). Clamps `cpos` to a grapheme boundary,
+    /// then clears selection + vim visual anchors.
     ///
     /// Passing `ids = vec![]` with marker-containing text trips the debug
     /// assert - exactly what you want, since the caller would otherwise be
@@ -325,7 +328,7 @@ impl PromptState {
         ctx.buf.text_mut().install(text, ids);
         let source = ctx.buf.source();
         ctx.win
-            .set_cpos(crate::smelt_edit::text::snap(source, cpos));
+            .set_cpos(crate::smelt_edit::text::snap_grapheme(source, cpos));
         ctx.win.clear_selection_anchor();
         ctx.win.clear_vim_visual_anchor();
     }
@@ -390,14 +393,13 @@ impl PromptState {
         self.save_undo(ctx);
         let inserted = prefix.len();
         ctx.buf.text_mut().insert_str(0, &prefix);
-        let cpos = ctx.win.cpos();
-        ctx.win.set_cpos(cpos + inserted);
+        let cpos = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), ctx.win.cpos() + inserted);
+        ctx.win.set_cpos(cpos);
         ctx.win.clear_selection_anchor();
-        // Every offset into the buffer shifts right by `inserted`. Cpos is
-        // shifted above; vim's visual_anchor needs the same treatment or
-        // it lands mid-codepoint when the prepended prefix straddles a
-        // boundary that the anchor used to sit on.
-        ctx.win.shift_vim_visual_anchor(inserted);
+        // Every offset into the buffer shifts right by `inserted`. If the
+        // prefix joins the first old grapheme, keep both cursors after that
+        // complete grapheme rather than inside it.
+        ctx.win.shift_vim_visual_anchor(inserted, ctx.buf.source());
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.from_paste = false;
     }
@@ -472,9 +474,9 @@ impl PromptState {
         range: std::ops::Range<usize>,
     ) -> PromptSubmission {
         let source = buf.source();
-        let start = smelt_buffer::text::snap(source, range.start.min(source.len()));
-        let end = smelt_buffer::text::snap(source, range.end.min(source.len()));
-        let selected = smelt_buffer::text::slice(source, start..end);
+        let range = smelt_buffer::text::snapped_grapheme_range(source, range);
+        let start = range.start;
+        let selected = smelt_buffer::text::slice(source, range);
         let mut marker_idx = smelt_buffer::text::slice(source, 0..start)
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
@@ -623,7 +625,7 @@ impl PromptState {
             SubmitEdit::DeleteRange { range } => {
                 self.save_undo(ctx);
                 ctx.buf.text_mut().replace_range(range.clone(), "");
-                let cpos = smelt_buffer::text::snap(ctx.buf.source(), range.start);
+                let cpos = smelt_buffer::text::snap_grapheme(ctx.buf.source(), range.start);
                 ctx.win.set_cpos(cpos);
                 ctx.win.clear_selection_anchor();
                 ctx.win.clear_vim_visual_anchor();
@@ -754,8 +756,8 @@ impl PromptState {
                 if ctx.win.cpos() > 0 {
                     let cpos = ctx.win.cpos();
                     let source = ctx.buf.source();
-                    let cp = char_pos(source, cpos);
-                    ctx.win.set_cpos(byte_of_char(source, cp - 1));
+                    ctx.win
+                        .set_cpos(smelt_buffer::text::prev_grapheme_boundary(source, cpos));
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -765,8 +767,8 @@ impl PromptState {
                 let cpos = ctx.win.cpos();
                 if cpos < ctx.buf.source().len() {
                     let source = ctx.buf.source();
-                    let cp = char_pos(source, cpos);
-                    ctx.win.set_cpos(byte_of_char(source, cp + 1));
+                    ctx.win
+                        .set_cpos(smelt_buffer::text::next_grapheme_boundary(source, cpos));
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -1058,8 +1060,8 @@ impl PromptState {
                 if ctx.win.cpos() > 0 {
                     let cpos = ctx.win.cpos();
                     let source = ctx.buf.source();
-                    let cp = char_pos(source, cpos);
-                    ctx.win.set_cpos(byte_of_char(source, cp - 1));
+                    ctx.win
+                        .set_cpos(smelt_buffer::text::prev_grapheme_boundary(source, cpos));
                 }
                 Action::Redraw
             }
@@ -1068,8 +1070,8 @@ impl PromptState {
                 if ctx.win.cpos() < ctx.buf.source().len() {
                     let cpos = ctx.win.cpos();
                     let source = ctx.buf.source();
-                    let cp = char_pos(source, cpos);
-                    ctx.win.set_cpos(byte_of_char(source, cp + 1));
+                    ctx.win
+                        .set_cpos(smelt_buffer::text::next_grapheme_boundary(source, cpos));
                 }
                 Action::Redraw
             }
@@ -1224,10 +1226,8 @@ impl PromptState {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-pub(crate) use smelt_buffer::text::{byte_of_char, char_pos};
-
 pub(super) fn current_line(buf: &str, cpos: usize) -> usize {
-    let end = smelt_buffer::text::snap(buf, cpos);
+    let end = smelt_buffer::text::snap_grapheme(buf, cpos);
     buf[..end].chars().filter(|&c| c == '\n').count()
 }
 
@@ -1356,6 +1356,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prepend_text_places_cursors_after_a_joined_grapheme() {
+        let mut input = Harness::new();
+        input.state.replace_text(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "\u{301}x".into(),
+        );
+        input.win.set_cpos(0);
+
+        input.state.prepend_text(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "e".into(),
+        );
+
+        assert_eq!(input.buf.source(), "e\u{301}x");
+        assert_eq!(input.win.cpos(), "e\u{301}".len());
+        assert_eq!(input.win.vim_state().visual_anchor_raw(), "e\u{301}".len());
+    }
+
     // ── rewind attachment restoration ────────────────────────────────────────
 
     #[test]
@@ -1367,6 +1392,19 @@ mod tests {
 
         assert_eq!(source, format!("look {ATTACHMENT_MARKER}"));
         assert_eq!(attachments.len(), 1);
+    }
+
+    #[test]
+    fn rewind_restore_replaces_complete_attachment_label_graphemes() {
+        for text in ["[shot.png]\u{301}", "\u{600}[shot.png]"] {
+            let (source, attachments) = rewind_source_and_attachments(
+                text.into(),
+                vec![("shot.png".into(), "data:image/png;base64,AAA".into())],
+            );
+
+            assert_eq!(source, ATTACHMENT_MARKER.to_string());
+            assert_eq!(attachments.len(), 1);
+        }
     }
 
     #[test]
@@ -1519,6 +1557,33 @@ mod tests {
             "Paste at end of line should not set from_paste"
         );
         assert_eq!(input.buf.source(), "hello world");
+    }
+
+    #[test]
+    fn paste_cursor_moves_after_graphemes_formed_with_following_text() {
+        for (pasted, following) in [
+            ("e", "\u{301}z"),
+            ("9", "\u{fe0f}z"),
+            ("👩", "\u{200d}💻z"),
+            ("🇨", "🇦z"),
+        ] {
+            let mut input = Harness::new();
+            input.buf.set_source(following.to_string());
+            input.win.set_cpos(0);
+            input.state.insert_paste(
+                &mut PromptCtx {
+                    buf: &mut input.buf,
+                    win: &mut input.win,
+                },
+                pasted.to_string(),
+            );
+
+            assert_eq!(input.buf.source(), format!("{pasted}{following}"));
+            assert_eq!(
+                input.win.cpos(),
+                smelt_buffer::text::next_grapheme_boundary(input.buf.source(), 0)
+            );
+        }
     }
 
     #[test]
@@ -1871,6 +1936,25 @@ mod tests {
     }
 
     // ── Selection tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn submission_ranges_never_split_grapheme_clusters() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let mut input = Harness::new();
+            input.buf.set_source(format!("a{grapheme}b"));
+            let inside = 1 + grapheme.chars().next().unwrap().len_utf8();
+
+            let head = input.state.submission_from_range(&input.buf, 0..inside);
+            assert_eq!(head.content.text_content(), "a", "{grapheme:?}");
+            assert_eq!(head.display, "a", "{grapheme:?}");
+
+            let tail = input
+                .state
+                .submission_from_range(&input.buf, inside..input.buf.source().len());
+            assert_eq!(tail.content.text_content(), format!("{grapheme}b"));
+            assert_eq!(tail.display, format!("{grapheme}b"));
+        }
+    }
 
     #[test]
     fn selected_submit_carries_only_selected_attachment_ids() {
@@ -2900,18 +2984,18 @@ mod tests {
     }
 
     #[test]
-    fn install_source_snaps_cpos_to_char_boundary() {
+    fn install_source_snaps_cpos_to_grapheme_boundary() {
         let mut input = Harness::new();
         input.state.install_source(
             &mut PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
-            "héllo".to_string(),
+            "he\u{301}llo".to_string(),
             2,
             Vec::new(),
-        ); // mid 'é'
-        assert_eq!(input.win.cpos(), 1, "cpos must snap to a char boundary");
+        ); // between the base `e` and its combining accent
+        assert_eq!(input.win.cpos(), 1, "cpos must snap to a grapheme boundary");
     }
 
     #[test]
@@ -2942,6 +3026,85 @@ mod tests {
 
         assert_eq!(input.buf.source(), "ab");
         assert_eq!(input.win.cpos(), 1);
+    }
+
+    #[test]
+    fn prompt_paste_and_deletion_keep_graphemes_atomic() {
+        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
+            let mut input = Harness::new();
+            let pasted = format!("a{grapheme}b");
+            input.state.insert_paste(
+                &mut PromptCtx {
+                    buf: &mut input.buf,
+                    win: &mut input.win,
+                },
+                pasted.clone(),
+            );
+            assert_eq!(input.buf.source(), pasted);
+
+            input.win.set_cpos(1 + grapheme.len());
+            input.state.backspace(&mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            });
+            assert_eq!(input.buf.source(), "ab", "{grapheme:?}");
+            assert_eq!(input.win.cpos(), 1, "{grapheme:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_deletion_cursor_stays_valid_when_neighbors_form_a_grapheme() {
+        let mut input = Harness::new();
+        input.buf.set_source("🇨 🇦z".into());
+        input.win.set_cpos("🇨 ".len());
+        input.state.backspace(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+
+        assert_eq!(input.buf.source(), "🇨🇦z");
+        assert_eq!(
+            smelt_buffer::text::snap_grapheme(input.buf.source(), input.win.cpos()),
+            input.win.cpos()
+        );
+    }
+
+    #[test]
+    fn selection_deletion_snaps_back_when_neighbors_form_a_grapheme() {
+        let mut input = Harness::new();
+        input.buf.set_source("🇨 x 🇦z".into());
+        let start = "🇨".len();
+        let end = "🇨 x ".len();
+        input.win.set_cpos(start);
+        input.win.extend_selection(start);
+        input.win.set_cpos(end);
+
+        input.state.delete_selection(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+
+        assert_eq!(input.buf.source(), "🇨🇦z");
+        assert_eq!(input.win.cpos(), 0);
+    }
+
+    #[test]
+    fn attachment_insertion_advances_past_a_joined_grapheme() {
+        let mut input = Harness::new();
+        input.buf.set_source("\u{301}x".into());
+        input.state.insert_attachment_id(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            7,
+        );
+
+        assert_eq!(input.buf.source(), format!("{ATTACHMENT_MARKER}\u{301}x"));
+        assert_eq!(
+            input.win.cpos(),
+            ATTACHMENT_MARKER.len_utf8() + "\u{301}".len()
+        );
     }
 
     #[test]

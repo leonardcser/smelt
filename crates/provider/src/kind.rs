@@ -156,7 +156,7 @@ impl ProviderKind {
 }
 
 fn api_base_host(api_base: &str) -> Option<String> {
-    let trimmed = api_base.trim();
+    let trimmed = smelt_buffer::text::trim_whitespace(api_base);
     let parsed = url::Url::parse(trimmed)
         .or_else(|_| url::Url::parse(&format!("https://{trimmed}")))
         .ok()?;
@@ -171,7 +171,7 @@ fn host_matches(host: &str, expected: &str) -> bool {
 }
 
 pub fn is_kimi_code_api_base(api_base: &str) -> bool {
-    let trimmed = api_base.trim();
+    let trimmed = smelt_buffer::text::trim_whitespace(api_base);
     let Ok(parsed) =
         url::Url::parse(trimmed).or_else(|_| url::Url::parse(&format!("https://{trimmed}")))
     else {
@@ -238,7 +238,7 @@ impl WireApi {
     }
 
     pub fn copilot_url(self, base: &str) -> String {
-        let base = base.trim_end_matches('/');
+        let base = crate::endpoint::trim_api_base(base);
         match self {
             Self::ChatCompletions => format!("{base}/chat/completions"),
             Self::OpenAiResponses => format!("{base}/responses"),

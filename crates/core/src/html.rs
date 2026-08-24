@@ -2,6 +2,7 @@
 //! links, plain text, and a markdown projection for LLM consumption.
 
 use scraper::{ElementRef, Html, Selector};
+use smelt_buffer::{cell_width, text};
 use std::collections::HashSet;
 use url::Url;
 
@@ -9,12 +10,16 @@ const SKIP_ELEMENTS: &[&str] = &[
     "script", "style", "noscript", "iframe", "object", "embed", "meta", "link", "svg",
 ];
 
+fn trim_owned(value: String) -> String {
+    text::trim_whitespace(&value).to_owned()
+}
+
 pub(crate) fn title(html: &str) -> Option<String> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("title").ok()?;
     doc.select(&sel)
         .next()
-        .map(|el| el.text().collect::<String>().trim().to_string())
+        .map(|el| trim_owned(el.text().collect()))
         .filter(|s| !s.is_empty())
 }
 
@@ -79,7 +84,7 @@ pub(crate) fn parse_ddg_results(html: &str) -> Vec<DdgResult> {
         let Some(title_el) = el.select(&title_sel).next() else {
             continue;
         };
-        let title: String = title_el.text().collect::<String>().trim().to_string();
+        let title = trim_owned(title_el.text().collect());
         if title.is_empty() {
             continue;
         }
@@ -91,7 +96,7 @@ pub(crate) fn parse_ddg_results(html: &str) -> Vec<DdgResult> {
         let description = el
             .select(&snippet_sel)
             .next()
-            .map(|s| s.text().collect::<String>().trim().to_string())
+            .map(|s| trim_owned(s.text().collect()))
             .unwrap_or_default();
         results.push(DdgResult {
             title,
@@ -200,7 +205,7 @@ pub(crate) fn to_markdown(html: &str, base_url: Option<&str>) -> Markdown {
     let title = Selector::parse("title").ok().and_then(|sel| {
         doc.select(&sel)
             .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
+            .map(|el| trim_owned(el.text().collect()))
             .filter(|s| !s.is_empty())
     });
 
@@ -215,7 +220,7 @@ pub(crate) fn to_markdown(html: &str, base_url: Option<&str>) -> Markdown {
             let Some(href) = el.value().attr("href") else {
                 continue;
             };
-            let href = href.trim();
+            let href = text::trim_whitespace(href);
             if href.is_empty()
                 || href.starts_with("javascript:")
                 || href.starts_with("mailto:")
@@ -287,13 +292,14 @@ fn html_to_md(el: ElementRef, out: &mut String) {
             let href = el.value().attr("href").unwrap_or("");
             let mut link_text = String::new();
             collect_inline_text(el, &mut link_text);
-            if link_text.trim().is_empty() {
+            let trimmed_link_text = text::trim_whitespace(&link_text);
+            if trimmed_link_text.is_empty() {
                 out.push_str(href);
             } else if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") {
                 out.push_str(&link_text);
             } else {
                 out.push('[');
-                out.push_str(link_text.trim());
+                out.push_str(trimmed_link_text);
                 out.push_str("](");
                 out.push_str(href);
                 out.push(')');
@@ -362,7 +368,7 @@ fn html_to_md(el: ElementRef, out: &mut String) {
             ensure_blank_line(out);
             let mut inner = String::new();
             walk_children(el, &mut inner);
-            for line in inner.trim().lines() {
+            for line in text::trim_whitespace(&inner).lines() {
                 out.push_str("> ");
                 out.push_str(line);
                 out.push('\n');
@@ -453,7 +459,7 @@ fn render_table(table: ElementRef, out: &mut String) {
     for row in table.select(&row_sel) {
         let ths: Vec<String> = row
             .select(&th_sel)
-            .map(|c| c.text().collect::<String>().trim().to_string())
+            .map(|c| trim_owned(c.text().collect()))
             .collect();
         if !ths.is_empty() {
             has_header = true;
@@ -462,7 +468,7 @@ fn render_table(table: ElementRef, out: &mut String) {
         }
         let tds: Vec<String> = row
             .select(&td_sel)
-            .map(|c| c.text().collect::<String>().trim().to_string())
+            .map(|c| trim_owned(c.text().collect()))
             .collect();
         if !tds.is_empty() {
             rows.push(tds);
@@ -507,32 +513,32 @@ fn collapse_blank_lines(s: &str) -> String {
             out.push('\n');
         }
     }
-    out.trim().to_string()
+    text::trim_whitespace(&out).to_owned()
 }
 
 fn collapse_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_was_space = true;
     let mut last_was_newline = true;
-    for ch in s.chars() {
-        if ch == '\n' {
-            if !last_was_newline {
-                out.push('\n');
-            }
-            last_was_newline = true;
-            last_was_space = true;
-        } else if ch.is_whitespace() {
-            if !last_was_space {
+    for grapheme in cell_width::graphemes(s) {
+        if grapheme.chars().all(char::is_whitespace) {
+            if grapheme.contains('\n') || grapheme.contains('\r') {
+                if !last_was_newline {
+                    out.push('\n');
+                }
+                last_was_newline = true;
+                last_was_space = true;
+            } else if !last_was_space {
                 out.push(' ');
+                last_was_space = true;
             }
-            last_was_space = true;
         } else {
-            out.push(ch);
+            out.push_str(grapheme);
             last_was_space = false;
             last_was_newline = false;
         }
     }
-    out.trim().to_string()
+    text::trim_whitespace(&out).to_owned()
 }
 
 #[cfg(test)]
@@ -543,6 +549,16 @@ mod tests {
     fn title_finds_document_title() {
         let html = "<html><head><title>  hello  </title></head><body></body></html>";
         assert_eq!(title(html), Some("hello".into()));
+    }
+
+    #[test]
+    fn html_whitespace_normalization_keeps_graphemes_atomic() {
+        let html = "<html><head><title> \u{301}title\u{600} </title></head><body></body></html>";
+        assert_eq!(title(html).as_deref(), Some(" \u{301}title\u{600} "));
+        assert_eq!(
+            collapse_whitespace(" \u{301}x\u{600} "),
+            " \u{301}x\u{600} "
+        );
     }
 
     #[test]

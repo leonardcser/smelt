@@ -11,9 +11,9 @@
 //!
 //! This target hammers the round-trip with random grids:
 //!  - random `(width, height)` within small bounds
-//!  - each cell gets a char from a small alphabet (ASCII, single-width
-//!    Unicode, CJK, and emoji) and a `Style` from a curated palette covering
-//!    every fg/bg/attr combination the parser exercises
+//!  - each cell gets a grapheme from a small alphabet (ASCII, decomposed
+//!    accents, CJK, ZWJ emoji, variation selectors, and flags) and a `Style`
+//!    from a curated palette covering every parser fg/bg/attr combination
 //!  - construct a `Grid`, run `from_grid` → `text + styles_text` →
 //!    `parse`, assert the parsed `SnapshotFrame` matches the original
 //!
@@ -38,13 +38,14 @@ struct Cell {
     style_idx: u8,
 }
 
-/// Printable ASCII, single-width Unicode, and representative wide glyphs.
+/// Printable ASCII and representative single- and multi-scalar graphemes.
 /// Wide entries exercise continuation reconstruction at arbitrary columns,
 /// including the right edge and overlaps with earlier writes.
-const CHARS: &[char] = &[
-    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2',
-    '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@', 'A', 'B', 'a', 'b', '~',
-    'á', 'é', 'ñ', '€', '¶', '漢', '界', '🙂', '🚀',
+const GRAPHEMES: &[&str] = &[
+    " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
+    "0", "1", "2", "3", "8", "9", ":", ";", "<", "=", ">", "?", "@", "A", "B", "a", "b",
+    "~", "á", "e\u{301}", "a\u{308}", "€", "¶", "漢", "界", "🙂", "👩\u{200d}💻",
+    "9\u{fe0f}", "🇨🇦",
 ];
 
 /// Palette covers: default; bare fg/bg; basic named colors; ANSI; RGB;
@@ -112,8 +113,8 @@ fn style(idx: u8) -> Style {
     }
 }
 
-fn ch(idx: u8) -> char {
-    CHARS[(idx as usize) % CHARS.len()]
+fn grapheme(idx: u8) -> &'static str {
+    GRAPHEMES[(idx as usize) % GRAPHEMES.len()]
 }
 
 fn run(input: Input) {
@@ -130,7 +131,7 @@ fn run(input: Input) {
         for x in 0..w {
             let i = (y as usize * w as usize + x as usize) % input.cells.len();
             let cell = input.cells[i];
-            grid.set(x, y, ch(cell.ch_idx), style(cell.style_idx));
+            grid.set_symbol(x, y, grapheme(cell.ch_idx), style(cell.style_idx));
         }
     }
 

@@ -103,7 +103,9 @@ pub fn split_markdown_list_prefix(line: &str) -> (&str, &str) {
 }
 
 pub fn is_markdown_list_item(line: &str) -> bool {
-    !split_markdown_list_prefix(line.trim_start()).0.is_empty()
+    !split_markdown_list_prefix(smelt_buffer::text::trim_start_whitespace(line))
+        .0
+        .is_empty()
 }
 
 /// Per-column alignment, parsed from a markdown table separator line.
