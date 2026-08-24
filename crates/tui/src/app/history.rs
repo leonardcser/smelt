@@ -1238,7 +1238,9 @@ impl TuiApp {
                 self.core.config.revision = self.core.config.revision.wrapping_add(1);
             }
             if selection_changed {
-                self.core.config.model_selection = selection;
+                self.core
+                    .config
+                    .set_model_selection(selection, &self.core.startup_overrides);
                 self.core
                     .signals
                     .set_dyn("model", std::rc::Rc::new(Option::<String>::None));
@@ -2610,6 +2612,9 @@ mod checkpoint_tests {
                 local status = smelt.model.status()
                 assert(status.requested == "managed/future-model")
                 assert(status.availability == "pending")
+                local levels = smelt.reasoning.cycle_list()
+                assert(#levels == 1)
+                assert(levels[1] == "off")
             "#,
         ));
     }

@@ -307,22 +307,33 @@ impl TestApp {
     /// Install and select one synthetic model for model-backed scenarios.
     pub fn use_model(&mut self, model: smelt_core::config::ResolvedModel) {
         self.app.core.config.available_models = vec![model.clone()];
-        self.app.core.config.model_selection = smelt_core::ModelSelectionState {
-            requested_key: Some(model.key.clone()),
-            requested_by: smelt_core::ModelSelectionSource::CatalogDefault,
-            active: Some(smelt_core::ActiveModel::from_resolved(&model)),
-        };
+        self.app.core.config.set_model_selection(
+            smelt_core::ModelSelectionState {
+                requested_key: Some(model.key.clone()),
+                requested_by: smelt_core::ModelSelectionSource::CatalogDefault,
+                active: Some(smelt_core::ActiveModel::from_resolved(&model)),
+            },
+            &self.app.core.startup_overrides,
+        );
     }
 
     pub(crate) fn set_model_selection_for_harness(
         &mut self,
         selection: smelt_core::ModelSelectionState,
     ) {
-        self.app.core.config.model_selection = selection;
+        self.app
+            .core
+            .config
+            .set_model_selection(selection, &self.app.core.startup_overrides);
     }
 
     pub(crate) fn replace_active_model_for_harness(&mut self, model: smelt_core::ActiveModel) {
-        self.app.core.config.model_selection.active = Some(model);
+        let mut selection = self.app.core.config.model_selection.clone();
+        selection.active = Some(model);
+        self.app
+            .core
+            .config
+            .set_model_selection(selection, &self.app.core.startup_overrides);
     }
 
     pub(crate) fn set_request_audit_for_harness(&mut self, mode: protocol::RequestAuditMode) {

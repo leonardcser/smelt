@@ -519,15 +519,18 @@ impl TuiApp {
             .active_model()
             .map(|model| model.key.clone());
         self.core.config.revision = self.core.config.revision.wrapping_add(1);
-        self.core.config.model_selection = smelt_core::ModelSelectionState {
-            requested_key: Some(resolved.key.clone()),
-            requested_by: if record {
-                smelt_core::ModelSelectionSource::User
-            } else {
-                smelt_core::ModelSelectionSource::Session
+        self.core.config.set_model_selection(
+            smelt_core::ModelSelectionState {
+                requested_key: Some(resolved.key.clone()),
+                requested_by: if record {
+                    smelt_core::ModelSelectionSource::User
+                } else {
+                    smelt_core::ModelSelectionSource::Session
+                },
+                active: Some(active),
             },
-            active: Some(active),
-        };
+            &self.core.startup_overrides,
+        );
         if record {
             self.update_session_persist_metadata();
         }

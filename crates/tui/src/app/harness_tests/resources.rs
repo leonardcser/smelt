@@ -217,6 +217,59 @@ fn model_switch_marks_missing_credentials_unavailable() {
     ));
 }
 
+fn add_reasoning_capable_model(app: &mut TestApp) {
+    let default = app.core_probe().config.available_models[0].clone();
+    let mut capable = default.clone();
+    capable.key = "openai/reasoning-model".into();
+    capable.provider_name = "openai".into();
+    capable.model_name = "reasoning-model".into();
+    capable.provider_type = "openai".into();
+    app.set_available_models(vec![default, capable]);
+}
+
+#[test]
+fn model_switch_updates_reasoning_levels_for_active_provider() {
+    let mut app = TestApp::builder().build();
+    add_reasoning_capable_model(&mut app);
+
+    assert!(app.run_lua(
+        r#"
+        local levels = smelt.reasoning.cycle_list()
+        assert(#levels == 4)
+        assert(levels[#levels] == "high")
+        smelt.model.set("openai/reasoning-model")
+        levels = smelt.reasoning.cycle_list()
+        assert(#levels == 5)
+        assert(levels[#levels] == "max")
+        smelt.model.set("test/test-model")
+        levels = smelt.reasoning.cycle_list()
+        assert(#levels == 4)
+        assert(levels[#levels] == "high")
+        "#,
+    ));
+}
+
+#[test]
+fn model_switch_preserves_explicit_reasoning_cycle() {
+    let mut app = TestApp::builder()
+        .with_reasoning_cycle(vec![
+            protocol::ReasoningEffort::Off,
+            protocol::ReasoningEffort::Max,
+        ])
+        .build();
+    add_reasoning_capable_model(&mut app);
+
+    assert!(app.run_lua(
+        r#"
+        smelt.model.set("openai/reasoning-model")
+        local levels = smelt.reasoning.cycle_list()
+        assert(#levels == 2)
+        assert(levels[1] == "off")
+        assert(levels[2] == "max")
+        "#,
+    ));
+}
+
 #[test]
 fn recent_model_persistence_failure_is_reported() {
     let mut app = TestApp::builder().build();

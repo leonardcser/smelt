@@ -168,6 +168,17 @@ impl RuntimeState {
         self.model_selection.active.as_mut()
     }
 
+    /// Install a model selection and refresh its model-dependent reasoning cycle.
+    pub fn set_model_selection(
+        &mut self,
+        selection: ModelSelectionState,
+        startup: &StartupOverrides,
+    ) {
+        self.reasoning_cycle =
+            resolve_reasoning_cycle(startup, self.reasoning_effort, selection.active.as_ref());
+        self.model_selection = selection;
+    }
+
     pub fn request_runtime_config(&self) -> RequestRuntimeConfig {
         RequestRuntimeConfig {
             redact_secrets: self.settings.redact_secrets,
@@ -310,12 +321,12 @@ fn resolve_mode(inputs: &RuntimeInputs<'_>, cycle: &mut Vec<AgentMode>) -> Agent
 }
 
 fn resolve_reasoning_cycle(
-    inputs: &RuntimeInputs<'_>,
+    startup: &StartupOverrides,
     selected: ReasoningEffort,
     active: Option<&ActiveModel>,
 ) -> Vec<ReasoningEffort> {
-    let fixed_cycle = inputs.startup.reasoning_cycle.is_some();
-    let mut cycle = inputs.startup.reasoning_cycle.clone().unwrap_or_else(|| {
+    let fixed_cycle = startup.reasoning_cycle.is_some();
+    let mut cycle = startup.reasoning_cycle.clone().unwrap_or_else(|| {
         active.map_or_else(
             || vec![ReasoningEffort::Off],
             |model| {
@@ -617,8 +628,11 @@ pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, Resolv
                 .and_then(ReasoningEffort::parse)
         })
         .unwrap_or(ReasoningEffort::Off);
-    let reasoning_cycle =
-        resolve_reasoning_cycle(&inputs, reasoning_effort, model_selection.active.as_ref());
+    let reasoning_cycle = resolve_reasoning_cycle(
+        inputs.startup,
+        reasoning_effort,
+        model_selection.active.as_ref(),
+    );
     let context_window = inputs.previous.and_then(|previous| {
         same_context_target(
             previous.model_selection.active.as_ref(),

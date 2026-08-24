@@ -228,6 +228,7 @@ pub struct TestAppBuilder {
     vim: Option<bool>,
     mode: AgentMode,
     mode_cycle: Option<Vec<AgentMode>>,
+    reasoning_cycle: Option<Vec<ReasoningEffort>>,
     init_lua: Option<std::path::PathBuf>,
     lua_config_dir: Option<std::path::PathBuf>,
     lua_runtime_override: Option<std::path::PathBuf>,
@@ -245,6 +246,7 @@ impl Default for TestAppBuilder {
             vim: None,
             mode: AgentMode::normal(),
             mode_cycle: None,
+            reasoning_cycle: None,
             init_lua: None,
             lua_config_dir: None,
             lua_runtime_override: None,
@@ -272,6 +274,11 @@ impl TestAppBuilder {
 
     pub fn with_mode_cycle(mut self, modes: Vec<AgentMode>) -> Self {
         self.mode_cycle = Some(modes);
+        self
+    }
+
+    pub fn with_reasoning_cycle(mut self, efforts: Vec<ReasoningEffort>) -> Self {
+        self.reasoning_cycle = Some(efforts);
         self
     }
 
@@ -404,6 +411,7 @@ impl TestAppBuilder {
         let available_models = desired.resolve_models();
         let startup_overrides = smelt_core::StartupOverrides {
             mode_cycle: explicit_mode_cycle,
+            reasoning_cycle: self.reasoning_cycle,
             settings: self
                 .vim
                 .map(|vim| {
