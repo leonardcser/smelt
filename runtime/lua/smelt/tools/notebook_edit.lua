@@ -29,17 +29,51 @@ local function preview_layout(meta)
   return smelt.layout.vbox({ smelt.layout.text(title), body })
 end
 
+local function retained_layout(block)
+  local output = block.output
+  local fields = output and output.content_fields
+  local meta = (output and output.metadata) or {}
+  if not fields then return nil end
+
+  local path = meta.path or ""
+  local lang = meta.syntax_ext
+  local body
+  if meta.edit_mode == "insert" then
+    local content = fields.new_source
+    if not (content and content.content_id) then return nil end
+    body = smelt.layout.content(content.content_id, {
+      format = "file",
+      path = path .. "." .. (lang or "py"),
+      lang = lang,
+    })
+  else
+    local old = fields.old_source
+    local new = fields.new_source
+    if not (old and old.content_id and new and new.content_id) then return nil end
+    body = smelt.layout.content_diff(old.content_id, new.content_id, {
+      path = lang and (path .. "." .. lang) or path,
+      lang = lang,
+      full_file = true,
+    })
+  end
+
+  local title = meta.title or ""
+  if title == "" then return body end
+  return smelt.layout.vbox({ smelt.layout.text(title), body })
+end
+
 smelt.transcript.register_tool("edit_notebook", {
-  cache_key = "smelt.tool-presentation.edit_notebook:v1",
+  cache_key = "smelt.tool-presentation.edit_notebook:v2",
   body = function(block)
-    return preview_layout((block.output and block.output.metadata) or {})
+    return retained_layout(block)
   end,
   compact = function(block)
     local meta = (block.output and block.output.metadata) or block.args or {}
     local mode = meta.edit_mode or "replace"
     local cell_type = meta.cell_type or ""
     local cell_label = cell_type ~= "" and (cell_type .. " cell") or "cell"
-    local lines = smelt.text.line_count(meta.new_source or "")
+    local new_source = block.output and block.output.content_fields and block.output.content_fields.new_source
+    local lines = (new_source and new_source.content_lines) or smelt.text.line_count(meta.new_source or "")
     if mode == "delete" then return "deleted " .. cell_label end
     local verb = ({ insert = "inserted", replace = "replaced" })[mode] or (mode .. "d")
     return verb .. " " .. cell_label .. ", " .. tostring(lines) .. " lines"
@@ -113,9 +147,18 @@ smelt.tools.register({
       return { content = err or "notebook edit failed", is_error = true }
     end
 
+    local metadata = result.metadata or {}
+    local old_source = metadata.old_source or ""
+    local new_source = metadata.new_source or ""
+    metadata.old_source = nil
+    metadata.new_source = nil
     return {
       content = result.message,
-      metadata = result.metadata,
+      metadata = metadata,
+      display_content = {
+        old_source = old_source,
+        new_source = new_source,
+      },
     }
   end,
 })

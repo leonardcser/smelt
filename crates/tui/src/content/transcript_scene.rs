@@ -1,10 +1,11 @@
 use mlua::{Lua, Table, Value};
 use smelt_core::lua::TranscriptGroupSpec;
+use smelt_core::transcript_content::ContentId;
 use smelt_core::transcript_model::{
-    BlockHistory, BlockId, LayoutKey, TranscriptPatchOperation, ViewState,
+    BlockHistory, BlockId, ContentChannel, LayoutKey, TranscriptGroupChildMetadata,
+    TranscriptPatchOperation, ViewState,
 };
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -31,13 +32,56 @@ pub(crate) enum RenderNode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderGroupChild {
+    pub(crate) id: BlockId,
+    pub(crate) content_revision: u64,
+    pub(crate) presentation_revision: u64,
+    pub(crate) metadata: TranscriptGroupChildMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RenderGroupNode {
     pub(crate) id: u64,
     pub(crate) name: String,
     pub(crate) bucket: String,
     pub(crate) child_range: Range<usize>,
-    pub(crate) child_ids: Vec<BlockId>,
+    pub(crate) children: Vec<RenderGroupChild>,
+    pub(crate) presentation_revision: u64,
     pub(crate) default_view_state: ViewState,
+}
+
+impl RenderGroupNode {
+    pub(crate) fn child_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.children.iter().map(|child| child.id)
+    }
+
+    fn update_child_revision(
+        &mut self,
+        history: &BlockHistory,
+        id: BlockId,
+        presentation_changed: bool,
+    ) -> bool {
+        let Some(child) = self.children.iter_mut().find(|child| child.id == id) else {
+            return false;
+        };
+        let key = history.resolve_key(
+            id,
+            LayoutKey {
+                width: 0,
+                view_state: ViewState::Expanded,
+                content_hash: 0,
+                sidecar_hash: 0,
+            },
+        );
+        child.content_revision = key.content_hash;
+        child.presentation_revision = key.sidecar_hash;
+        if presentation_changed {
+            child.metadata = history
+                .group_child_metadata(id)
+                .expect("group child remains in transcript history");
+        }
+        true
+    }
 }
 
 impl RenderNode {
@@ -396,10 +440,17 @@ struct TranscriptScenePrefix {
     revision: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContentAppend {
+    pub(crate) content_id: ContentId,
+    pub(crate) channel: ContentChannel,
+    pub(crate) byte_range: Range<usize>,
+}
+
 #[derive(Default)]
 pub(crate) struct TranscriptSceneRefresh {
     pub(crate) changed_blocks: HashSet<BlockId>,
-    pub(crate) appended_ranges: HashMap<BlockId, Vec<Range<usize>>>,
+    pub(crate) appended_ranges: HashMap<BlockId, Vec<ContentAppend>>,
     pub(crate) structure_changed: bool,
     pub(crate) prune_required: bool,
 }
@@ -407,7 +458,7 @@ pub(crate) struct TranscriptSceneRefresh {
 #[derive(Default)]
 struct ContentPatchRefresh {
     changed_blocks: HashSet<BlockId>,
-    appended_ranges: HashMap<BlockId, Vec<Range<usize>>>,
+    appended_ranges: HashMap<BlockId, Vec<ContentAppend>>,
 }
 
 #[derive(Clone, Debug)]
@@ -499,6 +550,31 @@ impl TranscriptScene {
         }
     }
 
+    fn update_group_child_revision(
+        &mut self,
+        history: &BlockHistory,
+        id: BlockId,
+        patch_revision: u64,
+        presentation_changed: bool,
+    ) {
+        let Some(index) = self.grouped_block_index_by_id.get(&id).copied() else {
+            return;
+        };
+        let Some(RenderNode::Group(group)) = self.nodes.get_mut(index) else {
+            return;
+        };
+        if !group.update_child_revision(history, id, presentation_changed) {
+            return;
+        }
+        if presentation_changed {
+            group.presentation_revision = smelt_core::utils::hash_serializable(&(
+                group.presentation_revision,
+                patch_revision,
+                id,
+            ));
+        }
+    }
+
     fn try_apply_content_patches(&mut self, history: &BlockHistory) -> Option<ContentPatchRefresh> {
         if self.history_patch_revision == history.patch_revision() {
             return (self.history_generation == history.generation())
@@ -506,29 +582,51 @@ impl TranscriptScene {
         }
         let mut content = ContentPatchRefresh::default();
         let mut replaced_blocks = HashSet::new();
+        let mut scene_changed = false;
         for patch in history.patches_since(self.history_patch_revision)? {
             for operation in &patch.operations {
                 match operation {
-                    TranscriptPatchOperation::Append { id, byte_range } => {
+                    TranscriptPatchOperation::Append {
+                        id,
+                        content_id,
+                        channel,
+                        byte_range,
+                    } => {
+                        scene_changed = true;
                         content.changed_blocks.insert(*id);
+                        self.update_group_child_revision(
+                            history,
+                            *id,
+                            patch.revision,
+                            byte_range.start == 0,
+                        );
                         if !replaced_blocks.contains(id) {
                             content
                                 .appended_ranges
                                 .entry(*id)
                                 .or_default()
-                                .push(byte_range.clone());
+                                .push(ContentAppend {
+                                    content_id: *content_id,
+                                    channel: *channel,
+                                    byte_range: byte_range.clone(),
+                                });
                         }
                     }
                     TranscriptPatchOperation::Replace { id } => {
+                        scene_changed = true;
                         content.changed_blocks.insert(*id);
                         content.appended_ranges.remove(id);
                         replaced_blocks.insert(*id);
+                        self.update_group_child_revision(history, *id, patch.revision, true);
                     }
                     TranscriptPatchOperation::SetStatus { id }
                     | TranscriptPatchOperation::SetSideState { id }
                     | TranscriptPatchOperation::Commit { id } => {
+                        scene_changed = true;
                         content.changed_blocks.insert(*id);
+                        self.update_group_child_revision(history, *id, patch.revision, true);
                     }
+                    TranscriptPatchOperation::SetAnimationState { .. } => {}
                     TranscriptPatchOperation::Insert { .. }
                     | TranscriptPatchOperation::Remove { .. }
                     | TranscriptPatchOperation::Reset => return None,
@@ -538,8 +636,10 @@ impl TranscriptScene {
         self.history_generation = history.generation();
         self.history_record_generation = history.record_dirty_generation();
         self.history_patch_revision = history.patch_revision();
-        self.append_prefix = None;
-        self.revision = self.revision.wrapping_add(1);
+        if scene_changed {
+            self.append_prefix = None;
+            self.revision = self.revision.wrapping_add(1);
+        }
         Some(content)
     }
 
@@ -562,8 +662,8 @@ impl TranscriptScene {
             let _perf = smelt_perf::perf::begin("transcript:transcript_scene:grouped_block_index");
             for (index, node) in nodes.iter().enumerate() {
                 if let RenderNode::Group(group) = node {
-                    for id in &group.child_ids {
-                        grouped_block_index_by_id.insert(*id, index);
+                    for id in group.child_ids() {
+                        grouped_block_index_by_id.insert(id, index);
                     }
                 }
             }
@@ -651,8 +751,8 @@ impl TranscriptScene {
         let index = self.nodes.len();
         self.node_index.insert(node.id(), index);
         if let RenderNode::Group(group) = &node {
-            for id in &group.child_ids {
-                self.grouped_block_index_by_id.insert(*id, index);
+            for id in group.child_ids() {
+                self.grouped_block_index_by_id.insert(id, index);
             }
         }
         self.nodes.push(node);
@@ -703,7 +803,7 @@ impl TranscriptScene {
                 true
             }
             Some(RenderNode::Group(group)) => {
-                out.extend(group.child_ids.iter().copied());
+                out.extend(group.child_ids());
                 true
             }
             None => false,
@@ -713,7 +813,7 @@ impl TranscriptScene {
     pub(crate) fn representative_block_id_for_node(&self, index: usize) -> Option<BlockId> {
         match self.nodes.get(index)? {
             RenderNode::Block { id, .. } => Some(*id),
-            RenderNode::Group(group) => group.child_ids.first().copied(),
+            RenderNode::Group(group) => group.children.first().map(|child| child.id),
         }
     }
 
@@ -747,12 +847,11 @@ impl TranscriptScene {
         base_key: LayoutKey,
     ) -> Option<NodeLayoutKey> {
         let view_state = presentation.effective_view_state(policy, self, history, index)?;
-        self.node_key_with_view_state(policy, history, index, base_key, view_state)
+        self.node_key_with_view_state(history, index, base_key, view_state)
     }
 
     pub(crate) fn node_key_with_view_state(
         &self,
-        policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
         index: usize,
         base_key: LayoutKey,
@@ -771,46 +870,13 @@ impl TranscriptScene {
             RenderNode::Group(group) => Some(LayoutKey {
                 width: base_key.width,
                 view_state,
-                content_hash: smelt_core::utils::hash_serializable(&GroupContentKey {
-                    id: group.id,
-                    name: &group.name,
-                    bucket: &group.bucket,
-                    group_generation: self.group_generation,
-                    group_cache_key: self.group_cache_key,
+                content_hash: group.id,
+                sidecar_hash: smelt_core::utils::hash_serializable(&(
+                    group.presentation_revision,
+                    self.group_generation,
+                    self.group_cache_key,
                     view_state,
-                    child_ids: &group.child_ids,
-                    child_view_states: group
-                        .child_range
-                        .clone()
-                        .filter_map(|block_index| {
-                            let id = *history.order.get(block_index)?;
-                            Some(policy.node_default_view_state(
-                                history,
-                                &RenderNode::Block { id, block_index },
-                            ))
-                        })
-                        .collect(),
-                    child_hashes: group
-                        .child_range
-                        .clone()
-                        .filter_map(|block_index| {
-                            history.order.get(block_index).map(|id| {
-                                history
-                                    .resolve_key(
-                                        *id,
-                                        LayoutKey {
-                                            width: base_key.width,
-                                            view_state,
-                                            content_hash: 0,
-                                            sidecar_hash: 0,
-                                        },
-                                    )
-                                    .content_hash
-                            })
-                        })
-                        .collect(),
-                }),
-                sidecar_hash: group_sidecar_hash(history, group.child_range.clone()),
+                )),
             }),
         }
     }
@@ -848,17 +914,24 @@ struct GroupIdKey<'a> {
     first_child: BlockId,
 }
 
-#[derive(serde::Serialize)]
-struct GroupContentKey<'a> {
-    id: u64,
-    name: &'a str,
-    bucket: &'a str,
-    group_generation: u64,
-    group_cache_key: Option<u64>,
-    view_state: ViewState,
-    child_ids: &'a [BlockId],
-    child_view_states: Vec<ViewState>,
-    child_hashes: Vec<u64>,
+fn render_group_child(history: &BlockHistory, id: BlockId) -> RenderGroupChild {
+    let key = history.resolve_key(
+        id,
+        LayoutKey {
+            width: 0,
+            view_state: ViewState::Expanded,
+            content_hash: 0,
+            sidecar_hash: 0,
+        },
+    );
+    RenderGroupChild {
+        id,
+        content_revision: key.content_hash,
+        presentation_revision: key.sidecar_hash,
+        metadata: history
+            .group_child_metadata(id)
+            .expect("group child exists in transcript history"),
+    }
 }
 
 fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<RenderNode> {
@@ -902,18 +975,30 @@ fn build_nodes_from(
             continue;
         };
 
-        let child_ids = history.order[index..end].to_vec();
+        let children = history.order[index..end]
+            .iter()
+            .copied()
+            .map(|id| render_group_child(history, id))
+            .collect::<Vec<_>>();
         let id = smelt_core::utils::hash_serializable(&GroupIdKey {
             name: &spec.name,
             bucket: &bucket,
-            first_child: child_ids[0],
+            first_child: children[0].id,
         });
+        let presentation_revision = smelt_core::utils::hash_serializable(&(
+            id,
+            children
+                .iter()
+                .map(|child| (child.id, child.presentation_revision))
+                .collect::<Vec<_>>(),
+        ));
         nodes.push(RenderNode::Group(Box::new(RenderGroupNode {
             id,
             name: spec.name.clone(),
             bucket,
             child_range: index..end,
-            child_ids,
+            children,
+            presentation_revision,
             default_view_state: view_state(spec.default_view.as_deref()),
         })));
         index = end;
@@ -1065,31 +1150,11 @@ fn json_bucket_value(value: &serde_json::Value) -> String {
     }
 }
 
-fn group_sidecar_hash(history: &BlockHistory, child_range: Range<usize>) -> u64 {
-    hash_values(
-        child_range
-            .filter_map(|block_index| history.order.get(block_index).copied())
-            .map(|id| block_sidecar_hash(history, id)),
-    )
-}
-
-fn hash_values(values: impl IntoIterator<Item = u64>) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for value in values {
-        value.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn block_sidecar_hash(history: &BlockHistory, id: BlockId) -> u64 {
-    history.sidecar_hash(id)
-}
-
 #[cfg(test)]
 fn tool_name(block: &smelt_core::transcript_model::Block) -> Option<&str> {
     match block {
-        smelt_core::transcript_model::Block::ToolDraft { name, .. }
-        | smelt_core::transcript_model::Block::ToolCall { name, .. } => Some(name),
+        smelt_core::transcript_model::Block::ToolDraft(draft) => Some(&draft.name),
+        smelt_core::transcript_model::Block::ToolCall { name, .. } => Some(name),
         _ => None,
     }
 }
@@ -1112,8 +1177,11 @@ fn view_state(value: Option<&str>) -> ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::stream_parser::StreamParser;
-    use smelt_core::transcript_model::Block;
+    use smelt_core::content::stream_parser::{StreamParser, ToolStart};
+    use smelt_core::transcript_model::{
+        Block, BlockHistory, ToolOutput, ToolState, ToolStateMutation, ToolStatus,
+        TranscriptBlockRecord,
+    };
 
     #[test]
     fn default_view_policy_peeks_thinking_blocks() {
@@ -1158,7 +1226,7 @@ mod tests {
                     call_id: format!("call-{tool}"),
                     name: tool.into(),
                     summary: protocol::StyledLines::default(),
-                    args: HashMap::new(),
+                    args: HashMap::new().into(),
                 }),
                 ViewState::Collapsed
             );
@@ -1169,7 +1237,7 @@ mod tests {
                     call_id: format!("call-{tool}"),
                     name: tool.into(),
                     summary: protocol::StyledLines::default(),
-                    args: HashMap::new(),
+                    args: HashMap::new().into(),
                 }),
                 ViewState::Expanded
             );
@@ -1191,7 +1259,7 @@ mod tests {
                 call_id: "call".into(),
                 name: "read_file".into(),
                 summary: protocol::StyledLines::default(),
-                args: HashMap::new(),
+                args: HashMap::new().into(),
             }),
             ViewState::Expanded
         );
@@ -1261,7 +1329,7 @@ mod tests {
                 call_id: format!("call-{name}"),
                 name: name.into(),
                 summary: protocol::StyledLines::default(),
-                args: HashMap::new(),
+                args: HashMap::new().into(),
             });
         }
         let spec = TranscriptGroupSpec {
@@ -1288,6 +1356,89 @@ mod tests {
             [RenderNode::Group(group), RenderNode::Block { block_index: 3, .. }]
                 if group.name == "explore" && group.child_range == (0..3)
         ));
+    }
+
+    #[test]
+    fn stored_tool_children_group_without_payload_hydration() {
+        let record =
+            |call_id: &str, path: &str, status: ToolStatus, is_error: bool| TranscriptBlockRecord {
+                block: Block::ToolCall {
+                    call_id: call_id.into(),
+                    name: "read_file".into(),
+                    summary: protocol::StyledLines::from_plain(format!("read {path}")),
+                    args: HashMap::from([(
+                        "file_path".to_string(),
+                        serde_json::Value::String(path.to_string()),
+                    )])
+                    .into(),
+                },
+                content_hash: 0,
+                origin: None,
+                tool_state: Some(ToolState {
+                    status,
+                    elapsed: None,
+                    called_at_ms: Some(1_234),
+                    elapsed_active: false,
+                    output: Some(Box::new(ToolOutput {
+                        content: "first\nsecond".into(),
+                        is_error,
+                        metadata: None,
+                        content_fields: Vec::new(),
+                    })),
+                    user_message: None,
+                    preview_output: None,
+                }),
+                tool_render_revision: 7,
+            };
+        let history = BlockHistory::from_block_records(vec![
+            record("call-1", "/tmp/first.rs", ToolStatus::Err, true),
+            record("call-2", "/tmp/second.rs", ToolStatus::Ok, false),
+        ]);
+        let spec = TranscriptGroupSpec {
+            name: "explore".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: Some("collapsed".into()),
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("tool".into()),
+                name: Some("read_file".into()),
+                names: Vec::new(),
+                terminal: Some(true),
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+
+        assert!(history.order.iter().all(|id| history.block(*id).is_none()));
+        let scene = TranscriptScene::for_history_with_groups(&history, &[spec], 1, None);
+        let RenderNode::Group(group) = &scene.nodes[0] else {
+            panic!("stored tools did not form a group");
+        };
+
+        assert_eq!(group.child_range, 0..2);
+        assert_eq!(
+            group.children[0].metadata.name.as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(group.children[0].metadata.status, Some("err"));
+        assert_eq!(
+            group.children[0].metadata.summary_text.as_deref(),
+            Some("read /tmp/first.rs")
+        );
+        assert_eq!(group.children[0].metadata.called_at_ms, Some(1_234));
+        assert_eq!(
+            group.children[0]
+                .metadata
+                .args
+                .as_ref()
+                .and_then(|args| args.get("file_path")),
+            Some(&serde_json::Value::String("/tmp/first.rs".into()))
+        );
+        assert_eq!(group.children[0].metadata.output.content_lines, Some(2));
+        assert_eq!(group.children[0].metadata.output.is_error, Some(true));
+        assert_eq!(group.children[1].metadata.status, Some("ok"));
     }
 
     #[test]
@@ -1405,9 +1556,59 @@ mod tests {
 
         assert!(!refresh.structure_changed);
         assert_eq!(refresh.changed_blocks, HashSet::from([id]));
-        let ranges = refresh.appended_ranges.get(&id).expect("append ranges");
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(ranges[0], initial_len..final_len);
+        let appends = refresh.appended_ranges.get(&id).expect("append ranges");
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].channel, ContentChannel::Primary);
+        assert_eq!(appends[0].byte_range, initial_len..final_len);
+        assert_eq!(
+            appends[0].content_id,
+            transcript
+                .history
+                .content(id, ContentChannel::Primary)
+                .expect("primary content")
+                .id()
+        );
+    }
+
+    #[test]
+    fn animation_patch_advances_history_without_invalidating_scene() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut parser = StreamParser::new();
+        parser.start_tool(
+            &mut transcript.history,
+            ToolStart {
+                invocation_id: protocol::InvocationId::new(1),
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain("echo hi"),
+                args: HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
+            std::time::Instant::now(),
+        );
+        let id = transcript.history.order[0];
+        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let scene_revision = scene.revision;
+        let patch_revision = scene.history_patch_revision;
+
+        assert!(transcript.history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::SyncElapsed(std::time::Duration::from_millis(250)),
+        ));
+        let refresh = scene.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+
+        assert!(scene.history_patch_revision > patch_revision);
+        assert_eq!(
+            scene.history_patch_revision,
+            transcript.history.patch_revision()
+        );
+        assert_eq!(scene.history_generation, transcript.history.generation());
+        assert_eq!(scene.revision, scene_revision);
+        assert!(refresh.changed_blocks.is_empty());
+        assert!(refresh.appended_ranges.is_empty());
+        assert!(!refresh.structure_changed);
+        assert!(!refresh.prune_required);
     }
 
     #[test]
@@ -1437,6 +1638,126 @@ mod tests {
         assert_eq!(plan.len(), 2);
         assert_ne!(plan.revision, initial_revision);
         assert_eq!(plan.index_for_block(id), Some(0));
+    }
+
+    #[test]
+    fn grouped_child_payload_append_isolated_from_siblings_and_group_presentation() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut parser = StreamParser::new();
+        let first_invocation = protocol::InvocationId::new(1);
+        let second_invocation = protocol::InvocationId::new(2);
+        for (invocation_id, call_id) in
+            [(first_invocation, "call-1"), (second_invocation, "call-2")]
+        {
+            parser.start_tool(
+                &mut transcript.history,
+                ToolStart {
+                    invocation_id,
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    summary: protocol::StyledLines::from_plain(call_id),
+                    args: HashMap::new(),
+                    preview_output: None,
+                    called_at_ms: 0,
+                },
+                std::time::Instant::now(),
+            );
+            parser.append_active_output_line(
+                &mut transcript.history,
+                invocation_id,
+                "seed\n".into(),
+            );
+        }
+        let spec = TranscriptGroupSpec {
+            name: "terminal-tools".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: Some("expanded".into()),
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("tool".into()),
+                name: Some("bash".into()),
+                names: Vec::new(),
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+        let mut scene = TranscriptScene::for_history_with_groups(
+            &transcript.history,
+            std::slice::from_ref(&spec),
+            1,
+            None,
+        );
+        let initial_group = match &scene.nodes[0] {
+            RenderNode::Group(group) => group.as_ref().clone(),
+            node => panic!("expected group, got {node:?}"),
+        };
+
+        parser.append_active_output_line(
+            &mut transcript.history,
+            first_invocation,
+            "continuation\n".into(),
+        );
+        let refresh = scene.refresh_for_history_with_groups(
+            &transcript.history,
+            std::slice::from_ref(&spec),
+            1,
+            None,
+        );
+        let appended_group = match &scene.nodes[0] {
+            RenderNode::Group(group) => group.as_ref(),
+            node => panic!("expected group, got {node:?}"),
+        };
+
+        assert!(!refresh.structure_changed);
+        assert_eq!(appended_group.id, initial_group.id);
+        assert_eq!(
+            appended_group.presentation_revision,
+            initial_group.presentation_revision
+        );
+        assert_eq!(appended_group.child_range, initial_group.child_range);
+        assert_eq!(
+            appended_group.child_ids().collect::<Vec<_>>(),
+            initial_group.child_ids().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            refresh.appended_ranges.keys().copied().collect::<Vec<_>>(),
+            vec![initial_group.children[0].id]
+        );
+        assert_eq!(appended_group.children[0], initial_group.children[0]);
+        assert_eq!(appended_group.children[1], initial_group.children[1]);
+
+        let before_status = appended_group.clone();
+        parser.set_active_status(
+            &mut transcript.history,
+            first_invocation,
+            ToolStatus::Ok,
+            std::time::Instant::now(),
+        );
+        let refresh = scene.refresh_for_history_with_groups(
+            &transcript.history,
+            std::slice::from_ref(&spec),
+            1,
+            None,
+        );
+        let finished_group = match &scene.nodes[0] {
+            RenderNode::Group(group) => group.as_ref(),
+            node => panic!("expected group, got {node:?}"),
+        };
+
+        assert!(!refresh.structure_changed);
+        assert_eq!(finished_group.id, initial_group.id);
+        assert_ne!(
+            finished_group.presentation_revision,
+            before_status.presentation_revision
+        );
+        assert_ne!(
+            finished_group.children[0].metadata,
+            before_status.children[0].metadata
+        );
+        assert_eq!(finished_group.children[1], before_status.children[1]);
     }
 
     #[test]
@@ -1538,7 +1859,8 @@ mod tests {
             name: "tools".into(),
             bucket: "tools".into(),
             child_range: 0..0,
-            child_ids: Vec::new(),
+            children: Vec::new(),
+            presentation_revision: 0,
             default_view_state: ViewState::Collapsed,
         }));
 

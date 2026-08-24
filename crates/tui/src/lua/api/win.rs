@@ -523,7 +523,7 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── set_renderer(fn) - register/clear per-window renderer ──
+        // ── set_renderer(fn) - register/clear retained window renderer ──
         methods.add_function(
             "set_renderer",
             |lua,
@@ -537,12 +537,33 @@ impl mlua::UserData for LuaWin {
                 };
                 if let Ok(mut map) = shared.win_renderers.lock() {
                     match handle {
-                        Some(h) => {
-                            map.insert(this.id.0, h);
+                        Some(handle) => {
+                            map.insert(
+                                this.id.0,
+                                smelt_core::lua::RegisteredWinRenderer {
+                                    handle,
+                                    dirty: true,
+                                },
+                            );
                         }
                         None => {
                             map.remove(&this.id.0);
                         }
+                    }
+                }
+                Ok(this_ud)
+            },
+        );
+
+        // ── invalidate_renderer() - repaint retained window content ──
+        methods.add_function(
+            "invalidate_renderer",
+            |lua, this_ud: mlua::AnyUserData| -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                let shared = current_shared(lua)?;
+                if let Ok(mut map) = shared.win_renderers.lock() {
+                    if let Some(renderer) = map.get_mut(&this.id.0) {
+                        renderer.dirty = true;
                     }
                 }
                 Ok(this_ud)
@@ -738,6 +759,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
+            "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While the window is mounted, the renderer runs once after registration and again only after `invalidate_renderer`; its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
+            "invalidate_renderer" => fn() -> LuaWin, "Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.",
         },
     });
 

@@ -245,6 +245,7 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
         title: Some("Planning the fix".into()),
         content: "The stored tail remains mergeable.".into(),
     }));
+    app.render_silent();
 
     let (len, id, block) = app
         .with_pinned_transcript_blocks(&[original_id], |history| {
@@ -266,7 +267,7 @@ fn reasoning_summary_event_merges_durably_compacted_tail() {
             kind: protocol::ReasoningKind::Summary,
         }) if title == "Planning the fix"
             && summary_titles == ["Inspecting the report", "Planning the fix"]
-            && content == "The stored tail remains mergeable."
+            && content.snapshot() == "The stored tail remains mergeable."
     ));
 }
 
@@ -279,7 +280,7 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for index in 0..RECORD_COUNT {
             app.push_transcript_block(Block::Text {
-                content: format!("record {index}"),
+                content: format!("record {index}").into(),
             });
         }
         app.save_session_and_flush();
@@ -331,6 +332,7 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
             .transcript()
             .history()
             .is_materialized(*id)));
+    app.render_silent();
     app.flush_persist();
     assert!(
         !app.session_document_has_unflushed_work(),
@@ -355,7 +357,9 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
     );
     app.require_transcript_record_resave_from_for_harness(0);
     app.set_fast_mode(true);
-    app.save_session_and_flush();
+    app.save_session();
+    app.render_silent();
+    app.flush_persist();
 
     assert_eq!(
         app.conversation_probe()
@@ -417,6 +421,10 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
             .record_index;
         assert!(record_index < durable_previews.len());
     }
+    assert!(reloaded
+        .with_pinned_transcript_blocks(&ids, |_| ())
+        .is_none());
+    reloaded.render_silent();
     let reloaded_rows = reloaded
         .with_pinned_transcript_blocks(&ids, |history| {
             ids.iter()
@@ -936,7 +944,7 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     for index in 0..RECORD_COUNT {
         app.push_transcript_block(Block::Text {
-            content: format!("persisted record {index}"),
+            content: format!("persisted record {index}").into(),
         });
     }
     app.save_session_and_flush();
@@ -954,6 +962,7 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     app.set_transcript_session_dir_for_harness(session_dir.join("missing-hydration-source"));
 
     app.save_session();
+    app.render_silent();
 
     assert!(app.session_document_has_unflushed_work());
     assert!(app
@@ -991,6 +1000,7 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     );
 
     assert!(retry_persistence_via_lua(&mut app));
+    app.render_silent();
     app.flush_persist();
     assert!(!app.session_document_has_unflushed_work());
     assert!(!has_sticky_session_save_failure(&app, &session_id));
@@ -1444,7 +1454,7 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
                 Vec::new(),
             )),
             Some(Block::Text {
-                content: format!("{label} assistant"),
+                content: format!("{label} assistant").into(),
             }),
         );
     }
@@ -1459,6 +1469,9 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
                 })
                 .collect::<Vec<_>>()
         };
+        if app.with_pinned_transcript_blocks(&ids, |_| ()).is_none() {
+            app.render_silent();
+        }
         app.with_pinned_transcript_blocks(&ids, |history| {
             ids.iter()
                 .map(|id| {
@@ -1615,6 +1628,7 @@ fn resumed_rewind_restores_prior_turn_context_before_next_request() {
     resumed.set_terminal_size(80, 24);
     resumed.set_context_window(Some(1_000));
     assert!(resumed.conversation_probe().has_live_session());
+    resumed.render_silent();
 
     resumed.rewind_to_block(Some(2), false);
     assert_eq!(resumed.session_message_count(), 2);
@@ -2384,7 +2398,7 @@ fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
             // Streaming assistant blocks are intentionally not linked to a canonical
             // history row.
             app.push_transcript_block(Block::Text {
-                content: format!("assistant {index}"),
+                content: format!("assistant {index}").into(),
             });
         }
         // Tool turns commonly produce consecutive assistant history items. The

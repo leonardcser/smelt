@@ -111,7 +111,7 @@ app_story!(edit_file_tool_states, |ctx| {
             ("new_string", json!("new")),
         ],
     );
-    ctx.tool_call_with_metadata(
+    ctx.tool_call_with_display_content(
         "edit_file",
         &[
             ("file_path", json!("src/lib.rs")),
@@ -127,14 +127,20 @@ app_story!(edit_file_tool_states, |ctx| {
             ),
         ],
         "ok",
-        json!({
-            "old_content": "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}",
-            "new_content": "fn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}",
-            "path": "src/lib.rs",
-        }),
+        json!({ "path": "src/lib.rs" }),
+        &[
+            (
+                "old_content",
+                "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}",
+            ),
+            (
+                "new_content",
+                "fn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}",
+            ),
+        ],
         Some(7),
     );
-    ctx.tool_call_with_metadata(
+    ctx.tool_call_with_display_content(
         "edit_file",
         &[
             ("file_path", json!("runtime/lua/smelt/plugins/compact.lua")),
@@ -142,11 +148,17 @@ app_story!(edit_file_tool_states, |ctx| {
             ("new_string", json!("Use them as evidence for task priority and return/resume instructions.")),
         ],
         "edited runtime/lua/smelt/plugins/compact.lua",
-        json!({
-            "old_content": "line 1\nUse them as evidence for task priority and return instructions.\nline 3\n",
-            "new_content": "line 1\nUse them as evidence for task priority and return/resume instructions.\nline 3\n",
-            "path": "runtime/lua/smelt/plugins/compact.lua"
-        }),
+        json!({ "path": "runtime/lua/smelt/plugins/compact.lua" }),
+        &[
+            (
+                "old_content",
+                "line 1\nUse them as evidence for task priority and return instructions.\nline 3\n",
+            ),
+            (
+                "new_content",
+                "line 1\nUse them as evidence for task priority and return/resume instructions.\nline 3\n",
+            ),
+        ],
         Some(5),
     );
     ctx.tool_call_error(
@@ -193,9 +205,9 @@ app_story!(edit_file_rejected_without_speculative_diff, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(edit_file_success_uses_output_metadata_diff, |ctx| {
+app_story!(edit_file_success_uses_retained_content_diff, |ctx| {
     ctx.set_viewport(84, 14);
-    ctx.tool_call_with_metadata(
+    ctx.tool_call_with_display_content(
         "edit_file",
         &[
             ("file_path", json!("src/lib.rs")),
@@ -203,11 +215,8 @@ app_story!(edit_file_success_uses_output_metadata_diff, |ctx| {
             ("new_string", json!("new")),
         ],
         "ok",
-        json!({
-            "old_content": "old\n",
-            "new_content": "new\n",
-            "path": "src/lib.rs",
-        }),
+        json!({ "path": "src/lib.rs" }),
+        &[("old_content", "old\n"), ("new_content", "new\n")],
         Some(1),
     );
     ctx.assert_snapshot();
@@ -219,7 +228,7 @@ app_story!(edit_notebook_tool_states, |ctx| {
         "edit_notebook",
         r#"{"notebook_path":"analysis.ipynb","cell_number":0,"new_source":"import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n"}"#,
     );
-    ctx.tool_call_with_metadata(
+    ctx.tool_call_with_display_content(
         "edit_notebook",
         &[
             ("notebook_path", json!("analysis.ipynb")),
@@ -233,12 +242,20 @@ app_story!(edit_notebook_tool_states, |ctx| {
         json!({
             "edit_mode": "replace",
             "path": "analysis.ipynb#cell0",
-            "old_source": "import pandas\ndf = pandas.read_csv('data.csv')\n",
-            "new_source": "import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n",
         }),
+        &[
+            (
+                "old_source",
+                "import pandas\ndf = pandas.read_csv('data.csv')\n",
+            ),
+            (
+                "new_source",
+                "import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n",
+            ),
+        ],
         Some(6),
     );
-    ctx.tool_call_with_metadata(
+    ctx.tool_call_with_display_content(
         "edit_notebook",
         &[
             ("notebook_path", json!("analysis.ipynb")),
@@ -249,8 +266,8 @@ app_story!(edit_notebook_tool_states, |ctx| {
         json!({
             "edit_mode": "insert",
             "path": "analysis.ipynb#cell1",
-            "new_source": "print(\"new cell\")\n",
         }),
+        &[("old_source", ""), ("new_source", "print(\"new cell\")\n")],
         Some(5),
     );
     ctx.assert_snapshot_named("expanded");
@@ -386,7 +403,7 @@ app_story!(present_plan_tool_states, |ctx| {
             ),
         ],
     );
-    ctx.tool_call(
+    ctx.tool_call_with_display_content(
         "present_plan",
         &[
             ("title", json!("Parser refactor")),
@@ -397,6 +414,13 @@ app_story!(present_plan_tool_states, |ctx| {
             ),
         ],
         "wrote plan to /tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md",
+        json!({
+            "plan_path": "/tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md"
+        }),
+        &[(
+            "plan",
+            "# Goal\nRefactor parser state.\n\n```rust\nfn parse(input: &str) -> Ast {\n    todo!()\n}\n```\n\n# Verification\nRun parser tests.",
+        )],
         Some(9),
     );
     ctx.assert_snapshot_named("expanded");

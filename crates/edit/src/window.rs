@@ -640,9 +640,9 @@ pub struct Window {
     /// set. Restored after a width/wrap-driven layout rebuild so resize keeps
     /// the same logical row anchored at the top instead of letting the
     /// visual-row counter drift across reflow. The changedtick guard skips
-    /// restoration when the buffer content was replaced under us (e.g. the
-    /// transcript projection rebuilds its buffer on every frame), since the
-    /// `(lrow, byte)` would no longer reference the same content.
+    /// restoration when the buffer content was replaced under us (for example,
+    /// when transcript projection installs a different retained range), since
+    /// the `(lrow, byte)` would no longer reference the same content.
     pub(crate) scroll_anchor: Option<(u64, usize, usize)>,
     /// Vertical scroll policy. `scroll_top` is the resolved viewport row used for paint;
     /// this records whether the next frame should preserve that row or resolve to tail.

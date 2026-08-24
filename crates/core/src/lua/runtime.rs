@@ -8,11 +8,13 @@ use std::time::Instant;
 use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
-use crate::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
+use crate::content::block_layout::{
+    BlockLayout, ContentRenderSpec, ContentSpec, LuaLeaf, TextSpec,
+};
 use crate::content::display_safe_text;
 use crate::lua::{
-    json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds, ToolEnv,
-    ToolExecResult, TranscriptGroupSpec,
+    json_to_lua, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent,
+    ToolCallIds, ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
 use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus};
@@ -2301,9 +2303,15 @@ impl LuaRuntime {
 
         match result {
             mlua::Value::Nil => None,
-            mlua::Value::Table(table) => {
-                Some(Box::new(Self::tool_output_from_lua_table(&self.lua, table)))
-            }
+            mlua::Value::Table(table) => match Self::tool_output_from_lua_table(&self.lua, table) {
+                Ok(output) => Some(Box::new(output)),
+                Err(error) => {
+                    self.record_error(format!(
+                        "tool preview_output `{tool_name}`: invalid result: {error}"
+                    ));
+                    None
+                }
+            },
             other => {
                 self.record_error(format!(
                     "tool preview_output `{tool_name}`: expected result table or nil, got {}",
@@ -2314,18 +2322,14 @@ impl LuaRuntime {
         }
     }
 
-    fn tool_output_from_lua_table(lua: &Lua, result: mlua::Table) -> ToolOutput {
-        let content: String = result.get("content").unwrap_or_default();
-        let is_error: bool = result.get("is_error").unwrap_or(false);
-        let metadata = result
-            .get::<mlua::Value>("metadata")
-            .ok()
-            .and_then(|v| crate::lua::lua_to_serde::<serde_json::Value>(lua, &v));
-        ToolOutput {
-            content,
-            is_error,
-            metadata,
-        }
+    fn tool_output_from_lua_table(lua: &Lua, result: mlua::Table) -> LuaResult<ToolOutput> {
+        let result = crate::lua::tool_result_from_lua_table(lua, &result)?;
+        Ok(ToolOutput::from_display_content(
+            result.content,
+            result.is_error,
+            result.metadata,
+            result.display_content,
+        ))
     }
 
     /// Invoke the tool's `summary(args)` Lua hook. The hook may return:
@@ -2511,11 +2515,11 @@ impl LuaRuntime {
     /// observe the same middleware chain. Every recursive call shares `now_ms`.
     pub fn render_transcript_layout(
         &self,
-        snapshot: &serde_json::Value,
+        node: &TranscriptRenderNode,
         view_state: crate::transcript_model::ViewState,
         now_ms: u64,
     ) -> BlockLayout {
-        let fallback = || fallback_transcript_snapshot_layout(snapshot);
+        let fallback = || fallback_transcript_node_layout(node);
         let render_fn = {
             let slot = self
                 .shared
@@ -2534,7 +2538,7 @@ impl LuaRuntime {
             }
         };
 
-        let node = match transcript_snapshot_to_lua_table(&self.lua, snapshot) {
+        let lua_node = match transcript_render_node_to_lua_table(&self.lua, node) {
             Ok(table) => table,
             Err(error) => {
                 self.record_error(format!("transcript render: build node: {error}"));
@@ -2563,21 +2567,15 @@ impl LuaRuntime {
             }
         };
 
-        let result: mlua::Value = match render.call(node) {
+        let result: mlua::Value = match render.call(lua_node) {
             Ok(value) => value,
             Err(error) => {
                 self.record_error(format!("transcript render: {error}"));
                 return fallback();
             }
         };
-        let kind = snapshot
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        let index = snapshot
-            .get("index")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let kind = node.kind();
+        let index = node.index();
         transcript_layout_from_lua_value(
             self,
             result,
@@ -2685,6 +2683,8 @@ impl LuaRuntime {
                             content: reason,
                             is_error: true,
                             metadata: None,
+                            display_content: Vec::new(),
+                            attachment: None,
                         });
                     }
                     *args = t;
@@ -2816,6 +2816,8 @@ impl LuaRuntime {
                     content: format!("no tool registered: {tool_name}"),
                     is_error: true,
                     metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
                 };
             };
             match self
@@ -2828,6 +2830,8 @@ impl LuaRuntime {
                         content: format!("tool handler not found: {tool_name}"),
                         is_error: true,
                         metadata: None,
+                        display_content: Vec::new(),
+                        attachment: None,
                     };
                 }
             }
@@ -2840,6 +2844,8 @@ impl LuaRuntime {
                     content: format!("tool arg table: {e}"),
                     is_error: true,
                     metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
                 };
             }
         };
@@ -2858,6 +2864,8 @@ impl LuaRuntime {
                     content: format!("tool ctx table: {e}"),
                     is_error: true,
                     metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
                 };
             }
         };
@@ -2890,6 +2898,8 @@ impl LuaRuntime {
                         content: "task runtime poisoned".into(),
                         is_error: true,
                         metadata: None,
+                        display_content: Vec::new(),
+                        attachment: None,
                     };
                 }
             };
@@ -2910,6 +2920,8 @@ impl LuaRuntime {
                         content: format!("tool spawn: {e}"),
                         is_error: true,
                         metadata: None,
+                        display_content: Vec::new(),
+                        attachment: None,
                     };
                 }
             };
@@ -2927,11 +2939,13 @@ impl LuaRuntime {
                     content: "task runtime poisoned".into(),
                     is_error: true,
                     metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
                 };
             }
         }
 
-        let mut immediate: Option<(String, bool, Option<serde_json::Value>)> = None;
+        let mut immediate: Option<LuaToolResultParts> = None;
         for out in outputs {
             match out {
                 TaskDriveOutput::ToolComplete {
@@ -2940,15 +2954,29 @@ impl LuaRuntime {
                     content,
                     is_error,
                     metadata,
+                    display_content,
+                    attachment,
                 } if completed_invocation == invocation && cid == call_id => {
-                    immediate = Some((content, is_error, metadata));
+                    immediate = Some(LuaToolResultParts {
+                        content,
+                        is_error,
+                        metadata,
+                        display_content,
+                        attachment: attachment.map(|attachment| *attachment),
+                    });
                 }
                 TaskDriveOutput::ToolComplete { .. } => {}
                 TaskDriveOutput::Error(msg) => self.record_error(msg),
             }
         }
         match immediate {
-            Some((mut content, mut is_error, metadata)) => {
+            Some(LuaToolResultParts {
+                mut content,
+                mut is_error,
+                metadata,
+                display_content,
+                attachment,
+            }) => {
                 self.run_after_hooks(
                     tool_name,
                     &args_for_after,
@@ -2960,6 +2988,8 @@ impl LuaRuntime {
                     content,
                     is_error,
                     metadata,
+                    display_content,
+                    attachment: attachment.map(Box::new),
                 }
             }
             None => ToolExecResult::Pending,
@@ -3080,16 +3110,247 @@ fn transcript_limit(limits: Option<&mlua::Table>, key: &str) -> LuaResult<Option
     }
 }
 
-fn transcript_snapshot_to_lua_table(
+fn set_content_metadata(table: &mlua::Table, content: &TranscriptContentMetadata) -> LuaResult<()> {
+    table.set("content_id", content.content_id)?;
+    table.set("content_revision", content.content_revision)?;
+    table.set("content_bytes", content.content_bytes)?;
+    table.set("content_lines", content.content_lines)?;
+    table.set("content_preview", content.content_preview.as_str())?;
+    Ok(())
+}
+
+fn argument_fields_to_lua_table(
     lua: &Lua,
-    snapshot: &serde_json::Value,
+    fields: &[TranscriptArgumentFieldMetadata],
 ) -> LuaResult<mlua::Table> {
-    let value = json_to_lua(lua, snapshot)?;
-    let mlua::Value::Table(table) = value else {
-        return Err(mlua::Error::external(
-            "transcript node must encode to a Lua table",
-        ));
-    };
+    let out = lua.create_table_with_capacity(fields.len(), 0)?;
+    for (index, field) in fields.iter().enumerate() {
+        let item = lua.create_table_with_capacity(0, 7)?;
+        item.set("name", field.name.as_str())?;
+        set_content_metadata(&item, &field.content)?;
+        item.set("complete", field.complete)?;
+        out.set(index + 1, item)?;
+    }
+    Ok(out)
+}
+
+fn tool_output_to_lua_table(
+    lua: &Lua,
+    output: &TranscriptToolOutputMetadata,
+) -> LuaResult<mlua::Table> {
+    let table = lua.create_table_with_capacity(0, 7)?;
+    set_content_metadata(&table, &output.content)?;
+    table.set("is_error", output.is_error)?;
+    if let Some(metadata) = output.metadata.as_ref() {
+        table.set("metadata", json_to_lua(lua, metadata)?)?;
+    }
+    if !output.content_fields.is_empty() {
+        let fields = lua.create_table_with_capacity(0, output.content_fields.len())?;
+        for field in &output.content_fields {
+            let metadata = lua.create_table_with_capacity(0, 5)?;
+            set_content_metadata(&metadata, &field.content)?;
+            fields.set(field.name.as_str(), metadata)?;
+        }
+        table.set("content_fields", fields)?;
+    }
+    Ok(table)
+}
+
+fn transcript_render_node_to_lua_table(
+    lua: &Lua,
+    node: &TranscriptRenderNode,
+) -> LuaResult<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("id", node.id)?;
+    table.set("index", node.index)?;
+    table.set("kind", node.kind)?;
+    match &node.fields {
+        TranscriptRenderFields::User {
+            text,
+            user_lines,
+            image_labels,
+        } => {
+            table.set("text", text.as_str())?;
+            table.set("user_lines", crate::lua::serde_to_lua(lua, user_lines)?)?;
+            table.set("image_labels", crate::lua::serde_to_lua(lua, image_labels)?)?;
+        }
+        TranscriptRenderFields::Mode {
+            text,
+            icon,
+            hl_group,
+        } => {
+            table.set("text", text.as_str())?;
+            table.set("icon", icon.as_str())?;
+            table.set("hl_group", hl_group.as_str())?;
+        }
+        TranscriptRenderFields::ProcessStatus { text, event } => {
+            table.set("text", text.as_str())?;
+            if let Some(event) = event {
+                table.set("event", event.event_type)?;
+                table.set("event_type", event.event_type)?;
+                if let Some(process_id) = event.process_id.as_deref() {
+                    table.set("process_id", process_id)?;
+                }
+                if let Some(exit_code) = event.exit_code {
+                    table.set("exit_code", exit_code)?;
+                }
+                let event_data = lua.create_table_with_capacity(0, 3)?;
+                event_data.set("event", event.event_type)?;
+                if let Some(process_id) = event.process_id.as_deref() {
+                    event_data.set("process_id", process_id)?;
+                }
+                if let Some(exit_code) = event.exit_code {
+                    event_data.set("exit_code", exit_code)?;
+                }
+                table.set("event_data", event_data)?;
+            }
+        }
+        TranscriptRenderFields::Thinking {
+            title,
+            summary_titles,
+            content,
+            reasoning_kind,
+            thinking_summary,
+        } => {
+            if let Some(title) = title {
+                table.set("title", title.as_str())?;
+            }
+            table.set(
+                "summary_titles",
+                crate::lua::serde_to_lua(lua, summary_titles)?,
+            )?;
+            set_content_metadata(&table, content)?;
+            table.set(
+                "reasoning_kind",
+                crate::lua::serde_to_lua(lua, reasoning_kind)?,
+            )?;
+            table.set("thinking_summary", thinking_summary.as_str())?;
+        }
+        TranscriptRenderFields::Text { content } => set_content_metadata(&table, content)?,
+        TranscriptRenderFields::Code { content, lang } => {
+            table.set("content", content.as_str())?;
+            table.set("lang", lang.as_str())?;
+        }
+        TranscriptRenderFields::ToolDraft {
+            stream_id,
+            call_id,
+            name,
+            summary,
+            summary_text,
+            args,
+            argument_fields,
+            raw_arguments,
+            draft_finished,
+        } => {
+            table.set("stream_id", stream_id.as_str())?;
+            if let Some(call_id) = call_id {
+                table.set("call_id", call_id.as_str())?;
+            }
+            table.set("name", name.as_str())?;
+            table.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
+            table.set("summary_text", summary_text.as_str())?;
+            table.set("args", args_to_lua_table(lua, args)?)?;
+            table.set(
+                "argument_fields",
+                argument_fields_to_lua_table(lua, argument_fields)?,
+            )?;
+            table.set("raw_arguments_id", raw_arguments.content_id)?;
+            table.set("raw_arguments_revision", raw_arguments.content_revision)?;
+            table.set("raw_arguments_bytes", raw_arguments.content_bytes)?;
+            table.set("raw_arguments_lines", raw_arguments.content_lines)?;
+            table.set(
+                "raw_arguments_preview",
+                raw_arguments.content_preview.as_str(),
+            )?;
+            table.set("status", "drafting")?;
+            table.set("draft", true)?;
+            table.set("draft_finished", *draft_finished)?;
+        }
+        TranscriptRenderFields::ToolCall {
+            call_id,
+            name,
+            summary,
+            summary_text,
+            args,
+            argument_fields,
+            status,
+            called_at_ms,
+            elapsed_ms,
+            elapsed_active,
+            user_message,
+            preview_output,
+            output,
+        } => {
+            table.set("call_id", call_id.as_str())?;
+            table.set("name", name.as_str())?;
+            table.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
+            table.set("summary_text", summary_text.as_str())?;
+            table.set("args", args_to_lua_table(lua, args)?)?;
+            table.set(
+                "argument_fields",
+                argument_fields_to_lua_table(lua, argument_fields)?,
+            )?;
+            table.set("status", *status)?;
+            if let Some(called_at_ms) = called_at_ms {
+                table.set("called_at_ms", *called_at_ms)?;
+            }
+            if let Some(elapsed_ms) = elapsed_ms {
+                table.set("elapsed_ms", *elapsed_ms)?;
+            }
+            table.set("elapsed_active", *elapsed_active)?;
+            if let Some(user_message) = user_message {
+                table.set("user_message", user_message.as_str())?;
+            }
+            if let Some(preview_output) = preview_output {
+                table.set(
+                    "preview_output",
+                    tool_output_to_lua_table(lua, preview_output)?,
+                )?;
+            }
+            if let Some(output) = output {
+                table.set("output", tool_output_to_lua_table(lua, output)?)?;
+            }
+        }
+        TranscriptRenderFields::Exec {
+            command,
+            command_spans,
+            output,
+        } => {
+            table.set("command", command.as_str())?;
+            table.set(
+                "command_spans",
+                crate::lua::serde_to_lua(lua, command_spans)?,
+            )?;
+            table.set("output_id", output.content_id)?;
+            table.set("output_revision", output.content_revision)?;
+            table.set("output_bytes", output.content_bytes)?;
+            table.set("output_lines", output.content_lines)?;
+            table.set("output_preview", output.content_preview.as_str())?;
+        }
+        TranscriptRenderFields::Summary { summary } => {
+            table.set("summary", summary.as_str())?;
+        }
+        TranscriptRenderFields::Group {
+            group_kind,
+            name,
+            bucket,
+            view_state,
+            children,
+            child_ids,
+        } => {
+            table.set("group_kind", group_kind.as_str())?;
+            table.set("name", name.as_str())?;
+            table.set("bucket", bucket.as_str())?;
+            table.set("view_state", *view_state)?;
+            table.set("children", crate::lua::serde_to_lua(lua, children)?)?;
+            let ids = lua.create_table_with_capacity(child_ids.len(), 0)?;
+            for (index, id) in child_ids.iter().enumerate() {
+                ids.set(index + 1, id.get())?;
+            }
+            table.set("child_ids", ids)?;
+            table.set("child_count", child_ids.len())?;
+        }
+    }
     Ok(table)
 }
 
@@ -3179,156 +3440,297 @@ fn transcript_layout_from_lua_value(
     }
 }
 
-#[derive(serde::Serialize)]
-struct TranscriptBlockSnapshot<'a> {
+#[derive(Clone, Debug)]
+pub struct TranscriptRenderNode {
     id: u64,
     index: usize,
     kind: &'static str,
-    #[serde(flatten)]
-    fields: TranscriptBlockSnapshotFields<'a>,
+    fields: TranscriptRenderFields,
 }
 
-#[derive(serde::Serialize)]
-#[serde(untagged)]
-enum TranscriptBlockSnapshotFields<'a> {
+#[derive(Clone, Debug)]
+struct TranscriptContentMetadata {
+    content_id: u64,
+    content_revision: u64,
+    content_bytes: usize,
+    content_lines: usize,
+    content_preview: String,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptProcessStatusMetadata {
+    event_type: &'static str,
+    process_id: Option<String>,
+    exit_code: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptToolOutputContentFieldMetadata {
+    name: String,
+    content: TranscriptContentMetadata,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptToolOutputMetadata {
+    content: TranscriptContentMetadata,
+    is_error: bool,
+    metadata: Option<serde_json::Value>,
+    content_fields: Vec<TranscriptToolOutputContentFieldMetadata>,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptArgumentFieldMetadata {
+    name: String,
+    content: TranscriptContentMetadata,
+    complete: bool,
+}
+
+#[derive(Clone, Debug)]
+enum TranscriptRenderFields {
     User {
-        text: &'a str,
+        text: String,
         user_lines: protocol::StyledLines,
-        image_labels: &'a [String],
+        image_labels: Vec<String>,
     },
     Mode {
-        text: &'a str,
-        icon: &'a str,
-        hl_group: &'a str,
+        text: String,
+        icon: String,
+        hl_group: String,
     },
     ProcessStatus {
-        text: &'a str,
-        #[serde(flatten)]
-        event_fields: serde_json::Map<String, serde_json::Value>,
+        text: String,
+        event: Option<TranscriptProcessStatusMetadata>,
     },
     Thinking {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        title: Option<&'a str>,
-        summary_titles: &'a [String],
-        content: &'a str,
-        reasoning_kind: &'a protocol::ReasoningKind,
+        title: Option<String>,
+        summary_titles: Vec<String>,
+        content: TranscriptContentMetadata,
+        reasoning_kind: protocol::ReasoningKind,
         thinking_summary: String,
     },
     Text {
-        content: &'a str,
+        content: TranscriptContentMetadata,
     },
     Code {
-        content: &'a str,
-        lang: &'a str,
+        content: String,
+        lang: String,
     },
     ToolDraft {
-        stream_id: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        call_id: Option<&'a str>,
-        name: &'a str,
-        summary: &'a protocol::StyledLines,
+        stream_id: String,
+        call_id: Option<String>,
+        name: String,
+        summary: protocol::StyledLines,
         summary_text: String,
-        args: &'a HashMap<String, serde_json::Value>,
-        raw_arguments: &'a str,
-        status: &'static str,
-        draft: bool,
+        args: HashMap<String, serde_json::Value>,
+        argument_fields: Vec<TranscriptArgumentFieldMetadata>,
+        raw_arguments: TranscriptContentMetadata,
         draft_finished: bool,
     },
     ToolCall {
-        call_id: &'a str,
-        name: &'a str,
-        summary: &'a protocol::StyledLines,
+        call_id: String,
+        name: String,
+        summary: protocol::StyledLines,
         summary_text: String,
-        args: &'a HashMap<String, serde_json::Value>,
+        args: HashMap<String, serde_json::Value>,
+        argument_fields: Vec<TranscriptArgumentFieldMetadata>,
         status: &'static str,
-        #[serde(skip_serializing_if = "Option::is_none")]
         called_at_ms: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         elapsed_ms: Option<u64>,
         elapsed_active: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        user_message: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        preview_output: Option<&'a crate::transcript_model::ToolOutput>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output: Option<&'a crate::transcript_model::ToolOutput>,
+        user_message: Option<String>,
+        preview_output: Option<Box<TranscriptToolOutputMetadata>>,
+        output: Option<Box<TranscriptToolOutputMetadata>>,
     },
     Exec {
-        command: &'a str,
+        command: String,
         command_spans: Vec<protocol::StyledSpan>,
-        output: &'a str,
+        output: TranscriptContentMetadata,
     },
     Summary {
-        summary: &'a str,
+        summary: String,
+    },
+    Group {
+        group_kind: String,
+        name: String,
+        bucket: String,
+        view_state: &'static str,
+        children: Vec<crate::transcript_model::TranscriptGroupChildMetadata>,
+        child_ids: Vec<BlockId>,
     },
 }
 
-/// Build the canonical renderer-facing snapshot for one transcript block.
-pub fn transcript_block_snapshot_json(
+impl TranscriptRenderNode {
+    pub fn group(
+        id: u64,
+        index: usize,
+        group_kind: String,
+        bucket: String,
+        view_state: &'static str,
+        children: Vec<crate::transcript_model::TranscriptGroupChildMetadata>,
+        child_ids: Vec<BlockId>,
+    ) -> Self {
+        Self {
+            id,
+            index,
+            kind: "group",
+            fields: TranscriptRenderFields::Group {
+                name: group_kind.clone(),
+                group_kind,
+                bucket,
+                view_state,
+                children,
+                child_ids,
+            },
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+}
+
+const LUA_CONTENT_PREVIEW_BYTES: usize = 4 * 1024;
+
+fn transcript_content_metadata(
+    content: &crate::transcript_content::TranscriptContent,
+) -> TranscriptContentMetadata {
+    let read = content.read();
+    let mut content_preview = if read.len() <= LUA_CONTENT_PREVIEW_BYTES {
+        read.to_string()
+    } else {
+        const OMISSION_MARKER: &str = "\n…\n";
+        let payload_bytes = LUA_CONTENT_PREVIEW_BYTES.saturating_sub(OMISSION_MARKER.len());
+        let head_end = payload_bytes / 2;
+        let tail_bytes = payload_bytes.saturating_sub(head_end);
+        let tail_start = read.len().saturating_sub(tail_bytes);
+        format!(
+            "{}{}{}",
+            read.slice(0..head_end),
+            OMISSION_MARKER,
+            read.slice(tail_start..read.len())
+        )
+    };
+    if content_preview.len() > LUA_CONTENT_PREVIEW_BYTES {
+        content_preview =
+            smelt_buffer::text::slice(&content_preview, 0..LUA_CONTENT_PREVIEW_BYTES).to_owned();
+    }
+    TranscriptContentMetadata {
+        content_id: content.id().get(),
+        content_revision: read.revision(),
+        content_bytes: read.len(),
+        content_lines: read.logical_line_count(),
+        content_preview,
+    }
+}
+
+fn transcript_argument_field_metadata(
+    fields: &[crate::content::tool_draft::ToolArgumentField],
+) -> Vec<TranscriptArgumentFieldMetadata> {
+    fields
+        .iter()
+        .map(|field| TranscriptArgumentFieldMetadata {
+            name: field.name.clone(),
+            content: transcript_content_metadata(&field.content),
+            complete: field.complete,
+        })
+        .collect()
+}
+
+fn transcript_tool_output_metadata(
+    output: &crate::transcript_model::ToolOutput,
+) -> TranscriptToolOutputMetadata {
+    TranscriptToolOutputMetadata {
+        content: transcript_content_metadata(&output.content),
+        is_error: output.is_error,
+        metadata: output.metadata.clone(),
+        content_fields: output
+            .content_fields
+            .iter()
+            .map(|field| TranscriptToolOutputContentFieldMetadata {
+                name: field.name.clone(),
+                content: transcript_content_metadata(&field.content),
+            })
+            .collect(),
+    }
+}
+
+/// Build compact, typed renderer metadata for one transcript block.
+pub fn transcript_block_render_node(
     id: BlockId,
     index: usize,
     block: &Block,
     state: Option<&ToolState>,
-) -> serde_json::Result<serde_json::Value> {
+) -> TranscriptRenderNode {
     let fields = match block {
         Block::User {
             text,
             image_labels,
             command,
-        } => TranscriptBlockSnapshotFields::User {
-            text,
+        } => TranscriptRenderFields::User {
+            text: text.clone(),
             user_lines: user_styled_lines(text, image_labels, *command),
-            image_labels,
+            image_labels: image_labels.clone(),
         },
         Block::Mode {
             text,
             icon,
             hl_group,
-        } => TranscriptBlockSnapshotFields::Mode {
-            text,
-            icon,
-            hl_group,
+        } => TranscriptRenderFields::Mode {
+            text: text.clone(),
+            icon: icon.clone(),
+            hl_group: hl_group.clone(),
         },
-        Block::ProcessStatus { text, event } => TranscriptBlockSnapshotFields::ProcessStatus {
-            text,
-            event_fields: event
-                .as_ref()
-                .map(protocol::ProcessStatusEvent::snapshot_json_fields)
-                .unwrap_or_default(),
+        Block::ProcessStatus { text, event } => TranscriptRenderFields::ProcessStatus {
+            text: text.clone(),
+            event: event.as_ref().map(|event| TranscriptProcessStatusMetadata {
+                event_type: event.event_type(),
+                process_id: event.process_id().map(str::to_owned),
+                exit_code: event.exit_code(),
+            }),
         },
         Block::Thinking {
             title,
             summary_titles,
             content,
             kind,
-        } => TranscriptBlockSnapshotFields::Thinking {
-            title: title.as_deref(),
-            summary_titles,
-            content,
-            reasoning_kind: kind,
-            thinking_summary: thinking_fallback_summary(title.as_deref(), content),
+        } => {
+            let (first_line, line_count) = {
+                let content = content.read();
+                (content.first_nonempty_line(), content.logical_line_count())
+            };
+            TranscriptRenderFields::Thinking {
+                title: title.clone(),
+                summary_titles: summary_titles.clone(),
+                content: transcript_content_metadata(content),
+                reasoning_kind: *kind,
+                thinking_summary: thinking_fallback_summary(
+                    title.as_deref(),
+                    &first_line,
+                    line_count,
+                ),
+            }
+        }
+        Block::Text { content } => TranscriptRenderFields::Text {
+            content: transcript_content_metadata(content),
         },
-        Block::Text { content } => TranscriptBlockSnapshotFields::Text { content },
-        Block::CodeLine { content, lang } => TranscriptBlockSnapshotFields::Code { content, lang },
-        Block::ToolDraft {
-            stream_id,
-            call_id,
-            name,
-            summary,
-            args,
-            raw_arguments,
-            finished,
-        } => TranscriptBlockSnapshotFields::ToolDraft {
-            stream_id,
-            call_id: call_id.as_deref(),
-            name,
-            summary,
-            summary_text: summary.as_plain_text(),
-            args,
-            raw_arguments,
-            status: "drafting",
-            draft: true,
-            draft_finished: *finished,
+        Block::CodeLine { content, lang } => TranscriptRenderFields::Code {
+            content: content.clone(),
+            lang: lang.clone(),
+        },
+        Block::ToolDraft(draft) => TranscriptRenderFields::ToolDraft {
+            stream_id: draft.stream_id.clone(),
+            call_id: draft.call_id.clone(),
+            name: draft.name.clone(),
+            summary: draft.summary.clone(),
+            summary_text: draft.summary.as_plain_text(),
+            args: draft.arguments.preview().clone(),
+            argument_fields: transcript_argument_field_metadata(draft.string_fields()),
+            raw_arguments: transcript_content_metadata(&draft.raw_arguments),
+            draft_finished: draft.finished,
         },
         Block::ToolCall {
             call_id,
@@ -3342,36 +3744,45 @@ pub fn transcript_block_snapshot_json(
             let elapsed_ms = state
                 .and_then(|state| state.elapsed)
                 .map(|elapsed| elapsed.as_millis() as u64);
-            TranscriptBlockSnapshotFields::ToolCall {
-                call_id,
-                name,
-                summary,
+            TranscriptRenderFields::ToolCall {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
                 summary_text: summary.as_plain_text(),
-                args,
+                args: args.preview().clone(),
+                argument_fields: transcript_argument_field_metadata(args.string_fields()),
                 status: status.label(),
                 called_at_ms: state.and_then(|state| state.called_at_ms),
                 elapsed_ms,
                 elapsed_active: state.is_some_and(|state| state.elapsed_active),
-                user_message: state.and_then(|state| state.user_message.as_deref()),
-                preview_output: state.and_then(|state| state.preview_output.as_deref()),
-                output: state.and_then(|state| state.output.as_deref()),
+                user_message: state.and_then(|state| state.user_message.clone()),
+                preview_output: state
+                    .and_then(|state| state.preview_output.as_deref())
+                    .map(transcript_tool_output_metadata)
+                    .map(Box::new),
+                output: state
+                    .and_then(|state| state.output.as_deref())
+                    .map(transcript_tool_output_metadata)
+                    .map(Box::new),
             }
         }
-        Block::Exec { command, output } => TranscriptBlockSnapshotFields::Exec {
-            command,
+        Block::Exec { command, output } => TranscriptRenderFields::Exec {
+            command: command.clone(),
             command_spans: exec_command_spans(command),
-            output,
+            output: transcript_content_metadata(output),
         },
         Block::Compacted { summary } | Block::CompactionPreview { summary } => {
-            TranscriptBlockSnapshotFields::Summary { summary }
+            TranscriptRenderFields::Summary {
+                summary: summary.clone(),
+            }
         }
     };
-    serde_json::to_value(TranscriptBlockSnapshot {
+    TranscriptRenderNode {
         id: id.0,
         index,
         kind: block.kind(),
         fields,
-    })
+    }
 }
 
 fn args_to_lua_table(
@@ -3519,24 +3930,74 @@ fn layout_text(content: impl Into<String>, hl_group: Option<&str>, ansi: bool) -
     }))
 }
 
-fn fallback_transcript_snapshot_layout(snapshot: &serde_json::Value) -> BlockLayout {
-    let kind = snapshot
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("transcript");
-    let text = ["content", "text", "summary", "summary_text", "name"]
-        .into_iter()
-        .find_map(|field| snapshot.get(field).and_then(serde_json::Value::as_str))
-        .filter(|text| !text.is_empty())
-        .unwrap_or(kind);
+fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
+    let content = match &node.fields {
+        TranscriptRenderFields::Thinking { content, .. }
+        | TranscriptRenderFields::Text { content }
+        | TranscriptRenderFields::Exec {
+            output: content, ..
+        } => Some(content),
+        TranscriptRenderFields::ToolDraft { raw_arguments, .. } => Some(raw_arguments),
+        TranscriptRenderFields::ToolCall { output, .. } => {
+            output.as_ref().map(|output| &output.content)
+        }
+        _ => None,
+    };
+    if let Some(content) = content {
+        let render = if matches!(node.kind, "assistant" | "thinking") {
+            ContentRenderSpec::Markdown {
+                dim: node.kind == "thinking",
+                italic: node.kind == "thinking",
+                inline: false,
+            }
+        } else {
+            ContentRenderSpec::Text {
+                hl_group: Some("ErrorMsg".into()),
+                ansi: matches!(node.kind, "exec" | "tool"),
+            }
+        };
+        return BlockLayout::Leaf(LuaLeaf::Content(ContentSpec {
+            id: crate::transcript_content::ContentId::new(content.content_id),
+            render,
+        }));
+    }
+
+    let text = match &node.fields {
+        TranscriptRenderFields::User { text, .. }
+        | TranscriptRenderFields::Mode { text, .. }
+        | TranscriptRenderFields::ProcessStatus { text, .. }
+        | TranscriptRenderFields::Code { content: text, .. }
+        | TranscriptRenderFields::Summary { summary: text } => text.as_str(),
+        TranscriptRenderFields::ToolDraft {
+            summary_text, name, ..
+        }
+        | TranscriptRenderFields::ToolCall {
+            summary_text, name, ..
+        } => {
+            if summary_text.is_empty() {
+                name.as_str()
+            } else {
+                summary_text.as_str()
+            }
+        }
+        TranscriptRenderFields::Group { name, .. } => name.as_str(),
+        TranscriptRenderFields::Thinking {
+            thinking_summary, ..
+        } => thinking_summary.as_str(),
+        TranscriptRenderFields::Text { .. } | TranscriptRenderFields::Exec { .. } => node.kind,
+    };
     layout_text(text, Some("ErrorMsg"), false)
 }
 
-fn thinking_fallback_summary(title: Option<&str>, content: &str) -> String {
-    if let Some(title) = title.filter(|_| content.trim().is_empty()) {
+fn thinking_fallback_summary(
+    title: Option<&str>,
+    first_nonempty_line: &str,
+    line_count: usize,
+) -> String {
+    if let Some(title) = title.filter(|_| line_count == 0) {
         return title.to_string();
     }
-    let (inferred_label, line_count) = thinking_summary(content);
+    let inferred_label = thinking_summary_label(first_nonempty_line);
     let label = title.unwrap_or(&inferred_label);
     let collapsed_lines = if title.is_some() || inferred_label == "thinking" {
         line_count
@@ -3549,24 +4010,13 @@ fn thinking_fallback_summary(title: Option<&str>, content: &str) -> String {
     )
 }
 
-fn thinking_summary(content: &str) -> (String, usize) {
-    let mut label = None;
-    let mut lines = 0usize;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        lines += 1;
-        if label.is_none()
-            && trimmed.starts_with("**")
-            && trimmed.ends_with("**")
-            && trimmed.len() > 4
-        {
-            label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
-        }
+fn thinking_summary_label(first_nonempty_line: &str) -> String {
+    let trimmed = first_nonempty_line.trim();
+    if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
+        trimmed[2..trimmed.len() - 2].trim().to_string()
+    } else {
+        "thinking".to_string()
     }
-    (label.unwrap_or_else(|| "thinking".to_string()), lines)
 }
 
 fn pluralize(count: usize, singular: &str, plural: &str) -> String {
@@ -3941,9 +4391,21 @@ mod tests {
     }
 
     #[test]
+    fn thinking_summary_counts_retained_lines_without_copying_content() {
+        assert_eq!(
+            thinking_fallback_summary(None, "**Inspecting the renderer**", 7),
+            "Inspecting the renderer\n… 6 lines collapsed …"
+        );
+        assert_eq!(
+            thinking_fallback_summary(None, "Read the transcript model first.", 6),
+            "thinking\n… 6 lines collapsed …"
+        );
+    }
+
+    #[test]
     fn title_only_thinking_summary_has_no_empty_line_count() {
         assert_eq!(
-            thinking_fallback_summary(Some("Checking files"), ""),
+            thinking_fallback_summary(Some("Checking files"), "", 0),
             "Checking files"
         );
     }
@@ -4133,8 +4595,8 @@ mod tests {
             )),
         };
 
-        let snapshot = transcript_block_snapshot_json(BlockId::new(9), 3, &block, None).unwrap();
-        let table = transcript_snapshot_to_lua_table(&lua, &snapshot).unwrap();
+        let node = transcript_block_render_node(BlockId::new(9), 3, &block, None);
+        let table = transcript_render_node_to_lua_table(&lua, &node).unwrap();
 
         assert_eq!(table.get::<String>("kind").unwrap(), "process_status");
         assert_eq!(
@@ -4154,12 +4616,197 @@ mod tests {
         );
     }
     #[test]
-    fn tool_snapshot_exposes_raw_active_and_terminal_timing_facts() {
+    fn transcript_payload_metadata_is_opaque_and_strictly_bounded() {
+        let lua = Lua::new();
+        let payload = "αβγ\n".repeat(2_000);
+
+        let assistant_content: crate::transcript_content::TranscriptContent =
+            payload.clone().into();
+        let assistant_id = assistant_content.id().get();
+        let assistant_node = transcript_block_render_node(
+            BlockId::new(1),
+            0,
+            &Block::Text {
+                content: assistant_content,
+            },
+            None,
+        );
+        let assistant = transcript_render_node_to_lua_table(&lua, &assistant_node).unwrap();
+        assert_eq!(assistant.get::<u64>("content_id").unwrap(), assistant_id);
+        assert_eq!(
+            assistant.get::<usize>("content_bytes").unwrap(),
+            payload.len()
+        );
+        assert_eq!(assistant.get::<usize>("content_lines").unwrap(), 2_000);
+        assert!(!assistant.contains_key("content").unwrap());
+        assert!(
+            assistant.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
+        );
+
+        let thinking_content: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let thinking_node = transcript_block_render_node(
+            BlockId::new(2),
+            1,
+            &Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                content: thinking_content,
+                kind: protocol::ReasoningKind::Raw,
+            },
+            None,
+        );
+        let thinking = transcript_render_node_to_lua_table(&lua, &thinking_node).unwrap();
+        assert!(!thinking.contains_key("content").unwrap());
+        assert!(
+            thinking.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
+        );
+
+        let draft_arguments: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let draft_id = draft_arguments.id().get();
+        let mut draft_state =
+            crate::content::tool_draft::ToolDraft::new("draft-1".into(), None, "write_file".into());
+        draft_state.summary = protocol::StyledLines::empty();
+        draft_state.raw_arguments = draft_arguments;
+        let draft_node =
+            transcript_block_render_node(BlockId::new(3), 2, &Block::ToolDraft(draft_state), None);
+        let draft = transcript_render_node_to_lua_table(&lua, &draft_node).unwrap();
+        assert_eq!(draft.get::<u64>("raw_arguments_id").unwrap(), draft_id);
+        assert_eq!(
+            draft.get::<usize>("raw_arguments_bytes").unwrap(),
+            payload.len()
+        );
+        assert_eq!(draft.get::<usize>("raw_arguments_lines").unwrap(), 2_000);
+        assert!(!draft.contains_key("raw_arguments").unwrap());
+        assert!(
+            draft.get::<String>("raw_arguments_preview").unwrap().len()
+                <= LUA_CONTENT_PREVIEW_BYTES
+        );
+
+        let tool_output: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let tool_output_id = tool_output.id().get();
+        let old_source_payload = "before source payload\n".repeat(100_000);
+        let new_source_payload = "after source payload\n".repeat(100_000);
+        let old_source: crate::transcript_content::TranscriptContent =
+            old_source_payload.clone().into();
+        let new_source: crate::transcript_content::TranscriptContent =
+            new_source_payload.clone().into();
+        let old_source_id = old_source.id().get();
+        let new_source_id = new_source.id().get();
+        let tool_args: crate::content::tool_draft::ToolArguments =
+            HashMap::from([("content".into(), serde_json::Value::String(payload.clone()))]).into();
+        let argument_content_id = tool_args
+            .string_field("content")
+            .expect("content argument")
+            .content
+            .id()
+            .get();
+        let tool_block = Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("run"),
+            args: tool_args,
+        };
+        let tool_state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            called_at_ms: None,
+            elapsed_active: false,
+            output: Some(Box::new(ToolOutput {
+                content: tool_output,
+                is_error: false,
+                metadata: Some(serde_json::json!({ "path": "src/lib.rs" })),
+                content_fields: vec![
+                    crate::transcript_model::ToolOutputContentField {
+                        name: "old_source".into(),
+                        content: old_source,
+                    },
+                    crate::transcript_model::ToolOutputContentField {
+                        name: "new_source".into(),
+                        content: new_source,
+                    },
+                ],
+            })),
+            user_message: None,
+            preview_output: None,
+        };
+        let tool_node =
+            transcript_block_render_node(BlockId::new(4), 3, &tool_block, Some(&tool_state));
+        let render_metadata_bytes = format!("{tool_node:?}").len();
+        assert!(
+            render_metadata_bytes < 8 * LUA_CONTENT_PREVIEW_BYTES,
+            "typed render metadata grew with multi-megabyte retained source fields: {render_metadata_bytes} bytes"
+        );
+        let tool = transcript_render_node_to_lua_table(&lua, &tool_node).unwrap();
+        let argument_fields: mlua::Table = tool.get("argument_fields").unwrap();
+        let argument_field: mlua::Table = argument_fields.get(1).unwrap();
+        assert_eq!(argument_field.get::<String>("name").unwrap(), "content");
+        assert_eq!(
+            argument_field.get::<u64>("content_id").unwrap(),
+            argument_content_id
+        );
+        assert_eq!(
+            argument_field.get::<usize>("content_bytes").unwrap(),
+            payload.len()
+        );
+        assert!(!argument_field.contains_key("content").unwrap());
+        let args: mlua::Table = tool.get("args").unwrap();
+        assert!(args.get::<String>("content").unwrap().len() <= 4 * 1024 + 4);
+        let output: mlua::Table = tool.get("output").unwrap();
+        assert_eq!(output.get::<u64>("content_id").unwrap(), tool_output_id);
+        assert_eq!(output.get::<usize>("content_bytes").unwrap(), payload.len());
+        assert!(!output.contains_key("content").unwrap());
+        assert!(
+            output.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
+        );
+        let content_fields: mlua::Table = output.get("content_fields").unwrap();
+        let old_source: mlua::Table = content_fields.get("old_source").unwrap();
+        assert_eq!(old_source.get::<u64>("content_id").unwrap(), old_source_id);
+        assert_eq!(
+            old_source.get::<usize>("content_bytes").unwrap(),
+            old_source_payload.len()
+        );
+        assert!(!old_source.contains_key("content").unwrap());
+        assert!(
+            old_source.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
+        );
+        let new_source: mlua::Table = content_fields.get("new_source").unwrap();
+        assert_eq!(new_source.get::<u64>("content_id").unwrap(), new_source_id);
+        assert_eq!(
+            new_source.get::<usize>("content_bytes").unwrap(),
+            new_source_payload.len()
+        );
+        assert!(!new_source.contains_key("content").unwrap());
+        assert!(
+            new_source.get::<String>("content_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES
+        );
+
+        let exec_output: crate::transcript_content::TranscriptContent = payload.clone().into();
+        let exec_id = exec_output.id().get();
+        let exec_node = transcript_block_render_node(
+            BlockId::new(5),
+            4,
+            &Block::Exec {
+                command: "run".into(),
+                output: exec_output,
+            },
+            None,
+        );
+        let exec = transcript_render_node_to_lua_table(&lua, &exec_node).unwrap();
+        assert_eq!(exec.get::<u64>("output_id").unwrap(), exec_id);
+        assert_eq!(exec.get::<usize>("output_bytes").unwrap(), payload.len());
+        assert_eq!(exec.get::<usize>("output_lines").unwrap(), 2_000);
+        assert!(!exec.contains_key("output").unwrap());
+        assert!(exec.get::<String>("output_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn tool_metadata_exposes_raw_active_and_terminal_timing_facts() {
+        let lua = Lua::new();
         let block = Block::ToolCall {
             call_id: "call-1".into(),
             name: "bash".into(),
             summary: protocol::StyledLines::from_plain("echo hi"),
-            args: HashMap::new(),
+            args: HashMap::new().into(),
         };
         let mut state = ToolState {
             status: ToolStatus::Pending,
@@ -4171,24 +4818,30 @@ mod tests {
             preview_output: None,
         };
 
-        let active = transcript_block_snapshot_json(BlockId::new(1), 0, &block, Some(&state))
-            .expect("active snapshot");
-        assert_eq!(active["called_at_ms"], 1_700_000_000_123u64);
-        assert_eq!(active["elapsed_ms"], 1_250);
-        assert_eq!(active["elapsed_active"], true);
-        assert_eq!(active["status"], "pending");
-        assert!(active.get("elapsed_text").is_none());
-        assert!(active.get("elapsed_secs").is_none());
+        let active_node = transcript_block_render_node(BlockId::new(1), 0, &block, Some(&state));
+        let active = transcript_render_node_to_lua_table(&lua, &active_node).unwrap();
+        assert_eq!(
+            active.get::<u64>("called_at_ms").unwrap(),
+            1_700_000_000_123
+        );
+        assert_eq!(active.get::<u64>("elapsed_ms").unwrap(), 1_250);
+        assert!(active.get::<bool>("elapsed_active").unwrap());
+        assert_eq!(active.get::<String>("status").unwrap(), "pending");
+        assert!(!active.contains_key("elapsed_text").unwrap());
+        assert!(!active.contains_key("elapsed_secs").unwrap());
 
         state.status = ToolStatus::Ok;
         state.elapsed = Some(std::time::Duration::from_millis(2_500));
         state.elapsed_active = false;
-        let terminal = transcript_block_snapshot_json(BlockId::new(1), 0, &block, Some(&state))
-            .expect("terminal snapshot");
-        assert_eq!(terminal["called_at_ms"], 1_700_000_000_123u64);
-        assert_eq!(terminal["elapsed_ms"], 2_500);
-        assert_eq!(terminal["elapsed_active"], false);
-        assert_eq!(terminal["status"], "ok");
+        let terminal_node = transcript_block_render_node(BlockId::new(1), 0, &block, Some(&state));
+        let terminal = transcript_render_node_to_lua_table(&lua, &terminal_node).unwrap();
+        assert_eq!(
+            terminal.get::<u64>("called_at_ms").unwrap(),
+            1_700_000_000_123
+        );
+        assert_eq!(terminal.get::<u64>("elapsed_ms").unwrap(), 2_500);
+        assert!(!terminal.get::<bool>("elapsed_active").unwrap());
+        assert_eq!(terminal.get::<String>("status").unwrap(), "ok");
     }
 
     #[test]
@@ -4408,13 +5061,36 @@ mod tests {
             .exec()
             .unwrap();
 
+        let child_ids = vec![BlockId::new(1), BlockId::new(2), BlockId::new(3)];
+        let children = child_ids
+            .iter()
+            .copied()
+            .map(|id| crate::transcript_model::TranscriptGroupChildMetadata {
+                id,
+                kind: "tool",
+                name: Some("bash".into()),
+                status: Some("ok"),
+                summary_text: None,
+                called_at_ms: None,
+                args: None,
+                output: Default::default(),
+                event: None,
+                process_id: None,
+                exit_code: None,
+                event_data: Default::default(),
+            })
+            .collect();
+        let node = TranscriptRenderNode::group(
+            7,
+            0,
+            "batch".into(),
+            "default".into(),
+            "expanded",
+            children,
+            child_ids,
+        );
         let layout = rt.render_transcript_layout(
-            &serde_json::json!({
-                "kind": "group",
-                "name": "batch",
-                "child_count": 3,
-                "children": [],
-            }),
+            &node,
             crate::transcript_model::ViewState::Expanded,
             1_742_573_823_000,
         );

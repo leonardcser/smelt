@@ -1,7 +1,10 @@
 use std::{
-    cell::RefCell,
+    borrow::Cow,
+    cell::{OnceCell, RefCell},
     collections::VecDeque,
     hash::{Hash, Hasher},
+    ops::Range,
+    rc::Rc,
     sync::Arc,
 };
 
@@ -15,10 +18,14 @@ use smelt_core::content::highlight::{
 };
 use smelt_core::content::inline_line::BreakPolicy;
 use smelt_core::content::markdown_ir::{
-    parse_markdown_with_options, MarkdownLine, MarkdownNode, MarkdownTextKind,
+    markdown_nodes_retained_bytes, parse_markdown_with_options, MarkdownLine, MarkdownNode,
+    MarkdownTextKind,
 };
 use smelt_core::content::{is_markdown_list_item, split_markdown_list_prefix};
 use smelt_core::theme::intern;
+use smelt_core::transcript_content::{
+    ContentId, ContentRead, ContentTextWindow, TranscriptContent,
+};
 
 pub fn render_markdown_inner(
     out: &mut LineBuilder,
@@ -71,8 +78,8 @@ pub fn render_markdown_inner_range_with_options(
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
     inline_options: &InlineOptions,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
 ) -> u16 {
     if row_count == 0 {
         return 0;
@@ -105,9 +112,302 @@ pub fn measure_markdown_inner_with_options(
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
     inline_options: &InlineOptions,
-) -> u16 {
+) -> usize {
     let block = parse_markdown_cached(content, inline_options);
     measure_markdown_block(block.as_doc(), width, indent, dim, bctx, inline_options)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_retained_markdown_inner_range_with_options(
+    out: &mut LineBuilder,
+    content: &TranscriptContent,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    row_start: usize,
+    row_count: usize,
+) -> u16 {
+    if row_count == 0 {
+        return 0;
+    }
+    let _perf = smelt_perf::perf::begin("render:markdown:retained_range");
+    let before = out.line_count();
+    let parsed = parse_retained_markdown_cached(content, inline_options);
+    let read = content.read();
+    let source = MarkdownSource::Retained(&read);
+    let clip = Some(RowClip {
+        start: row_start,
+        end: row_start.saturating_add(row_count),
+    });
+    if indent.is_empty() && bctx.is_none() {
+        let mut parsed = parsed.borrow_mut();
+        let layout_index =
+            ensure_retained_markdown_layout(&mut parsed, source, width, dim, inline_options);
+        let layout = &parsed.layouts[layout_index];
+        let first_after = layout
+            .completed_states
+            .partition_point(|state| state.rows <= row_start);
+        let first_doc = first_after.saturating_sub(1).min(parsed.completed.len());
+        let mut state = layout
+            .completed_states
+            .get(first_doc)
+            .copied()
+            .unwrap_or_default();
+        render_markdown_docs_from_state(
+            out,
+            parsed.docs(source, inline_options).skip(first_doc),
+            width,
+            indent,
+            dim,
+            bctx,
+            inline_options,
+            clip,
+            &mut state,
+        );
+    } else {
+        let parsed = parsed.borrow();
+        render_markdown_docs(
+            out,
+            parsed.docs(source, inline_options),
+            width,
+            indent,
+            dim,
+            bctx,
+            inline_options,
+            clip,
+        );
+    }
+    refresh_retained_markdown_cache_weight(&parsed);
+    out.line_count()
+        .saturating_sub(before)
+        .min(u16::MAX as usize) as u16
+}
+
+pub fn measure_retained_markdown_inner_with_options(
+    content: &TranscriptContent,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+) -> usize {
+    let parsed = parse_retained_markdown_cached(content, inline_options);
+    let read = content.read();
+    let source = MarkdownSource::Retained(&read);
+    let rows = if indent.is_empty() && bctx.is_none() {
+        let mut parsed = parsed.borrow_mut();
+        let layout_index =
+            ensure_retained_markdown_layout(&mut parsed, source, width, dim, inline_options);
+        parsed.layouts[layout_index].total_state.rows
+    } else {
+        let parsed = parsed.borrow();
+        measure_markdown_docs(
+            parsed.docs(source, inline_options),
+            width,
+            indent,
+            dim,
+            bctx,
+            inline_options,
+        )
+    };
+    refresh_retained_markdown_cache_weight(&parsed);
+    rows
+}
+
+struct RetainedMarkdownEdge {
+    nodes: Vec<Arc<[MarkdownNode]>>,
+    row_start: usize,
+    row_count: usize,
+    truncated: bool,
+}
+
+impl RetainedMarkdownEdge {
+    fn window(&self) -> ContentTextWindow {
+        ContentTextWindow {
+            row_count: self.row_count,
+            truncated: self.truncated,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retained_markdown_edge(
+    read: &ContentRead<'_>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    max_rows: usize,
+    tail: bool,
+) -> RetainedMarkdownEdge {
+    if max_rows == 0 {
+        return RetainedMarkdownEdge {
+            nodes: Vec::new(),
+            row_start: 0,
+            row_count: 0,
+            truncated: !read.is_empty(),
+        };
+    }
+
+    let source = MarkdownSource::Retained(read);
+    let range_count = read.markdown_range_count();
+    let mut nodes = Vec::new();
+    let mut state = FlowState::default();
+
+    if tail {
+        let target_rows = max_rows.saturating_add(2);
+        let mut start = range_count;
+        let mut estimated_rows = 0usize;
+        while start > 0 && estimated_rows <= target_rows {
+            start -= 1;
+            let range = read
+                .markdown_range(start)
+                .expect("retained Markdown range index");
+            let parsed = parse_retained_markdown_nodes(
+                read.slice(range.clone()).into_owned(),
+                range.start,
+                inline_options,
+            );
+            let mut doc_state = FlowState::default();
+            measure_markdown_doc(
+                MarkdownDoc {
+                    source,
+                    nodes: parsed.as_ref(),
+                },
+                width,
+                indent,
+                dim,
+                bctx,
+                inline_options,
+                &mut doc_state,
+            );
+            estimated_rows = estimated_rows.saturating_add(doc_state.rows);
+            nodes.push(parsed);
+        }
+        nodes.reverse();
+        for parsed in &nodes {
+            measure_markdown_doc(
+                MarkdownDoc {
+                    source,
+                    nodes: parsed.as_ref(),
+                },
+                width,
+                indent,
+                dim,
+                bctx,
+                inline_options,
+                &mut state,
+            );
+        }
+        let row_count = state.rows.min(max_rows);
+        RetainedMarkdownEdge {
+            nodes,
+            row_start: state.rows.saturating_sub(row_count),
+            row_count,
+            truncated: start > 0 || state.rows > max_rows,
+        }
+    } else {
+        let mut next = 0usize;
+        while next < range_count && state.rows <= max_rows {
+            let range = read
+                .markdown_range(next)
+                .expect("retained Markdown range index");
+            let parsed = parse_retained_markdown_nodes(
+                read.slice(range.clone()).into_owned(),
+                range.start,
+                inline_options,
+            );
+            measure_markdown_doc(
+                MarkdownDoc {
+                    source,
+                    nodes: parsed.as_ref(),
+                },
+                width,
+                indent,
+                dim,
+                bctx,
+                inline_options,
+                &mut state,
+            );
+            nodes.push(parsed);
+            next = next.saturating_add(1);
+        }
+        RetainedMarkdownEdge {
+            nodes,
+            row_start: 0,
+            row_count: state.rows.min(max_rows),
+            truncated: next < range_count || state.rows > max_rows,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn measure_retained_markdown_inner_edge_with_options(
+    content: &TranscriptContent,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    max_rows: usize,
+) -> ContentTextWindow {
+    retained_markdown_edge(
+        &content.read(),
+        width,
+        indent,
+        dim,
+        bctx,
+        inline_options,
+        max_rows,
+        false,
+    )
+    .window()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_retained_markdown_inner_edge_with_options(
+    out: &mut LineBuilder,
+    content: &TranscriptContent,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    max_rows: usize,
+    tail: bool,
+) -> ContentTextWindow {
+    let read = content.read();
+    let edge = retained_markdown_edge(
+        &read,
+        width,
+        indent,
+        dim,
+        bctx,
+        inline_options,
+        max_rows,
+        tail,
+    );
+    let source = MarkdownSource::Retained(&read);
+    render_markdown_docs(
+        out,
+        edge.nodes.iter().map(|nodes| MarkdownDoc {
+            source,
+            nodes: nodes.as_ref(),
+        }),
+        width,
+        indent,
+        dim,
+        bctx,
+        inline_options,
+        Some(RowClip {
+            start: edge.row_start,
+            end: edge.row_start.saturating_add(edge.row_count),
+        }),
+    );
+    edge.window()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -118,8 +418,8 @@ pub(super) fn markdown_range_has_visible_text_with_options(
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
     inline_options: &InlineOptions,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
 ) -> bool {
     if row_count == 0 {
         return false;
@@ -143,7 +443,8 @@ const MARKDOWN_PARSE_CACHE_CAP: usize = 128;
 const MARKDOWN_PARSE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 thread_local! {
-    static MARKDOWN_PARSE_CACHE: RefCell<VecDeque<MarkdownParseCacheEntry>> = const { RefCell::new(VecDeque::new()) };
+    static MARKDOWN_PARSE_CACHE: RefCell<MarkdownParseCache> = const { RefCell::new(MarkdownParseCache::new()) };
+    static RETAINED_MARKDOWN_PARSE_CACHE: RefCell<RetainedMarkdownParseCache> = const { RefCell::new(RetainedMarkdownParseCache::new()) };
 }
 
 #[derive(Clone)]
@@ -155,16 +456,162 @@ struct ParsedMarkdown {
 impl ParsedMarkdown {
     fn as_doc(&self) -> MarkdownDoc<'_> {
         MarkdownDoc {
-            source: self.source.as_ref(),
+            source: MarkdownSource::Inline(self.source.as_ref()),
             nodes: self.nodes.as_ref(),
+        }
+    }
+
+    fn dynamic_retained_bytes(&self) -> usize {
+        self.source
+            .len()
+            .saturating_add(arc_header_bytes())
+            .saturating_add(markdown_arc_retained_bytes(&self.nodes))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MarkdownSource<'a> {
+    Inline(&'a str),
+    Retained(&'a ContentRead<'a>),
+}
+
+impl<'a> MarkdownSource<'a> {
+    fn slice(self, range: std::ops::Range<usize>) -> Cow<'a, str> {
+        match self {
+            Self::Inline(source) => Cow::Borrowed(smelt_buffer::text::slice(source, range)),
+            Self::Retained(source) => source.slice(range),
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct MarkdownDoc<'a> {
-    source: &'a str,
+    source: MarkdownSource<'a>,
     nodes: &'a [MarkdownNode],
+}
+
+struct RetainedMarkdownParseCacheEntry {
+    content_id: ContentId,
+    inline_options: InlineOptions,
+    parsed: Rc<RefCell<RetainedParsedMarkdown>>,
+    retained_bytes: usize,
+}
+
+struct RetainedMarkdownDoc {
+    range: Range<usize>,
+    nodes: OnceCell<Arc<[MarkdownNode]>>,
+}
+
+impl RetainedMarkdownDoc {
+    fn new(range: Range<usize>) -> Self {
+        Self {
+            range,
+            nodes: OnceCell::new(),
+        }
+    }
+
+    fn nodes(&self, source: MarkdownSource<'_>, inline_options: &InlineOptions) -> &[MarkdownNode] {
+        self.nodes
+            .get_or_init(|| {
+                let start = self.range.start;
+                parse_retained_markdown_nodes(
+                    source.slice(self.range.clone()).into_owned(),
+                    start,
+                    inline_options,
+                )
+            })
+            .as_ref()
+    }
+}
+
+struct RetainedParsedMarkdown {
+    revision: Option<u64>,
+    content_len: usize,
+    completed_end: usize,
+    completed: Vec<Rc<RetainedMarkdownDoc>>,
+    suffix: Arc<[MarkdownNode]>,
+    layout_clock: u64,
+    layouts: Vec<RetainedMarkdownLayout>,
+}
+
+struct RetainedMarkdownLayout {
+    width: usize,
+    completed_states: Vec<FlowState>,
+    suffix_revision: Option<u64>,
+    total_state: FlowState,
+    last_used: u64,
+}
+
+impl RetainedParsedMarkdown {
+    fn empty() -> Self {
+        Self {
+            revision: None,
+            content_len: 0,
+            completed_end: 0,
+            completed: Vec::new(),
+            suffix: Arc::from([]),
+            layout_clock: 0,
+            layouts: Vec::new(),
+        }
+    }
+
+    fn docs<'a>(
+        &'a self,
+        source: MarkdownSource<'a>,
+        inline_options: &'a InlineOptions,
+    ) -> impl Iterator<Item = MarkdownDoc<'a>> + 'a {
+        self.completed
+            .iter()
+            .map(move |doc| MarkdownDoc {
+                source,
+                nodes: doc.nodes(source, inline_options),
+            })
+            .chain(std::iter::once(MarkdownDoc {
+                source,
+                nodes: self.suffix.as_ref(),
+            }))
+    }
+
+    fn dynamic_retained_bytes(&self) -> usize {
+        self.completed
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Rc<RetainedMarkdownDoc>>())
+            .saturating_add(
+                self.completed
+                    .iter()
+                    .map(|doc| {
+                        rc_header_bytes()
+                            .saturating_add(std::mem::size_of::<RetainedMarkdownDoc>())
+                            .saturating_add(
+                                doc.nodes
+                                    .get()
+                                    .map_or(0, |nodes| markdown_arc_retained_bytes(nodes)),
+                            )
+                    })
+                    .sum::<usize>(),
+            )
+            .saturating_add(markdown_arc_retained_bytes(&self.suffix))
+            .saturating_add(
+                self.layouts
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<RetainedMarkdownLayout>()),
+            )
+            .saturating_add(
+                self.layouts
+                    .iter()
+                    .map(|layout| {
+                        layout
+                            .completed_states
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<FlowState>())
+                    })
+                    .sum::<usize>(),
+            )
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -178,20 +625,153 @@ struct MarkdownParseCacheEntry {
     key: MarkdownParseCacheKey,
     inline_options: InlineOptions,
     parsed: ParsedMarkdown,
+    retained_bytes: usize,
+}
+
+struct MarkdownParseCache {
+    entries: VecDeque<MarkdownParseCacheEntry>,
+    retained_bytes: usize,
+}
+
+impl MarkdownParseCache {
+    const fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            retained_bytes: 0,
+        }
+    }
+
+    fn push_front(&mut self, entry: MarkdownParseCacheEntry) {
+        self.retained_bytes = self.retained_bytes.saturating_add(entry.retained_bytes);
+        self.entries.push_front(entry);
+        self.evict_to_budget();
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > MARKDOWN_PARSE_CACHE_CAP
+            || self.measured_retained_bytes() > MARKDOWN_PARSE_CACHE_BYTES
+        {
+            let Some(entry) = self.entries.pop_back() else {
+                break;
+            };
+            self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+        }
+    }
+
+    fn measured_retained_bytes(&self) -> usize {
+        self.retained_bytes.saturating_add(
+            self.entries
+                .capacity()
+                .saturating_mul(std::mem::size_of::<MarkdownParseCacheEntry>()),
+        )
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries = VecDeque::new();
+        self.retained_bytes = 0;
+    }
+}
+
+struct RetainedMarkdownParseCache {
+    entries: VecDeque<RetainedMarkdownParseCacheEntry>,
+    retained_bytes: usize,
+}
+
+impl RetainedMarkdownParseCache {
+    const fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            retained_bytes: 0,
+        }
+    }
+
+    fn push_front(&mut self, entry: RetainedMarkdownParseCacheEntry) {
+        self.retained_bytes = self.retained_bytes.saturating_add(entry.retained_bytes);
+        self.entries.push_front(entry);
+    }
+
+    fn refresh_entry(&mut self, parsed: &Rc<RefCell<RetainedParsedMarkdown>>) {
+        let parsed_bytes = retained_parsed_allocation_bytes(parsed);
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| Rc::ptr_eq(&entry.parsed, parsed))
+        else {
+            return;
+        };
+        let retained_bytes = entry
+            .inline_options
+            .dynamic_retained_bytes()
+            .saturating_add(parsed_bytes);
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(entry.retained_bytes)
+            .saturating_add(retained_bytes);
+        entry.retained_bytes = retained_bytes;
+        self.evict_to_budget();
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > MARKDOWN_PARSE_CACHE_CAP
+            || self.measured_retained_bytes() > MARKDOWN_PARSE_CACHE_BYTES
+        {
+            let Some(entry) = self.entries.pop_back() else {
+                break;
+            };
+            self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+        }
+    }
+
+    fn measured_retained_bytes(&self) -> usize {
+        self.retained_bytes.saturating_add(
+            self.entries
+                .capacity()
+                .saturating_mul(std::mem::size_of::<RetainedMarkdownParseCacheEntry>()),
+        )
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries = VecDeque::new();
+        self.retained_bytes = 0;
+    }
+}
+
+const fn arc_header_bytes() -> usize {
+    2 * std::mem::size_of::<usize>()
+}
+
+const fn rc_header_bytes() -> usize {
+    2 * std::mem::size_of::<usize>()
+}
+
+fn markdown_arc_retained_bytes(nodes: &[MarkdownNode]) -> usize {
+    arc_header_bytes().saturating_add(markdown_nodes_retained_bytes(nodes))
+}
+
+fn retained_parsed_allocation_bytes(parsed: &Rc<RefCell<RetainedParsedMarkdown>>) -> usize {
+    let parsed = parsed.borrow();
+    rc_header_bytes()
+        .saturating_add(
+            std::mem::size_of::<RefCell<RetainedParsedMarkdown>>()
+                .saturating_sub(std::mem::size_of::<RetainedParsedMarkdown>()),
+        )
+        .saturating_add(parsed.retained_bytes())
 }
 
 fn parse_markdown_cached(content: &str, inline_options: &InlineOptions) -> ParsedMarkdown {
     let key = markdown_parse_cache_key(content, inline_options);
     if let Some(parsed) = MARKDOWN_PARSE_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let pos = cache.iter().position(|entry| {
+        let pos = cache.entries.iter().position(|entry| {
             entry.key == key
                 && entry.inline_options == *inline_options
                 && entry.parsed.source.as_ref() == content
         })?;
-        let entry = cache.remove(pos)?;
+        let entry = cache.entries.remove(pos)?;
         let parsed = entry.parsed.clone();
-        cache.push_front(entry);
+        cache.entries.push_front(entry);
         Some(parsed)
     }) {
         return parsed;
@@ -202,24 +782,212 @@ fn parse_markdown_cached(content: &str, inline_options: &InlineOptions) -> Parse
         source: Arc::from(content),
         nodes: Arc::from(block.nodes.into_boxed_slice()),
     };
+    let retained_bytes = inline_options
+        .dynamic_retained_bytes()
+        .saturating_add(parsed.dynamic_retained_bytes());
     MARKDOWN_PARSE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.push_front(MarkdownParseCacheEntry {
+        cache.borrow_mut().push_front(MarkdownParseCacheEntry {
             key,
             inline_options: inline_options.clone(),
             parsed: parsed.clone(),
+            retained_bytes,
         });
-        while cache.len() > MARKDOWN_PARSE_CACHE_CAP
-            || markdown_cache_bytes(&cache) > MARKDOWN_PARSE_CACHE_BYTES
-        {
-            cache.pop_back();
-        }
     });
     parsed
 }
 
-fn markdown_cache_bytes(cache: &VecDeque<MarkdownParseCacheEntry>) -> usize {
-    cache.iter().map(|entry| entry.parsed.source.len()).sum()
+fn parse_retained_markdown_cached(
+    content: &TranscriptContent,
+    inline_options: &InlineOptions,
+) -> Rc<RefCell<RetainedParsedMarkdown>> {
+    let parsed = RETAINED_MARKDOWN_PARSE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(pos) = cache.entries.iter().position(|entry| {
+            entry.content_id == content.id() && entry.inline_options == *inline_options
+        }) {
+            let entry = cache
+                .entries
+                .remove(pos)
+                .expect("retained Markdown cache position exists");
+            let parsed = Rc::clone(&entry.parsed);
+            cache.entries.push_front(entry);
+            parsed
+        } else {
+            let parsed = Rc::new(RefCell::new(RetainedParsedMarkdown::empty()));
+            let retained_bytes = inline_options
+                .dynamic_retained_bytes()
+                .saturating_add(retained_parsed_allocation_bytes(&parsed));
+            cache.push_front(RetainedMarkdownParseCacheEntry {
+                content_id: content.id(),
+                inline_options: inline_options.clone(),
+                parsed: Rc::clone(&parsed),
+                retained_bytes,
+            });
+            parsed
+        }
+    });
+
+    update_retained_markdown(&parsed, content, inline_options);
+    refresh_retained_markdown_cache_weight(&parsed);
+    parsed
+}
+
+fn refresh_retained_markdown_cache_weight(parsed: &Rc<RefCell<RetainedParsedMarkdown>>) {
+    RETAINED_MARKDOWN_PARSE_CACHE.with(|cache| cache.borrow_mut().refresh_entry(parsed));
+}
+
+fn update_retained_markdown(
+    parsed: &Rc<RefCell<RetainedParsedMarkdown>>,
+    content: &TranscriptContent,
+    inline_options: &InlineOptions,
+) {
+    let (cached_revision, cached_len, completed_end) = {
+        let parsed = parsed.borrow();
+        (parsed.revision, parsed.content_len, parsed.completed_end)
+    };
+    let read = content.read();
+    if cached_revision == Some(read.revision()) {
+        return;
+    }
+
+    let suffix_range = read.markdown_suffix_range();
+    let reset = read.len() < cached_len || suffix_range.start < completed_end;
+    let completed_start = if reset { 0 } else { completed_end };
+    let completed_docs = read
+        .markdown_completed_ranges_after(completed_start)
+        .into_iter()
+        .map(|range| Rc::new(RetainedMarkdownDoc::new(range)))
+        .collect::<Vec<_>>();
+    let suffix_start = suffix_range.start;
+    let suffix_source = read.slice(suffix_range).into_owned();
+    let revision = read.revision();
+    let content_len = read.len();
+    drop(read);
+
+    let suffix = parse_retained_markdown_nodes(suffix_source, suffix_start, inline_options);
+
+    let mut parsed = parsed.borrow_mut();
+    if reset {
+        parsed.completed.clear();
+        parsed.layouts.clear();
+    }
+    parsed.completed.extend(completed_docs);
+    parsed.revision = Some(revision);
+    parsed.content_len = content_len;
+    parsed.completed_end = suffix_start;
+    parsed.suffix = suffix;
+}
+
+fn parse_retained_markdown_nodes(
+    source: String,
+    source_start: usize,
+    inline_options: &InlineOptions,
+) -> Arc<[MarkdownNode]> {
+    let mut nodes = parse_markdown_with_options(&source, inline_options).nodes;
+    shift_markdown_nodes(&mut nodes, source_start);
+    Arc::from(nodes.into_boxed_slice())
+}
+
+fn shift_markdown_nodes(nodes: &mut [MarkdownNode], offset: usize) {
+    let shift = |range: &mut std::ops::Range<usize>| {
+        range.start = range.start.saturating_add(offset);
+        range.end = range.end.saturating_add(offset);
+    };
+    for node in nodes {
+        match node {
+            MarkdownNode::Source { range } | MarkdownNode::Rule { range } => shift(range),
+            MarkdownNode::Text { range, lines, .. } => {
+                shift(range);
+                for line in lines {
+                    shift(&mut line.source);
+                }
+            }
+            MarkdownNode::Code { range, body, .. } => {
+                shift(range);
+                for line in body {
+                    shift(line);
+                }
+            }
+            MarkdownNode::Table { range, .. } => shift(range),
+        }
+    }
+}
+
+const RETAINED_MARKDOWN_LAYOUT_WIDTHS: usize = 2;
+
+fn ensure_retained_markdown_layout(
+    parsed: &mut RetainedParsedMarkdown,
+    source: MarkdownSource<'_>,
+    width: usize,
+    dim: bool,
+    inline_options: &InlineOptions,
+) -> usize {
+    parsed.layout_clock = parsed
+        .layout_clock
+        .checked_add(1)
+        .expect("retained Markdown layout clock overflow");
+    let mut layout = parsed
+        .layouts
+        .iter()
+        .position(|layout| layout.width == width)
+        .map(|index| parsed.layouts.swap_remove(index))
+        .unwrap_or_else(|| RetainedMarkdownLayout {
+            width,
+            completed_states: vec![FlowState::default()],
+            suffix_revision: None,
+            total_state: FlowState::default(),
+            last_used: 0,
+        });
+
+    let measured_docs = layout.completed_states.len().saturating_sub(1);
+    let mut state = layout.completed_states.last().copied().unwrap_or_default();
+    for doc in parsed.completed.iter().skip(measured_docs) {
+        measure_markdown_doc(
+            MarkdownDoc {
+                source,
+                nodes: doc.nodes(source, inline_options),
+            },
+            width,
+            "",
+            dim,
+            None,
+            inline_options,
+            &mut state,
+        );
+        layout.completed_states.push(state);
+    }
+
+    if layout.suffix_revision != parsed.revision {
+        state = layout.completed_states.last().copied().unwrap_or_default();
+        measure_markdown_doc(
+            MarkdownDoc {
+                source,
+                nodes: parsed.suffix.as_ref(),
+            },
+            width,
+            "",
+            dim,
+            None,
+            inline_options,
+            &mut state,
+        );
+        layout.total_state = state;
+        layout.suffix_revision = parsed.revision;
+    }
+    layout.last_used = parsed.layout_clock;
+
+    if parsed.layouts.len() >= RETAINED_MARKDOWN_LAYOUT_WIDTHS {
+        let oldest = parsed
+            .layouts
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, layout)| layout.last_used)
+            .map(|(index, _)| index)
+            .unwrap_or_default();
+        parsed.layouts.swap_remove(oldest);
+    }
+    parsed.layouts.push(layout);
+    parsed.layouts.len().saturating_sub(1)
 }
 
 fn markdown_parse_cache_key(
@@ -241,22 +1009,22 @@ fn hash_value<T: Hash + ?Sized>(value: &T) -> u64 {
 
 #[derive(Clone, Copy)]
 struct RowClip {
-    start: u16,
-    end: u16,
+    start: usize,
+    end: usize,
 }
 
 impl RowClip {
-    fn contains(self, row: u16) -> bool {
+    fn contains(self, row: usize) -> bool {
         row >= self.start && row < self.end
     }
 
-    fn intersects(self, start: u16, rows: u16) -> bool {
+    fn intersects(self, start: usize, rows: usize) -> bool {
         let end = start.saturating_add(rows);
         start < self.end && end > self.start
     }
 }
 
-fn should_emit(clip: Option<RowClip>, row: u16) -> bool {
+fn should_emit(clip: Option<RowClip>, row: usize) -> bool {
     clip.is_none_or(|clip| clip.contains(row))
 }
 
@@ -271,6 +1039,57 @@ fn render_markdown_block(
     inline_options: &InlineOptions,
     clip: Option<RowClip>,
 ) -> u16 {
+    render_markdown_docs(
+        out,
+        std::iter::once(block),
+        width,
+        indent,
+        dim,
+        bctx,
+        inline_options,
+        clip,
+    )
+    .min(u16::MAX as usize) as u16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_markdown_docs<'a>(
+    out: &mut LineBuilder,
+    blocks: impl IntoIterator<Item = MarkdownDoc<'a>>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    clip: Option<RowClip>,
+) -> usize {
+    let mut state = RenderState::default();
+    render_markdown_docs_from_state(
+        out,
+        blocks,
+        width,
+        indent,
+        dim,
+        bctx,
+        inline_options,
+        clip,
+        &mut state,
+    );
+    state.rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_markdown_docs_from_state<'a>(
+    out: &mut LineBuilder,
+    blocks: impl IntoIterator<Item = MarkdownDoc<'a>>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    clip: Option<RowClip>,
+    state: &mut RenderState,
+) {
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
@@ -284,85 +1103,112 @@ fn render_markdown_block(
         inline_options,
         clip,
     };
-    let mut state = RenderState::default();
 
-    for node in block.nodes {
-        if clip.is_some_and(|clip| state.rows >= clip.end) {
-            break;
-        }
-        match node {
-            MarkdownNode::Source { range } => {
-                let source = smelt_buffer::text::slice(block.source, range.clone());
-                render_source_lines(out, source, MarkdownTextKind::Paragraph, &ctx, &mut state);
+    for block in blocks {
+        for node in block.nodes {
+            if clip.is_some_and(|clip| state.rows >= clip.end) {
+                break;
             }
-            MarkdownNode::Text { lines, kind, .. } => {
-                render_text_lines(out, block.source, lines, *kind, &ctx, &mut state);
-            }
-            MarkdownNode::Code { lang, body, .. } => {
-                render_block_gap(out, &mut state, clip);
-                let code_lines: Vec<&str> = body
-                    .iter()
-                    .flat_map(|range| {
-                        smelt_buffer::text::slice(block.source, range.clone()).lines()
-                    })
-                    .collect();
-                let code_block = parse_code_block(&code_lines, lang);
-                if let Some(clip) = clip {
-                    let rows = measure_code_block(&code_block, width) as u16;
-                    if clip.intersects(state.rows, rows) {
-                        let theme = out.theme().clone();
-                        let inherited_style = out.current_style();
-                        let mut buf = smelt_core::buffer::Buffer::new(
-                            smelt_core::buffer::BufId(0),
-                            smelt_core::buffer::BufCreateOpts::default(),
-                        );
-                        let outcome = {
-                            let mut col = LineBuilder::new(&mut buf, &theme, width.max(1) as u16);
-                            col.push(None, inherited_style);
-                            render_code_block(&mut col, &code_block, width, dim, bctx, true);
-                            col.finish()
-                        };
-                        if outcome.was_wrapped {
-                            out.mark_wrapped();
-                        }
-                        emit_temp_rows(out, &buf, width, state.rows, rows, clip, None);
-                    }
-                    state.rows = state.rows.saturating_add(rows);
-                } else {
-                    state.rows += render_code_block(out, &code_block, width, dim, bctx, true);
+            match node {
+                MarkdownNode::Source { range } => {
+                    let source = block.source.slice(range.clone());
+                    render_source_lines(out, &source, MarkdownTextKind::Paragraph, &ctx, state);
                 }
-                state.last_content_was_heading = false;
-                state.prev_was_block = true;
-            }
-            MarkdownNode::Table {
-                range,
-                alignments,
-                rows,
-            } => {
-                render_block_gap(out, &mut state, clip);
-                if let Some(clip) = clip {
-                    let table_rows = measure_markdown_table_with_options(
-                        rows,
-                        alignments,
-                        width,
-                        dim,
-                        bctx,
-                        indent,
-                        inline_options,
-                    );
-                    if clip.intersects(state.rows, table_rows) {
-                        let theme = out.theme().clone();
-                        let inherited_style = out.current_style();
-                        let mut buf = smelt_core::buffer::Buffer::new(
-                            smelt_core::buffer::BufId(0),
-                            smelt_core::buffer::BufCreateOpts::default(),
-                        );
-                        let outcome = {
-                            let mut col = LineBuilder::new(&mut buf, &theme, width.max(1) as u16);
-                            col.push(None, inherited_style);
-                            let start = col.line_count();
+                MarkdownNode::Text { lines, kind, .. } => {
+                    render_text_lines(out, block.source, lines, *kind, &ctx, state);
+                }
+                MarkdownNode::Code { lang, body, .. } => {
+                    render_block_gap(out, state, clip);
+                    let code_source = markdown_code_source(block.source, body);
+                    let code_lines: Vec<&str> = code_source.lines().collect();
+                    let code_block = parse_code_block(&code_lines, lang);
+                    if let Some(clip) = clip {
+                        let rows = measure_code_block(&code_block, width);
+                        if clip.intersects(state.rows, rows) {
+                            let inherited_style = out.current_style();
+                            let mut buf = smelt_core::buffer::Buffer::new(
+                                smelt_core::buffer::BufId(0),
+                                smelt_core::buffer::BufCreateOpts::default(),
+                            );
+                            let outcome = {
+                                let mut col =
+                                    LineBuilder::new(&mut buf, out.theme(), width.max(1) as u16);
+                                col.push(None, inherited_style);
+                                render_code_block(&mut col, &code_block, width, dim, bctx, true);
+                                col.finish()
+                            };
+                            if outcome.was_wrapped {
+                                out.mark_wrapped();
+                            }
+                            emit_temp_rows(out, &buf, width, state.rows, rows, clip, None);
+                        }
+                        state.rows = state.rows.saturating_add(rows);
+                    } else {
+                        state.rows = state.rows.saturating_add(usize::from(render_code_block(
+                            out,
+                            &code_block,
+                            width,
+                            dim,
+                            bctx,
+                            true,
+                        )));
+                    }
+                    state.last_content_was_heading = false;
+                    state.prev_was_block = true;
+                }
+                MarkdownNode::Table {
+                    range,
+                    alignments,
+                    rows,
+                } => {
+                    render_block_gap(out, state, clip);
+                    if let Some(clip) = clip {
+                        let table_rows = usize::from(measure_markdown_table_with_options(
+                            rows,
+                            alignments,
+                            width,
+                            dim,
+                            bctx,
+                            indent,
+                            inline_options,
+                        ));
+                        if clip.intersects(state.rows, table_rows) {
+                            let inherited_style = out.current_style();
+                            let mut buf = smelt_core::buffer::Buffer::new(
+                                smelt_core::buffer::BufId(0),
+                                smelt_core::buffer::BufCreateOpts::default(),
+                            );
+                            let outcome = {
+                                let mut col =
+                                    LineBuilder::new(&mut buf, out.theme(), width.max(1) as u16);
+                                col.push(None, inherited_style);
+                                let start = col.line_count();
+                                render_markdown_table_with_options(
+                                    &mut col,
+                                    rows,
+                                    alignments,
+                                    width,
+                                    dim,
+                                    bctx,
+                                    indent,
+                                    inline_options,
+                                );
+                                let source = block.source.slice(range.clone());
+                                let source = source.trim_end_matches(['\r', '\n']);
+                                col.stamp_copy_group(start, source);
+                                col.finish()
+                            };
+                            if outcome.was_wrapped {
+                                out.mark_wrapped();
+                            }
+                            emit_temp_rows(out, &buf, width, state.rows, table_rows, clip, None);
+                        }
+                        state.rows = state.rows.saturating_add(table_rows);
+                    } else {
+                        let start = out.line_count();
+                        state.rows = state.rows.saturating_add(usize::from(
                             render_markdown_table_with_options(
-                                &mut col,
+                                out,
                                 rows,
                                 alignments,
                                 width,
@@ -370,68 +1216,48 @@ fn render_markdown_block(
                                 bctx,
                                 indent,
                                 inline_options,
-                            );
-                            let source = smelt_buffer::text::slice(block.source, range.clone())
-                                .trim_end_matches(['\r', '\n']);
-                            col.stamp_copy_group(start, source);
-                            col.finish()
-                        };
-                        if outcome.was_wrapped {
-                            out.mark_wrapped();
-                        }
-                        emit_temp_rows(out, &buf, width, state.rows, table_rows, clip, None);
+                            ),
+                        ));
+                        let source = block.source.slice(range.clone());
+                        let source = source.trim_end_matches(['\r', '\n']);
+                        out.stamp_copy_group(start, source);
                     }
-                    state.rows = state.rows.saturating_add(table_rows);
-                } else {
-                    let start = out.line_count();
-                    state.rows += render_markdown_table_with_options(
-                        out,
-                        rows,
-                        alignments,
-                        width,
-                        dim,
-                        bctx,
-                        indent,
-                        inline_options,
-                    );
-                    let source = smelt_buffer::text::slice(block.source, range.clone())
-                        .trim_end_matches(['\r', '\n']);
-                    out.stamp_copy_group(start, source);
+                    state.last_content_was_heading = false;
+                    state.prev_was_block = true;
                 }
-                state.last_content_was_heading = false;
-                state.prev_was_block = true;
-            }
-            MarkdownNode::Rule { .. } => {
-                render_block_gap(out, &mut state, clip);
-                if should_emit(clip, state.rows) {
-                    render_horizontal_rule(out, bctx, indent);
+                MarkdownNode::Rule { .. } => {
+                    render_block_gap(out, state, clip);
+                    if should_emit(clip, state.rows) {
+                        render_horizontal_rule(out, bctx, indent);
+                    }
+                    state.rows = state.rows.saturating_add(1);
+                    state.last_content_was_heading = false;
+                    state.prev_was_block = true;
                 }
-                state.rows = state.rows.saturating_add(1);
-                state.last_content_was_heading = false;
-                state.prev_was_block = true;
             }
         }
     }
-
-    state.rows
 }
 
 fn emit_temp_rows(
     out: &mut LineBuilder,
     buf: &smelt_core::buffer::Buffer,
     width: usize,
-    base_row: u16,
-    rows: u16,
+    base_row: usize,
+    rows: usize,
     clip: RowClip,
     style_overlay: Option<(bool, bool)>,
 ) {
     let start = clip.start.saturating_sub(base_row).min(rows);
     let end = clip.end.saturating_sub(base_row).min(rows);
     for row in start..end {
-        apply_temp_decoration(out, buf, row as usize, true);
+        let Ok(buffer_row) = u16::try_from(row) else {
+            break;
+        };
+        apply_temp_decoration(out, buf, row, true);
         emit_buffer_row_clipped(
             buf,
-            row,
+            buffer_row,
             width.min(u16::MAX as usize) as u16,
             out,
             style_overlay,
@@ -463,9 +1289,9 @@ fn markdown_block_range_has_visible_text(
         }
         match node {
             MarkdownNode::Source { range } => {
-                let source = smelt_buffer::text::slice(block.source, range.clone());
+                let source = block.source.slice(range.clone());
                 if source_lines_range_has_visible_text(
-                    source,
+                    &source,
                     MarkdownTextKind::Paragraph,
                     max_cols,
                     dim,
@@ -491,14 +1317,10 @@ fn markdown_block_range_has_visible_text(
             }
             MarkdownNode::Code { lang, body, .. } => {
                 measure_block_gap(&mut state);
-                let code_lines: Vec<&str> = body
-                    .iter()
-                    .flat_map(|range| {
-                        smelt_buffer::text::slice(block.source, range.clone()).lines()
-                    })
-                    .collect();
+                let code_source = markdown_code_source(block.source, body);
+                let code_lines: Vec<&str> = code_source.lines().collect();
                 let code_block = parse_code_block(&code_lines, lang);
-                let rows = measure_code_block(&code_block, width) as u16;
+                let rows = measure_code_block(&code_block, width);
                 if clip.intersects(state.rows, rows)
                     && code_lines.iter().any(|line| !line.trim().is_empty())
                 {
@@ -512,7 +1334,7 @@ fn markdown_block_range_has_visible_text(
                 alignments, rows, ..
             } => {
                 measure_block_gap(&mut state);
-                let table_rows = measure_markdown_table_with_options(
+                let table_rows = usize::from(measure_markdown_table_with_options(
                     rows,
                     alignments,
                     width,
@@ -520,7 +1342,7 @@ fn markdown_block_range_has_visible_text(
                     bctx,
                     indent,
                     inline_options,
-                );
+                ));
                 if clip.intersects(state.rows, table_rows)
                     && rows.iter().flatten().any(|cell| !cell.trim().is_empty())
                 {
@@ -552,78 +1374,106 @@ fn measure_markdown_block(
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
     inline_options: &InlineOptions,
-) -> u16 {
+) -> usize {
+    measure_markdown_docs(
+        std::iter::once(block),
+        width,
+        indent,
+        dim,
+        bctx,
+        inline_options,
+    )
+}
+
+fn measure_markdown_docs<'a>(
+    blocks: impl IntoIterator<Item = MarkdownDoc<'a>>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+) -> usize {
+    let mut state = MeasureState::default();
+    for block in blocks {
+        measure_markdown_doc(block, width, indent, dim, bctx, inline_options, &mut state);
+    }
+    state.rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_markdown_doc(
+    block: MarkdownDoc<'_>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+    state: &mut MeasureState,
+) {
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
         width.saturating_sub(display_width(indent) + 1)
     };
-    let mut state = MeasureState::default();
-
     for node in block.nodes {
         match node {
             MarkdownNode::Source { range } => {
-                let source = smelt_buffer::text::slice(block.source, range.clone());
+                let source = block.source.slice(range.clone());
                 measure_source_lines(
-                    source,
+                    &source,
                     MarkdownTextKind::Paragraph,
                     max_cols,
                     dim,
                     inline_options,
-                    &mut state,
+                    state,
                 );
             }
             MarkdownNode::Text { lines, kind, .. } => {
-                measure_text_lines(block.source, lines, *kind, max_cols, dim, &mut state);
+                measure_text_lines(block.source, lines, *kind, max_cols, dim, state);
             }
             MarkdownNode::Code { lang, body, .. } => {
-                measure_block_gap(&mut state);
-                let code_lines: Vec<&str> = body
-                    .iter()
-                    .flat_map(|range| {
-                        smelt_buffer::text::slice(block.source, range.clone()).lines()
-                    })
-                    .collect();
+                measure_block_gap(state);
+                let code_source = markdown_code_source(block.source, body);
+                let code_lines: Vec<&str> = code_source.lines().collect();
                 let code_block = parse_code_block(&code_lines, lang);
                 state.rows = state
                     .rows
-                    .saturating_add(measure_code_block(&code_block, width) as u16);
+                    .saturating_add(measure_code_block(&code_block, width));
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
             MarkdownNode::Table {
                 alignments, rows, ..
             } => {
-                measure_block_gap(&mut state);
-                state.rows = state
-                    .rows
-                    .saturating_add(measure_markdown_table_with_options(
-                        rows,
-                        alignments,
-                        width,
-                        dim,
-                        bctx,
-                        indent,
-                        inline_options,
-                    ));
+                measure_block_gap(state);
+                state.rows =
+                    state
+                        .rows
+                        .saturating_add(usize::from(measure_markdown_table_with_options(
+                            rows,
+                            alignments,
+                            width,
+                            dim,
+                            bctx,
+                            indent,
+                            inline_options,
+                        )));
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
             MarkdownNode::Rule { .. } => {
-                measure_block_gap(&mut state);
+                measure_block_gap(state);
                 state.rows = state.rows.saturating_add(1);
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
         }
     }
-
-    state.rows
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FlowState {
-    rows: u16,
+    rows: usize,
     last_content_was_heading: bool,
     pending_blank: bool,
     prev_was_block: bool,
@@ -658,6 +1508,24 @@ fn measure_text_gap(state: &mut MeasureState, kind: MarkdownTextKind) -> bool {
     state.rows != before
 }
 
+fn markdown_source_lines<'a>(
+    source: MarkdownSource<'a>,
+    lines: &[MarkdownLine],
+) -> Vec<Cow<'a, str>> {
+    lines
+        .iter()
+        .map(|line| source.slice(line.source.clone()))
+        .collect()
+}
+
+fn markdown_code_source(source: MarkdownSource<'_>, body: &[std::ops::Range<usize>]) -> String {
+    let mut code = String::with_capacity(body.iter().map(std::ops::Range::len).sum());
+    for range in body {
+        code.push_str(&source.slice(range.clone()));
+    }
+    code
+}
+
 fn measure_source_lines(
     source: &str,
     kind: MarkdownTextKind,
@@ -684,13 +1552,14 @@ fn measure_source_lines(
 }
 
 fn measure_text_lines(
-    source: &str,
+    source: MarkdownSource<'_>,
     lines: &[MarkdownLine],
     kind: MarkdownTextKind,
     max_cols: usize,
     dim: bool,
     state: &mut MeasureState,
 ) {
+    let source_lines = markdown_source_lines(source, lines);
     let mut sink = MeasureIrSink {
         lines,
         max_cols,
@@ -699,8 +1568,8 @@ fn measure_text_lines(
     };
     walk_text_lines(
         lines.len(),
-        |i| smelt_buffer::text::slice(source, lines[i].source.clone()),
-        |i| is_markdown_list_item(smelt_buffer::text::slice(source, lines[i].source.clone())),
+        |i| source_lines[i].as_ref(),
+        |i| is_markdown_list_item(source_lines[i].as_ref()),
         kind,
         state,
         &mut sink,
@@ -737,7 +1606,7 @@ fn source_lines_range_has_visible_text(
 }
 
 fn text_lines_range_has_visible_text(
-    source: &str,
+    source: MarkdownSource<'_>,
     lines: &[MarkdownLine],
     kind: MarkdownTextKind,
     max_cols: usize,
@@ -745,6 +1614,7 @@ fn text_lines_range_has_visible_text(
     clip: RowClip,
     state: &mut FlowState,
 ) -> bool {
+    let source_lines = markdown_source_lines(source, lines);
     let mut sink = ProbeIrSink {
         lines,
         max_cols,
@@ -755,8 +1625,8 @@ fn text_lines_range_has_visible_text(
     };
     walk_text_lines(
         lines.len(),
-        |i| smelt_buffer::text::slice(source, lines[i].source.clone()),
-        |i| is_markdown_list_item(smelt_buffer::text::slice(source, lines[i].source.clone())),
+        |i| source_lines[i].as_ref(),
+        |i| is_markdown_list_item(source_lines[i].as_ref()),
         kind,
         state,
         &mut sink,
@@ -831,12 +1701,13 @@ fn render_source_lines(
 
 fn render_text_lines(
     out: &mut LineBuilder,
-    source: &str,
+    source: MarkdownSource<'_>,
     lines: &[MarkdownLine],
     kind: MarkdownTextKind,
     ctx: &RenderTextCtx<'_>,
     state: &mut RenderState,
 ) {
+    let source_lines = markdown_source_lines(source, lines);
     let mut sink = RenderIrSink {
         out,
         ctx,
@@ -845,8 +1716,8 @@ fn render_text_lines(
     };
     walk_text_lines(
         lines.len(),
-        |i| smelt_buffer::text::slice(source, lines[i].source.clone()),
-        |i| is_markdown_list_item(smelt_buffer::text::slice(source, lines[i].source.clone())),
+        |i| source_lines[i].as_ref(),
+        |i| is_markdown_list_item(source_lines[i].as_ref()),
         kind,
         state,
         &mut sink,
@@ -939,7 +1810,7 @@ impl TextFlowSink for MeasureSourceSink<'_> {
         let spans = fallback_markdown_line_spans(line, self.kind, self.dim, self.inline_options);
         state.rows = state
             .rows
-            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len() as u16);
+            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len());
     }
 }
 
@@ -964,7 +1835,7 @@ impl TextFlowSink for MeasureIrSink<'_> {
         let spans = markdown_line_spans(line, &self.lines[index].spans, self.kind, self.dim);
         state.rows = state
             .rows
-            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len() as u16);
+            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len());
     }
 }
 
@@ -1266,8 +2137,8 @@ mod tests {
                         false,
                         None,
                         &InlineOptions::default(),
-                        start as u16,
-                        count as u16,
+                        start,
+                        count,
                     );
                 });
                 let range_rows: Vec<&str> =
@@ -1280,6 +2151,353 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn markdown_arc_accounting_includes_the_header_for_empty_nodes() {
+        let nodes: Arc<[MarkdownNode]> = Arc::from([]);
+
+        assert_eq!(markdown_arc_retained_bytes(&nodes), arc_header_bytes());
+    }
+
+    #[test]
+    fn markdown_cache_evicts_an_oversize_many_span_entry() {
+        MARKDOWN_PARSE_CACHE.with_borrow_mut(MarkdownParseCache::clear);
+        let source = "**x** ".repeat(120_000);
+        let parsed = parse_markdown_cached(&source, &InlineOptions::default());
+
+        assert!(!parsed.nodes.is_empty());
+        MARKDOWN_PARSE_CACHE.with_borrow(|cache| {
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.retained_bytes, 0);
+        });
+    }
+
+    #[test]
+    fn retained_markdown_cache_updates_after_lazy_parse_and_layout_growth() {
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow_mut(RetainedMarkdownParseCache::clear);
+        let content = TranscriptContent::from(
+            (0..128)
+                .map(|index| {
+                    format!(
+                        "Paragraph {index} with **bold** and [link](https://example.test/{index})."
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+        let options = InlineOptions::default();
+        let parsed = parse_retained_markdown_cached(&content, &options);
+        let before = RETAINED_MARKDOWN_PARSE_CACHE.with_borrow(|cache| cache.retained_bytes);
+
+        measure_retained_markdown_inner_with_options(&content, 40, "", false, None, &options);
+
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow(|cache| {
+            assert_eq!(cache.entries.len(), 1);
+            assert!(cache.retained_bytes > before);
+            assert_eq!(cache.retained_bytes, cache.entries[0].retained_bytes);
+            assert!(cache.measured_retained_bytes() <= MARKDOWN_PARSE_CACHE_BYTES);
+        });
+        assert!(!parsed.borrow().layouts.is_empty());
+    }
+
+    #[test]
+    fn retained_markdown_cache_evicts_after_oversize_table_materializes() {
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow_mut(RetainedMarkdownParseCache::clear);
+        let source = format!(
+            "| value |\n| --- |\n| {} |\n\nsuffix",
+            "x".repeat(MARKDOWN_PARSE_CACHE_BYTES + 1)
+        );
+        let content = TranscriptContent::from(source);
+        let options = InlineOptions::default();
+        let parsed = parse_retained_markdown_cached(&content, &options);
+        assert_eq!(
+            RETAINED_MARKDOWN_PARSE_CACHE.with_borrow(|cache| cache.entries.len()),
+            1
+        );
+
+        let read = content.read();
+        let source = MarkdownSource::Retained(&read);
+        let materialized_nodes = {
+            let parsed = parsed.borrow();
+            assert!(!parsed.completed.is_empty());
+            parsed.completed[0].nodes(source, &options).len()
+        };
+        drop(read);
+        refresh_retained_markdown_cache_weight(&parsed);
+
+        assert!(materialized_nodes > 0);
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow(|cache| {
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.retained_bytes, 0);
+        });
+        assert!(!parsed.borrow().completed.is_empty());
+    }
+
+    #[test]
+    fn retained_markdown_reuses_completed_prefix_nodes_after_suffix_appends() {
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow_mut(RetainedMarkdownParseCache::clear);
+        let content = TranscriptContent::from("# café\n\nmutable".to_string());
+        let options = InlineOptions::default();
+
+        let first = parse_retained_markdown_cached(&content, &options);
+        let first_prefix = {
+            let parsed = first.borrow();
+            assert_eq!(parsed.completed.len(), 1);
+            Rc::clone(&parsed.completed[0])
+        };
+        measure_retained_markdown_inner_with_options(&content, 30, "", false, None, &options);
+        let first_completed_states = {
+            let parsed = first.borrow();
+            parsed.layouts[0].completed_states.clone()
+        };
+
+        content.append_owned(" suffix".to_string());
+        let second = parse_retained_markdown_cached(&content, &options);
+        assert!(Rc::ptr_eq(&first, &second));
+        measure_retained_markdown_inner_with_options(&content, 30, "", false, None, &options);
+        {
+            let parsed = second.borrow();
+            assert_eq!(parsed.completed.len(), 1);
+            assert!(Rc::ptr_eq(&first_prefix, &parsed.completed[0]));
+            assert_eq!(parsed.layouts[0].completed_states, first_completed_states);
+        }
+
+        content.append_owned("\n\nnext".to_string());
+        let third = parse_retained_markdown_cached(&content, &options);
+        let parsed = third.borrow();
+        assert_eq!(parsed.completed.len(), 2);
+        assert!(Rc::ptr_eq(&first_prefix, &parsed.completed[0]));
+    }
+
+    #[test]
+    fn retained_markdown_matches_contiguous_render_across_chunk_boundaries() {
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow_mut(RetainedMarkdownParseCache::clear);
+        let content = TranscriptContent::from("# café".to_string());
+        content.append_owned(" heading\n\nParagraph with **bold** 東京.\n\n```rust\n".to_string());
+        content.append_owned("fn main() {}\n```\n\n| col | value |\n| --- | --- |\n".to_string());
+        content.append_owned("| α | β |\n\nAfter table.".to_string());
+        let snapshot = content.snapshot();
+        let options = InlineOptions::default();
+
+        let contiguous = render_test(42, |sink| {
+            render_markdown_inner_with_options(sink, &snapshot, 42, "", false, None, &options);
+        });
+        let retained = render_test(42, |sink| {
+            render_retained_markdown_inner_range_with_options(
+                sink,
+                &content,
+                42,
+                "",
+                false,
+                None,
+                &options,
+                0,
+                usize::MAX,
+            );
+        });
+
+        assert_eq!(retained.lines.len(), contiguous.lines.len());
+        for (retained, contiguous) in retained.lines.iter().zip(&contiguous.lines) {
+            assert_eq!(retained.text, contiguous.text);
+            assert_eq!(retained.source_text, contiguous.source_text);
+            assert_eq!(
+                retained.external_source_text,
+                contiguous.external_source_text
+            );
+            assert_eq!(retained.soft_wrapped, contiguous.soft_wrapped);
+            assert_eq!(retained.cell_selectable, contiguous.cell_selectable);
+            assert_eq!(retained.block_selectable, contiguous.block_selectable);
+            assert_eq!(retained.copy_continuation, contiguous.copy_continuation);
+            assert_eq!(retained.spans.len(), contiguous.spans.len());
+            for (retained, contiguous) in retained.spans.iter().zip(&contiguous.spans) {
+                assert_eq!(retained.text, contiguous.text);
+                assert_eq!(retained.style, contiguous.style);
+                assert_eq!(retained.meta, contiguous.meta);
+            }
+        }
+        let contiguous_rows = contiguous
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        for start in 0..contiguous_rows.len() {
+            let range = render_test(42, |sink| {
+                render_retained_markdown_inner_range_with_options(
+                    sink, &content, 42, "", false, None, &options, start, 3,
+                );
+            });
+            let range_rows = range
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>();
+            let end = start.saturating_add(3).min(contiguous_rows.len());
+            assert_eq!(range_rows, contiguous_rows[start..end], "start={start}");
+        }
+        assert!(retained.lines.iter().any(|line| line
+            .source_text
+            .as_deref()
+            .is_some_and(|source| source.contains("| col |"))));
+    }
+
+    #[test]
+    fn retained_markdown_constructs_match_contiguous_render() {
+        let cases = [
+            (
+                "loose unordered list",
+                "- first\n\n  continuation\n\n- second",
+            ),
+            (
+                "loose ordered list",
+                "1. first\n\n   continuation\n\n2. second",
+            ),
+            ("block quote", "> quote\n>\n> continued\n\noutside"),
+            ("indented code", "    code one\n\n    code two\n\noutside"),
+            (
+                "forward reference",
+                "[reference][id]\n\n[id]: https://example.com",
+            ),
+            (
+                "backward reference",
+                "[id]: https://example.com\n\n[reference][id]",
+            ),
+        ];
+        let options = InlineOptions::default();
+
+        for (name, source) in cases {
+            let content = TranscriptContent::from(source.to_string());
+            let contiguous = render_test(40, |sink| {
+                render_markdown_inner_with_options(sink, source, 40, "", false, None, &options);
+            });
+            let retained = render_test(40, |sink| {
+                render_retained_markdown_inner_range_with_options(
+                    sink,
+                    &content,
+                    40,
+                    "",
+                    false,
+                    None,
+                    &options,
+                    0,
+                    usize::MAX,
+                );
+            });
+            let contiguous_rows = contiguous
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>();
+            let retained_rows = retained
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(retained_rows, contiguous_rows, "{name}");
+
+            for max_rows in 0..=contiguous_rows.len().min(4) {
+                for tail in [false, true] {
+                    let edge = render_test(40, |sink| {
+                        let window = render_retained_markdown_inner_edge_with_options(
+                            sink, &content, 40, "", false, None, &options, max_rows, tail,
+                        );
+                        assert_eq!(window.row_count, max_rows, "{name} tail={tail}");
+                        assert_eq!(
+                            window.truncated,
+                            contiguous_rows.len() > max_rows,
+                            "{name} tail={tail}"
+                        );
+                    });
+                    let edge_rows = edge
+                        .lines
+                        .iter()
+                        .map(|line| line.text.as_str())
+                        .collect::<Vec<_>>();
+                    let expected = if tail {
+                        &contiguous_rows[contiguous_rows.len().saturating_sub(max_rows)..]
+                    } else {
+                        &contiguous_rows[..max_rows]
+                    };
+                    assert_eq!(edge_rows, expected, "{name} tail={tail}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_markdown_edges_match_full_rendered_rows() {
+        let content = TranscriptContent::from(
+            "# Heading\n\nFirst paragraph with **bold** text.\n\n- one\n- two\n\n> quote\n\nLast paragraph."
+                .to_string(),
+        );
+        let options = InlineOptions::default();
+        let full = render_test(28, |sink| {
+            render_retained_markdown_inner_range_with_options(
+                sink,
+                &content,
+                28,
+                "",
+                false,
+                None,
+                &options,
+                0,
+                usize::MAX,
+            );
+        });
+        let full_rows = full
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+
+        for tail in [false, true] {
+            let edge = render_test(28, |sink| {
+                let window = render_retained_markdown_inner_edge_with_options(
+                    sink, &content, 28, "", false, None, &options, 4, tail,
+                );
+                assert_eq!(window.row_count, 4);
+                assert!(window.truncated);
+            });
+            let edge_rows = edge
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>();
+            let expected = if tail {
+                &full_rows[full_rows.len() - 4..]
+            } else {
+                &full_rows[..4]
+            };
+            assert_eq!(edge_rows, expected, "tail={tail}");
+        }
+    }
+
+    #[test]
+    fn retained_markdown_edges_do_not_build_complete_parse_or_layout_caches() {
+        RETAINED_MARKDOWN_PARSE_CACHE.with_borrow_mut(RetainedMarkdownParseCache::clear);
+        let content = TranscriptContent::from(
+            (0..20_000)
+                .map(|index| format!("Paragraph {index:05} with **bold** text.\n"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let retained_before = content.retained_bytes();
+        let options = InlineOptions::default();
+
+        let measured = measure_retained_markdown_inner_edge_with_options(
+            &content, 40, "", false, None, &options, 4,
+        );
+        let rendered = render_test(40, |sink| {
+            render_retained_markdown_inner_edge_with_options(
+                sink, &content, 40, "", false, None, &options, 4, true,
+            );
+        });
+
+        assert_eq!(measured.row_count, 4);
+        assert!(measured.truncated);
+        assert_eq!(rendered.lines.len(), 4);
+        assert!(RETAINED_MARKDOWN_PARSE_CACHE.with_borrow(|cache| cache.entries.is_empty()));
+        assert_eq!(content.retained_bytes(), retained_before);
     }
 
     #[test]
@@ -1326,8 +2544,9 @@ mod tests {
                 if let Some(smelt_core::transcript_model::Block::Text { content }) =
                     history.materialized_block_at(index)
                 {
+                    let content = content.snapshot();
                     let block = render_test(80, |sink| {
-                        render_markdown_inner(sink, content, 80, "", false, None);
+                        render_markdown_inner(sink, &content, 80, "", false, None);
                     });
                     rows.extend(block.lines.into_iter().map(|line| line.text));
                 }

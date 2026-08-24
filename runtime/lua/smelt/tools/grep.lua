@@ -165,7 +165,7 @@ local function grep_collapsed_detail(block)
     return transcript_defaults.display_count_text(block, { unit = count_unit_for_mode(mode) })
   end
 
-  return smelt.text.line_count((output and output.content) or "") .. " matches"
+  return tostring((output and output.content_lines) or 0) .. " matches"
 end
 
 smelt.transcript.register_tool("grep", {

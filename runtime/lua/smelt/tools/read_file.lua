@@ -54,6 +54,7 @@ local function format_text_window(content, offset, limit)
 end
 
 local function line_count(content)
+  if type(content) == "number" then return content end
   if content == nil or content == "" then return 0 end
   return smelt.text.line_count(content)
 end
@@ -189,7 +190,7 @@ smelt.transcript.register_tool("read_file", {
     return transcript_defaults.render_tool_output_tail(block.output, ctx)
   end,
   compact = function(block)
-    return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
+    return tostring((block.output and block.output.content_lines) or 0) .. " lines"
   end,
 })
 

@@ -36,6 +36,14 @@ pub(crate) struct DispatchingTurn {
     previous_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
 }
 
+pub(super) struct LuaToolCompletion {
+    pub(super) content: String,
+    pub(super) is_error: bool,
+    pub(super) metadata: Option<serde_json::Value>,
+    pub(super) display_content: Vec<protocol::ToolDisplayContent>,
+    pub(super) attachment: Option<Box<protocol::ToolAttachment>>,
+}
+
 impl TurnLifecycle {
     pub(crate) fn new(
         applied_mode: protocol::AgentMode,
@@ -1125,6 +1133,7 @@ impl TuiApp {
         self.cancel_turn_lua_tasks();
         self.conversation.invalidate_turn_callbacks();
         self.busy_stack.clear();
+        self.discard_pending_transcript_work();
         // A turn is ending without going through `finish_turn`. Commit any
         // in-flight streaming buffers so the post-cancel state honors the
         // "no agent ⇒ no active stream" invariant (an empty thinking delta
@@ -1174,6 +1183,7 @@ impl TuiApp {
                 self.cancel_turn_lua_tasks();
                 self.conversation.invalidate_turn_callbacks();
                 self.busy_stack.clear();
+                self.discard_pending_transcript_work();
                 self.clear_compaction_preview();
                 // Archive an interrupted outcome so the prompt bar shows
                 // "interrupted" rather than falling back to idle/done.
@@ -1214,6 +1224,7 @@ impl TuiApp {
         self.platform.set_sleep_inhibited(false);
         match end {
             TurnEnd::Cancelled => {
+                self.discard_pending_transcript_work();
                 self.core.engine.send(UiCommand::Cancel);
                 self.cancel_turn_lua_tasks();
                 self.conversation.invalidate_turn_callbacks();
@@ -1371,21 +1382,38 @@ impl TuiApp {
                 content,
                 is_error,
                 metadata,
+                display_content,
+                attachment,
             } => {
-                self.complete_lua_tool(invocation, call_id, content, is_error, metadata);
+                self.complete_lua_tool(
+                    invocation,
+                    call_id,
+                    LuaToolCompletion {
+                        content,
+                        is_error,
+                        metadata,
+                        display_content,
+                        attachment,
+                    },
+                );
             }
             crate::lua::ToolExecResult::Pending => {}
         }
     }
 
-    pub(crate) fn complete_lua_tool(
+    pub(super) fn complete_lua_tool(
         &mut self,
         invocation: smelt_core::lua::ToolInvocationContext,
         call_id: String,
-        mut content: String,
-        mut is_error: bool,
-        mut metadata: Option<serde_json::Value>,
+        completion: LuaToolCompletion,
     ) {
+        let LuaToolCompletion {
+            mut content,
+            mut is_error,
+            mut metadata,
+            display_content,
+            attachment,
+        } = completion;
         match self.commit_tool_cwd_change(invocation, !is_error) {
             Ok(true) => {
                 self.refresh_active_turn_permissions();
@@ -1409,6 +1437,8 @@ impl TuiApp {
             content,
             is_error,
             metadata,
+            display_content,
+            attachment: attachment.map(|attachment| *attachment),
         });
     }
 

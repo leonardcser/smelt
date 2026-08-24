@@ -3,8 +3,8 @@
 -- This module owns:
 --   * the statusline window (`M.win`)
 --   * a registry of named source callbacks (`M.add` / `M.remove`)
---   * a per-frame renderer that calls each source, flattens the
---     returned segments, composes via `_bar.compose_status`, and
+--   * a retained renderer that calls each source after semantic invalidation,
+--     flattens the returned segments, composes via `_bar.compose_status`, and
 --     writes to the window's buffer.
 --
 -- The built-in `core` source reads engine state from signals plus
@@ -19,6 +19,14 @@ local M = {}
 
 local NS = smelt.ns("smelt.statusline")
 local sources = {} -- ordered { name, handler } pairs
+local renderer_subscriptions = {}
+
+-- Repaint after plugin-owned state changes that are not represented by a
+-- built-in signal. Adding, replacing, and removing sources invalidates
+-- automatically.
+function M.invalidate()
+  if M.win then M.win:invalidate_renderer() end
+end
 
 -- ── source registry ─────────────────────────────────────────────────
 
@@ -26,16 +34,19 @@ function M.add(name, handler)
   for _, src in ipairs(sources) do
     if src.name == name then
       src.handler = handler
+      M.invalidate()
       return
     end
   end
   sources[#sources + 1] = { name = name, handler = handler }
+  M.invalidate()
 end
 
 function M.remove(name)
   for i = #sources, 1, -1 do
     if sources[i].name == name then table.remove(sources, i) end
   end
+  M.invalidate()
 end
 
 -- ── default `core` source ───────────────────────────────────────────
@@ -223,7 +234,29 @@ M.win = smelt.win.new(smelt.buf.new({ name = "smelt.statusline" }), {
   region = "status",
 })
 
-if M.win then M.win:set_renderer(render) end
+if M.win then
+  M.win:set_renderer(render)
+  if type(smelt.signal.subscribe) == "function" then
+    for _, name in ipairs({
+      "agent_mode",
+      "cursor_pos",
+      "cwd_managed_worktree",
+      "cwd_worktree_path",
+      "input_epoch",
+      "keymap_pending",
+      "permission_pending",
+      "running_procs",
+      "session_epoch",
+      "task_label",
+      "tps",
+      "viewport_pos",
+      "vim_mode",
+      "vim_pending_input",
+    }) do
+      renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(name, M.invalidate)
+    end
+  end
+end
 
 -- Row count this composer paints into. Layout / overlay code that needs
 -- to reserve space above the statusline reads this instead of touching

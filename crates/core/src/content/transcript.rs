@@ -54,13 +54,11 @@ impl Transcript {
     fn normalize_block(block: Block) -> Option<Block> {
         Some(match block {
             Block::Text { content } => {
-                let t = content.trim();
-                if t.is_empty() {
+                let content = content.into_trimmed();
+                if content.is_empty() {
                     return None;
                 }
-                Block::Text {
-                    content: t.to_string(),
-                }
+                Block::Text { content }
             }
             Block::Thinking {
                 title,
@@ -78,14 +76,14 @@ impl Transcript {
                     .cloned()
                     .or_else(|| title.map(|title| title.trim().to_string()))
                     .filter(|title| !title.is_empty());
-                let content = content.trim();
+                let content = content.into_trimmed();
                 if title.is_none() && content.is_empty() {
                     return None;
                 }
                 Block::Thinking {
                     title,
                     summary_titles,
-                    content: content.to_string(),
+                    content,
                     kind,
                 }
             }
@@ -337,7 +335,7 @@ mod tests {
             title: Some("Checking files".into()),
             summary_titles: vec!["Checking files".into()],
             kind: protocol::ReasoningKind::Summary,
-            content: String::new(),
+            content: String::new().into(),
         });
         assert_eq!(
             block_at(&t.history, 0),
@@ -345,7 +343,7 @@ mod tests {
                 title: Some("Checking files".into()),
                 summary_titles: vec!["Checking files".into()],
                 kind: protocol::ReasoningKind::Summary,
-                content: String::new(),
+                content: String::new().into(),
             }
         );
     }
@@ -465,6 +463,7 @@ mod tests {
                 content_hash: 0,
                 origin: Some(BlockOrigin::History(0)),
                 tool_state: None,
+                tool_render_revision: 0,
             },
             TranscriptBlockRecord {
                 block: Block::Text {
@@ -473,6 +472,7 @@ mod tests {
                 content_hash: 0,
                 origin: Some(BlockOrigin::History(1)),
                 tool_state: None,
+                tool_render_revision: 0,
             },
         ]);
 

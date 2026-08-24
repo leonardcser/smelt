@@ -346,6 +346,8 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                             content: "tool finished".into(),
                             is_error: false,
                             metadata: None,
+                            display_content: Vec::new(),
+                            attachment: None,
                         });
                     }
                 }
@@ -879,6 +881,8 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
                     content: "done".into(),
                     is_error: false,
                     metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
                 });
             }
             Some(EngineEvent::ToolFinished { call_id, .. }) if call_id == TOOL_CALL_ID => {

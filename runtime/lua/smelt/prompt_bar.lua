@@ -25,6 +25,31 @@ local INDICATOR_PRIORITY = 1
 local LABEL_PRIORITY = 2
 local SECONDARY_PRIORITY = 3
 local OPTIONAL_PRIORITY = 4
+local DEFAULT_BAR_STYLE = { fg = "SmeltSeparator" }
+local COMMENT_DIM_STYLE = { fg = "Comment", dim = true }
+local NORMAL_BOLD_STYLE = { fg = "Normal", bold = true }
+local indicator_cache = { spans = {}, pool = {}, count = 0 }
+local renderer_subscriptions = {}
+
+local function invalidate_on(win, names)
+  if not win or type(smelt.signal.subscribe) ~= "function" then return end
+  for _, name in ipairs(names) do
+    renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(name, function()
+      win:invalidate_renderer()
+    end)
+  end
+end
+
+local function invalidate_when_changed(win, name, display_value)
+  if not win or type(smelt.signal.subscribe) ~= "function" then return end
+  renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(
+    name,
+    function(value, previous)
+      if display_value(value) ~= display_value(previous) then
+        win:invalidate_renderer()
+      end
+    end)
+end
 
 -- ── helpers ─────────────────────────────────────────────────────────
 
@@ -151,12 +176,35 @@ end
 -- "glyph + label" gets its own span so the traveling wave can paint a
 -- per-cell gradient.
 
+local function indicator_span(text, style, priority, selectable)
+  local index = indicator_cache.count + 1
+  indicator_cache.count = index
+  local span = indicator_cache.pool[index]
+  if not span then
+    span = {}
+    indicator_cache.pool[index] = span
+  end
+  span.text = text
+  span.style = style
+  span.priority = priority
+  span.selectable = selectable
+  indicator_cache.spans[index] = span
+  return span
+end
+
+local function finish_indicator()
+  for index = indicator_cache.count + 1, #indicator_cache.spans do
+    indicator_cache.spans[index] = nil
+  end
+  return indicator_cache.spans
+end
+
 local function indicator_spans(opts)
-  opts = opts or {}
-  local bar_style = opts.bar_style or { fg = "SmeltSeparator" }
+  local bar_style = (opts and opts.bar_style) or DEFAULT_BAR_STYLE
   local state = smelt.signal.get("work_state")
   if not state or state == "idle" then return nil end
 
+  indicator_cache.count = 0
   local label = smelt.signal.get("work_label") or ""
   local elapsed_ms = smelt.signal.get("work_elapsed_ms") or 0
   local retry_attempt = smelt.signal.get("work_retry_attempt") or 0
@@ -179,18 +227,26 @@ local function indicator_spans(opts)
     glyph = ""
   end
 
-  local spans = {}
   local wave_x = 0
+  local wave_t, wave_low, wave_high
+  if active then wave_t, wave_low, wave_high = smelt.spinner.wave_state() end
   local function add_wave_text(text, priority, selectable_start)
     for _, codepoint in utf8.codes(text) do
-      local ch = utf8.char(codepoint)
-      local rgb = smelt.spinner.wave_color_at(wave_x)
-      spans[#spans + 1] = {
-        text = ch,
-        style = { fg = rgb, bold = true },
-        priority = priority,
-        selectable = selectable_start and wave_x >= selectable_start,
-      }
+      local span = indicator_cache.pool[indicator_cache.count + 1]
+      local style = span and span.wave_style
+      if not style then
+        style = { fg = { 0, 0, 0 }, bold = true }
+        if not span then span = {} end
+        span.wave_style = style
+        indicator_cache.pool[indicator_cache.count + 1] = span
+      end
+      local level = smelt.spinner.wave_level_at(wave_x, wave_t, wave_low, wave_high)
+      style.fg[1], style.fg[2], style.fg[3] = level, level, level
+      indicator_span(
+        utf8.char(codepoint),
+        style,
+        priority,
+        selectable_start and wave_x >= selectable_start)
       wave_x = wave_x + 1
     end
   end
@@ -198,60 +254,44 @@ local function indicator_spans(opts)
   -- Leading `─` so the indicator sits one cell in from the edge. It drops with
   -- the compact spinner so narrow bars fall back to a clean rule instead of an
   -- orphan edge cell.
-  spans[#spans + 1] = {
-    text = "\u{2500}",
-    style = bar_style,
-    priority = INDICATOR_PRIORITY,
-    selectable = false,
-  }
+  indicator_span("\u{2500}", bar_style, INDICATOR_PRIORITY, false)
 
   if active then
     if glyph ~= "" then add_wave_text(" " .. glyph, INDICATOR_PRIORITY, nil) end
     if label ~= "" then add_wave_text(" " .. label, LABEL_PRIORITY, 3) end
   else
-    local style
+    local style = NORMAL_BOLD_STYLE
     if state == "paused" or state == "done" or state == "interrupted" then
-      style = { fg = "Comment", dim = true }
-    else
-      style = { fg = "Normal", bold = true }
+      style = COMMENT_DIM_STYLE
     end
     if glyph ~= "" then
-      spans[#spans + 1] = {
-        text = " " .. glyph,
-        style = style,
-        priority = INDICATOR_PRIORITY,
-        selectable = false,
-      }
+      indicator_span(" " .. glyph, style, INDICATOR_PRIORITY, false)
     end
     if label ~= "" then
-      spans[#spans + 1] = {
-        text = " " .. label,
-        style = style,
-        priority = LABEL_PRIORITY,
-      }
+      indicator_span(" " .. label, style, LABEL_PRIORITY, nil)
     end
   end
 
   -- Duration suppressed for `interrupted` (label alone reads cleaner).
   local secs = math.floor(elapsed_ms / 1000)
   if state ~= "interrupted" and secs > 0 then
-    spans[#spans + 1] = {
-      text = " " .. smelt.text.format_duration(secs),
-      style = { fg = "Comment", dim = true },
-      priority = SECONDARY_PRIORITY,
-    }
+    indicator_span(
+      " " .. smelt.text.format_duration(secs),
+      COMMENT_DIM_STYLE,
+      SECONDARY_PRIORITY,
+      nil)
   end
 
   if retry_attempt > 0 then
     local retry_secs = math.max(1, math.ceil(retry_remaining_ms / 1000))
-    spans[#spans + 1] = {
-      text = string.format(" (retrying in %ds #%d)", retry_secs, retry_attempt),
-      style = { fg = "Comment", dim = true },
-      priority = OPTIONAL_PRIORITY,
-    }
+    indicator_span(
+      string.format(" (retrying in %ds #%d)", retry_secs, retry_attempt),
+      COMMENT_DIM_STYLE,
+      OPTIONAL_PRIORITY,
+      nil)
   end
 
-  return spans
+  return finish_indicator()
 end
 
 -- ── right-side spans (model + reasoning + tokens + cost) ─────────────
@@ -266,8 +306,7 @@ local function reasoning_color_group(effort)
 end
 
 local function right_spans(opts)
-  opts = opts or {}
-  local bar_style = opts.bar_style or { fg = "SmeltSeparator" }
+  local bar_style = (opts and opts.bar_style) or DEFAULT_BAR_STYLE
   local spans = {}
   local status = smelt.session.status and smelt.session.status() or {}
   local model = status.model or smelt.model.current()
@@ -451,6 +490,38 @@ if M.bottom_win then
   M.bottom_win:set_renderer(render_bottom)
 end
 
+invalidate_on(M.aux_win, {
+  "input_epoch",
+  "notification_visible",
+  "prompt_queue_revision",
+  "work_state",
+})
+invalidate_on(M.top_win, {
+  "fast_mode",
+  "input_epoch",
+  "model",
+  "prompt_queue_revision",
+  "prompt_resize_active",
+  "prompt_resize_chrome",
+  "reasoning",
+  "session_epoch",
+  "spinner_frame",
+  "tokens_used",
+  "work_label",
+  "work_retry_attempt",
+  "work_state",
+})
+invalidate_when_changed(M.top_win, "work_elapsed_ms", function(value)
+  return math.floor((tonumber(value) or 0) / 1000)
+end)
+invalidate_when_changed(M.top_win, "work_retry_remaining_ms", function(value)
+  return math.max(1, math.ceil((tonumber(value) or 0) / 1000))
+end)
+invalidate_on(M.bottom_win, {
+  "prompt_resize_active",
+  "prompt_resize_chrome",
+})
+
 -- Expose helper for the layout composer so it can compute the top bar's
 -- row count from current state (queued messages, stash row, bar row).
 -- `max_top_rows` is an optional cap; when omitted the natural row count is
@@ -464,6 +535,21 @@ function M.top_rows(max_top_rows)
     return math.min(rows, math.max(1, max_top_rows))
   end
   return rows
+end
+
+if smelt.win and smelt.win.PROMPT then
+  local previous_top_rows = M.top_rows()
+  renderer_subscriptions[#renderer_subscriptions + 1] = smelt.win.PROMPT:on(
+    "text_changed",
+    function()
+      if M.aux_win then M.aux_win:invalidate_renderer() end
+      if M.top_win then M.top_win:invalidate_renderer() end
+      local top_rows = M.top_rows()
+      if top_rows ~= previous_top_rows then
+        previous_top_rows = top_rows
+        smelt.ui.layout.invalidate()
+      end
+    end)
 end
 
 return M

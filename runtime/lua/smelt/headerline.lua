@@ -14,6 +14,15 @@ local M = {}
 
 local NS = smelt.ns("smelt.headerline")
 local sources = {} -- ordered { name, spec } pairs
+local renderer_subscriptions = {}
+
+-- Repaint and recompose the layout after plugin-owned state changes that are
+-- not represented by a built-in signal. Visibility may change the row count.
+-- Adding, replacing, and removing sources invalidates automatically.
+function M.invalidate()
+  if M.win then M.win:invalidate_renderer() end
+  smelt.ui.layout.invalidate()
+end
 
 function M.add(name, spec)
   if type(spec) == "function" then spec = { render = spec } end
@@ -23,16 +32,19 @@ function M.add(name, spec)
   for _, src in ipairs(sources) do
     if src.name == name then
       src.spec = spec
+      M.invalidate()
       return
     end
   end
   sources[#sources + 1] = { name = name, spec = spec }
+  M.invalidate()
 end
 
 function M.remove(name)
   for i = #sources, 1, -1 do
     if sources[i].name == name then table.remove(sources, i) end
   end
+  M.invalidate()
 end
 
 local function is_visible(src)
@@ -82,6 +94,12 @@ M.win = smelt.win.new(smelt.buf.new({ name = "smelt.headerline" }), {
   region = "header",
 })
 
-if M.win then M.win:set_renderer(render) end
+if M.win then
+  M.win:set_renderer(render)
+  if type(smelt.signal.subscribe) == "function" then
+    renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(
+      "session_epoch", M.invalidate)
+  end
+end
 
 return M

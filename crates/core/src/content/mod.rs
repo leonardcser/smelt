@@ -7,6 +7,7 @@ pub mod file_icons;
 pub mod highlight;
 pub mod selection;
 pub mod stream_parser;
+pub mod tool_draft;
 pub mod transcript;
 pub mod width;
 

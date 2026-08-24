@@ -176,7 +176,7 @@ Return the model-visible message list for the next request. If the session has a
 fun(id: string, opts: table): table?
 ```
 
-Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'unavailable', reason }` when persisted content cannot be hydrated, or `nil` when the session is missing.
+Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'pending' }` while the background preview service reads or hydrates persisted content, or `{ status = 'unavailable', reason }` when persisted content cannot be hydrated.
 
 ## `smelt.session.reset`
 

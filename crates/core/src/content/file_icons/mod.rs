@@ -29,6 +29,14 @@ impl FileIconOptions {
         self.hash(&mut h);
         h.finish()
     }
+
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        self.base_dir.as_ref().map_or(0, PathBuf::capacity)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
 }
 
 impl Default for FileIconOptions {

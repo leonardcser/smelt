@@ -285,16 +285,6 @@ pub(crate) fn reclaim_step(
                )
              LIMIT ?2
          )",
-        "DELETE FROM lineage_transcript_extent_chunks
-         WHERE rowid IN (
-             SELECT extent.rowid
-             FROM lineage_transcript_extent_chunks extent
-             WHERE extent.lineage_id = ?1
-               AND extent.transcript_root_id NOT IN (
-                   SELECT root_id FROM smelt_reachable_roots
-               )
-             LIMIT ?2
-         )",
         "DELETE FROM lineage_sequence_roots
          WHERE rowid IN (
              SELECT root.rowid
@@ -307,6 +297,14 @@ pub(crate) fn reclaim_step(
                      AND (revision.history_root_id = root.root_id
                           OR revision.transcript_root_id = root.root_id)
                )
+             LIMIT ?2
+         )",
+        "DELETE FROM lineage_transcript_extent_nodes
+         WHERE rowid IN (
+             SELECT profile.rowid
+             FROM lineage_transcript_extent_nodes profile
+             WHERE profile.lineage_id = ?1
+               AND profile.node_id NOT IN (SELECT node_id FROM smelt_reachable_nodes)
              LIMIT ?2
          )",
         "DELETE FROM lineage_sequence_entries
@@ -332,6 +330,16 @@ pub(crate) fn reclaim_step(
                    SELECT 1 FROM lineage_sequence_roots root
                    WHERE root.lineage_id = node.lineage_id
                      AND root.root_node_id = node.node_id
+               )
+             LIMIT ?2
+         )",
+        "DELETE FROM lineage_transcript_record_profiles
+         WHERE rowid IN (
+             SELECT profile.rowid
+             FROM lineage_transcript_record_profiles profile
+             WHERE profile.lineage_id = ?1
+               AND profile.payload_id NOT IN (
+                   SELECT payload_id FROM smelt_reachable_payloads
                )
              LIMIT ?2
          )",

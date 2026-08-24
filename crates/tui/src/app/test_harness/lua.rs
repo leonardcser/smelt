@@ -77,8 +77,17 @@ impl TestApp {
         is_error: bool,
         metadata: Option<serde_json::Value>,
     ) {
-        self.app
-            .complete_lua_tool(invocation, call_id, content, is_error, metadata);
+        self.app.complete_lua_tool(
+            invocation,
+            call_id,
+            crate::app::agent::LuaToolCompletion {
+                content,
+                is_error,
+                metadata,
+                display_content: Vec::new(),
+                attachment: None,
+            },
+        );
     }
 
     /// Run an arbitrary Lua snippet while lending it the frontend host. Callers

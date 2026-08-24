@@ -1,39 +1,54 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 
 use super::markdown::{
     markdown_range_has_visible_text_with_options, measure_markdown_inner_with_options,
-    render_markdown_inner_range_with_options,
+    measure_retained_markdown_inner_edge_with_options,
+    measure_retained_markdown_inner_with_options, render_markdown_inner_range_with_options,
+    render_retained_markdown_inner_edge_with_options,
+    render_retained_markdown_inner_range_with_options,
 };
-use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
+use super::temp_rows::{
+    apply_temp_decoration, emit_buffer_row_clipped, emit_buffer_row_clipped_with_scratch,
+};
 use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
-use smelt_core::buffer::SpanMeta;
+use smelt_core::buffer::{BufCreateOpts, BufId, Buffer, Span, SpanMeta};
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
-    solve_hbox_widths_with_fit, BlockLayout, CodeSpec, GutterSpec, IrLeaf, LayoutIr, LineSpec,
-    MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
+    solve_hbox_widths_with_fit, BlockLayout, CodeSpec, ContentRenderSpec, GutterSpec, IrLeaf,
+    LayoutIr, LineSpec, MarkdownSpec, PanelSpec, RetainedContentSpec, RetainedInlineSyntax,
+    RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{
-    display_width, wrapped_segments, LineBuilder, WrappedSegmentKind,
+    display_width, wrapped_segments, LineBuilder, Outcome, WrappedSegmentKind,
 };
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
     emit_inline_spans, parse_inline_spans_with_options, render_code_block, wrap_inline_spans,
-    InlineOptions, InlineSpan, InlineSyntax,
+    InlineOptions, InlineSpan, InlineSyntax, InlineSyntaxSpan,
 };
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
 use smelt_core::theme::{intern, Theme};
 use smelt_core::transcript_model::BlockHistory;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_RETAINED_TEXT_RENDER_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
-    render_layout_ir_range(
+    render_layout_ir_range_measured(
         out,
         layout,
         width,
         0,
-        u16::MAX,
+        usize::MAX,
         None,
         None,
         &InlineOptions::default(),
+        RenderMeasurement::Complete,
     )
 }
 
@@ -44,70 +59,376 @@ pub(crate) fn render_layout_ir_into_with_history(
     history: &BlockHistory,
     inline_options: &InlineOptions,
 ) -> u16 {
-    render_layout_ir_range(
+    render_layout_ir_range_measured(
         out,
         layout,
         width,
         0,
-        u16::MAX,
+        usize::MAX,
         None,
         Some(history),
         inline_options,
-    )
-}
-
-pub(crate) fn render_layout_ir_range_into(
-    out: &mut LineBuilder,
-    layout: &LayoutIr,
-    width: u16,
-    row_start: u16,
-    row_count: u16,
-    inline_options: &InlineOptions,
-) -> u16 {
-    render_layout_ir_range(
-        out,
-        layout,
-        width,
-        row_start,
-        row_count,
-        None,
-        None,
-        inline_options,
-    )
-}
-
-pub(crate) fn render_layout_ir_range_into_with_history(
-    out: &mut LineBuilder,
-    layout: &LayoutIr,
-    width: u16,
-    row_start: u16,
-    row_count: u16,
-    history: &BlockHistory,
-    inline_options: &InlineOptions,
-) -> u16 {
-    render_layout_ir_range(
-        out,
-        layout,
-        width,
-        row_start,
-        row_count,
-        None,
-        Some(history),
-        inline_options,
+        RenderMeasurement::Complete,
     )
 }
 
 #[cfg(test)]
-pub(crate) fn measure_layout_ir(layout: &LayoutIr, width: u16) -> u16 {
+pub(crate) fn measure_layout_ir(layout: &LayoutIr, width: u16) -> usize {
     measure_layout_ir_with_options(layout, width, &InlineOptions::default())
 }
 
+#[cfg(test)]
 pub(crate) fn measure_layout_ir_with_options(
     layout: &LayoutIr,
     width: u16,
     inline_options: &InlineOptions,
-) -> u16 {
+) -> usize {
     measure_layout_ir_full(layout, width, inline_options)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MeasuredLayout {
+    rows: usize,
+    kind: MeasuredLayoutKind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MeasuredLayoutKind {
+    Terminal,
+    Child(Box<MeasuredLayout>),
+    Children(Vec<MeasuredLayout>),
+    Hbox {
+        widths: Vec<u16>,
+        children: Vec<MeasuredLayout>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum RenderMeasurement<'a> {
+    Complete,
+    Measured(&'a MeasuredLayout),
+}
+
+impl RenderMeasurement<'_> {
+    fn child(self) -> Self {
+        match self {
+            Self::Complete => Self::Complete,
+            Self::Measured(measured) => Self::Measured(
+                measured
+                    .child()
+                    .expect("measured layout must match its wrapper"),
+            ),
+        }
+    }
+}
+
+impl MeasuredLayout {
+    pub(crate) fn rows(&self) -> usize {
+        self.rows
+    }
+
+    fn child(&self) -> Option<&Self> {
+        match &self.kind {
+            MeasuredLayoutKind::Child(child) => Some(child),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> Option<&[Self]> {
+        match &self.kind {
+            MeasuredLayoutKind::Children(children) | MeasuredLayoutKind::Hbox { children, .. } => {
+                Some(children)
+            }
+            _ => None,
+        }
+    }
+
+    fn hbox_widths(&self) -> Option<&[u16]> {
+        match &self.kind {
+            MeasuredLayoutKind::Hbox { widths, .. } => Some(widths),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let own = std::mem::size_of::<Self>();
+        match &self.kind {
+            MeasuredLayoutKind::Terminal => own,
+            MeasuredLayoutKind::Child(child) => own.saturating_add(child.retained_bytes()),
+            MeasuredLayoutKind::Children(children) => {
+                own.saturating_add(children.iter().map(Self::retained_bytes).sum::<usize>())
+            }
+            MeasuredLayoutKind::Hbox { widths, children } => own
+                .saturating_add(widths.capacity().saturating_mul(std::mem::size_of::<u16>()))
+                .saturating_add(children.iter().map(Self::retained_bytes).sum::<usize>()),
+        }
+    }
+}
+
+pub(crate) fn measure_layout_ir_plan(
+    layout: &LayoutIr,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> MeasuredLayout {
+    measure_layout_ir_plan_with_gutter(layout, width, 0, inline_options)
+}
+
+pub(crate) fn refresh_layout_ir_content_measurements(
+    layout: &LayoutIr,
+    measured: &mut MeasuredLayout,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> bool {
+    matches!(
+        refresh_layout_ir_content_measurements_inner(layout, measured, width, inline_options),
+        ContentMeasurementRefresh::Updated
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentMeasurementRefresh {
+    Unchanged,
+    Updated,
+    Incompatible,
+}
+
+impl ContentMeasurementRefresh {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Incompatible, _) | (_, Self::Incompatible) => Self::Incompatible,
+            (Self::Updated, _) | (_, Self::Updated) => Self::Updated,
+            (Self::Unchanged, Self::Unchanged) => Self::Unchanged,
+        }
+    }
+}
+
+fn refresh_layout_ir_content_measurements_inner(
+    layout: &LayoutIr,
+    measured: &mut MeasuredLayout,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> ContentMeasurementRefresh {
+    match (layout, &mut measured.kind) {
+        (BlockLayout::Empty, MeasuredLayoutKind::Terminal)
+        | (BlockLayout::Leaf(_), MeasuredLayoutKind::Terminal) => {
+            let BlockLayout::Leaf(IrLeaf::Content(spec)) = layout else {
+                return ContentMeasurementRefresh::Unchanged;
+            };
+            measured.rows = measure_content_spec(spec, width, 0, inline_options);
+            ContentMeasurementRefresh::Updated
+        }
+        (BlockLayout::Vbox(items), MeasuredLayoutKind::Children(children)) => {
+            if items.len() != children.len() {
+                return ContentMeasurementRefresh::Incompatible;
+            }
+            let refresh = items.iter().zip(children.iter_mut()).fold(
+                ContentMeasurementRefresh::Unchanged,
+                |refresh, (child, measured_child)| {
+                    refresh.merge(refresh_layout_ir_content_measurements_inner(
+                        child,
+                        measured_child,
+                        width,
+                        inline_options,
+                    ))
+                },
+            );
+            if refresh == ContentMeasurementRefresh::Updated {
+                measured.rows = children
+                    .iter()
+                    .fold(0usize, |rows, child| rows.saturating_add(child.rows));
+            }
+            refresh
+        }
+        (BlockLayout::Hbox(items), MeasuredLayoutKind::Hbox { widths, children }) => {
+            if items.len() != widths.len() || items.len() != children.len() {
+                return ContentMeasurementRefresh::Incompatible;
+            }
+            let refresh = items
+                .iter()
+                .zip(widths.iter().copied())
+                .zip(children.iter_mut())
+                .fold(
+                    ContentMeasurementRefresh::Unchanged,
+                    |refresh, ((item, child_width), measured_child)| {
+                        refresh.merge(refresh_layout_ir_content_measurements_inner(
+                            &item.layout,
+                            measured_child,
+                            child_width,
+                            inline_options,
+                        ))
+                    },
+                );
+            if refresh == ContentMeasurementRefresh::Updated {
+                measured.rows = children.iter().map(|child| child.rows).max().unwrap_or(0);
+            }
+            refresh
+        }
+        (BlockLayout::Gutter { child, spec }, MeasuredLayoutKind::Child(measured_child)) => {
+            let spec_width = display_width_u16(&spec.text);
+            let refresh = refresh_layout_ir_content_measurements_inner(
+                child,
+                measured_child,
+                child_width_after_gutter(width, spec_width),
+                inline_options,
+            );
+            if refresh == ContentMeasurementRefresh::Updated {
+                measured.rows = measured_child.rows;
+            }
+            refresh
+        }
+        (BlockLayout::RowPrefix { child, spec }, MeasuredLayoutKind::Child(measured_child)) => {
+            let prefix_width = row_prefix_width(spec);
+            let refresh = refresh_layout_ir_content_measurements_inner(
+                child,
+                measured_child,
+                child_width_after_gutter(width, prefix_width),
+                inline_options,
+            );
+            if refresh == ContentMeasurementRefresh::Updated {
+                measured.rows = measure_row_prefix_special(child, spec, width, inline_options)
+                    .unwrap_or(measured_child.rows);
+            }
+            refresh
+        }
+        (BlockLayout::Panel { child, spec }, MeasuredLayoutKind::Child(measured_child)) => {
+            let refresh = refresh_layout_ir_content_measurements_inner(
+                child,
+                measured_child,
+                panel_child_width(width, spec.padding),
+                inline_options,
+            );
+            if refresh == ContentMeasurementRefresh::Updated {
+                measured.rows = measured_child
+                    .rows
+                    .saturating_add(usize::from(spec.padding.saturating_mul(2)));
+            }
+            refresh
+        }
+        (
+            BlockLayout::Style { child, .. } | BlockLayout::Refresh { child, .. },
+            MeasuredLayoutKind::Child(measured_child),
+        ) => {
+            let refresh = refresh_layout_ir_content_measurements_inner(
+                child,
+                measured_child,
+                width,
+                inline_options,
+            );
+            if refresh == ContentMeasurementRefresh::Updated {
+                measured.rows = measured_child.rows;
+            }
+            refresh
+        }
+        (BlockLayout::Cap { child, spec }, MeasuredLayoutKind::Terminal) => {
+            measured.rows = measure_bounded_cap_rows(child, spec, width, inline_options)
+                .expect("every cap has a bounded measurement policy");
+            ContentMeasurementRefresh::Updated
+        }
+        _ => ContentMeasurementRefresh::Incompatible,
+    }
+}
+
+fn measure_layout_ir_plan_with_gutter(
+    layout: &LayoutIr,
+    width: u16,
+    gutter_cells: u16,
+    inline_options: &InlineOptions,
+) -> MeasuredLayout {
+    match layout {
+        BlockLayout::Empty => MeasuredLayout {
+            rows: 0,
+            kind: MeasuredLayoutKind::Terminal,
+        },
+        BlockLayout::Leaf(leaf) => MeasuredLayout {
+            rows: measure_ir_leaf(leaf, width, gutter_cells, inline_options),
+            kind: MeasuredLayoutKind::Terminal,
+        },
+        BlockLayout::Vbox(items) => {
+            let children = items
+                .iter()
+                .map(|child| {
+                    measure_layout_ir_plan_with_gutter(child, width, gutter_cells, inline_options)
+                })
+                .collect::<Vec<_>>();
+            let rows = children
+                .iter()
+                .fold(0usize, |rows, child| rows.saturating_add(child.rows));
+            MeasuredLayout {
+                rows,
+                kind: MeasuredLayoutKind::Children(children),
+            }
+        }
+        BlockLayout::Hbox(items) => {
+            let widths = solve_ir_hbox_widths(items, width);
+            let children = items
+                .iter()
+                .zip(widths.iter().copied())
+                .map(|(item, child_width)| {
+                    measure_layout_ir_plan(&item.layout, child_width, inline_options)
+                })
+                .collect::<Vec<_>>();
+            let rows = children.iter().map(|child| child.rows).max().unwrap_or(0);
+            MeasuredLayout {
+                rows,
+                kind: MeasuredLayoutKind::Hbox { widths, children },
+            }
+        }
+        BlockLayout::Gutter { child, spec } => {
+            let spec_width = display_width_u16(&spec.text);
+            let child = measure_layout_ir_plan_with_gutter(
+                child,
+                child_width_after_gutter(width, spec_width),
+                spec_width,
+                inline_options,
+            );
+            MeasuredLayout {
+                rows: child.rows,
+                kind: MeasuredLayoutKind::Child(Box::new(child)),
+            }
+        }
+        BlockLayout::RowPrefix { child, spec } => {
+            let prefix_width = row_prefix_width(spec);
+            let child_width = child_width_after_gutter(width, prefix_width);
+            let measured_child = measure_layout_ir_plan_with_gutter(
+                child,
+                child_width,
+                gutter_cells,
+                inline_options,
+            );
+            let rows = measure_row_prefix_special(child, spec, width, inline_options)
+                .unwrap_or(measured_child.rows);
+            MeasuredLayout {
+                rows,
+                kind: MeasuredLayoutKind::Child(Box::new(measured_child)),
+            }
+        }
+        BlockLayout::Panel { child, spec } => {
+            let child = measure_layout_ir_plan(
+                child,
+                panel_child_width(width, spec.padding),
+                inline_options,
+            );
+            MeasuredLayout {
+                rows: child
+                    .rows
+                    .saturating_add(usize::from(spec.padding.saturating_mul(2))),
+                kind: MeasuredLayoutKind::Child(Box::new(child)),
+            }
+        }
+        BlockLayout::Style { child, .. } | BlockLayout::Refresh { child, .. } => {
+            let child =
+                measure_layout_ir_plan_with_gutter(child, width, gutter_cells, inline_options);
+            MeasuredLayout {
+                rows: child.rows,
+                kind: MeasuredLayoutKind::Child(Box::new(child)),
+            }
+        }
+        BlockLayout::Cap { child, spec } => MeasuredLayout {
+            rows: measure_bounded_cap_rows(child, spec, width, inline_options)
+                .expect("every cap has a bounded measurement policy"),
+            kind: MeasuredLayoutKind::Terminal,
+        },
+    }
 }
 
 fn pluralize(count: usize, singular: &str, plural: &str) -> String {
@@ -119,15 +440,40 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_layout_ir_range(
+pub(crate) fn render_layout_ir_range_into_measured(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    measured: &MeasuredLayout,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    render_layout_ir_range_measured(
+        out,
+        layout,
+        width,
+        row_start,
+        row_count,
+        None,
+        history,
+        inline_options,
+        RenderMeasurement::Measured(measured),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_layout_ir_range_measured(
     out: &mut LineBuilder,
     layout: &LayoutIr,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
+    measurement: RenderMeasurement<'_>,
 ) -> u16 {
     if row_count == 0 {
         return 0;
@@ -153,6 +499,7 @@ fn render_layout_ir_range(
             gutter,
             history,
             inline_options,
+            measurement,
         ),
         BlockLayout::Hbox(items) => render_ir_hbox(
             out,
@@ -163,11 +510,12 @@ fn render_layout_ir_range(
             gutter,
             history,
             inline_options,
+            measurement,
         ),
         BlockLayout::Gutter { child, spec } => {
             let spec_width = display_width_u16(&spec.text);
             let child_width = child_width_after_gutter(width, spec_width);
-            render_layout_ir_range(
+            render_layout_ir_range_measured(
                 out,
                 child,
                 child_width,
@@ -176,6 +524,7 @@ fn render_layout_ir_range(
                 Some(spec),
                 history,
                 inline_options,
+                measurement.child(),
             )
         }
         BlockLayout::RowPrefix { child, spec } => render_ir_row_prefix(
@@ -188,6 +537,7 @@ fn render_layout_ir_range(
             gutter,
             history,
             inline_options,
+            measurement.child(),
         ),
         BlockLayout::Panel { child, spec } => render_ir_panel(
             out,
@@ -199,6 +549,7 @@ fn render_layout_ir_range(
             gutter,
             history,
             inline_options,
+            measurement.child(),
         ),
         BlockLayout::Style { child, spec } => render_ir_style(
             out,
@@ -210,6 +561,7 @@ fn render_layout_ir_range(
             gutter,
             history,
             inline_options,
+            measurement.child(),
         ),
         BlockLayout::Cap { child, spec } => render_ir_cap(
             out,
@@ -219,10 +571,9 @@ fn render_layout_ir_range(
             row_start,
             row_count,
             gutter,
-            history,
             inline_options,
         ),
-        BlockLayout::Refresh { child, .. } => render_layout_ir_range(
+        BlockLayout::Refresh { child, .. } => render_layout_ir_range_measured(
             out,
             child,
             width,
@@ -231,6 +582,7 @@ fn render_layout_ir_range(
             gutter,
             history,
             inline_options,
+            measurement.child(),
         ),
     }
 }
@@ -240,26 +592,50 @@ fn render_ir_vbox(
     out: &mut LineBuilder,
     items: &[LayoutIr],
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
+    measurement: RenderMeasurement<'_>,
 ) -> u16 {
     let mut written = 0u16;
     let mut skipped = row_start;
-    for child in items {
-        if written >= row_count {
+    let measured_children = match measurement {
+        RenderMeasurement::Complete => None,
+        RenderMeasurement::Measured(measured) => Some(
+            measured
+                .children()
+                .expect("measured layout must match its vbox"),
+        ),
+    };
+    if let Some(children) = measured_children {
+        assert_eq!(children.len(), items.len(), "measured vbox child count");
+    }
+    for (index, child) in items.iter().enumerate() {
+        let child_measurement = measured_children.map_or(RenderMeasurement::Complete, |children| {
+            RenderMeasurement::Measured(&children[index])
+        });
+        if usize::from(written) >= row_count {
             break;
         }
-        let child_rows =
-            measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter), inline_options);
+        let child_rows = match child_measurement {
+            RenderMeasurement::Complete => measure_layout_ir_full_with_gutter(
+                child,
+                width,
+                gutter_width(gutter),
+                inline_options,
+            ),
+            RenderMeasurement::Measured(measured) => measured.rows(),
+        };
         if skipped >= child_rows {
             skipped = skipped.saturating_sub(child_rows);
             continue;
         }
-        let child_count = row_count.saturating_sub(written).min(child_rows - skipped);
-        written = written.saturating_add(render_layout_ir_range(
+        let child_count = row_count
+            .saturating_sub(usize::from(written))
+            .min(child_rows - skipped);
+        written = written.saturating_add(render_layout_ir_range_measured(
             out,
             child,
             width,
@@ -268,13 +644,14 @@ fn render_ir_vbox(
             gutter,
             history,
             inline_options,
+            child_measurement,
         ));
         skipped = 0;
     }
     written
 }
 
-fn measure_layout_ir_full(layout: &LayoutIr, width: u16, inline_options: &InlineOptions) -> u16 {
+fn measure_layout_ir_full(layout: &LayoutIr, width: u16, inline_options: &InlineOptions) -> usize {
     measure_layout_ir_full_with_gutter(layout, width, 0, inline_options)
 }
 
@@ -283,7 +660,7 @@ fn measure_layout_ir_full_with_gutter(
     width: u16,
     gutter_cells: u16,
     inline_options: &InlineOptions,
-) -> u16 {
+) -> usize {
     match layout {
         BlockLayout::Empty => 0,
         BlockLayout::Leaf(leaf) => measure_ir_leaf(leaf, width, gutter_cells, inline_options),
@@ -321,12 +698,8 @@ fn measure_layout_ir_full_with_gutter(
             measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options)
         }
         BlockLayout::Cap { child, spec } => {
-            let child_rows =
-                measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options);
-            let theme = Theme::default();
-            cap_rows_for_child(child_rows, spec, child, width, None, inline_options, &theme)
-                .len()
-                .min(u16::MAX as usize) as u16
+            measure_bounded_cap_rows(child, spec, width, inline_options)
+                .expect("every cap has a bounded measurement policy")
         }
         BlockLayout::Refresh { child, .. } => {
             measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options)
@@ -339,14 +712,23 @@ fn render_ir_leaf(
     out: &mut LineBuilder,
     leaf: &IrLeaf,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     _history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
 ) -> u16 {
     match leaf {
         IrLeaf::Text(spec) => render_text_spec(out, spec, width, row_start, row_count, gutter),
+        IrLeaf::Content(spec) => render_content_spec(
+            out,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            inline_options,
+        ),
         IrLeaf::Runs(spec) => render_runs_spec(out, spec, width, row_start, row_count, gutter),
         IrLeaf::Line(spec) => render_line_spec(out, spec, row_start, row_count, gutter),
         IrLeaf::Markdown(spec) => render_markdown_spec(
@@ -376,9 +758,10 @@ fn measure_ir_leaf(
     width: u16,
     gutter_cells: u16,
     inline_options: &InlineOptions,
-) -> u16 {
+) -> usize {
     match leaf {
         IrLeaf::Text(spec) => measure_text_spec(spec, width),
+        IrLeaf::Content(spec) => measure_content_spec(spec, width, gutter_cells, inline_options),
         IrLeaf::Runs(spec) => measure_runs_spec(spec, width),
         IrLeaf::Line(spec) => measure_line_spec(spec),
         IrLeaf::Markdown(spec) => measure_markdown_spec(spec, width, inline_options),
@@ -407,20 +790,552 @@ fn wrap_plain_line_ranges(line: &str, width: u16) -> Vec<(usize, usize)> {
     smelt_buffer::wrap::wrap_line_ranges(line, width as usize)
 }
 
-fn count_plain_line_ranges(line: &str, width: u16) -> u16 {
-    smelt_buffer::wrap::count_line_ranges(line, width as usize).min(u16::MAX as usize) as u16
+fn count_plain_line_ranges(line: &str, width: u16) -> usize {
+    smelt_buffer::wrap::count_line_ranges(line, width as usize)
+}
+
+fn render_content_spec(
+    out: &mut LineBuilder,
+    spec: &RetainedContentSpec,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    match &spec.render {
+        ContentRenderSpec::Text { hl_group, ansi } => render_content_text_spec(
+            out,
+            spec,
+            hl_group.as_deref(),
+            *ansi,
+            width,
+            row_start,
+            row_count,
+            gutter,
+        ),
+        ContentRenderSpec::Markdown {
+            dim,
+            italic,
+            inline,
+        } => render_retained_markdown_spec(
+            out,
+            spec,
+            *dim,
+            *italic,
+            *inline,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            inline_options,
+        ),
+        ContentRenderSpec::Code { lang, cache } => {
+            render_retained_code_spec(out, spec, lang, cache, width, row_start, row_count, gutter)
+        }
+        ContentRenderSpec::File { path, lang, cache } => {
+            let indent = gutter_width(gutter);
+            let syntax_ext = lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext)
+                .or_else(|| {
+                    std::path::Path::new(path)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                })
+                .unwrap_or("txt");
+            smelt_core::content::highlight::print_retained_file_view(
+                out,
+                &spec.content,
+                cache,
+                syntax_ext,
+                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                indent,
+                width.saturating_add(indent),
+                row_start,
+                row_count,
+            )
+        }
+    }
+}
+
+fn measure_content_spec(
+    spec: &RetainedContentSpec,
+    width: u16,
+    gutter_cells: u16,
+    inline_options: &InlineOptions,
+) -> usize {
+    match &spec.render {
+        ContentRenderSpec::Text { ansi, .. } => measure_content_text_spec(spec, *ansi, width),
+        ContentRenderSpec::Markdown {
+            dim,
+            italic,
+            inline,
+        } => measure_retained_markdown_spec(spec, *dim, *italic, *inline, width, inline_options),
+        ContentRenderSpec::Code { .. } => {
+            smelt_core::content::highlight::measure_retained_code_block(&spec.content, width)
+        }
+        ContentRenderSpec::File { .. } => {
+            smelt_core::content::highlight::measure_retained_file_view(
+                &spec.content,
+                width.saturating_add(gutter_cells),
+                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                gutter_cells,
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_code_spec(
+    out: &mut LineBuilder,
+    spec: &RetainedContentSpec,
+    lang: &str,
+    cache: &smelt_core::content::highlight::RetainedFileViewCache,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+) -> u16 {
+    if row_count == 0 {
+        return 0;
+    }
+    if gutter.is_none() {
+        return smelt_core::content::highlight::print_retained_code_block(
+            out,
+            &spec.content,
+            cache,
+            lang,
+            width,
+            row_start,
+            row_count,
+        );
+    }
+
+    let inherited_style = out.current_style();
+    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+    let outcome = {
+        let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
+        col.push(None, inherited_style);
+        smelt_core::content::highlight::print_retained_code_block(
+            &mut col,
+            &spec.content,
+            cache,
+            lang,
+            width,
+            row_start,
+            row_count,
+        );
+        col.finish()
+    };
+    if outcome.was_wrapped {
+        out.mark_wrapped();
+    }
+    let gutter = gutter.expect("guttered retained code render requires gutter");
+    let rows = outcome.line_count.min(u16::MAX as usize) as u16;
+    for row in 0..rows {
+        print_row_gutter(out, gutter);
+        apply_temp_decoration(out, &buf, row as usize, true);
+        emit_buffer_row_clipped(&buf, row, width, out, None);
+        out.newline();
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_markdown_spec(
+    out: &mut LineBuilder,
+    spec: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    inline: bool,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    if inline {
+        return render_retained_inline_markdown_spec(
+            out,
+            spec,
+            dim,
+            italic,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            inline_options,
+        );
+    }
+    if let Some(rows) = render_retained_plain_markdown_line(
+        out, spec, dim, italic, width, row_start, row_count, gutter,
+    ) {
+        return rows;
+    }
+
+    if gutter.is_none() {
+        if italic {
+            out.save_style();
+            out.set_italic();
+        }
+        let rows = render_retained_markdown_inner_range_with_options(
+            out,
+            &spec.content,
+            width as usize,
+            "",
+            dim,
+            None,
+            inline_options,
+            row_start,
+            row_count,
+        );
+        if italic {
+            out.pop_style();
+        }
+        return rows;
+    }
+
+    let gutter = gutter.expect("guttered retained Markdown render requires gutter");
+    let inherited_style = out.current_style();
+    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+    let outcome = {
+        let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
+        col.push(None, inherited_style);
+        if italic {
+            col.save_style();
+            col.set_italic();
+        }
+        render_retained_markdown_inner_range_with_options(
+            &mut col,
+            &spec.content,
+            width as usize,
+            "",
+            dim,
+            None,
+            inline_options,
+            row_start,
+            row_count,
+        );
+        if italic {
+            col.pop_style();
+        }
+        col.finish()
+    };
+    if outcome.was_wrapped {
+        out.mark_wrapped();
+    }
+    let style_overlay = gutter.styled.then_some((dim, italic));
+    let rows = outcome.line_count.min(u16::MAX as usize) as u16;
+    for row in 0..rows {
+        print_row_gutter(out, gutter);
+        apply_temp_decoration(out, &buf, row as usize, true);
+        emit_buffer_row_clipped(&buf, row, width, out, style_overlay);
+        out.newline();
+    }
+    rows
+}
+
+fn measure_retained_markdown_spec(
+    spec: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    inline: bool,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> usize {
+    if inline {
+        return measure_retained_inline_markdown_spec(spec, dim, italic, width, inline_options);
+    }
+    if let Some(rows) = measure_retained_plain_markdown_line(spec, width) {
+        return rows;
+    }
+    measure_retained_markdown_inner_with_options(
+        &spec.content,
+        width as usize,
+        "",
+        dim,
+        None,
+        inline_options,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_inline_markdown_spec(
+    out: &mut LineBuilder,
+    spec: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    let read = spec.content.read();
+    let max_cols = width.max(1) as usize;
+    let mut seen = 0usize;
+    let mut rows = 0u16;
+    'outer: for line_index in 0..read.logical_line_count() {
+        let Some(line) = read.line(line_index) else {
+            continue;
+        };
+        let spans = retained_inline_markdown_spans(&line, dim, italic, inline_options);
+        let wrapped = wrap_inline_spans(&spans, max_cols);
+        for segment in wrapped_segments(out, &wrapped) {
+            if seen < row_start {
+                seen = seen.saturating_add(1);
+                continue;
+            }
+            if usize::from(rows) >= row_count {
+                break 'outer;
+            }
+            segment.emit(out, |out, row_spans, _| {
+                if let Some(gutter) = gutter {
+                    if gutter.styled {
+                        out.save_style();
+                        if dim {
+                            out.set_dim();
+                        }
+                        if italic {
+                            out.set_italic();
+                        }
+                        out.print_gutter(&gutter.text);
+                        out.pop_style();
+                    } else {
+                        out.print_gutter(&gutter.text);
+                    }
+                }
+                emit_inline_spans(out, row_spans);
+            });
+            out.newline();
+            rows = rows.saturating_add(1);
+            seen = seen.saturating_add(1);
+        }
+    }
+    rows
+}
+
+fn measure_retained_inline_markdown_spec(
+    spec: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> usize {
+    let read = spec.content.read();
+    let max_cols = width.max(1) as usize;
+    (0..read.logical_line_count())
+        .filter_map(|line| read.line(line))
+        .map(|line| {
+            let spans = retained_inline_markdown_spans(&line, dim, italic, inline_options);
+            wrap_inline_spans(&spans, max_cols).len()
+        })
+        .sum()
+}
+
+fn retained_inline_markdown_spans(
+    line: &str,
+    dim: bool,
+    italic: bool,
+    inline_options: &InlineOptions,
+) -> Vec<InlineSpan> {
+    let mut spans = parse_inline_spans_with_options(line, dim, inline_options);
+    if italic {
+        for span in &mut spans {
+            span.style.italic = true;
+        }
+    }
+    spans
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_plain_markdown_line(
+    out: &mut LineBuilder,
+    spec: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+) -> Option<u16> {
+    let read = spec.content.read();
+    let plain_markdown =
+        read.logical_line_count() == 1 && read.line_is_plain_markdown(0) && !read.is_empty();
+    drop(read);
+    if !plain_markdown {
+        return None;
+    }
+
+    let mut rows = 0u16;
+    spec.content.visit_text_layout_rows(
+        width,
+        false,
+        row_start..row_start.saturating_add(row_count),
+        |row| {
+            render_retained_plain_markdown_row(out, row, dim, italic, gutter);
+            rows = rows.saturating_add(1);
+        },
+    );
+    Some(rows)
+}
+
+fn measure_retained_plain_markdown_line(spec: &RetainedContentSpec, width: u16) -> Option<usize> {
+    let read = spec.content.read();
+    let plain_markdown =
+        read.logical_line_count() == 1 && read.line_is_plain_markdown(0) && !read.is_empty();
+    drop(read);
+    plain_markdown.then(|| spec.content.text_layout_rows(width, false))
+}
+
+fn render_retained_plain_markdown_row(
+    out: &mut LineBuilder,
+    row: smelt_core::transcript_content::ContentTextRow<'_>,
+    dim: bool,
+    italic: bool,
+    gutter: Option<&GutterSpec>,
+) {
+    if row.wrapped() {
+        out.mark_wrapped();
+    }
+    if row.continuation() {
+        out.mark_soft_wrap_continuation();
+    }
+    let text = row.text();
+    emit_retained_plain_markdown_slice(out, &text, dim, italic, gutter);
+    out.newline();
+}
+
+fn emit_retained_plain_markdown_slice(
+    out: &mut LineBuilder,
+    text: &str,
+    dim: bool,
+    italic: bool,
+    gutter: Option<&GutterSpec>,
+) {
+    if let Some(gutter) = gutter.filter(|gutter| !gutter.styled) {
+        out.print_gutter(&gutter.text);
+    }
+    if dim {
+        out.push_dim();
+    }
+    if italic {
+        out.save_style();
+        out.set_italic();
+    }
+    if let Some(gutter) = gutter.filter(|gutter| gutter.styled) {
+        out.print_gutter(&gutter.text);
+    }
+    out.print(text);
+    if italic {
+        out.pop_style();
+    }
+    if dim {
+        out.pop_style();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_content_text_spec(
+    out: &mut LineBuilder,
+    spec: &RetainedContentSpec,
+    hl_group: Option<&str>,
+    ansi: bool,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+) -> u16 {
+    let _perf = smelt_perf::perf::begin("render:layout:render_content_text");
+    #[cfg(test)]
+    TEST_RETAINED_TEXT_RENDER_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    let row_end = row_start.saturating_add(row_count);
+    smelt_perf::perf::record_value(
+        "render:layout:render_content_text_bytes",
+        spec.content.len() as u64,
+    );
+    let hl = hl_group.map(intern);
+    let mut rows = 0u16;
+    spec.content
+        .visit_text_layout_rows(width, ansi, row_start..row_end, |row| {
+            render_content_text_row(out, row, hl, ansi, gutter);
+            rows = rows.saturating_add(1);
+        });
+    rows
+}
+
+fn render_content_text_row(
+    out: &mut LineBuilder,
+    row: smelt_core::transcript_content::ContentTextRow<'_>,
+    hl: Option<smelt_core::theme::HlGroup>,
+    ansi: bool,
+    gutter: Option<&GutterSpec>,
+) {
+    if row.wrapped() {
+        out.mark_wrapped();
+    }
+    if row.continuation() {
+        out.mark_soft_wrap_continuation();
+    }
+    if let Some(gutter) = gutter.filter(|gutter| !gutter.styled) {
+        out.print_gutter(&gutter.text);
+    }
+    match hl {
+        Some(group) => out.push_hl(group),
+        None => out.push_dim(),
+    }
+    if let Some(gutter) = gutter.filter(|gutter| gutter.styled) {
+        out.print_gutter(&gutter.text);
+    }
+    if ansi && !row.spans().is_empty() {
+        let text = row.text();
+        let mut cursor = 0usize;
+        for span in row.spans() {
+            if cursor < span.byte_range.start {
+                out.print(smelt_buffer::text::slice(
+                    &text,
+                    cursor..span.byte_range.start,
+                ));
+            }
+            let span_text = smelt_buffer::text::slice(&text, span.byte_range.clone());
+            if span.style == smelt_core::style::Style::default() {
+                out.print(span_text);
+            } else {
+                out.push(None, span.style);
+                out.print(span_text);
+                out.pop_style();
+            }
+            cursor = span.byte_range.end;
+        }
+        if cursor < text.len() {
+            out.print(smelt_buffer::text::slice(&text, cursor..text.len()));
+        }
+    } else {
+        row.visit_text(|text| out.print(text));
+    }
+    out.pop_style();
+    out.newline();
+}
+
+fn measure_content_text_spec(spec: &RetainedContentSpec, ansi: bool, width: u16) -> usize {
+    let _perf = smelt_perf::perf::begin("render:layout:measure_content_text");
+    spec.content.text_layout_rows(width, ansi)
 }
 
 fn render_text_spec(
     out: &mut LineBuilder,
     spec: &TextSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
+    let _perf = smelt_perf::perf::begin("render:layout:render_text");
+    smelt_perf::perf::record_value("render:layout:render_text_bytes", spec.content.len() as u64);
+    smelt_perf::perf::record_value("render:layout:render_text_row_start", row_start as u64);
     let hl = spec.hl_group.as_deref().map(intern);
-    let mut seen = 0u16;
+    let mut seen = 0usize;
     let mut rows = 0u16;
     'outer: for line in spec.content.lines() {
         let expanded = expand_tabs(line);
@@ -445,7 +1360,7 @@ fn render_text_spec(
                 seen = seen.saturating_add(1);
                 continue;
             }
-            if rows >= row_count {
+            if usize::from(rows) >= row_count {
                 break 'outer;
             }
             segment.emit(out, |out, &(ws, we), _| {
@@ -474,14 +1389,19 @@ fn render_text_spec(
     rows
 }
 
-fn measure_text_spec(spec: &TextSpec, width: u16) -> u16 {
+fn measure_text_spec(spec: &TextSpec, width: u16) -> usize {
+    let _perf = smelt_perf::perf::begin("render:layout:measure_text");
+    smelt_perf::perf::record_value(
+        "render:layout:measure_text_bytes",
+        spec.content.len() as u64,
+    );
     spec.content
         .lines()
         .map(|line| {
             let expanded = expand_tabs(line);
             if spec.ansi {
                 let (_, ranges, _) = wrap_ansi(&expanded, width as usize);
-                ranges.len() as u16
+                ranges.len()
             } else {
                 count_plain_line_ranges(&expanded, width)
             }
@@ -531,22 +1451,22 @@ fn render_runs_spec(
     out: &mut LineBuilder,
     spec: &RunsSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     let default_hl = spec.hl_group.as_deref();
     let continuation_indent = runs_continuation_indent(spec, width);
-    let mut seen = 0u16;
+    let mut seen = 0usize;
     let mut rows = 0u16;
-    'outer: for spans in &spec.lines.0 {
+    'outer: for (line_index, spans) in spec.lines.0.iter().enumerate() {
         let wrapped = wrap_styled_runs(spans, width, continuation_indent);
         for segment in wrapped_segments(out, &wrapped) {
             if seen < row_start {
                 seen = seen.saturating_add(1);
                 continue;
             }
-            if rows >= row_count {
+            if usize::from(rows) >= row_count {
                 break 'outer;
             }
             segment.emit(out, |out, row_fragments, kind| {
@@ -563,7 +1483,13 @@ fn render_runs_spec(
                     let Some(span) = spans.get(fragment.run_index) else {
                         continue;
                     };
-                    print_styled_span_range(out, span, default_hl, fragment.range.clone());
+                    print_styled_span_range(
+                        out,
+                        span,
+                        default_hl,
+                        fragment.range.clone(),
+                        spec.syntax_highlights.spans(line_index, fragment.run_index),
+                    );
                 }
             });
             out.newline();
@@ -574,20 +1500,20 @@ fn render_runs_spec(
     rows
 }
 
-fn measure_runs_spec(spec: &RunsSpec, width: u16) -> u16 {
+fn measure_runs_spec(spec: &RunsSpec, width: u16) -> usize {
     let continuation_indent = runs_continuation_indent(spec, width);
     spec.lines
         .0
         .iter()
-        .map(|spans| wrap_styled_runs(spans, width, continuation_indent).len() as u16)
+        .map(|spans| wrap_styled_runs(spans, width, continuation_indent).len())
         .sum()
 }
 
 fn render_line_spec(
     out: &mut LineBuilder,
     spec: &LineSpec,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     if row_start > 0 || row_count == 0 {
@@ -597,12 +1523,12 @@ fn render_line_spec(
         out.print_gutter(&gutter.text);
     }
     let default_hl = spec.hl_group.as_deref();
-    print_styled_spans(out, &spec.spans, default_hl);
+    print_styled_spans(out, &spec.spans, default_hl, Some(&spec.syntax_highlights));
     out.newline();
     1
 }
 
-fn measure_line_spec(_spec: &LineSpec) -> u16 {
+fn measure_line_spec(_spec: &LineSpec) -> usize {
     1
 }
 
@@ -610,8 +1536,8 @@ fn render_markdown_spec(
     out: &mut LineBuilder,
     spec: &MarkdownSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     inline_options: &InlineOptions,
 ) -> u16 {
@@ -667,19 +1593,18 @@ fn render_markdown_spec_with_gutter(
     out: &mut LineBuilder,
     spec: &MarkdownSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: &GutterSpec,
     inline_options: &InlineOptions,
 ) -> u16 {
-    let theme = out.theme().clone();
     let inherited_style = out.current_style();
     let mut buf = smelt_core::buffer::Buffer::new(
         smelt_core::buffer::BufId(0),
         smelt_core::buffer::BufCreateOpts::default(),
     );
     let outcome = {
-        let mut col = LineBuilder::new(&mut buf, &theme, width.max(1));
+        let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
         col.push(None, inherited_style);
         if spec.italic {
             col.save_style();
@@ -715,7 +1640,7 @@ fn render_markdown_spec_with_gutter(
     rows
 }
 
-fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> u16 {
+fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> usize {
     if spec.inline {
         return measure_inline_markdown_spec(spec, width, inline_options);
     }
@@ -764,14 +1689,14 @@ fn render_plain_markdown_spec(
     out: &mut LineBuilder,
     spec: &MarkdownSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     if plain_markdown_is_single_ascii_word(&spec.content) {
         return render_plain_markdown_ascii_word(out, spec, width, row_start, row_count, gutter);
     }
-    let mut seen = 0u16;
+    let mut seen = 0usize;
     let mut rows = 0u16;
     'outer: for line in spec.content.lines() {
         let expanded = expand_tabs(line);
@@ -789,7 +1714,7 @@ fn render_plain_markdown_spec(
                 seen = seen.saturating_add(1);
                 continue;
             }
-            if rows >= row_count {
+            if usize::from(rows) >= row_count {
                 break 'outer;
             }
             segment.emit(out, |out, &(ws, we), _| {
@@ -822,7 +1747,7 @@ fn render_plain_markdown_spec(
     rows
 }
 
-fn measure_plain_markdown_spec(spec: &MarkdownSpec, width: u16) -> u16 {
+fn measure_plain_markdown_spec(spec: &MarkdownSpec, width: u16) -> usize {
     if plain_markdown_is_single_ascii_word(&spec.content) {
         return ascii_word_rows(spec.content.len(), width);
     }
@@ -839,17 +1764,17 @@ fn plain_markdown_is_single_ascii_word(content: &str) -> bool {
         .all(|byte| byte.is_ascii_graphic() && *byte != b' ')
 }
 
-fn ascii_word_rows(len: usize, width: u16) -> u16 {
+fn ascii_word_rows(len: usize, width: u16) -> usize {
     let width = usize::from(width.max(1));
-    len.max(1).div_ceil(width).min(u16::MAX as usize) as u16
+    len.max(1).div_ceil(width)
 }
 
 fn render_plain_markdown_ascii_word(
     out: &mut LineBuilder,
     spec: &MarkdownSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     if row_count == 0 {
@@ -863,9 +1788,7 @@ fn render_plain_markdown_ascii_word(
     let mut rows = 0u16;
     let end_row = row_start.saturating_add(row_count).min(total_rows);
     for row in row_start..end_row {
-        let start = usize::from(row)
-            .saturating_mul(width)
-            .min(spec.content.len());
+        let start = row.saturating_mul(width).min(spec.content.len());
         let end = start.saturating_add(width).min(spec.content.len());
         emit_plain_markdown_slice(
             out,
@@ -911,13 +1834,13 @@ fn render_inline_markdown_spec(
     out: &mut LineBuilder,
     spec: &MarkdownSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     inline_options: &InlineOptions,
 ) -> u16 {
     let max_cols = width.max(1) as usize;
-    let mut seen = 0u16;
+    let mut seen = 0usize;
     let mut rows = 0u16;
     'outer: for line in spec.content.lines() {
         let spans = inline_markdown_spans(line, spec.dim, spec.italic, inline_options);
@@ -927,7 +1850,7 @@ fn render_inline_markdown_spec(
                 seen = seen.saturating_add(1);
                 continue;
             }
-            if rows >= row_count {
+            if usize::from(rows) >= row_count {
                 break 'outer;
             }
             segment.emit(out, |out, row_spans, _| {
@@ -960,13 +1883,13 @@ fn measure_inline_markdown_spec(
     spec: &MarkdownSpec,
     width: u16,
     inline_options: &InlineOptions,
-) -> u16 {
+) -> usize {
     let max_cols = width.max(1) as usize;
     spec.content
         .lines()
         .map(|line| {
             let spans = inline_markdown_spans(line, spec.dim, spec.italic, inline_options);
-            wrap_inline_spans(&spans, max_cols).len() as u16
+            wrap_inline_spans(&spans, max_cols).len()
         })
         .sum()
 }
@@ -990,12 +1913,12 @@ fn render_code_spec(
     out: &mut LineBuilder,
     spec: &CodeSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     let block = code_block_from_spec(spec);
-    let total = measure_code_block(&block, width as usize) as u16;
+    let total = measure_code_block(&block, width as usize);
     if row_start == 0 && row_count >= total && gutter.is_none() {
         return render_code_block(out, &block, width as usize, false, None, false);
     }
@@ -1005,8 +1928,8 @@ fn render_code_spec(
     })
 }
 
-fn measure_code_spec(spec: &CodeSpec, width: u16) -> u16 {
-    measure_code_block(&code_block_from_spec(spec), width as usize) as u16
+fn measure_code_spec(spec: &CodeSpec, width: u16) -> usize {
+    measure_code_block(&code_block_from_spec(spec), width as usize)
 }
 
 fn code_block_from_spec(spec: &CodeSpec) -> smelt_core::content::code_block::CodeBlock {
@@ -1022,8 +1945,8 @@ fn render_separator_spec(
     out: &mut LineBuilder,
     spec: &SeparatorSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     if row_start > 0 || row_count == 0 {
@@ -1045,7 +1968,7 @@ fn render_separator_spec(
         action: None,
     };
     out.print_with_meta(&"─".repeat(left), fill_meta.clone());
-    print_styled_spans(out, &spec.label, None);
+    print_styled_spans(out, &spec.label, None, None);
     out.print_with_meta(&"─".repeat(right), fill_meta);
     if spec.dim {
         out.pop_style();
@@ -1054,27 +1977,26 @@ fn render_separator_spec(
     1
 }
 
-fn measure_separator_spec(_spec: &SeparatorSpec) -> u16 {
+fn measure_separator_spec(_spec: &SeparatorSpec) -> usize {
     1
 }
 
 fn render_via_temp(
     out: &mut LineBuilder,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     styled_gutter: Option<(bool, bool)>,
     render: impl FnOnce(&mut LineBuilder) -> u16,
 ) -> u16 {
-    let theme = out.theme().clone();
     let inherited_style = out.current_style();
     let mut buf = smelt_core::buffer::Buffer::new(
         smelt_core::buffer::BufId(0),
         smelt_core::buffer::BufCreateOpts::default(),
     );
     let outcome = {
-        let mut col = LineBuilder::new(&mut buf, &theme, width.max(1));
+        let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
         col.push(None, inherited_style);
         render(&mut col);
         col.finish()
@@ -1082,15 +2004,18 @@ fn render_via_temp(
     if outcome.was_wrapped {
         out.mark_wrapped();
     }
-    let total = outcome.line_count.min(u16::MAX as usize) as u16;
+    let total = outcome.line_count;
     let end = row_start.saturating_add(row_count).min(total);
     let mut rows = 0u16;
     for row in row_start..end {
+        let Ok(buffer_row) = u16::try_from(row) else {
+            break;
+        };
         if let Some(gutter) = gutter {
             print_row_gutter(out, gutter);
         }
-        apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, width, out, styled_gutter);
+        apply_temp_decoration(out, &buf, row, true);
+        emit_buffer_row_clipped(&buf, buffer_row, width, out, styled_gutter);
         out.newline();
         rows = rows.saturating_add(1);
     }
@@ -1115,7 +2040,7 @@ fn print_row_prefix(out: &mut LineBuilder, prefix: &[protocol::StyledSpan], max_
             break;
         }
         let piece = clipped_cell_prefix(&span.text, remaining);
-        print_styled_span_range(out, span, None, 0..piece.len());
+        print_styled_span_range(out, span, None, 0..piece.len(), None);
         remaining = remaining.saturating_sub(display_width(piece));
         if piece.len() < span.text.len() {
             break;
@@ -1145,40 +2070,15 @@ fn row_prefix_child_widths(spec: &RowPrefixSpec, width: u16) -> (u16, u16) {
     )
 }
 
-struct RowPrefixRunRow<'a> {
-    spans: &'a [protocol::StyledSpan],
-    fragments: Vec<WrappedRun<usize>>,
-    segment_kind: WrappedSegmentKind,
-}
-
-fn row_prefix_runs_wrapped_rows(
-    spec: &RunsSpec,
-    first_width: u16,
-    rest_width: u16,
-) -> Vec<RowPrefixRunRow<'_>> {
-    let mut rows = Vec::new();
+fn measure_row_prefix_runs(spec: &RunsSpec, first_width: u16, rest_width: u16) -> usize {
+    let mut rows = 0usize;
     for spans in &spec.lines.0 {
-        let line_first_width = if rows.is_empty() {
-            first_width
-        } else {
-            rest_width
-        };
-        let wrapped = wrap_styled_runs_with_widths(spans, line_first_width, rest_width);
-        for (idx, fragments) in wrapped.into_iter().enumerate() {
-            rows.push(RowPrefixRunRow {
-                spans: spans.as_slice(),
-                fragments,
-                segment_kind: WrappedSegmentKind::from_index(idx),
-            });
-        }
+        let line_first_width = if rows == 0 { first_width } else { rest_width };
+        rows = rows.saturating_add(
+            wrap_styled_runs_with_widths(spans, line_first_width, rest_width).len(),
+        );
     }
     rows
-}
-
-fn measure_row_prefix_runs(spec: &RunsSpec, first_width: u16, rest_width: u16) -> u16 {
-    row_prefix_runs_wrapped_rows(spec, first_width, rest_width)
-        .len()
-        .min(u16::MAX as usize) as u16
 }
 
 fn measure_row_prefix_special(
@@ -1186,7 +2086,7 @@ fn measure_row_prefix_special(
     prefix: &RowPrefixSpec,
     width: u16,
     _inline_options: &InlineOptions,
-) -> Option<u16> {
+) -> Option<usize> {
     let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
     match child {
         BlockLayout::Leaf(IrLeaf::Runs(spec)) => {
@@ -1196,8 +2096,11 @@ fn measure_row_prefix_special(
             let BlockLayout::Leaf(IrLeaf::Runs(runs)) = child.as_ref() else {
                 return None;
             };
+            if !transient_layout_fits_budget(child, &mut TransientLayoutBudget::default()) {
+                return None;
+            }
             let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
-            Some(cap_rows(child_rows, spec).len().min(u16::MAX as usize) as u16)
+            Some(cap_rows(child_rows, spec).row_count())
         }
         _ => None,
     }
@@ -1209,38 +2112,51 @@ fn render_row_prefix_runs(
     spec: &RunsSpec,
     prefix: &RowPrefixSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
+    if row_count == 0 {
+        return 0;
+    }
     let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
-    let rows = row_prefix_runs_wrapped_rows(spec, first_width, rest_width);
     let default_hl = spec.hl_group.as_deref();
+    let row_end = row_start.saturating_add(row_count);
+    let mut source_row = 0usize;
     let mut written = 0u16;
-    for (source_row, row) in rows
-        .iter()
-        .enumerate()
-        .skip(row_start as usize)
-        .take(row_count as usize)
-    {
-        if let Some(gutter) = gutter {
-            print_row_gutter(out, gutter);
-        }
-        let (row_prefix, child_width) = if source_row == 0 {
-            (&prefix.first, first_width)
+    'lines: for spans in &spec.lines.0 {
+        let line_first_width = if source_row == 0 {
+            first_width
         } else {
-            (&prefix.rest, rest_width)
+            rest_width
         };
-        print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
-        row.segment_kind.apply(out);
-        for fragment in &row.fragments {
-            let Some(span) = row.spans.get(fragment.run_index) else {
-                continue;
-            };
-            print_styled_span_range(out, span, default_hl, fragment.range.clone());
+        let wrapped = wrap_styled_runs_with_widths(spans, line_first_width, rest_width);
+        for (segment_index, fragments) in wrapped.into_iter().enumerate() {
+            if source_row >= row_end {
+                break 'lines;
+            }
+            if source_row >= row_start {
+                if let Some(gutter) = gutter {
+                    print_row_gutter(out, gutter);
+                }
+                let (row_prefix, child_width) = if source_row == 0 {
+                    (&prefix.first, first_width)
+                } else {
+                    (&prefix.rest, rest_width)
+                };
+                print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
+                WrappedSegmentKind::from_index(segment_index).apply(out);
+                for fragment in &fragments {
+                    let Some(span) = spans.get(fragment.run_index) else {
+                        continue;
+                    };
+                    print_styled_span_range(out, span, default_hl, fragment.range.clone(), None);
+                }
+                out.newline();
+                written = written.saturating_add(1);
+            }
+            source_row = source_row.saturating_add(1);
         }
-        out.newline();
-        written = written.saturating_add(1);
     }
     written
 }
@@ -1252,32 +2168,53 @@ fn render_row_prefix_runs_cap(
     cap: &smelt_core::content::block_layout::CapSpec,
     prefix: &RowPrefixSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
     let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
     let rows = cap_rows(child_rows, cap);
     let mut written = 0u16;
-    for (output_row, row) in rows
-        .into_iter()
-        .enumerate()
-        .skip(row_start as usize)
-        .take(row_count as usize)
-    {
+    let mut selected_row = 0usize;
+    while selected_row < row_count {
+        let Some(output_row) = row_start.checked_add(selected_row) else {
+            break;
+        };
+        let Some(row) = rows.row_at(output_row) else {
+            break;
+        };
         match row {
             CapRow::Child(child_row) => {
+                let mut child_count = 1usize;
+                while child_count < row_count.saturating_sub(selected_row) {
+                    let Some(next_output) = output_row.checked_add(child_count) else {
+                        break;
+                    };
+                    let expected_child = child_row.saturating_add(child_count);
+                    if !matches!(rows.row_at(next_output), Some(CapRow::Child(row)) if row == expected_child)
+                    {
+                        break;
+                    }
+                    child_count = child_count.saturating_add(1);
+                }
                 written = written.saturating_add(render_row_prefix_runs(
-                    out, runs, prefix, width, child_row, 1, gutter,
+                    out,
+                    runs,
+                    prefix,
+                    width,
+                    child_row,
+                    child_count,
+                    gutter,
                 ));
+                selected_row = selected_row.saturating_add(child_count);
+                continue;
             }
             CapRow::Marker {
                 skipped,
                 kept,
                 total,
                 direction,
-                ..
             } => {
                 if let Some(gutter) = gutter {
                     print_row_gutter(out, gutter);
@@ -1292,14 +2229,15 @@ fn render_row_prefix_runs_cap(
                 written = written.saturating_add(1);
             }
         }
+        selected_row = selected_row.saturating_add(1);
     }
     written
 }
 
 fn render_cap_marker_text(
     out: &mut LineBuilder,
-    skipped: u16,
-    kept: u16,
+    skipped: usize,
+    kept: usize,
     total: Option<u64>,
     direction: &str,
     max_cols: u16,
@@ -1321,11 +2259,12 @@ fn render_ir_row_prefix(
     child: &LayoutIr,
     spec: &RowPrefixSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
+    child_measurement: RenderMeasurement<'_>,
 ) -> u16 {
     if let BlockLayout::Leaf(IrLeaf::Runs(runs)) = child {
         return render_row_prefix_runs(out, runs, spec, width, row_start, row_count, gutter);
@@ -1336,24 +2275,25 @@ fn render_ir_row_prefix(
     } = child
     {
         if let BlockLayout::Leaf(IrLeaf::Runs(runs)) = cap_child.as_ref() {
-            return render_row_prefix_runs_cap(
-                out, runs, cap_spec, spec, width, row_start, row_count, gutter,
-            );
+            if transient_layout_fits_budget(cap_child, &mut TransientLayoutBudget::default()) {
+                return render_row_prefix_runs_cap(
+                    out, runs, cap_spec, spec, width, row_start, row_count, gutter,
+                );
+            }
         }
     }
 
     let prefix_width = row_prefix_width(spec);
     let child_width = child_width_after_gutter(width, prefix_width);
-    let theme = out.theme().clone();
     let inherited_style = out.current_style();
     let mut buf = smelt_core::buffer::Buffer::new(
         smelt_core::buffer::BufId(0),
         smelt_core::buffer::BufCreateOpts::default(),
     );
     let outcome = {
-        let mut col = LineBuilder::new(&mut buf, &theme, child_width);
+        let mut col = LineBuilder::new(&mut buf, out.theme(), child_width);
         col.push(None, inherited_style);
-        render_layout_ir_range(
+        render_layout_ir_range_measured(
             &mut col,
             child,
             child_width,
@@ -1362,6 +2302,7 @@ fn render_ir_row_prefix(
             None,
             history,
             inline_options,
+            child_measurement,
         );
         col.finish()
     };
@@ -1369,9 +2310,12 @@ fn render_ir_row_prefix(
         out.mark_wrapped();
     }
 
-    let total = outcome.line_count.min(u16::MAX as usize) as u16;
+    let total = outcome.line_count;
     let mut rows = 0u16;
     for row in 0..total {
+        let Ok(buffer_row) = u16::try_from(row) else {
+            break;
+        };
         if let Some(gutter) = gutter {
             print_row_gutter(out, gutter);
         }
@@ -1382,8 +2326,8 @@ fn render_ir_row_prefix(
             &spec.rest
         };
         print_row_prefix(out, prefix, width.saturating_sub(child_width));
-        apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, child_width, out, None);
+        apply_temp_decoration(out, &buf, row, true);
+        emit_buffer_row_clipped(&buf, buffer_row, child_width, out, None);
         out.newline();
         rows = rows.saturating_add(1);
     }
@@ -1398,9 +2342,16 @@ fn print_styled_spans(
     out: &mut LineBuilder,
     spans: &[protocol::StyledSpan],
     default_hl: Option<&str>,
+    syntax_highlights: Option<&RetainedInlineSyntax>,
 ) {
-    for span in spans {
-        print_styled_span_range(out, span, default_hl, 0..span.text.len());
+    for (index, span) in spans.iter().enumerate() {
+        print_styled_span_range(
+            out,
+            span,
+            default_hl,
+            0..span.text.len(),
+            syntax_highlights.and_then(|highlights| highlights.spans(0, index)),
+        );
     }
 }
 
@@ -1409,6 +2360,7 @@ fn print_styled_span_range(
     span: &protocol::StyledSpan,
     default_hl: Option<&str>,
     range: std::ops::Range<usize>,
+    syntax_highlights: Option<&[InlineSyntaxSpan]>,
 ) {
     let piece = smelt_buffer::text::slice(&span.text, range.clone());
     if piece.is_empty() {
@@ -1436,9 +2388,18 @@ fn print_styled_span_range(
         out.set_italic();
     }
     match span.syntax.as_deref() {
+        Some(_) if span.selectable && syntax_highlights.is_some() => {
+            print_retained_inline_syntax(
+                out,
+                &span.text,
+                range,
+                syntax_highlights.expect("syntax highlights checked above"),
+            );
+        }
         Some(lang) if span.selectable => {
-            let mut h = InlineSyntax::new(lang);
-            h.print_line_range(out, &span.text, range);
+            let _perf = smelt_perf::perf::begin("render:layout:inline_syntax");
+            let mut highlighter = InlineSyntax::new(lang);
+            highlighter.print_line_range(out, &span.text, range);
         }
         _ if span.selectable => out.print(piece),
         _ => out.print_with_meta(piece, SpanMeta::unselectable()),
@@ -1446,265 +2407,621 @@ fn print_styled_span_range(
     out.pop_style();
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_ir_style(
-    out: &mut LineBuilder,
-    child: &LayoutIr,
-    spec: &StyleSpec,
-    width: u16,
-    row_start: u16,
-    row_count: u16,
-    gutter: Option<&GutterSpec>,
-    history: Option<&BlockHistory>,
-    inline_options: &InlineOptions,
-) -> u16 {
+fn print_retained_inline_syntax(
+    out: &mut LineBuilder<'_>,
+    source: &str,
+    range: std::ops::Range<usize>,
+    highlights: &[InlineSyntaxSpan],
+) {
     out.save_style();
-    apply_style_spec(out, spec);
-    let rows = render_layout_ir_range(
-        out,
-        child,
-        width,
-        row_start,
-        row_count,
-        gutter,
-        history,
-        inline_options,
-    );
+    for highlight in highlights {
+        let byte_start = highlight.byte_start.max(range.start);
+        let byte_end = highlight.byte_end.min(range.end);
+        if byte_start >= byte_end {
+            continue;
+        }
+        let [r, g, b] = highlight.foreground;
+        out.set_fg(smelt_core::style::Color::Rgb { r, g, b });
+        out.print(smelt_buffer::text::slice(source, byte_start..byte_end));
+    }
     out.pop_style();
-    rows
 }
 
-fn apply_style_spec(out: &mut LineBuilder, spec: &StyleSpec) {
-    if let Some(group) = spec.hl_group.as_deref() {
-        out.set_hl(intern(group));
+mod chrome;
+use chrome::{
+    apply_style_spec, measure_ir_panel, panel_child_width, render_ir_panel, render_ir_style,
+};
+
+const MAX_BOUNDED_MARKDOWN_PARSE_BYTES: usize = 64 * 1024;
+const BOUNDED_MARKDOWN_OMITTED: &str = "[large Markdown content omitted]";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedMarkdownEdgeMode {
+    Parsed,
+    Literal,
+    Omitted,
+}
+
+fn retained_markdown_edge_mode(
+    content: &RetainedContentSpec,
+    inline: bool,
+) -> RetainedMarkdownEdgeMode {
+    let read = content.content.read();
+    if read.is_empty() {
+        return RetainedMarkdownEdgeMode::Parsed;
     }
-    if let Some(c) = spec.fg.as_deref().and_then(|name| out.theme().get(name).fg) {
-        out.set_fg(c);
+    if inline {
+        return if read.len() <= MAX_BOUNDED_MARKDOWN_PARSE_BYTES {
+            RetainedMarkdownEdgeMode::Parsed
+        } else if read.large_lines_have_ascii_cells() {
+            RetainedMarkdownEdgeMode::Literal
+        } else {
+            RetainedMarkdownEdgeMode::Omitted
+        };
     }
-    if let Some(c) = spec.bg.as_deref().and_then(|name| out.theme().get(name).bg) {
-        out.set_bg(c);
+    if read.logical_line_count() == 1 && read.line_is_plain_markdown(0) {
+        let bounded = read
+            .line_range(0)
+            .is_none_or(|range| range.len() <= MAX_BOUNDED_MARKDOWN_PARSE_BYTES)
+            || read.line_has_ascii_cells(0);
+        return if bounded {
+            RetainedMarkdownEdgeMode::Literal
+        } else {
+            RetainedMarkdownEdgeMode::Omitted
+        };
     }
-    if spec.dim {
-        out.set_dim();
+    if !read.markdown_has_range_larger_than(MAX_BOUNDED_MARKDOWN_PARSE_BYTES) {
+        RetainedMarkdownEdgeMode::Parsed
+    } else if read.large_lines_have_ascii_cells() {
+        RetainedMarkdownEdgeMode::Literal
+    } else {
+        RetainedMarkdownEdgeMode::Omitted
     }
-    if spec.bold {
-        out.set_bold();
+}
+
+fn measure_retained_markdown_edge(
+    content: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    inline: bool,
+    width: u16,
+    inline_options: &InlineOptions,
+    max_rows: usize,
+) -> smelt_core::transcript_content::ContentTextWindow {
+    match retained_markdown_edge_mode(content, inline) {
+        RetainedMarkdownEdgeMode::Literal => {
+            return content
+                .content
+                .visit_text_layout_head_rows(width, false, max_rows, |_| {});
+        }
+        RetainedMarkdownEdgeMode::Omitted => {
+            return smelt_core::transcript_content::ContentTextWindow {
+                row_count: max_rows.min(1),
+                truncated: max_rows == 0,
+            };
+        }
+        RetainedMarkdownEdgeMode::Parsed => {}
     }
-    if spec.italic {
+
+    let total = if inline {
+        measure_retained_inline_markdown_spec(content, dim, italic, width, inline_options)
+    } else {
+        return measure_retained_markdown_inner_edge_with_options(
+            &content.content,
+            width as usize,
+            "",
+            dim,
+            None,
+            inline_options,
+            max_rows,
+        );
+    };
+    smelt_core::transcript_content::ContentTextWindow {
+        row_count: total.min(max_rows),
+        truncated: total > max_rows,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_markdown_edge(
+    out: &mut LineBuilder,
+    content: &RetainedContentSpec,
+    dim: bool,
+    italic: bool,
+    inline: bool,
+    width: u16,
+    inline_options: &InlineOptions,
+    max_rows: usize,
+    tail: bool,
+) -> smelt_core::transcript_content::ContentTextWindow {
+    let mode = retained_markdown_edge_mode(content, inline);
+    let window = measure_retained_markdown_edge(
+        content,
+        dim,
+        italic,
+        inline,
+        width,
+        inline_options,
+        max_rows,
+    );
+    match mode {
+        RetainedMarkdownEdgeMode::Literal => {
+            if tail {
+                content.content.visit_text_layout_tail_rows(
+                    width,
+                    false,
+                    window.row_count,
+                    |row| render_retained_plain_markdown_row(out, row, dim, italic, None),
+                );
+            } else {
+                content.content.visit_text_layout_head_rows(
+                    width,
+                    false,
+                    window.row_count,
+                    |row| render_retained_plain_markdown_row(out, row, dim, italic, None),
+                );
+            }
+            return window;
+        }
+        RetainedMarkdownEdgeMode::Omitted => {
+            if window.row_count > 0 {
+                out.save_style();
+                if dim {
+                    out.set_dim();
+                }
+                if italic {
+                    out.set_italic();
+                }
+                out.print_with_meta(BOUNDED_MARKDOWN_OMITTED, SpanMeta::unselectable());
+                out.pop_style();
+                out.newline();
+            }
+            return window;
+        }
+        RetainedMarkdownEdgeMode::Parsed => {}
+    }
+
+    if inline {
+        let total =
+            measure_retained_inline_markdown_spec(content, dim, italic, width, inline_options);
+        let row_start = if tail {
+            total.saturating_sub(window.row_count)
+        } else {
+            0
+        };
+        render_retained_inline_markdown_spec(
+            out,
+            content,
+            dim,
+            italic,
+            width,
+            row_start,
+            window.row_count,
+            None,
+            inline_options,
+        );
+        return window;
+    }
+
+    if italic {
+        out.save_style();
         out.set_italic();
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_ir_panel(
-    out: &mut LineBuilder,
-    child: &LayoutIr,
-    spec: &PanelSpec,
-    width: u16,
-    row_start: u16,
-    row_count: u16,
-    gutter: Option<&GutterSpec>,
-    history: Option<&BlockHistory>,
-    inline_options: &InlineOptions,
-) -> u16 {
-    let total = measure_ir_panel(child, spec, width, inline_options);
-    let end = row_start.saturating_add(row_count).min(total);
-    let child_width = panel_child_width(width, spec.padding);
-    let child_rows = measure_layout_ir_full(child, child_width, inline_options);
-    let panel_hl = intern(&spec.hl_group);
-    let panel_bg = out
-        .theme()
-        .resolve(panel_hl)
-        .bg
-        .unwrap_or(smelt_core::style::Color::Reset);
-    let pad_text = " ".repeat(spec.padding as usize);
-    let pad_meta = SpanMeta::unselectable();
-    let theme = out.theme().clone();
-    let mut rows = 0u16;
-
-    for panel_row in row_start..end {
-        if let Some(gutter) = gutter {
-            out.print_gutter(&gutter.text);
-        }
-        out.set_hl(panel_hl);
-        if !pad_text.is_empty() {
-            out.print_with_meta(&pad_text, pad_meta.clone());
-        }
-        if let Some(child_row) = panel_row
-            .checked_sub(spec.padding)
-            .filter(|row| *row < child_rows)
-        {
-            let mut buf = smelt_core::buffer::Buffer::new(
-                smelt_core::buffer::BufId(0),
-                smelt_core::buffer::BufCreateOpts::default(),
-            );
-            let outcome = {
-                let mut col = LineBuilder::new(&mut buf, &theme, child_width);
-                render_layout_ir_range(
-                    &mut col,
-                    child,
-                    child_width,
-                    child_row,
-                    1,
-                    None,
-                    history,
-                    inline_options,
-                );
-                col.finish()
-            };
-            if outcome.was_wrapped {
-                out.mark_wrapped();
-            }
-            if outcome.line_count > 0 {
-                apply_temp_decoration(out, &buf, 0, false);
-                emit_buffer_row_clipped(&buf, 0, child_width, out, None);
-            }
-        }
-        out.fill_line_bg(panel_bg);
-        out.reset_style();
-        out.newline();
-        rows = rows.saturating_add(1);
+    render_retained_markdown_inner_edge_with_options(
+        out,
+        &content.content,
+        width as usize,
+        "",
+        dim,
+        None,
+        inline_options,
+        max_rows,
+        tail,
+    );
+    if italic {
+        out.pop_style();
     }
-    rows
+    window
 }
 
-fn measure_ir_panel(
-    child: &LayoutIr,
-    spec: &PanelSpec,
+const MAX_BOUNDED_EDGE_TRANSIENT_BYTES: usize = 64 * 1024;
+const MAX_BOUNDED_EDGE_TRANSIENT_NODES: usize = 4 * 1024;
+const MAX_BOUNDED_EDGE_TRANSIENT_SPANS: usize = 4 * 1024;
+const MAX_BOUNDED_EDGE_DEPTH: usize = 32;
+const BOUNDED_TRANSIENT_OMITTED: &str = "[large transient layout omitted]";
+
+fn measure_retained_text_edge(
+    content: &smelt_core::transcript_content::TranscriptContent,
+    width: u16,
+    ansi: bool,
+    max_rows: usize,
+) -> smelt_core::transcript_content::ContentTextWindow {
+    let logical_lines = content.read().logical_line_count();
+    if max_rows != 0 && logical_lines > max_rows {
+        return smelt_core::transcript_content::ContentTextWindow {
+            row_count: max_rows,
+            truncated: true,
+        };
+    }
+    content.visit_text_layout_head_rows(width, ansi, max_rows, |_| {})
+}
+
+fn measure_retained_content_edge(
+    content: &RetainedContentSpec,
+    width: u16,
+    max_rows: usize,
+    inline_options: &InlineOptions,
+) -> smelt_core::transcript_content::ContentTextWindow {
+    match &content.render {
+        ContentRenderSpec::Text { ansi, .. } => {
+            measure_retained_text_edge(&content.content, width, *ansi, max_rows)
+        }
+        ContentRenderSpec::Markdown {
+            dim,
+            italic,
+            inline,
+        } => measure_retained_markdown_edge(
+            content,
+            *dim,
+            *italic,
+            *inline,
+            width,
+            inline_options,
+            max_rows,
+        ),
+        ContentRenderSpec::Code { .. } => {
+            smelt_core::content::highlight::measure_retained_code_block_edge(
+                &content.content,
+                width,
+                max_rows,
+            )
+        }
+        ContentRenderSpec::File { .. } => {
+            smelt_core::content::highlight::measure_retained_file_view_edge(
+                &content.content,
+                width,
+                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                0,
+                max_rows,
+            )
+        }
+    }
+}
+
+#[derive(Default)]
+struct TransientLayoutBudget {
+    bytes: usize,
+    nodes: usize,
+    spans: usize,
+}
+
+impl TransientLayoutBudget {
+    fn add_node(&mut self) -> bool {
+        self.nodes = self.nodes.saturating_add(1);
+        self.nodes <= MAX_BOUNDED_EDGE_TRANSIENT_NODES
+    }
+
+    fn add_bytes(&mut self, bytes: usize) -> bool {
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.bytes <= MAX_BOUNDED_EDGE_TRANSIENT_BYTES
+    }
+
+    fn add_spans<'a>(&mut self, spans: impl Iterator<Item = &'a protocol::StyledSpan>) -> bool {
+        for span in spans {
+            self.spans = self.spans.saturating_add(1);
+            if self.spans > MAX_BOUNDED_EDGE_TRANSIENT_SPANS || !self.add_bytes(span.text.len()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn transient_leaf_fits_budget(leaf: &IrLeaf, budget: &mut TransientLayoutBudget) -> bool {
+    match leaf {
+        IrLeaf::Text(spec) => budget.add_bytes(spec.content.len()),
+        IrLeaf::Runs(spec) => budget.add_spans(spec.lines.0.iter().flatten()),
+        IrLeaf::Line(spec) => budget.add_spans(spec.spans.iter()),
+        IrLeaf::Markdown(spec) => budget.add_bytes(spec.content.len()),
+        IrLeaf::Code(spec) => budget.add_bytes(spec.content.len()),
+        IrLeaf::Separator(spec) => budget.add_spans(spec.label.iter()),
+        IrLeaf::Content(_) | IrLeaf::SourceView(_) => false,
+    }
+}
+
+fn transient_layout_fits_budget(layout: &LayoutIr, budget: &mut TransientLayoutBudget) -> bool {
+    transient_layout_fits_budget_inner(layout, budget, 0)
+}
+
+fn transient_layout_fits_budget_inner(
+    layout: &LayoutIr,
+    budget: &mut TransientLayoutBudget,
+    depth: usize,
+) -> bool {
+    if depth > MAX_BOUNDED_EDGE_DEPTH || !budget.add_node() {
+        return false;
+    }
+    match layout {
+        BlockLayout::Empty => true,
+        BlockLayout::Leaf(leaf) => transient_leaf_fits_budget(leaf, budget),
+        BlockLayout::Vbox(items) => items.iter().all(|child| {
+            transient_layout_fits_budget_inner(child, budget, depth.saturating_add(1))
+        }),
+        BlockLayout::Hbox(items) => items.iter().all(|item| {
+            transient_layout_fits_budget_inner(&item.layout, budget, depth.saturating_add(1))
+        }),
+        BlockLayout::Gutter { child, .. }
+        | BlockLayout::RowPrefix { child, .. }
+        | BlockLayout::Panel { child, .. }
+        | BlockLayout::Style { child, .. }
+        | BlockLayout::Cap { child, .. }
+        | BlockLayout::Refresh { child, .. } => {
+            transient_layout_fits_budget_inner(child, budget, depth.saturating_add(1))
+        }
+    }
+}
+
+fn transient_leaf_is_bounded(leaf: &IrLeaf) -> bool {
+    transient_leaf_fits_budget(leaf, &mut TransientLayoutBudget::default())
+}
+
+fn bounded_transient_layout_rows(
+    layout: &LayoutIr,
     width: u16,
     inline_options: &InlineOptions,
-) -> u16 {
-    let child_width = panel_child_width(width, spec.padding);
-    let child_rows = measure_layout_ir_full(child, child_width, inline_options);
-    child_rows.saturating_add(spec.padding.saturating_mul(2))
+) -> Option<usize> {
+    transient_layout_fits_budget(layout, &mut TransientLayoutBudget::default())
+        .then(|| measure_layout_ir_full(layout, width, inline_options))
 }
 
-fn panel_child_width(width: u16, padding: u16) -> u16 {
-    width.saturating_sub(padding.saturating_mul(2)).max(1)
-}
+fn measure_bounded_layout_edge_inner(
+    layout: &LayoutIr,
+    width: u16,
+    max_rows: usize,
+    inline_options: &InlineOptions,
+    depth: usize,
+) -> Option<smelt_core::transcript_content::ContentTextWindow> {
+    use smelt_core::transcript_content::ContentTextWindow;
 
-#[derive(Clone, Copy)]
-enum CapRow {
-    Child(u16),
-    Marker {
-        skipped: u16,
-        kept: u16,
-        total: Option<u64>,
-        direction: &'static str,
-        omitted: Option<(u16, u16)>,
-    },
-}
+    if depth > MAX_BOUNDED_EDGE_DEPTH {
+        return Some(ContentTextWindow {
+            row_count: max_rows.min(1),
+            truncated: true,
+        });
+    }
 
-fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) -> Vec<CapRow> {
-    use smelt_core::content::block_layout::{CapKeep, CapMarker};
-
-    let truncated = child_rows > spec.rows;
-    let mut rows = Vec::new();
-    match spec.keep {
-        CapKeep::Head { marker } => {
-            let kept = child_rows.min(spec.rows);
-            if truncated && marker == Some(CapMarker::Above) {
-                rows.push(CapRow::Marker {
-                    skipped: child_rows.saturating_sub(kept),
-                    kept,
-                    total: None,
-                    direction: "above",
-                    omitted: None,
+    match layout {
+        BlockLayout::Empty => Some(ContentTextWindow {
+            row_count: 0,
+            truncated: false,
+        }),
+        BlockLayout::Leaf(IrLeaf::Content(content)) => Some(measure_retained_content_edge(
+            content,
+            width,
+            max_rows,
+            inline_options,
+        )),
+        BlockLayout::Leaf(leaf) => {
+            if !transient_leaf_is_bounded(leaf) {
+                return Some(ContentTextWindow {
+                    row_count: max_rows.min(1),
+                    truncated: true,
                 });
             }
-            rows.extend((0..kept).map(CapRow::Child));
-            if truncated && marker == Some(CapMarker::Below) {
-                rows.push(CapRow::Marker {
-                    skipped: child_rows.saturating_sub(kept),
-                    kept,
-                    total: None,
-                    direction: "below",
-                    omitted: None,
-                });
-            }
+            let total = measure_ir_leaf(leaf, width, 0, inline_options);
+            Some(ContentTextWindow {
+                row_count: total.min(max_rows),
+                truncated: total > max_rows,
+            })
         }
-        CapKeep::Tail { marker } => {
-            let kept = child_rows.min(spec.rows);
-            if truncated && marker == Some(CapMarker::Above) {
-                rows.push(CapRow::Marker {
-                    skipped: child_rows.saturating_sub(kept),
-                    kept,
-                    total: spec.total_rows.filter(|total| *total > kept as u64),
-                    direction: "above",
-                    omitted: None,
-                });
-            }
-            rows.extend((child_rows.saturating_sub(kept)..child_rows).map(CapRow::Child));
-            if truncated && marker == Some(CapMarker::Below) {
-                rows.push(CapRow::Marker {
-                    skipped: child_rows.saturating_sub(kept),
-                    kept,
-                    total: None,
-                    direction: "below",
-                    omitted: None,
-                });
-            }
-        }
-        CapKeep::HeadTail { head, marker } => {
-            if !truncated {
-                rows.extend((0..child_rows).map(CapRow::Child));
-            } else {
-                let head_rows = head.min(spec.rows);
-                let tail_rows = spec.rows.saturating_sub(head_rows);
-                rows.extend((0..head_rows).map(CapRow::Child));
-                if marker {
-                    rows.push(CapRow::Marker {
-                        skipped: child_rows.saturating_sub(spec.rows),
-                        kept: spec.rows,
-                        total: None,
-                        direction: "omitted",
-                        omitted: Some((head_rows, child_rows.saturating_sub(tail_rows))),
+        BlockLayout::Vbox(items) => {
+            let mut row_count = 0usize;
+            for child in items {
+                let remaining = max_rows.saturating_sub(row_count);
+                if remaining == 0 {
+                    return Some(ContentTextWindow {
+                        row_count,
+                        truncated: true,
                     });
                 }
-                rows.extend((child_rows.saturating_sub(tail_rows)..child_rows).map(CapRow::Child));
+                let child = measure_bounded_layout_edge_inner(
+                    child,
+                    width,
+                    remaining,
+                    inline_options,
+                    depth.saturating_add(1),
+                )?;
+                row_count = row_count.saturating_add(child.row_count);
+                if child.truncated {
+                    return Some(ContentTextWindow {
+                        row_count,
+                        truncated: true,
+                    });
+                }
             }
+            Some(ContentTextWindow {
+                row_count,
+                truncated: false,
+            })
+        }
+        BlockLayout::Gutter { child, spec } => {
+            let gutter_width = display_width_u16(&spec.text);
+            measure_bounded_layout_edge_inner(
+                child,
+                child_width_after_gutter(width, gutter_width),
+                max_rows,
+                inline_options,
+                depth.saturating_add(1),
+            )
+        }
+        BlockLayout::RowPrefix { child, spec } => measure_bounded_layout_edge_inner(
+            child,
+            child_width_after_gutter(width, row_prefix_width(spec)),
+            max_rows,
+            inline_options,
+            depth.saturating_add(1),
+        ),
+        BlockLayout::Panel { child, spec } => {
+            let padding = usize::from(spec.padding);
+            let top_rows = padding.min(max_rows);
+            if top_rows == max_rows {
+                return Some(ContentTextWindow {
+                    row_count: top_rows,
+                    truncated: true,
+                });
+            }
+            let child = measure_bounded_layout_edge_inner(
+                child,
+                panel_child_width(width, spec.padding),
+                max_rows.saturating_sub(top_rows),
+                inline_options,
+                depth.saturating_add(1),
+            )?;
+            let row_count = top_rows.saturating_add(child.row_count);
+            if child.truncated {
+                return Some(ContentTextWindow {
+                    row_count,
+                    truncated: true,
+                });
+            }
+            let total = row_count.saturating_add(padding);
+            Some(ContentTextWindow {
+                row_count: total.min(max_rows),
+                truncated: total > max_rows,
+            })
+        }
+        BlockLayout::Style { child, .. } | BlockLayout::Refresh { child, .. } => {
+            measure_bounded_layout_edge_inner(
+                child,
+                width,
+                max_rows,
+                inline_options,
+                depth.saturating_add(1),
+            )
+        }
+        BlockLayout::Cap { child, spec } => {
+            let rows = measure_bounded_cap_rows_inner(
+                child,
+                spec,
+                width,
+                inline_options,
+                depth.saturating_add(1),
+            )?;
+            Some(ContentTextWindow {
+                row_count: rows.min(max_rows),
+                truncated: rows > max_rows,
+            })
+        }
+        BlockLayout::Hbox(items) => {
+            let widths = solve_ir_hbox_widths(items, width);
+            let mut row_count = 0usize;
+            let mut truncated = false;
+            for (item, child_width) in items.iter().zip(widths) {
+                if child_width == 0 {
+                    continue;
+                }
+                let child = measure_bounded_layout_edge_inner(
+                    &item.layout,
+                    child_width,
+                    max_rows,
+                    inline_options,
+                    depth.saturating_add(1),
+                )?;
+                row_count = row_count.max(child.row_count);
+                truncated |= child.truncated;
+            }
+            Some(ContentTextWindow {
+                row_count,
+                truncated,
+            })
         }
     }
-    rows
 }
 
+fn retained_text_cap_leaf(
+    child: &LayoutIr,
+) -> Option<(
+    &RetainedContentSpec,
+    Option<smelt_core::theme::HlGroup>,
+    bool,
+)> {
+    let BlockLayout::Leaf(IrLeaf::Content(content)) = child else {
+        return None;
+    };
+    let ContentRenderSpec::Text { hl_group, ansi } = &content.render else {
+        return None;
+    };
+    Some((content, hl_group.as_deref().map(intern), *ansi))
+}
+
+fn measure_bounded_cap_rows(
+    child: &LayoutIr,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> Option<usize> {
+    measure_bounded_cap_rows_inner(child, spec, width, inline_options, 0)
+}
+
+fn measure_bounded_cap_rows_inner(
+    child: &LayoutIr,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    width: u16,
+    inline_options: &InlineOptions,
+    depth: usize,
+) -> Option<usize> {
+    use smelt_core::content::block_layout::CapKeep;
+
+    if depth <= MAX_BOUNDED_EDGE_DEPTH {
+        if let Some(child_rows) = bounded_transient_layout_rows(child, width, inline_options) {
+            return Some(
+                cap_rows_for_child(child_rows, spec, child, width, None, inline_options, None)
+                    .row_count(),
+            );
+        }
+    }
+    let probe_rows = usize::from(spec.rows).saturating_add(1);
+    let window =
+        measure_bounded_layout_edge_inner(child, width, probe_rows, inline_options, depth)?;
+    let truncated = window.truncated || window.row_count > usize::from(spec.rows);
+    let kept = window.row_count.min(usize::from(spec.rows));
+    let marker = truncated
+        && match spec.keep {
+            CapKeep::Head { marker } | CapKeep::Tail { marker } => marker.is_some(),
+            CapKeep::HeadTail { marker, .. } => marker,
+        };
+    Some(kept.saturating_add(usize::from(marker)))
+}
+
+mod cap_rows;
+use cap_rows::*;
+
 fn cap_rows_for_child(
-    child_rows: u16,
+    child_rows: usize,
     spec: &smelt_core::content::block_layout::CapSpec,
     child: &LayoutIr,
     width: u16,
     history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
-    theme: &Theme,
-) -> Vec<CapRow> {
+    theme: Option<&Theme>,
+) -> CapRows {
     let mut rows = cap_rows(child_rows, spec);
-    rows.retain(|row| match row {
-        CapRow::Marker {
-            direction: "omitted",
-            omitted: Some((start, end)),
-            ..
-        } => omitted_rows_have_visible_text(
-            child,
-            width,
-            *start,
-            *end,
-            history,
-            inline_options,
-            theme,
-        ),
-        _ => true,
-    });
+    if rows.omitted_range().is_some_and(|(start, end)| {
+        !omitted_rows_have_visible_text(child, width, start, end, history, inline_options, theme)
+    }) {
+        rows.remove_omitted_marker();
+    }
     rows
 }
 
 fn omitted_rows_have_visible_text(
     child: &LayoutIr,
     width: u16,
-    start: u16,
-    end: u16,
+    start: usize,
+    end: usize,
     history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
-    theme: &Theme,
+    theme: Option<&Theme>,
 ) -> bool {
     if start >= end {
         return false;
@@ -1712,9 +3029,17 @@ fn omitted_rows_have_visible_text(
     if let Some(visible) = layout_range_has_visible_text(child, width, start, end, inline_options) {
         return visible;
     }
+    let fallback_theme;
+    let theme = if let Some(theme) = theme {
+        theme
+    } else {
+        fallback_theme = Theme::default();
+        &fallback_theme
+    };
+    let measured = measure_layout_ir_plan(child, width, inline_options);
     let mut buf = smelt_core::buffer::Buffer::new(smelt_core::buffer::BufId(0), Default::default());
     let mut out = LineBuilder::new(&mut buf, theme, width);
-    let rows = render_layout_ir_range(
+    let rows = render_layout_ir_range_measured(
         &mut out,
         child,
         width,
@@ -1723,6 +3048,7 @@ fn omitted_rows_have_visible_text(
         None,
         history,
         inline_options,
+        RenderMeasurement::Measured(&measured),
     );
     out.finish();
     rows > 0 && (0..rows as usize).any(|row| !buf.get_line(row).unwrap_or("").trim().is_empty())
@@ -1731,8 +3057,8 @@ fn omitted_rows_have_visible_text(
 fn layout_range_has_visible_text(
     layout: &LayoutIr,
     width: u16,
-    start: u16,
-    end: u16,
+    start: usize,
+    end: usize,
     inline_options: &InlineOptions,
 ) -> Option<bool> {
     if start >= end {
@@ -1752,6 +3078,13 @@ fn layout_range_has_visible_text(
                 end.saturating_sub(start),
             ))
         }
+        BlockLayout::Leaf(IrLeaf::Content(spec)) => match &spec.render {
+            ContentRenderSpec::Text { ansi, .. } => Some(
+                spec.content
+                    .text_layout_range_has_visible_text(width, *ansi, start..end),
+            ),
+            _ => None,
+        },
         BlockLayout::Vbox(items) => {
             vbox_range_has_visible_text(items, width, start, end, inline_options)
         }
@@ -1787,11 +3120,11 @@ fn layout_range_has_visible_text(
 fn vbox_range_has_visible_text(
     items: &[LayoutIr],
     width: u16,
-    start: u16,
-    end: u16,
+    start: usize,
+    end: usize,
     inline_options: &InlineOptions,
 ) -> Option<bool> {
-    let mut base = 0u16;
+    let mut base = 0usize;
     let mut saw_unknown = false;
     for child in items {
         if base >= end {
@@ -1819,68 +3152,1014 @@ fn vbox_range_has_visible_text(
     (!saw_unknown).then_some(false)
 }
 
+struct CapRenderRange {
+    start: usize,
+    end: usize,
+    output_row: usize,
+    written: u16,
+}
+
+impl CapRenderRange {
+    fn includes_current(&self) -> bool {
+        self.output_row >= self.start && self.output_row < self.end
+    }
+
+    fn advance(&mut self) {
+        self.output_row = self.output_row.saturating_add(1);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_text_cap_marker(
+    out: &mut LineBuilder,
+    state: &mut CapRenderRange,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    kept: usize,
+    direction: &'static str,
+    total: Option<u64>,
+    gutter: Option<&GutterSpec>,
+) {
+    if state.includes_current() {
+        let estimated_total = total
+            .or(spec.total_rows)
+            .unwrap_or(kept.saturating_add(1) as u64);
+        let skipped = estimated_total
+            .saturating_sub(kept as u64)
+            .min(usize::MAX as u64) as usize;
+        render_cap_marker(out, skipped, kept, total, direction, gutter);
+        state.written = state.written.saturating_add(1);
+    }
+    state.advance();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_text_cap_edge(
+    out: &mut LineBuilder,
+    state: &mut CapRenderRange,
+    content: &RetainedContentSpec,
+    hl: Option<smelt_core::theme::HlGroup>,
+    ansi: bool,
+    width: u16,
+    tail: bool,
+    count: usize,
+    gutter: Option<&GutterSpec>,
+) {
+    if tail {
+        content
+            .content
+            .visit_text_layout_tail_rows(width, ansi, count, |row| {
+                if state.includes_current() {
+                    render_content_text_row(out, row, hl, ansi, gutter);
+                    state.written = state.written.saturating_add(1);
+                }
+                state.advance();
+            });
+    } else {
+        content
+            .content
+            .visit_text_layout_head_rows(width, ansi, count, |row| {
+                if state.includes_current() {
+                    render_content_text_row(out, row, hl, ansi, gutter);
+                    state.written = state.written.saturating_add(1);
+                }
+                state.advance();
+            });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_retained_text_cap(
+    out: &mut LineBuilder,
+    child: &LayoutIr,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+) -> Option<u16> {
+    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+
+    let (content, hl, ansi) = retained_text_cap_leaf(child)?;
+    let probe_rows = usize::from(spec.rows).saturating_add(1);
+    let probe = measure_retained_text_edge(&content.content, width, ansi, probe_rows);
+    let truncated = probe.truncated || probe.row_count > usize::from(spec.rows);
+    let kept = probe.row_count.min(usize::from(spec.rows));
+    let mut state = CapRenderRange {
+        start: row_start,
+        end: row_start.saturating_add(row_count),
+        output_row: 0,
+        written: 0,
+    };
+
+    match spec.keep {
+        CapKeep::Head { marker } => {
+            if truncated && marker == Some(CapMarker::Above) {
+                render_retained_text_cap_marker(out, &mut state, spec, kept, "above", None, gutter);
+            }
+            render_retained_text_cap_edge(
+                out, &mut state, content, hl, ansi, width, false, kept, gutter,
+            );
+            if truncated && marker == Some(CapMarker::Below) {
+                render_retained_text_cap_marker(out, &mut state, spec, kept, "below", None, gutter);
+            }
+        }
+        CapKeep::Tail { marker } => {
+            if truncated && marker == Some(CapMarker::Above) {
+                render_retained_text_cap_marker(
+                    out,
+                    &mut state,
+                    spec,
+                    kept,
+                    "above",
+                    spec.total_rows.filter(|total| *total > kept as u64),
+                    gutter,
+                );
+            }
+            render_retained_text_cap_edge(
+                out, &mut state, content, hl, ansi, width, true, kept, gutter,
+            );
+            if truncated && marker == Some(CapMarker::Below) {
+                render_retained_text_cap_marker(out, &mut state, spec, kept, "below", None, gutter);
+            }
+        }
+        CapKeep::HeadTail { head, marker } => {
+            if !truncated {
+                render_retained_text_cap_edge(
+                    out, &mut state, content, hl, ansi, width, false, kept, gutter,
+                );
+            } else {
+                let head_rows = usize::from(head).min(kept);
+                let tail_rows = kept.saturating_sub(head_rows);
+                render_retained_text_cap_edge(
+                    out, &mut state, content, hl, ansi, width, false, head_rows, gutter,
+                );
+                if marker {
+                    render_retained_text_cap_marker(
+                        out, &mut state, spec, kept, "omitted", None, gutter,
+                    );
+                }
+                render_retained_text_cap_edge(
+                    out, &mut state, content, hl, ansi, width, true, tail_rows, gutter,
+                );
+            }
+        }
+    }
+    Some(state.written)
+}
+
+fn render_retained_cap_marker(
+    out: &mut LineBuilder,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    kept: usize,
+    direction: &'static str,
+    known_rows: Option<usize>,
+    total: Option<u64>,
+) {
+    let estimated_total = known_rows
+        .map(|rows| rows.min(u64::MAX as usize) as u64)
+        .or(total)
+        .or(spec.total_rows)
+        .unwrap_or(kept.saturating_add(1) as u64);
+    let skipped = estimated_total
+        .saturating_sub(kept as u64)
+        .min(usize::MAX as u64) as usize;
+    render_cap_marker(out, skipped, kept, total, direction, None);
+}
+
+fn render_retained_content_edge(
+    out: &mut LineBuilder,
+    content: &RetainedContentSpec,
+    width: u16,
+    count: usize,
+    tail: bool,
+    inline_options: &InlineOptions,
+) {
+    match &content.render {
+        ContentRenderSpec::Text { hl_group, ansi } => {
+            let hl = hl_group.as_deref().map(intern);
+            if tail {
+                content
+                    .content
+                    .visit_text_layout_tail_rows(width, *ansi, count, |row| {
+                        render_content_text_row(out, row, hl, *ansi, None);
+                    });
+            } else {
+                content
+                    .content
+                    .visit_text_layout_head_rows(width, *ansi, count, |row| {
+                        render_content_text_row(out, row, hl, *ansi, None);
+                    });
+            }
+        }
+        ContentRenderSpec::Code { lang, cache } => {
+            smelt_core::content::highlight::print_retained_code_block_edge(
+                out,
+                &content.content,
+                cache,
+                lang,
+                width,
+                count,
+                tail,
+            );
+        }
+        ContentRenderSpec::File { path, lang, cache } => {
+            let syntax_ext = lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext)
+                .or_else(|| {
+                    std::path::Path::new(path)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                })
+                .unwrap_or("txt");
+            smelt_core::content::highlight::print_retained_file_view_edge(
+                out,
+                &content.content,
+                cache,
+                syntax_ext,
+                smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+                0,
+                width,
+                count,
+                tail,
+            );
+        }
+        ContentRenderSpec::Markdown {
+            dim,
+            italic,
+            inline,
+        } => {
+            render_retained_markdown_edge(
+                out,
+                content,
+                *dim,
+                *italic,
+                *inline,
+                width,
+                inline_options,
+                count,
+                tail,
+            );
+        }
+    }
+}
+
+fn replay_bounded_edge_buffer(out: &mut LineBuilder, buf: &Buffer, outcome: Outcome, width: u16) {
+    if outcome.was_wrapped {
+        out.mark_wrapped();
+    }
+    for row in 0..outcome.line_count {
+        apply_temp_decoration(out, buf, row, true);
+        let row = u16::try_from(row).expect("bounded edge exceeds the temporary buffer");
+        emit_buffer_row_clipped(buf, row, width, out, None);
+        out.newline();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_bounded_layout_edge_to_buffer(
+    layout: &LayoutIr,
+    theme: &Theme,
+    inherited_style: smelt_core::style::Style,
+    width: u16,
+    max_rows: usize,
+    tail: bool,
+    inline_options: &InlineOptions,
+    depth: usize,
+) -> Option<(
+    Buffer,
+    Outcome,
+    smelt_core::transcript_content::ContentTextWindow,
+)> {
+    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+    let mut col = LineBuilder::new(&mut buf, theme, width.max(1));
+    col.push(None, inherited_style);
+    let window = render_bounded_layout_edge_inner(
+        &mut col,
+        layout,
+        width,
+        max_rows,
+        tail,
+        inline_options,
+        depth,
+    )?;
+    let outcome = col.finish();
+    Some((buf, outcome, window))
+}
+
+fn render_panel_edge_row(
+    out: &mut LineBuilder,
+    child: Option<(&Buffer, usize)>,
+    child_width: u16,
+    panel_hl: smelt_core::theme::HlGroup,
+    panel_bg: smelt_core::style::Color,
+    padding: u16,
+) {
+    out.set_hl(panel_hl);
+    if padding > 0 {
+        out.print_with_meta(&" ".repeat(usize::from(padding)), SpanMeta::unselectable());
+    }
+    if let Some((buf, row)) = child {
+        apply_temp_decoration(out, buf, row, false);
+        let row = u16::try_from(row).expect("bounded panel edge exceeds the temporary buffer");
+        emit_buffer_row_clipped(buf, row, child_width, out, None);
+    }
+    out.fill_line_bg(panel_bg);
+    out.reset_style();
+    out.newline();
+}
+
+fn render_bounded_layout_edge_inner(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    width: u16,
+    max_rows: usize,
+    tail: bool,
+    inline_options: &InlineOptions,
+    depth: usize,
+) -> Option<smelt_core::transcript_content::ContentTextWindow> {
+    if depth > MAX_BOUNDED_EDGE_DEPTH {
+        let window = smelt_core::transcript_content::ContentTextWindow {
+            row_count: max_rows.min(1),
+            truncated: true,
+        };
+        if window.row_count > 0 {
+            out.print_with_meta(BOUNDED_TRANSIENT_OMITTED, SpanMeta::unselectable());
+            out.newline();
+        }
+        return Some(window);
+    }
+
+    let window = measure_bounded_layout_edge_inner(layout, width, max_rows, inline_options, depth)?;
+    match layout {
+        BlockLayout::Empty => {}
+        BlockLayout::Leaf(IrLeaf::Content(content)) => {
+            render_retained_content_edge(
+                out,
+                content,
+                width,
+                window.row_count,
+                tail,
+                inline_options,
+            );
+        }
+        BlockLayout::Leaf(leaf) => {
+            if !transient_leaf_is_bounded(leaf) {
+                if window.row_count > 0 {
+                    out.print_with_meta(BOUNDED_TRANSIENT_OMITTED, SpanMeta::unselectable());
+                    out.newline();
+                }
+            } else {
+                let total = measure_ir_leaf(leaf, width, 0, inline_options);
+                let row_start = if tail {
+                    total.saturating_sub(window.row_count)
+                } else {
+                    0
+                };
+                render_ir_leaf(
+                    out,
+                    leaf,
+                    width,
+                    row_start,
+                    window.row_count,
+                    None,
+                    None,
+                    inline_options,
+                );
+            }
+        }
+        BlockLayout::Vbox(items) => {
+            if !tail || !window.truncated {
+                let mut remaining = window.row_count;
+                for child in items {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let child_window = render_bounded_layout_edge_inner(
+                        out,
+                        child,
+                        width,
+                        remaining,
+                        false,
+                        inline_options,
+                        depth.saturating_add(1),
+                    )?;
+                    remaining = remaining.saturating_sub(child_window.row_count);
+                    if child_window.truncated {
+                        break;
+                    }
+                }
+            } else {
+                let inherited_style = out.current_style();
+                let mut remaining = window.row_count;
+                let mut rendered = Vec::new();
+                for child in items.iter().rev() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let (buf, outcome, child_window) = render_bounded_layout_edge_to_buffer(
+                        child,
+                        out.theme(),
+                        inherited_style,
+                        width,
+                        remaining,
+                        true,
+                        inline_options,
+                        depth.saturating_add(1),
+                    )?;
+                    remaining = remaining.saturating_sub(child_window.row_count);
+                    rendered.push((buf, outcome));
+                    if child_window.truncated {
+                        break;
+                    }
+                }
+                for (buf, outcome) in rendered.into_iter().rev() {
+                    replay_bounded_edge_buffer(out, &buf, outcome, width);
+                }
+            }
+        }
+        BlockLayout::Gutter { child, spec } => {
+            let gutter_width = display_width_u16(&spec.text);
+            let child_width = child_width_after_gutter(width, gutter_width);
+            let (buf, outcome, _) = render_bounded_layout_edge_to_buffer(
+                child,
+                out.theme(),
+                out.current_style(),
+                child_width,
+                window.row_count,
+                tail,
+                inline_options,
+                depth.saturating_add(1),
+            )?;
+            if outcome.was_wrapped {
+                out.mark_wrapped();
+            }
+            for row in 0..outcome.line_count {
+                print_row_gutter(out, spec);
+                apply_temp_decoration(out, &buf, row, true);
+                let row = u16::try_from(row).expect("bounded gutter exceeds temporary buffer");
+                emit_buffer_row_clipped(&buf, row, child_width, out, None);
+                out.newline();
+            }
+        }
+        BlockLayout::RowPrefix { child, spec } => {
+            let prefix_width = row_prefix_width(spec);
+            let child_width = child_width_after_gutter(width, prefix_width);
+            let (buf, outcome, _) = render_bounded_layout_edge_to_buffer(
+                child,
+                out.theme(),
+                out.current_style(),
+                child_width,
+                window.row_count,
+                tail,
+                inline_options,
+                depth.saturating_add(1),
+            )?;
+            if outcome.was_wrapped {
+                out.mark_wrapped();
+            }
+            let starts_at_head = !tail || !window.truncated;
+            for row in 0..outcome.line_count {
+                let prefix = if starts_at_head && row == 0 {
+                    &spec.first
+                } else {
+                    &spec.rest
+                };
+                print_row_prefix(out, prefix, prefix_width);
+                apply_temp_decoration(out, &buf, row, true);
+                let row = u16::try_from(row).expect("bounded row prefix exceeds temporary buffer");
+                emit_buffer_row_clipped(&buf, row, child_width, out, None);
+                out.newline();
+            }
+        }
+        BlockLayout::Panel { child, spec } => {
+            let padding = usize::from(spec.padding);
+            let child_width = panel_child_width(width, spec.padding);
+            let panel_hl = intern(&spec.hl_group);
+            let panel_bg = out
+                .theme()
+                .resolve(panel_hl)
+                .bg
+                .unwrap_or(smelt_core::style::Color::Reset);
+            let (top_rows, child_limit, bottom_rows) = if tail {
+                let bottom = padding.min(window.row_count);
+                let child_limit = window.row_count.saturating_sub(bottom);
+                let child_window = measure_bounded_layout_edge_inner(
+                    child,
+                    child_width,
+                    child_limit,
+                    inline_options,
+                    depth.saturating_add(1),
+                )?;
+                let top = if child_window.truncated {
+                    0
+                } else {
+                    child_limit
+                        .saturating_sub(child_window.row_count)
+                        .min(padding)
+                };
+                (top, child_window.row_count, bottom)
+            } else {
+                let top = padding.min(window.row_count);
+                let child_limit = window.row_count.saturating_sub(top);
+                let child_window = measure_bounded_layout_edge_inner(
+                    child,
+                    child_width,
+                    child_limit,
+                    inline_options,
+                    depth.saturating_add(1),
+                )?;
+                let bottom = if child_window.truncated {
+                    0
+                } else {
+                    child_limit
+                        .saturating_sub(child_window.row_count)
+                        .min(padding)
+                };
+                (top, child_window.row_count, bottom)
+            };
+            for _ in 0..top_rows {
+                render_panel_edge_row(out, None, child_width, panel_hl, panel_bg, spec.padding);
+            }
+            if child_limit > 0 {
+                let (buf, outcome, _) = render_bounded_layout_edge_to_buffer(
+                    child,
+                    out.theme(),
+                    out.current_style(),
+                    child_width,
+                    child_limit,
+                    tail,
+                    inline_options,
+                    depth.saturating_add(1),
+                )?;
+                if outcome.was_wrapped {
+                    out.mark_wrapped();
+                }
+                for row in 0..outcome.line_count {
+                    render_panel_edge_row(
+                        out,
+                        Some((&buf, row)),
+                        child_width,
+                        panel_hl,
+                        panel_bg,
+                        spec.padding,
+                    );
+                }
+            }
+            for _ in 0..bottom_rows {
+                render_panel_edge_row(out, None, child_width, panel_hl, panel_bg, spec.padding);
+            }
+        }
+        BlockLayout::Style { child, spec } => {
+            out.save_style();
+            apply_style_spec(out, spec);
+            render_bounded_layout_edge_inner(
+                out,
+                child,
+                width,
+                window.row_count,
+                tail,
+                inline_options,
+                depth.saturating_add(1),
+            )?;
+            out.pop_style();
+        }
+        BlockLayout::Refresh { child, .. } => {
+            render_bounded_layout_edge_inner(
+                out,
+                child,
+                width,
+                window.row_count,
+                tail,
+                inline_options,
+                depth.saturating_add(1),
+            )?;
+        }
+        BlockLayout::Cap { child, spec } => {
+            let child_depth = depth.saturating_add(1);
+            let rows =
+                measure_bounded_cap_rows_inner(child, spec, width, inline_options, child_depth)?;
+            let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+            let outcome = {
+                let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
+                col.push(None, out.current_style());
+                render_bounded_layout_cap_inner(
+                    &mut col,
+                    child,
+                    spec,
+                    width,
+                    0,
+                    rows,
+                    None,
+                    inline_options,
+                    child_depth,
+                )?;
+                col.finish()
+            };
+            if outcome.was_wrapped {
+                out.mark_wrapped();
+            }
+            let start = if tail {
+                outcome.line_count.saturating_sub(window.row_count)
+            } else {
+                0
+            };
+            let end = start
+                .saturating_add(window.row_count)
+                .min(outcome.line_count);
+            for row in start..end {
+                apply_temp_decoration(out, &buf, row, true);
+                let row = u16::try_from(row).expect("nested cap exceeds temporary buffer");
+                emit_buffer_row_clipped(&buf, row, width, out, None);
+                out.newline();
+            }
+        }
+        BlockLayout::Hbox(items) => {
+            let widths = solve_ir_hbox_widths(items, width);
+            let inherited_style = out.current_style();
+            let mut columns = Vec::with_capacity(items.len());
+            for (item, child_width) in items.iter().zip(widths.iter().copied()) {
+                if child_width == 0 {
+                    columns.push(None);
+                    continue;
+                }
+                let (buf, outcome, _) = render_bounded_layout_edge_to_buffer(
+                    &item.layout,
+                    out.theme(),
+                    inherited_style,
+                    child_width,
+                    window.row_count,
+                    tail,
+                    inline_options,
+                    depth.saturating_add(1),
+                )?;
+                if outcome.was_wrapped {
+                    out.mark_wrapped();
+                }
+                columns.push(Some((buf, outcome)));
+            }
+
+            let copy_owner = items.iter().position(|item| item.copy_owner).unwrap_or(0);
+            let bottom_align = tail && window.truncated;
+            for row in 0..window.row_count {
+                for (index, (column, child_width)) in
+                    columns.iter().zip(widths.iter().copied()).enumerate()
+                {
+                    if child_width == 0 {
+                        continue;
+                    }
+                    let Some((buf, outcome)) = column else {
+                        continue;
+                    };
+                    let child_row = if bottom_align {
+                        row.checked_sub(window.row_count.saturating_sub(outcome.line_count))
+                    } else {
+                        (row < outcome.line_count).then_some(row)
+                    };
+                    let emitted = if let Some(child_row) = child_row {
+                        if index == copy_owner {
+                            apply_temp_decoration(out, buf, child_row, false);
+                        }
+                        let child_row = u16::try_from(child_row)
+                            .expect("bounded hbox exceeds the temporary buffer");
+                        emit_buffer_row_clipped(buf, child_row, child_width, out, None)
+                    } else {
+                        0
+                    };
+                    print_hbox_padding(out, child_width.saturating_sub(emitted));
+                }
+                out.newline();
+            }
+        }
+    }
+    Some(window)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_bounded_layout_cap(
+    out: &mut LineBuilder,
+    child: &LayoutIr,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
+) -> Option<u16> {
+    render_bounded_layout_cap_inner(
+        out,
+        child,
+        spec,
+        width,
+        row_start,
+        row_count,
+        gutter,
+        inline_options,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_bounded_layout_cap_inner(
+    out: &mut LineBuilder,
+    child: &LayoutIr,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    width: u16,
+    row_start: usize,
+    row_count: usize,
+    gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
+    depth: usize,
+) -> Option<u16> {
+    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+
+    let cap = usize::from(spec.rows);
+    let exact_child_rows = (depth <= MAX_BOUNDED_EDGE_DEPTH)
+        .then(|| bounded_transient_layout_rows(child, width, inline_options))
+        .flatten();
+    let probe = measure_bounded_layout_edge_inner(
+        child,
+        width,
+        cap.saturating_add(1),
+        inline_options,
+        depth,
+    )?;
+    let truncated =
+        exact_child_rows.map_or(probe.truncated || probe.row_count > cap, |rows| rows > cap);
+    let kept = exact_child_rows.unwrap_or(probe.row_count).min(cap);
+    let marker_visible = if let Some(child_rows) = exact_child_rows {
+        cap_rows_for_child(
+            child_rows,
+            spec,
+            child,
+            width,
+            None,
+            inline_options,
+            Some(out.theme()),
+        )
+        .row_count()
+            > kept
+    } else {
+        truncated
+            && match spec.keep {
+                CapKeep::Head { marker } | CapKeep::Tail { marker } => marker.is_some(),
+                CapKeep::HeadTail { marker, .. } => marker,
+            }
+    };
+    if !truncated && gutter.is_none() && row_start == 0 {
+        let requested = row_count.min(kept);
+        let window = render_bounded_layout_edge_inner(
+            out,
+            child,
+            width,
+            requested,
+            false,
+            inline_options,
+            depth,
+        )?;
+        return Some(u16::try_from(window.row_count).expect("capped output is terminal-bounded"));
+    }
+    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+    let outcome = {
+        let mut col = LineBuilder::new(&mut buf, out.theme(), width);
+        col.push(None, out.current_style());
+        match spec.keep {
+            CapKeep::Head { marker } => {
+                if marker_visible && marker == Some(CapMarker::Above) {
+                    render_retained_cap_marker(
+                        &mut col,
+                        spec,
+                        kept,
+                        "above",
+                        exact_child_rows,
+                        None,
+                    );
+                }
+                render_bounded_layout_edge_inner(
+                    &mut col,
+                    child,
+                    width,
+                    kept,
+                    false,
+                    inline_options,
+                    depth,
+                )?;
+                if marker_visible && marker == Some(CapMarker::Below) {
+                    render_retained_cap_marker(
+                        &mut col,
+                        spec,
+                        kept,
+                        "below",
+                        exact_child_rows,
+                        None,
+                    );
+                }
+            }
+            CapKeep::Tail { marker } => {
+                if marker_visible && marker == Some(CapMarker::Above) {
+                    render_retained_cap_marker(
+                        &mut col,
+                        spec,
+                        kept,
+                        "above",
+                        exact_child_rows,
+                        spec.total_rows.filter(|total| *total > kept as u64),
+                    );
+                }
+                render_bounded_layout_edge_inner(
+                    &mut col,
+                    child,
+                    width,
+                    kept,
+                    true,
+                    inline_options,
+                    depth,
+                )?;
+                if marker_visible && marker == Some(CapMarker::Below) {
+                    render_retained_cap_marker(
+                        &mut col,
+                        spec,
+                        kept,
+                        "below",
+                        exact_child_rows,
+                        None,
+                    );
+                }
+            }
+            CapKeep::HeadTail { head, marker } => {
+                if truncated {
+                    let head_rows = usize::from(head).min(kept);
+                    let tail_rows = kept.saturating_sub(head_rows);
+                    render_bounded_layout_edge_inner(
+                        &mut col,
+                        child,
+                        width,
+                        head_rows,
+                        false,
+                        inline_options,
+                        depth,
+                    )?;
+                    if marker_visible && marker {
+                        render_retained_cap_marker(
+                            &mut col,
+                            spec,
+                            kept,
+                            "omitted",
+                            exact_child_rows,
+                            None,
+                        );
+                    }
+                    render_bounded_layout_edge_inner(
+                        &mut col,
+                        child,
+                        width,
+                        tail_rows,
+                        true,
+                        inline_options,
+                        depth,
+                    )?;
+                } else {
+                    render_bounded_layout_edge_inner(
+                        &mut col,
+                        child,
+                        width,
+                        kept,
+                        false,
+                        inline_options,
+                        depth,
+                    )?;
+                }
+            }
+        }
+        col.finish()
+    };
+    if outcome.was_wrapped {
+        out.mark_wrapped();
+    }
+    let end = row_start.saturating_add(row_count).min(outcome.line_count);
+    let mut written = 0u16;
+    for row in row_start..end {
+        if let Some(gutter) = gutter {
+            print_bounded_cap_gutter(
+                out,
+                gutter,
+                child,
+                spec,
+                truncated,
+                marker_visible,
+                kept,
+                row,
+            );
+        }
+        apply_temp_decoration(out, &buf, row, true);
+        let buffer_row = u16::try_from(row).expect("capped output is terminal-bounded");
+        emit_buffer_row_clipped(&buf, buffer_row, width, out, None);
+        out.newline();
+        written = written.saturating_add(1);
+    }
+    Some(written)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_bounded_cap_gutter(
+    out: &mut LineBuilder,
+    gutter: &GutterSpec,
+    child: &LayoutIr,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    truncated: bool,
+    marker_visible: bool,
+    kept: usize,
+    row: usize,
+) {
+    if !gutter.styled {
+        print_row_gutter(out, gutter);
+        return;
+    }
+    out.save_style();
+    if bounded_cap_row_is_marker(spec, truncated, marker_visible, kept, row) {
+        out.set_dim();
+    } else {
+        apply_outer_layout_styles(out, child);
+    }
+    out.print_gutter(&gutter.text);
+    out.pop_style();
+}
+
+fn bounded_cap_row_is_marker(
+    spec: &smelt_core::content::block_layout::CapSpec,
+    truncated: bool,
+    marker_visible: bool,
+    kept: usize,
+    row: usize,
+) -> bool {
+    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+
+    if !truncated || !marker_visible {
+        return false;
+    }
+    match spec.keep {
+        CapKeep::Head {
+            marker: Some(CapMarker::Above),
+        }
+        | CapKeep::Tail {
+            marker: Some(CapMarker::Above),
+        } => row == 0,
+        CapKeep::Head {
+            marker: Some(CapMarker::Below),
+        }
+        | CapKeep::Tail {
+            marker: Some(CapMarker::Below),
+        } => row == kept,
+        CapKeep::HeadTail { head, marker: true } => row == usize::from(head).min(kept),
+        _ => false,
+    }
+}
+
+fn apply_outer_layout_styles(out: &mut LineBuilder, layout: &LayoutIr) {
+    match layout {
+        BlockLayout::Style { child, spec } => {
+            apply_style_spec(out, spec);
+            apply_outer_layout_styles(out, child);
+        }
+        BlockLayout::Refresh { child, .. } => apply_outer_layout_styles(out, child),
+        _ => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_ir_cap(
     out: &mut LineBuilder,
     child: &LayoutIr,
     spec: &smelt_core::content::block_layout::CapSpec,
     width: u16,
-    row_start: u16,
-    row_count: u16,
+    row_start: usize,
+    row_count: usize,
     gutter: Option<&GutterSpec>,
-    history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
 ) -> u16 {
-    let child_rows =
-        measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter), inline_options);
-    let theme = out.theme().clone();
-    let rows = cap_rows_for_child(
-        child_rows,
-        spec,
-        child,
-        width,
-        history,
-        inline_options,
-        &theme,
-    );
-    let mut written = 0u16;
-    for row in rows
-        .into_iter()
-        .skip(row_start as usize)
-        .take(row_count as usize)
+    let _perf = smelt_perf::perf::begin("render:layout:cap");
+    if let Some(rows) =
+        render_retained_text_cap(out, child, spec, width, row_start, row_count, gutter)
     {
-        match row {
-            CapRow::Child(child_start) => {
-                written = written.saturating_add(render_layout_ir_range(
-                    out,
-                    child,
-                    width,
-                    child_start,
-                    1,
-                    gutter,
-                    history,
-                    inline_options,
-                ));
-            }
-            CapRow::Marker {
-                skipped,
-                kept,
-                total,
-                direction,
-                ..
-            } => {
-                render_cap_marker(out, skipped, kept, total, direction, gutter);
-                written = written.saturating_add(1);
-            }
-        }
+        return rows;
     }
-    written
+    render_bounded_layout_cap(
+        out,
+        child,
+        spec,
+        width,
+        row_start,
+        row_count,
+        gutter,
+        inline_options,
+    )
+    .expect("every cap has a bounded rendering policy")
 }
 
 fn render_cap_marker(
     out: &mut LineBuilder,
-    skipped: u16,
-    kept: u16,
+    skipped: usize,
+    kept: usize,
     total: Option<u64>,
     direction: &str,
     gutter: Option<&GutterSpec>,
@@ -1898,202 +4177,26 @@ fn render_cap_marker(
     out.newline();
 }
 
-fn cap_marker_text(skipped: u16, kept: u16, total: Option<u64>, direction: &str) -> String {
+fn cap_marker_text(skipped: usize, kept: usize, total: Option<u64>, direction: &str) -> String {
     if direction == "above" {
         if let Some(total) = total {
             format!(
                 "… showing last {} of {}",
                 kept,
-                pluralize(total as usize, "line", "lines")
+                pluralize(total.min(usize::MAX as u64) as usize, "line", "lines")
             )
         } else {
-            format!(
-                "… {} {direction}",
-                pluralize(skipped as usize, "line", "lines")
-            )
+            format!("… {} {direction}", pluralize(skipped, "line", "lines"))
         }
     } else if direction == "omitted" {
-        format!(
-            "… {} omitted …",
-            pluralize(skipped as usize, "line", "lines")
-        )
+        format!("… {} omitted …", pluralize(skipped, "line", "lines"))
     } else {
-        format!(
-            "… {} {direction}",
-            pluralize(skipped as usize, "line", "lines")
-        )
+        format!("… {} {direction}", pluralize(skipped, "line", "lines"))
     }
 }
 
-fn solve_ir_hbox_widths(
-    items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
-    total_width: u16,
-) -> Vec<u16> {
-    let constraints: Vec<_> = items.iter().map(|item| item.constraint).collect();
-    let fit_widths: Vec<_> = items
-        .iter()
-        .map(|item| intrinsic_layout_width(&item.layout, total_width))
-        .collect();
-    solve_hbox_widths_with_fit(&constraints, &fit_widths, total_width)
-}
-
-// `Constraint::Fit` uses renderer-defined intrinsic widths. Most leaves can
-// report their unwrapped content width; width-dependent leaves fall back to a
-// safe cap so a fit column never asks for more than the parent can provide.
-fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16 {
-    match layout {
-        BlockLayout::Empty => 0,
-        BlockLayout::Leaf(leaf) => intrinsic_leaf_width(leaf, total_width),
-        BlockLayout::Vbox(items) => items
-            .iter()
-            .map(|child| intrinsic_layout_width(child, total_width))
-            .max()
-            .unwrap_or(0),
-        BlockLayout::Hbox(items) => items
-            .iter()
-            .map(|item| intrinsic_layout_width(&item.layout, total_width))
-            .fold(0u16, u16::saturating_add),
-        BlockLayout::Gutter { child, spec } => {
-            display_width_u16(&spec.text).saturating_add(intrinsic_layout_width(child, total_width))
-        }
-        BlockLayout::RowPrefix { child, spec } => {
-            row_prefix_width(spec).saturating_add(intrinsic_layout_width(child, total_width))
-        }
-        BlockLayout::Panel { child, spec } => intrinsic_layout_width(child, total_width)
-            .saturating_add(spec.padding.saturating_mul(2)),
-        BlockLayout::Style { child, .. }
-        | BlockLayout::Cap { child, .. }
-        | BlockLayout::Refresh { child, .. } => intrinsic_layout_width(child, total_width),
-    }
-}
-
-fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
-    match leaf {
-        IrLeaf::Text(spec) => spec
-            .content
-            .lines()
-            .map(display_width_u16)
-            .max()
-            .unwrap_or(0),
-        IrLeaf::Runs(spec) => spec
-            .lines
-            .0
-            .iter()
-            .map(|line| {
-                line.iter()
-                    .map(|span| display_width_u16(&span.text))
-                    .fold(0u16, u16::saturating_add)
-            })
-            .max()
-            .unwrap_or(0),
-        IrLeaf::Line(spec) => spec
-            .spans
-            .iter()
-            .map(|span| display_width_u16(&span.text))
-            .fold(0u16, u16::saturating_add),
-        IrLeaf::Markdown(spec) => spec
-            .content
-            .lines()
-            .map(display_width_u16)
-            .max()
-            .unwrap_or(0),
-        IrLeaf::Code(spec) => spec
-            .content
-            .lines()
-            .map(display_width_u16)
-            .max()
-            .unwrap_or(0),
-        IrLeaf::Separator(spec) => styled_spans_width(&spec.label).min(u16::MAX as usize) as u16,
-        IrLeaf::SourceView(_) => total_width,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_ir_hbox(
-    out: &mut LineBuilder,
-    items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
-    total_width: u16,
-    row_start: u16,
-    row_count: u16,
-    gutter: Option<&GutterSpec>,
-    history: Option<&BlockHistory>,
-    inline_options: &InlineOptions,
-) -> u16 {
-    let widths = solve_ir_hbox_widths(items, total_width);
-    let total_rows = items
-        .iter()
-        .zip(widths.iter().copied())
-        .map(|(item, w)| measure_layout_ir_full(&item.layout, w, inline_options))
-        .max()
-        .unwrap_or(0);
-    let end = row_start.saturating_add(row_count).min(total_rows);
-    let copy_owner = items.iter().position(|item| item.copy_owner).unwrap_or(0);
-    let mut written = 0u16;
-    let theme = out.theme().clone();
-    for row in row_start..end {
-        if let Some(gutter) = gutter {
-            out.print_gutter(&gutter.text);
-        }
-        for (idx, item) in items.iter().enumerate() {
-            let col_w = widths.get(idx).copied().unwrap_or(0);
-            if col_w == 0 {
-                continue;
-            }
-            let mut buf = smelt_core::buffer::Buffer::new(
-                smelt_core::buffer::BufId(idx as u64 + 1),
-                Default::default(),
-            );
-            let outcome = {
-                let mut col = LineBuilder::new(&mut buf, &theme, col_w);
-                render_layout_ir_range(
-                    &mut col,
-                    &item.layout,
-                    col_w,
-                    row,
-                    1,
-                    None,
-                    history,
-                    inline_options,
-                );
-                col.finish()
-            };
-            if outcome.was_wrapped {
-                out.mark_wrapped();
-            }
-            if idx == copy_owner && outcome.line_count > 0 {
-                apply_temp_decoration(out, &buf, 0, false);
-            }
-            let emitted = emit_buffer_row_clipped(&buf, 0, col_w, out, None);
-            if emitted < col_w {
-                out.print_with_meta(
-                    &" ".repeat((col_w - emitted) as usize),
-                    SpanMeta::unselectable(),
-                );
-            }
-        }
-        out.newline();
-        written = written.saturating_add(1);
-    }
-    written
-}
-
-fn gutter_width(gutter: Option<&GutterSpec>) -> u16 {
-    gutter.map(|g| display_width_u16(&g.text)).unwrap_or(0)
-}
-
-fn row_prefix_width(spec: &RowPrefixSpec) -> u16 {
-    styled_spans_width(&spec.first)
-        .max(styled_spans_width(&spec.rest))
-        .min(u16::MAX as usize) as u16
-}
-
-fn display_width_u16(text: &str) -> u16 {
-    display_width(text).min(u16::MAX as usize) as u16
-}
-
-fn child_width_after_gutter(width: u16, gutter_width: u16) -> u16 {
-    width.saturating_sub(gutter_width).max(1)
-}
+mod hbox;
+use hbox::*;
 
 #[cfg(test)]
 mod tests {
@@ -2125,6 +4228,348 @@ mod tests {
         smelt_buffer::coords::copy_byte_range(&buf, 0, text.len())
     }
 
+    fn retained_text_layout(content: impl Into<String>) -> LayoutIr {
+        BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+            content: smelt_core::transcript_content::TranscriptContent::from(content.into()),
+            render: ContentRenderSpec::Text {
+                hl_group: None,
+                ansi: true,
+            },
+        }))
+    }
+
+    fn panel_layout(child: LayoutIr, padding: u16) -> LayoutIr {
+        BlockLayout::Panel {
+            child: Box::new(child),
+            spec: PanelSpec {
+                hl_group: "Normal".into(),
+                padding,
+            },
+        }
+    }
+
+    #[test]
+    fn panel_renders_requested_child_range_once() {
+        let layout = panel_layout(retained_text_layout("one\ntwo\nthree\nfour"), 1);
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 12, &options);
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+
+        TEST_RETAINED_TEXT_RENDER_COUNT.with(|count| count.set(0));
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 12);
+            assert_eq!(
+                render_layout_ir_range_measured(
+                    &mut out,
+                    &layout,
+                    12,
+                    1,
+                    3,
+                    None,
+                    None,
+                    &options,
+                    RenderMeasurement::Measured(&measured),
+                ),
+                3
+            );
+            out.finish();
+        }
+
+        assert_eq!(buf.lines(), &[" one", " two", " three"]);
+        TEST_RETAINED_TEXT_RENDER_COUNT.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn panel_preserves_padding_background_copy_and_soft_wrap_metadata() {
+        let layout = panel_layout(retained_text_layout("abcdef"), 1);
+        let buf = render_buffer(&layout, 5);
+
+        assert_eq!(buf.lines(), &[" ", " abc", " def", " "]);
+        assert!((0..buf.line_count())
+            .all(|row| buf.decoration_at(row).fill_bg == Some(smelt_core::style::Color::Reset)));
+        assert!(buf.decoration_at(2).soft_wrapped);
+        let text = buf.text();
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(&buf, 0, text.len()),
+            "\nabcdef\n"
+        );
+    }
+
+    #[test]
+    fn panel_renders_child_ranges_past_terminal_row_limits() {
+        let layout = panel_layout(retained_text_layout("x".repeat(70_001)), 1);
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 3, &options);
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 3);
+            assert_eq!(
+                render_layout_ir_range_measured(
+                    &mut out,
+                    &layout,
+                    3,
+                    70_000,
+                    2,
+                    None,
+                    None,
+                    &options,
+                    RenderMeasurement::Measured(&measured),
+                ),
+                2
+            );
+            out.finish();
+        }
+
+        assert_eq!(buf.lines(), &[" x", " x"]);
+    }
+
+    #[test]
+    fn retained_measurement_refresh_matches_full_rebuild_without_reallocating_tree() {
+        let content = smelt_core::transcript_content::TranscriptContent::from("one".to_string());
+        let content_leaf = || {
+            BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::Text {
+                    hl_group: None,
+                    ansi: true,
+                },
+            }))
+        };
+        let layout = BlockLayout::Vbox(vec![
+            BlockLayout::Panel {
+                child: Box::new(BlockLayout::Style {
+                    child: Box::new(BlockLayout::Gutter {
+                        child: Box::new(BlockLayout::Cap {
+                            child: Box::new(content_leaf()),
+                            spec: CapSpec {
+                                rows: 3,
+                                keep: CapKeep::Tail {
+                                    marker: Some(CapMarker::Above),
+                                },
+                                total_rows: None,
+                            },
+                        }),
+                        spec: GutterSpec {
+                            text: "│ ".into(),
+                            styled: true,
+                        },
+                    }),
+                    spec: StyleSpec::default(),
+                }),
+                spec: PanelSpec {
+                    hl_group: "Normal".into(),
+                    padding: 1,
+                },
+            },
+            BlockLayout::Hbox(vec![
+                HboxItem {
+                    constraint: Constraint::Length(3),
+                    layout: BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                        content: "log".into(),
+                        hl_group: None,
+                        ansi: false,
+                    })),
+                    copy_owner: true,
+                },
+                HboxItem {
+                    constraint: Constraint::Fill(1),
+                    layout: BlockLayout::RowPrefix {
+                        child: Box::new(content_leaf()),
+                        spec: RowPrefixSpec {
+                            first: vec![],
+                            rest: vec![],
+                        },
+                    },
+                    copy_owner: false,
+                },
+            ]),
+        ]);
+        let options = InlineOptions::default();
+        let mut measured = measure_layout_ir_plan(&layout, 12, &options);
+        let retained_bytes = measured.retained_bytes();
+        let child_storage = match &measured.kind {
+            MeasuredLayoutKind::Children(children) => children.as_ptr(),
+            _ => panic!("expected root vbox measurement"),
+        };
+
+        content.append_owned("\ntwo two two\nthree three three\nfour".into());
+
+        assert!(refresh_layout_ir_content_measurements(
+            &layout,
+            &mut measured,
+            12,
+            &options,
+        ));
+        assert_eq!(measured, measure_layout_ir_plan(&layout, 12, &options));
+        assert_eq!(measured.retained_bytes(), retained_bytes);
+        match &measured.kind {
+            MeasuredLayoutKind::Children(children) => {
+                assert_eq!(children.as_ptr(), child_storage);
+            }
+            _ => panic!("expected root vbox measurement"),
+        }
+    }
+
+    #[test]
+    fn retained_code_matches_transient_code_layout_and_copy_text() {
+        let source = "fn main() {\n\tprintln!(\"hello world\");\n}\n";
+        let transient = BlockLayout::Leaf(IrLeaf::Code(CodeSpec {
+            content: source.to_string(),
+            lang: "rust".into(),
+        }));
+        let content =
+            smelt_core::transcript_content::TranscriptContent::from("fn main() {\n".to_string());
+        content.append_owned("\tprintln!(\"hello world\");\n}\n".to_string());
+        let retained = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+            content,
+            render: ContentRenderSpec::Code {
+                lang: "rust".into(),
+                cache: Default::default(),
+            },
+        }));
+
+        assert_eq!(
+            measure_layout_ir(&retained, 18),
+            measure_layout_ir(&transient, 18)
+        );
+        assert_eq!(render_lines(&retained, 18), render_lines(&transient, 18));
+        assert_eq!(
+            copy_rendered_text(&retained, 18),
+            copy_rendered_text(&transient, 18)
+        );
+    }
+
+    #[test]
+    fn retained_code_tail_cap_does_not_build_a_full_file_layout() {
+        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let retained_bytes = content.retained_bytes();
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::Code {
+                    lang: "text".into(),
+                    cache: Default::default(),
+                },
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: Some(70_001),
+            },
+        };
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 40, &options);
+
+        assert_eq!(measured.rows(), 3);
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(content.retained_bytes(), retained_bytes);
+        let expected = [
+            "… showing last 2 of 70001 lines".to_string(),
+            "x".repeat(40),
+            "x".to_string(),
+        ];
+        assert_eq!(render_lines(&layout, 40), expected);
+        let retained_after = content.retained_bytes();
+        assert!(retained_after <= retained_bytes.saturating_add(4 * 1024));
+        assert_eq!(render_lines(&layout, 40), expected);
+        assert_eq!(content.retained_bytes(), retained_after);
+    }
+
+    #[test]
+    fn retained_file_tail_cap_does_not_build_a_full_file_layout() {
+        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let retained_bytes = content.retained_bytes();
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::File {
+                    path: "output.txt".into(),
+                    lang: None,
+                    cache: Default::default(),
+                },
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail { marker: None },
+                total_rows: None,
+            },
+        };
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 10, &options);
+
+        assert_eq!(measured.rows(), 2);
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(content.retained_bytes(), retained_bytes);
+        assert_eq!(render_lines(&layout, 10).len(), 2);
+        let retained_after = content.retained_bytes();
+        assert!(retained_after <= retained_bytes.saturating_add(4 * 1024));
+        assert_eq!(render_lines(&layout, 10).len(), 2);
+        assert_eq!(content.retained_bytes(), retained_after);
+    }
+
+    #[test]
+    fn retained_code_renders_ranges_past_terminal_row_limits() {
+        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let layout = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+            content,
+            render: ContentRenderSpec::Code {
+                lang: "text".into(),
+                cache: Default::default(),
+            },
+        }));
+        let options = InlineOptions::default();
+
+        let measured = measure_layout_ir_plan(&layout, 1, &options);
+        assert_eq!(measured.rows(), 70_001);
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 1);
+            assert_eq!(
+                render_layout_ir_range_into_measured(
+                    &mut out, &layout, &measured, 1, 69_999, 2, None, &options,
+                ),
+                2
+            );
+            out.finish();
+        }
+        assert_eq!(buf.lines(), &["x", "x"]);
+    }
+
+    #[test]
+    fn retained_markdown_ascii_word_renders_deep_ranges_without_snapshotting() {
+        let content = smelt_core::transcript_content::TranscriptContent::from("x".repeat(70_001));
+        let layout = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+            content,
+            render: ContentRenderSpec::Markdown {
+                dim: false,
+                italic: false,
+                inline: false,
+            },
+        }));
+        let options = InlineOptions::default();
+
+        let measured = measure_layout_ir_plan(&layout, 1, &options);
+        assert_eq!(measured.rows(), 70_001);
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 1);
+            assert_eq!(
+                render_layout_ir_range_into_measured(
+                    &mut out, &layout, &measured, 1, 69_999, 2, None, &options,
+                ),
+                2
+            );
+            out.finish();
+        }
+        assert_eq!(buf.lines(), &["x", "x"]);
+    }
+
     #[test]
     fn markdown_range_render_does_not_materialize_full_block() {
         let content = (0..2_000)
@@ -2138,13 +4583,17 @@ mod tests {
             inline: false,
         }));
         let theme = Theme::default();
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 60, &options);
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         {
             let mut out = LineBuilder::new(&mut buf, &theme, 60);
-            render_layout_ir_range_into(&mut out, &layout, 60, 300, 3, &InlineOptions::default());
+            render_layout_ir_range_into_measured(
+                &mut out, &layout, &measured, 60, 300, 3, None, &options,
+            );
             out.finish();
         }
         let snapshot = smelt_perf::perf::snapshot();
@@ -2182,23 +4631,23 @@ mod tests {
         }));
         let width = 51;
         let options = InlineOptions::default();
-        let measured = measure_layout_ir_with_options(&layout, width, &options);
+        let measured = measure_layout_ir_plan(&layout, width, &options);
         let row_count = 43;
-        let row_start = measured - row_count;
+        let row_start = measured.rows() - row_count;
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
 
         let rendered = {
             let mut out = LineBuilder::new(&mut buf, &theme, width);
-            let rendered = render_layout_ir_range_into(
-                &mut out, &layout, width, row_start, row_count, &options,
+            let rendered = render_layout_ir_range_into_measured(
+                &mut out, &layout, &measured, width, row_start, row_count, None, &options,
             );
             let outcome = out.finish();
             assert_eq!(outcome.line_count, rendered as usize);
             rendered
         };
 
-        assert_eq!(rendered, row_count);
+        assert_eq!(usize::from(rendered), row_count);
     }
 
     #[test]
@@ -2233,13 +4682,17 @@ mod tests {
             },
         };
         let theme = Theme::default();
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 60, &options);
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         {
             let mut out = LineBuilder::new(&mut buf, &theme, 60);
-            render_layout_ir_range_into(&mut out, &layout, 60, 300, 3, &InlineOptions::default());
+            render_layout_ir_range_into_measured(
+                &mut out, &layout, &measured, 60, 300, 3, None, &options,
+            );
             out.finish();
         }
         let snapshot = smelt_perf::perf::snapshot();
@@ -2307,6 +4760,7 @@ mod tests {
                     ..Default::default()
                 }],
                 hl_group: None,
+                syntax_highlights: Default::default(),
             }))),
             spec: RowPrefixSpec {
                 first: vec![prefix.clone()],
@@ -2335,6 +4789,7 @@ mod tests {
                     },
                 ],
                 hl_group: None,
+                syntax_highlights: Default::default(),
             }))),
             spec: RowPrefixSpec {
                 first: Vec::new(),
@@ -2390,6 +4845,7 @@ mod tests {
                         ..Default::default()
                     }],
                     hl_group: None,
+                    syntax_highlights: Default::default(),
                 })),
                 copy_owner: false,
             },
@@ -2409,6 +4865,7 @@ mod tests {
                     ),
                     hl_group: None,
                     continuation_indent: 0,
+                    syntax_highlights: Default::default(),
                 })),
                 copy_owner: true,
             },
@@ -2434,6 +4891,7 @@ mod tests {
             ]]),
             hl_group: None,
             continuation_indent: 7,
+            syntax_highlights: Default::default(),
         }));
 
         assert_eq!(
@@ -2445,6 +4903,754 @@ mod tests {
             ]
         );
         assert_eq!(measure_layout_ir(&layout, 20), 3);
+    }
+
+    #[test]
+    fn retained_text_tail_cap_keeps_measurement_and_rendering_bounded() {
+        let content = smelt_core::transcript_content::TranscriptContent::from(
+            (0..100_000)
+                .map(|line| format!("line {line:06}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let retained_before = content.retained_bytes();
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::Text {
+                    hl_group: None,
+                    ansi: true,
+                },
+            }))),
+            spec: CapSpec {
+                rows: 3,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: Some(100_000),
+            },
+        };
+
+        let measured = measure_layout_ir_plan(&layout, 80, &InlineOptions::default());
+        assert_eq!(measured.rows(), 4);
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(
+            render_lines(&layout, 80),
+            [
+                "… showing last 3 of 100000 lines",
+                "line 099997",
+                "line 099998",
+                "line 099999",
+            ]
+        );
+        let retained_after = content.retained_bytes();
+        assert!(retained_after <= retained_before.saturating_add(4 * 1024));
+        assert_eq!(
+            render_lines(&layout, 80),
+            [
+                "… showing last 3 of 100000 lines",
+                "line 099997",
+                "line 099998",
+                "line 099999",
+            ]
+        );
+        assert_eq!(content.retained_bytes(), retained_after);
+    }
+
+    #[test]
+    fn retained_text_edge_measurement_preserves_wrapping_ansi_and_truncation() {
+        let wrapped = smelt_core::transcript_content::TranscriptContent::from("abcdefgh");
+        assert_eq!(
+            measure_retained_text_edge(&wrapped, 4, false, 3),
+            smelt_core::transcript_content::ContentTextWindow {
+                row_count: 2,
+                truncated: false,
+            }
+        );
+
+        let ansi =
+            smelt_core::transcript_content::TranscriptContent::from("\u{1b}[31mabcdefgh\u{1b}[0m");
+        assert_eq!(
+            measure_retained_text_edge(&ansi, 4, true, 3),
+            smelt_core::transcript_content::ContentTextWindow {
+                row_count: 2,
+                truncated: false,
+            }
+        );
+
+        let multiline =
+            smelt_core::transcript_content::TranscriptContent::from("one\ntwo\nthree\nfour");
+        assert_eq!(
+            measure_retained_text_edge(&multiline, 80, false, 3),
+            smelt_core::transcript_content::ContentTextWindow {
+                row_count: 3,
+                truncated: true,
+            }
+        );
+
+        let equal_lines_with_wrap =
+            smelt_core::transcript_content::TranscriptContent::from("abcdefgh\nx\ny");
+        assert_eq!(
+            measure_retained_text_edge(&equal_lines_with_wrap, 4, false, 3),
+            smelt_core::transcript_content::ContentTextWindow {
+                row_count: 3,
+                truncated: true,
+            }
+        );
+    }
+
+    #[test]
+    fn thinking_peek_cap_queries_wrapped_retained_markdown_edges() {
+        let content = smelt_core::transcript_content::TranscriptContent::from(format!(
+            "{}x",
+            "word ".repeat(14_000)
+        ));
+        let retained_before = content.retained_bytes();
+        let thinking = BlockLayout::Style {
+            child: Box::new(BlockLayout::Vbox(vec![
+                BlockLayout::Leaf(IrLeaf::Markdown(MarkdownSpec {
+                    content: "**Title**".into(),
+                    dim: false,
+                    italic: false,
+                    inline: false,
+                })),
+                BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                    content: content.clone(),
+                    render: ContentRenderSpec::Markdown {
+                        dim: false,
+                        italic: false,
+                        inline: false,
+                    },
+                })),
+            ])),
+            spec: StyleSpec {
+                dim: true,
+                italic: true,
+                ..Default::default()
+            },
+        };
+        let layout = BlockLayout::Gutter {
+            child: Box::new(BlockLayout::Cap {
+                child: Box::new(thinking),
+                spec: CapSpec {
+                    rows: 4,
+                    keep: CapKeep::HeadTail {
+                        head: 1,
+                        marker: true,
+                    },
+                    total_rows: Some(7_002),
+                },
+            }),
+            spec: GutterSpec {
+                text: "│ ".into(),
+                styled: true,
+            },
+        };
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 40, &options);
+
+        assert_eq!(measured.rows(), 5);
+        assert_eq!(content.retained_bytes(), retained_before);
+        let expected = [
+            "│ Title".to_string(),
+            "│ … 6998 lines omitted …".to_string(),
+            "│ word word word word word word word wor".to_string(),
+            "│ d word word word word word word word w".to_string(),
+            "│ ord x".to_string(),
+        ];
+        assert_eq!(render_lines(&layout, 40), expected);
+        let retained_after = content.retained_bytes();
+        assert!(retained_after <= retained_before.saturating_add(4 * 1024));
+        assert_eq!(render_lines(&layout, 40), expected);
+        assert_eq!(content.retained_bytes(), retained_after);
+    }
+
+    #[test]
+    fn pathological_retained_markdown_nodes_use_bounded_literal_edges() {
+        let content = smelt_core::transcript_content::TranscriptContent::from(format!(
+            "# {}",
+            "word ".repeat(14_000)
+        ));
+        let retained_before = content.retained_bytes();
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::Markdown {
+                    dim: false,
+                    italic: false,
+                    inline: false,
+                },
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: Some(1_751),
+            },
+        };
+        let measured = measure_layout_ir_plan(&layout, 40, &InlineOptions::default());
+
+        assert_eq!(measured.rows(), 3);
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(content.retained_bytes(), retained_before);
+        let expected = [
+            "… showing last 2 of 1751 lines",
+            "d word word word word word word word wor",
+            "d ",
+        ];
+        assert_eq!(render_lines(&layout, 40), expected);
+        let retained_after = content.retained_bytes();
+        assert!(retained_after <= retained_before.saturating_add(4 * 1024));
+        assert_eq!(render_lines(&layout, 40), expected);
+        assert_eq!(content.retained_bytes(), retained_after);
+    }
+
+    #[test]
+    fn pathological_non_ascii_markdown_uses_bounded_omission() {
+        let content = smelt_core::transcript_content::TranscriptContent::from("界".repeat(30_000));
+        let retained_before = content.retained_bytes();
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::Markdown {
+                    dim: true,
+                    italic: false,
+                    inline: false,
+                },
+            }))),
+            spec: CapSpec {
+                rows: 4,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: None,
+            },
+        };
+        let measured = measure_layout_ir_plan(&layout, 80, &InlineOptions::default());
+
+        assert_eq!(measured.rows(), 1);
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(render_lines(&layout, 80), [BOUNDED_MARKDOWN_OMITTED]);
+        assert_eq!(content.retained_bytes(), retained_before);
+    }
+
+    #[test]
+    fn pathological_multiline_markdown_nodes_use_bounded_literal_edges() {
+        let content = smelt_core::transcript_content::TranscriptContent::from(format!(
+            "```\n{}\n```",
+            (0..10_000)
+                .map(|line| format!("line {line:05}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        let retained_before = content.retained_bytes();
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: content.clone(),
+                render: ContentRenderSpec::Markdown {
+                    dim: false,
+                    italic: false,
+                    inline: false,
+                },
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: Some(10_002),
+            },
+        };
+        let measured = measure_layout_ir_plan(&layout, 80, &InlineOptions::default());
+
+        assert_eq!(measured.rows(), 3);
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(content.retained_bytes(), retained_before);
+        let expected = ["… showing last 2 of 10002 lines", "line 09999", "```"];
+        assert_eq!(render_lines(&layout, 80), expected);
+        let retained_after = content.retained_bytes();
+        assert!(retained_after <= retained_before.saturating_add(4 * 1024));
+        assert_eq!(render_lines(&layout, 80), expected);
+        assert_eq!(content.retained_bytes(), retained_after);
+    }
+
+    #[test]
+    fn oversized_transient_caps_never_measure_or_render_the_payload() {
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                content: "x".repeat(MAX_BOUNDED_EDGE_TRANSIENT_BYTES + 1),
+                hl_group: None,
+                ansi: false,
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::HeadTail {
+                    head: 1,
+                    marker: true,
+                },
+                total_rows: None,
+            },
+        };
+        let options = InlineOptions::default();
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let measured = measure_layout_ir_plan(&layout, 40, &options);
+        let lines = render_lines(&layout, 40);
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        smelt_perf::perf::clear();
+
+        assert!(matches!(measured.kind, MeasuredLayoutKind::Terminal));
+        assert_eq!(lines, vec![BOUNDED_TRANSIENT_OMITTED, "… 1 line omitted …"]);
+        for forbidden in ["render:layout:measure_text", "render:layout:render_text"] {
+            assert_eq!(
+                snapshot
+                    .durations
+                    .iter()
+                    .find(|row| row.label == forbidden)
+                    .map_or(0, |row| row.count),
+                0,
+                "oversized transient cap used {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_span_budget_bounds_zero_width_layouts() {
+        let spans = (0..=MAX_BOUNDED_EDGE_TRANSIENT_SPANS)
+            .map(|_| protocol::StyledSpan::default())
+            .collect();
+        let leaf = IrLeaf::Line(LineSpec {
+            spans,
+            hl_group: None,
+            syntax_highlights: Default::default(),
+        });
+        assert!(!transient_leaf_is_bounded(&leaf));
+
+        let runs = RunsSpec {
+            lines: protocol::StyledLines(vec![(0..=MAX_BOUNDED_EDGE_TRANSIENT_SPANS)
+                .map(|_| protocol::StyledSpan::default())
+                .collect()]),
+            hl_group: None,
+            continuation_indent: 0,
+            syntax_highlights: Default::default(),
+        };
+        let layout = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Cap {
+                child: Box::new(BlockLayout::Leaf(IrLeaf::Runs(runs))),
+                spec: CapSpec {
+                    rows: 1,
+                    keep: CapKeep::Head { marker: None },
+                    total_rows: None,
+                },
+            }),
+            spec: RowPrefixSpec {
+                first: vec![protocol::StyledSpan {
+                    text: "F ".into(),
+                    ..Default::default()
+                }],
+                rest: vec![protocol::StyledSpan {
+                    text: "R ".into(),
+                    ..Default::default()
+                }],
+            },
+        };
+        assert_eq!(
+            render_lines(&layout, 40),
+            vec![format!("F {BOUNDED_TRANSIENT_OMITTED}")]
+        );
+    }
+
+    #[test]
+    fn transient_depth_budget_bounds_deeply_nested_caps() {
+        let mut child = BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: "payload".into(),
+            hl_group: None,
+            ansi: false,
+        }));
+        for _ in 0..=MAX_BOUNDED_EDGE_DEPTH {
+            child = BlockLayout::Style {
+                child: Box::new(child),
+                spec: StyleSpec::default(),
+            };
+        }
+        assert!(!transient_layout_fits_budget(
+            &child,
+            &mut TransientLayoutBudget::default()
+        ));
+
+        let layout = BlockLayout::Cap {
+            child: Box::new(child),
+            spec: CapSpec {
+                rows: 1,
+                keep: CapKeep::HeadTail {
+                    head: 1,
+                    marker: true,
+                },
+                total_rows: None,
+            },
+        };
+        assert_eq!(
+            render_lines(&layout, 40),
+            vec![BOUNDED_TRANSIENT_OMITTED, "… 1 line omitted …"]
+        );
+    }
+
+    #[test]
+    fn bounded_caps_render_retained_content_through_recursive_wrappers() {
+        let prefix = |text: &str| {
+            vec![protocol::StyledSpan {
+                text: text.into(),
+                selectable: false,
+                ..Default::default()
+            }]
+        };
+        let tail_cap = |child, total_rows| BlockLayout::Cap {
+            child: Box::new(child),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: Some(total_rows),
+            },
+        };
+        let cases = [
+            (
+                "style",
+                tail_cap(
+                    BlockLayout::Style {
+                        child: Box::new(retained_text_layout("one\ntwo\nthree\nfour\nfive")),
+                        spec: StyleSpec {
+                            dim: true,
+                            ..Default::default()
+                        },
+                    },
+                    5,
+                ),
+                vec!["… showing last 2 of 5 lines", "four", "five"],
+            ),
+            (
+                "vbox",
+                tail_cap(
+                    BlockLayout::Vbox(vec![
+                        BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                            content: "title".into(),
+                            hl_group: None,
+                            ansi: false,
+                        })),
+                        retained_text_layout("one\ntwo\nthree\nfour\nfive"),
+                    ]),
+                    6,
+                ),
+                vec!["… showing last 2 of 6 lines", "four", "five"],
+            ),
+            (
+                "gutter",
+                tail_cap(
+                    BlockLayout::Gutter {
+                        child: Box::new(retained_text_layout("one\ntwo\nthree\nfour\nfive")),
+                        spec: GutterSpec {
+                            text: "│ ".into(),
+                            styled: false,
+                        },
+                    },
+                    5,
+                ),
+                vec!["… showing last 2 of 5 lines", "│ four", "│ five"],
+            ),
+            (
+                "row prefix",
+                tail_cap(
+                    BlockLayout::RowPrefix {
+                        child: Box::new(retained_text_layout("one\ntwo\nthree\nfour\nfive")),
+                        spec: RowPrefixSpec {
+                            first: prefix("F "),
+                            rest: prefix("R "),
+                        },
+                    },
+                    5,
+                ),
+                vec!["… showing last 2 of 5 lines", "R four", "R five"],
+            ),
+            (
+                "panel",
+                tail_cap(
+                    panel_layout(retained_text_layout("one\ntwo\nthree\nfour\nfive"), 1),
+                    7,
+                ),
+                vec!["… showing last 2 of 7 lines", " five", " "],
+            ),
+            (
+                "hbox",
+                tail_cap(
+                    BlockLayout::Hbox(vec![
+                        HboxItem {
+                            constraint: Constraint::Length(5),
+                            layout: retained_text_layout("one\ntwo\nthree\nfour\nfive"),
+                            copy_owner: true,
+                        },
+                        HboxItem {
+                            constraint: Constraint::Length(5),
+                            layout: retained_text_layout("six\nseven\neight\nnine\nten"),
+                            copy_owner: false,
+                        },
+                    ]),
+                    5,
+                ),
+                vec!["… showing last 2 of 5 lines", "four nine ", "five ten  "],
+            ),
+            (
+                "nested cap",
+                tail_cap(
+                    BlockLayout::Cap {
+                        child: Box::new(retained_text_layout("one\ntwo\nthree\nfour\nfive")),
+                        spec: CapSpec {
+                            rows: 3,
+                            keep: CapKeep::Tail {
+                                marker: Some(CapMarker::Above),
+                            },
+                            total_rows: Some(5),
+                        },
+                    },
+                    4,
+                ),
+                vec!["… showing last 2 of 4 lines", "four", "five"],
+            ),
+        ];
+
+        for (name, layout, expected) in cases {
+            let measured = measure_layout_ir_plan(&layout, 40, &InlineOptions::default());
+            assert!(
+                matches!(measured.kind, MeasuredLayoutKind::Terminal),
+                "{name} used a full child measurement"
+            );
+            assert_eq!(render_lines(&layout, 40), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn bounded_cap_preserves_styled_gutters_for_content_and_markers() {
+        let layout = BlockLayout::Gutter {
+            child: Box::new(BlockLayout::Cap {
+                child: Box::new(BlockLayout::Style {
+                    child: Box::new(retained_text_layout("one\ntwo\nthree\nfour\nfive")),
+                    spec: StyleSpec {
+                        dim: true,
+                        italic: true,
+                        ..Default::default()
+                    },
+                }),
+                spec: CapSpec {
+                    rows: 2,
+                    keep: CapKeep::HeadTail {
+                        head: 1,
+                        marker: true,
+                    },
+                    total_rows: Some(5),
+                },
+            }),
+            spec: GutterSpec {
+                text: "│ ".into(),
+                styled: true,
+            },
+        };
+        let buffer = render_buffer(&layout, 40);
+        assert_eq!(
+            buffer.lines(),
+            &["│ one", "│ … 3 lines omitted …", "│ five"]
+        );
+
+        let theme = Theme::default();
+        let gutter_style = |row| {
+            let span = buffer
+                .highlights_at(row)
+                .into_iter()
+                .find(|span| span.col_start == 0 && span.col_end >= 2)
+                .expect("gutter should be styled");
+            theme.resolve(span.hl)
+        };
+        let head = gutter_style(0);
+        assert!(head.dim && head.italic);
+        let marker = gutter_style(1);
+        assert!(marker.dim && !marker.italic);
+        let tail = gutter_style(2);
+        assert!(tail.dim && tail.italic);
+    }
+
+    #[test]
+    fn bounded_cap_wrappers_preserve_copy_and_soft_wrap_metadata() {
+        let prefix = vec![protocol::StyledSpan {
+            text: "R ".into(),
+            selectable: false,
+            ..Default::default()
+        }];
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::RowPrefix {
+                child: Box::new(retained_text_layout("abcdef")),
+                spec: RowPrefixSpec {
+                    first: prefix.clone(),
+                    rest: prefix,
+                },
+            }),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail { marker: None },
+                total_rows: Some(3),
+            },
+        };
+        let buffer = render_buffer(&layout, 4);
+        let text = buffer.text();
+
+        assert_eq!(buffer.lines(), &["R cd", "R ef"]);
+        assert!(buffer.decoration_at(0).soft_wrapped);
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(&buffer, 0, text.len()),
+            "cdef"
+        );
+    }
+
+    #[test]
+    fn retained_text_range_renders_past_terminal_row_limits_through_wrappers() {
+        let content = smelt_core::transcript_content::TranscriptContent::from(
+            (0..70_000)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let layout = BlockLayout::Gutter {
+            child: Box::new(BlockLayout::Style {
+                child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                    content,
+                    render: ContentRenderSpec::Text {
+                        hl_group: None,
+                        ansi: false,
+                    },
+                }))),
+                spec: StyleSpec::default(),
+            }),
+            spec: GutterSpec {
+                text: "│ ".into(),
+                styled: false,
+            },
+        };
+        let options = InlineOptions::default();
+        let measured = measure_layout_ir_plan(&layout, 80, &options);
+        assert_eq!(measured.rows(), 70_000);
+
+        let theme = Theme::default();
+        let mut buffer = Buffer::new(BufId(0), BufCreateOpts::default());
+        let rendered = {
+            let mut out = LineBuilder::new(&mut buffer, &theme, 80);
+            let rendered = render_layout_ir_range_into_measured(
+                &mut out, &layout, &measured, 80, 69_999, 1, None, &options,
+            );
+            out.finish();
+            rendered
+        };
+        assert_eq!(rendered, 1);
+        assert_eq!(buffer.get_line(0), Some("│ line 69999"));
+    }
+
+    #[test]
+    fn cap_head_tail_uses_three_bounded_segments() {
+        let rows = cap_rows(
+            10,
+            &CapSpec {
+                rows: 4,
+                keep: CapKeep::HeadTail {
+                    head: 2,
+                    marker: true,
+                },
+                total_rows: None,
+            },
+        );
+
+        assert_eq!(rows.row_count(), 5);
+        assert_eq!(rows.row_at(0), Some(CapRow::Child(0)));
+        assert_eq!(rows.row_at(1), Some(CapRow::Child(1)));
+        assert_eq!(
+            rows.row_at(2),
+            Some(CapRow::Marker {
+                skipped: 6,
+                kept: 4,
+                total: None,
+                direction: "omitted",
+            })
+        );
+        assert_eq!(rows.row_at(3), Some(CapRow::Child(8)));
+        assert_eq!(rows.row_at(4), Some(CapRow::Child(9)));
+        assert_eq!(rows.row_at(5), None);
+    }
+
+    #[test]
+    fn retained_cap_head_tail_marks_truncation_even_when_omitted_rows_are_blank() {
+        let layout = BlockLayout::Cap {
+            child: Box::new(retained_text_layout("head\n\n\n\ntail")),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::HeadTail {
+                    head: 1,
+                    marker: true,
+                },
+                total_rows: Some(5),
+            },
+        };
+
+        assert_eq!(
+            render_lines(&layout, 80),
+            vec!["head", "… 3 lines omitted …", "tail"]
+        );
+        assert_eq!(measure_layout_ir(&layout, 80), 3);
+    }
+
+    #[test]
+    fn cap_head_tail_suppresses_marker_for_blank_omitted_rows() {
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Text(TextSpec {
+                content: "head\n\n\n\ntail".into(),
+                hl_group: None,
+                ansi: false,
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::HeadTail {
+                    head: 1,
+                    marker: true,
+                },
+                total_rows: None,
+            },
+        };
+
+        assert_eq!(render_lines(&layout, 80), vec!["head", "tail"]);
+        assert_eq!(measure_layout_ir(&layout, 80), 2);
+    }
+
+    #[test]
+    fn cap_head_tail_keeps_marker_for_visible_omitted_rows() {
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Text(TextSpec {
+                content: "head\n\nmiddle\n\ntail".into(),
+                hl_group: None,
+                ansi: false,
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::HeadTail {
+                    head: 1,
+                    marker: true,
+                },
+                total_rows: None,
+            },
+        };
+
+        assert_eq!(
+            render_lines(&layout, 80),
+            vec!["head", "… 3 lines omitted …", "tail"]
+        );
+        assert_eq!(measure_layout_ir(&layout, 80), 3);
     }
 
     #[test]

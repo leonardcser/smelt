@@ -325,6 +325,10 @@ smelt.cmd.register("resume", function()
       if active_preview_key == key then
         if info and info.status == "ready" then
           ignore_preview_scroll_top = info.scroll_top
+        elseif info and info.status == "pending" then
+          preview_buf:lines({ "  Loading session preview..." })
+          ignore_preview_scroll_top = 0
+          preview_leaf:scroll(0)
         elseif info and info.status == "unavailable" then
           preview_buf:lines({
             "  (session preview unavailable)",

@@ -27,13 +27,17 @@ pub(crate) mod render_loop;
 pub(crate) mod reveal;
 pub(crate) mod search;
 pub(crate) mod session_document;
+pub(crate) mod session_preview;
 pub(crate) mod shell_panel;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
+pub(crate) mod transcript_detail;
+pub(crate) mod transcript_hydration;
 pub(crate) mod transcript_scroll;
 pub(crate) mod transcript_scroll_trace;
 pub(crate) mod transcript_search;
+pub(crate) mod transcript_work;
 pub(crate) mod ui_host;
 pub(crate) mod well_known;
 
@@ -259,6 +263,26 @@ pub(crate) struct CommittedTranscriptView {
     pub(crate) state: TranscriptViewState,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MainLayoutInputs {
+    terminal_width: u16,
+    terminal_height: u16,
+    prompt_input_rows: u16,
+    dialog: Option<crate::smelt_edit::ContainerId>,
+    dialog_buffers: Vec<(crate::smelt_edit::BufId, u64)>,
+}
+
+#[cfg(all(test, feature = "transcript-bench"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptReaderMetrics {
+    pub(crate) metadata_readers: usize,
+    pub(crate) hydration_readers: usize,
+    pub(crate) total_readers: usize,
+    pub(crate) metadata_open_attempts: usize,
+    pub(crate) hydration_open_attempts: usize,
+    pub(crate) total_open_attempts: usize,
+}
+
 pub struct TuiApp {
     pub(crate) core: smelt_core::Core,
     pub(crate) conversation: crate::app::conversation::ConversationRuntime,
@@ -273,10 +297,20 @@ pub struct TuiApp {
     pub(crate) pending_session_save: bool,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) working: smelt_core::working::WorkingState,
-    /// Viewport layout updated each frame; read by mouse hit-testing and scroll estimation.
+    /// Resolved viewport rectangles read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
+    /// Inputs that produced the retained root layout tree.
+    pub(crate) main_layout_inputs: Option<MainLayoutInputs>,
     platform: crate::app::platform_runtime::PlatformRuntime,
+    transcript_hydration_worker:
+        Option<crate::app::transcript_hydration::TranscriptHydrationWorker>,
+    transcript_detail: crate::app::transcript_detail::TranscriptDetailRuntime,
+    session_preview: crate::app::session_preview::SessionPreviewRuntime,
+    pending_transcript_search: Option<crate::app::search::PendingTranscriptSearch>,
+    pending_transcript_rewind: Option<crate::app::lua_handlers::PendingTranscriptRewind>,
     frame_scheduler: crate::app::render_loop::FrameScheduler,
+    transcript_work: crate::app::transcript_work::TranscriptWorkQueue,
+    continuing_engine_ask_ids: std::collections::HashSet<u64>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     managed_models: crate::app::managed_models::ManagedModelState,
@@ -462,6 +496,10 @@ pub enum AppEvent {
         readiness: smelt_core::mcp::McpReadiness,
     },
     TranscriptSearchCompleted(crate::app::transcript_search::TranscriptSearchWorkerResult),
+    TranscriptHydrationCompleted(
+        Box<crate::app::transcript_hydration::TranscriptHydrationWorkerResult>,
+    ),
+    SessionPreviewCompleted(crate::app::session_preview::SessionPreviewWorkerResult),
     ShutdownSignal,
 }
 
@@ -1169,6 +1207,29 @@ impl PendingHistoryAppend {
 }
 
 impl TuiApp {
+    #[cfg(all(test, feature = "transcript-bench"))]
+    pub(crate) fn transcript_reader_metrics_for_harness(&self) -> TranscriptReaderMetrics {
+        let transcript = self.conversation.transcript();
+        let metadata_readers = transcript.retained_store_reader_count_for_harness();
+        let metadata_open_attempts = transcript.store_open_attempt_count_for_harness();
+        let hydration_readers = self
+            .transcript_hydration_worker
+            .as_ref()
+            .map_or(0, |worker| worker.retained_reader_count());
+        let hydration_open_attempts = self
+            .transcript_hydration_worker
+            .as_ref()
+            .map_or(0, |worker| worker.open_attempt_count());
+        TranscriptReaderMetrics {
+            metadata_readers,
+            hydration_readers,
+            total_readers: metadata_readers.saturating_add(hydration_readers),
+            metadata_open_attempts,
+            hydration_open_attempts,
+            total_open_attempts: metadata_open_attempts.saturating_add(hydration_open_attempts),
+        }
+    }
+
     pub(crate) fn active_context_token_identity(
         &self,
     ) -> smelt_core::session::ContextTokenIdentity {
@@ -1219,9 +1280,9 @@ impl TuiApp {
             .request(crate::app::render_loop::FrameUrgency::Urgent);
     }
 
-    pub(crate) fn request_streaming_render(&mut self) {
+    pub(crate) fn request_continuation_render(&mut self) {
         self.frame_scheduler
-            .request(crate::app::render_loop::FrameUrgency::Streaming);
+            .request(crate::app::render_loop::FrameUrgency::Continuation);
     }
 
     pub(crate) fn request_animation_render(&mut self, interval: Duration) {
@@ -1922,8 +1983,16 @@ impl TuiApp {
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             working: smelt_core::working::WorkingState::new(working_clock),
             layout: crate::content::layout::LayoutState::default(),
+            main_layout_inputs: None,
             platform,
+            transcript_hydration_worker: None,
+            transcript_detail: crate::app::transcript_detail::TranscriptDetailRuntime::default(),
+            session_preview: crate::app::session_preview::SessionPreviewRuntime::default(),
+            pending_transcript_search: None,
+            pending_transcript_rewind: None,
             frame_scheduler: crate::app::render_loop::FrameScheduler::default(),
+            transcript_work: crate::app::transcript_work::TranscriptWorkQueue::default(),
+            continuing_engine_ask_ids: std::collections::HashSet::new(),
             last_width: term_w,
             last_height: term_h,
             managed_models,
@@ -2019,10 +2088,8 @@ impl TuiApp {
         Some(expires_at.saturating_duration_since(self.core.clock.instant_now()))
     }
 
-    /// Publish `vim_mode`, `vim_pending_input`, `keymap_pending`,
-    /// `confirms_pending`, transcript navigation generation, `now`,
-    /// `notification_visible`, `spinner_frame`, and the `work_*` family of
-    /// signals whenever their values change.
+    /// Publish prompt, mode, keymap, transcript navigation, time, notification,
+    /// spinner, and work-state signals whenever their values change.
     pub(crate) fn publish_diff_signals(&mut self) {
         let keymap_pending = self.keymap_pending_cell_value();
         self.core
@@ -2037,6 +2104,12 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());
+        let fast_mode = self.fast_mode_active();
+        let prompt_queue_revision = self.prompt.queue_revision();
+        self.core.signals.publish_if_changed("fast_mode", fast_mode);
+        self.core
+            .signals
+            .publish_if_changed("prompt_queue_revision", prompt_queue_revision);
         let now_secs = self
             .core
             .clock
@@ -2678,6 +2751,37 @@ impl TuiApp {
             AppEvent::TranscriptSearchCompleted(result) => {
                 self.handle_transcript_search_worker_result(result)
             }
+            AppEvent::TranscriptHydrationCompleted(result) => {
+                let current = self
+                    .transcript_hydration_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_current(&result));
+                if current {
+                    let redraw = self
+                        .conversation
+                        .install_transcript_hydration_result(*result);
+                    if self.transcript_work.front_waits_for_hydration() {
+                        self.request_continuation_render();
+                    }
+                    if self.pending_transcript_rewind.is_some() {
+                        self.request_urgent_render();
+                    }
+                    if self.complete_pending_transcript_details() {
+                        self.request_urgent_render();
+                    }
+                    self.save_deferred_session_batch_if_ready();
+                    if !self.conversation.transcript_hydration_is_pending() {
+                        self.retry_pending_transcript_search();
+                    }
+                    if redraw {
+                        self.ui.force_redraw();
+                        self.request_urgent_render();
+                    }
+                }
+            }
+            AppEvent::SessionPreviewCompleted(result) => {
+                self.handle_session_preview_worker_result(result)
+            }
             AppEvent::ShutdownSignal => self.pending_quit = true,
         }
     }
@@ -3151,8 +3255,12 @@ impl TuiApp {
     fn handle_platform_event(&mut self, event: crate::app::platform_runtime::PlatformEvent) {
         match event {
             crate::app::platform_runtime::PlatformEvent::App(event) => {
+                let hydration_completed =
+                    matches!(&event, AppEvent::TranscriptHydrationCompleted(_));
                 self.handle_app_event(event);
-                self.render_normal();
+                if !hydration_completed || self.frame_scheduler.has_pending() {
+                    self.render_normal();
+                }
             }
             crate::app::platform_runtime::PlatformEvent::ContextWindow(update) => {
                 self.apply_context_window_update(*update);
@@ -3414,7 +3522,6 @@ impl TuiApp {
                 .map(|deadline| deadline.saturating_duration_since(now));
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
-            let next_draft_render_delay = self.next_tool_draft_render_delay();
             let next_transcript_refresh_delay = self
                 .conversation
                 .next_transcript_refresh_at()
@@ -3423,7 +3530,6 @@ impl TuiApp {
                 next_timer_delay,
                 next_notification_delay,
                 next_keymap_delay,
-                next_draft_render_delay,
                 next_transcript_refresh_delay,
             ]
             .into_iter()
@@ -3610,7 +3716,6 @@ impl TuiApp {
                     self.drive_lua_tasks();
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
-                    self.flush_due_tool_drafts();
                     self.publish_diff_signals();
                     self.render_normal();
                 }

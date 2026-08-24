@@ -1271,7 +1271,9 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
                 command: false,
             });
         } else {
-            app.push_transcript_block(smelt_core::Block::Text { content });
+            app.push_transcript_block(smelt_core::Block::Text {
+                content: content.into(),
+            });
         }
     }
     app.save_session_and_flush();
@@ -1290,18 +1292,41 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
     });
     app.render_silent();
 
-    assert!(app.run_lua(
+    app.run_lua_result(
         r#"
-            local text = smelt.transcript.loaded_text_expensive()
-            assert(text:find("lua sparse tail exact marker", 1, true))
-            local blocks = smelt.transcript.loaded_blocks_expensive()
-            assert(#blocks > 0)
-            local rows = smelt.transcript.rows(blocks[#blocks].first_row, 1)
+            _G.lua_sparse_tail_text = nil
+            _G.lua_sparse_tail_block_count = nil
+            _G.lua_sparse_tail_last_row = nil
+            local immediate_text = smelt.transcript.loaded_text_expensive(function(text)
+                _G.lua_sparse_tail_text = text
+            end)
+            local immediate_blocks = smelt.transcript.loaded_blocks_expensive(function(blocks)
+                _G.lua_sparse_tail_block_count = #blocks
+                _G.lua_sparse_tail_last_row = blocks[#blocks].first_row
+            end)
+            assert(type(immediate_text) == "string")
+            assert(type(immediate_blocks) == "table")
+            assert(lua_sparse_tail_text == nil)
+            assert(lua_sparse_tail_block_count == nil)
+        "#,
+    )
+    .expect("request sparse tail transcript details");
+    app.render_silent();
+    app.run_lua_result(
+        r#"
+            assert(lua_sparse_tail_text:find("lua sparse tail exact marker", 1, true))
+            assert(lua_sparse_tail_block_count > 0)
+            local rows = smelt.transcript.rows(lua_sparse_tail_last_row, 1)
             assert(type(rows) == "table")
         "#,
-    ));
+    )
+    .expect("materialize sparse tail transcript details");
     let tail_snapshot = app.conversation_probe().transcript().memory_snapshot();
     assert!(tail_snapshot.hydration_reads > 0);
+    assert!(
+        tail_snapshot.hydration_reads < 100,
+        "simultaneous Lua detail requests duplicated hydration reads: {tail_snapshot:?}"
+    );
     assert!(
         tail_snapshot.hydrated_blocks < 100,
         "Lua detail operation retained its full loaded window: {tail_snapshot:?}"
@@ -1316,17 +1341,58 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
         "#,
     ));
     app.render_silent();
-    assert!(app.run_lua(
+    app.run_lua_result(
         r#"
-            local text = smelt.transcript.loaded_text_expensive()
-            assert(text:find("lua sparse early exact marker", 1, true))
+            _G.lua_sparse_early_text = nil
+            smelt.transcript.loaded_text_expensive(function(text)
+                _G.lua_sparse_early_text = text
+            end)
         "#,
-    ));
+    )
+    .expect("request sparse early transcript text");
+    app.render_silent();
+    app.run_lua_result(
+        r#"
+            assert(lua_sparse_early_text:find("lua sparse early exact marker", 1, true))
+        "#,
+    )
+    .expect("materialize sparse early transcript text");
     let early_snapshot = app.conversation_probe().transcript().memory_snapshot();
     assert!(early_snapshot.hydration_reads > tail_snapshot.hydration_reads);
     assert!(
         early_snapshot.hydrated_blocks < 100,
         "Lua reveal/detail pins did not converge: {early_snapshot:?}"
+    );
+
+    app.run_lua_result(
+        r#"
+            smelt.transcript.loaded_text_expensive(function(_)
+                error("stale detail callback must not run")
+            end)
+        "#,
+    )
+    .expect("request transcript detail before Lua reload");
+    app.reload_lua();
+    app.render_silent();
+    let stale_snapshot = app.conversation_probe().transcript().memory_snapshot();
+    assert!(
+        stale_snapshot.hydrated_blocks < 100,
+        "stale Lua detail request retained operation pins: {stale_snapshot:?}"
+    );
+
+    app.run_lua_result(
+        r#"
+            smelt.transcript.loaded_text_expensive(function(_)
+                error("intentional transcript detail callback failure")
+            end)
+        "#,
+    )
+    .expect("request failing transcript detail callback");
+    app.render_silent();
+    let error_snapshot = app.conversation_probe().transcript().memory_snapshot();
+    assert!(
+        error_snapshot.hydrated_blocks < 100,
+        "failed Lua detail callback retained operation pins: {error_snapshot:?}"
     );
 }
 
@@ -2945,6 +3011,7 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
             content: "reload output".into(),
             is_error: false,
             metadata: None,
+            content_fields: Vec::new(),
         })),
         Some(Duration::from_millis(1200)),
     );

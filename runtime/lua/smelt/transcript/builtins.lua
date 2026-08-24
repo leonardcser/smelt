@@ -83,9 +83,9 @@ end
 
 local function read_file_label(child)
   local args = child.args or {}
-  local content = child.output and child.output.content
+  local content_lines = child.output and child.output.content_lines
   if smelt.tools and smelt.tools.read_file_summary and args.file_path then
-    return smelt.tools.read_file_summary(args, content)
+    return smelt.tools.read_file_summary(args, content_lines)
   end
   return display_path(args.file_path) or child.summary_text or child.name or "read_file"
 end

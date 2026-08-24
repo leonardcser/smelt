@@ -299,7 +299,7 @@ app_story!(full_agent_turn_composite, |ctx| {
     ctx.engine(EngineEvent::Text {
         content: "I'll rename the function and harden it against overflow.".into(),
     });
-    ctx.tool_call_with_metadata(
+    ctx.tool_call_with_display_content(
         "edit_file",
         &[
             ("file_path", json!("src/lib.rs")),
@@ -307,11 +307,11 @@ app_story!(full_agent_turn_composite, |ctx| {
             ("new_string", json!("fn checked_add(a: i64, b: i64)")),
         ],
         "ok",
-        json!({
-            "path": "src/lib.rs",
-            "old_content": "fn add(a: i32, b: i32)",
-            "new_content": "fn checked_add(a: i64, b: i64)",
-        }),
+        json!({ "path": "src/lib.rs" }),
+        &[
+            ("old_content", "fn add(a: i32, b: i32)"),
+            ("new_content", "fn checked_add(a: i64, b: i64)"),
+        ],
         Some(9),
     );
     ctx.engine(EngineEvent::Text {

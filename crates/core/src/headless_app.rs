@@ -171,6 +171,8 @@ impl HeadlessApp {
                 content: format!("tool not found: {tool_name}"),
                 is_error: true,
                 metadata: None,
+                display_content: Vec::new(),
+                attachment: None,
             });
             return;
         };
@@ -182,6 +184,8 @@ impl HeadlessApp {
                 content: format!("tool not available in headless mode: {tool_name}"),
                 is_error: true,
                 metadata: None,
+                display_content: Vec::new(),
+                attachment: None,
             });
             return;
         }
@@ -211,6 +215,8 @@ impl HeadlessApp {
                 content,
                 is_error,
                 metadata,
+                display_content,
+                attachment,
             } => {
                 self.core.engine.send(UiCommand::ToolResult {
                     request_id,
@@ -219,6 +225,8 @@ impl HeadlessApp {
                     content,
                     is_error,
                     metadata,
+                    display_content,
+                    attachment: attachment.map(|attachment| *attachment),
                 });
             }
             crate::lua::ToolExecResult::Pending => {}
@@ -241,6 +249,8 @@ impl HeadlessApp {
                 content,
                 is_error,
                 metadata,
+                display_content,
+                attachment,
             } = out
             {
                 self.core.engine.send(UiCommand::ToolResult {
@@ -250,6 +260,8 @@ impl HeadlessApp {
                     content,
                     is_error,
                     metadata,
+                    display_content,
+                    attachment: attachment.map(|attachment| *attachment),
                 });
             }
         }
@@ -425,7 +437,7 @@ impl HeadlessApp {
         let mut total_usage = protocol::TokenUsage::default();
         let mut last_tps: Option<f64> = None;
         let mut total_cost = 0.0_f64;
-        let mut pending_tools: HashMap<protocol::InvocationId, (String, String, String)> =
+        let mut pending_tools: HashMap<protocol::InvocationId, (String, String, Vec<String>)> =
             HashMap::new();
 
         let mut interrupted = false;
@@ -479,16 +491,15 @@ impl HeadlessApp {
                     let mut arg_keys: Vec<String> = args.keys().cloned().collect();
                     arg_keys.sort();
                     let summary = format!("{tool_name}({})", arg_keys.join(", "));
-                    pending_tools
-                        .insert(*invocation_id, (tool_name.clone(), summary, String::new()));
+                    pending_tools.insert(*invocation_id, (tool_name.clone(), summary, Vec::new()));
                 }
                 EngineEvent::ToolOutput {
                     invocation_id,
-                    chunk,
+                    line,
                     ..
                 } if self.sink.format == OutputFormat::Text && self.sink.verbose => {
                     if let Some((_, _, output)) = pending_tools.get_mut(invocation_id) {
-                        output.push_str(chunk);
+                        output.push(line.clone());
                     }
                 }
                 EngineEvent::ToolFinished {
@@ -505,7 +516,7 @@ impl HeadlessApp {
                         } else if result.is_error {
                             result.content.clone()
                         } else {
-                            output
+                            output.join("\n")
                         };
                         self.sink.log_tool(
                             &name,

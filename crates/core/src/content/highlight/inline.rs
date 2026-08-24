@@ -548,6 +548,16 @@ pub struct InlineOptions {
     pub file_icons: FileIconOptions,
 }
 
+impl InlineOptions {
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        self.file_icons.dynamic_retained_bytes()
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InlineStyle {
     pub bold: bool,
@@ -565,6 +575,23 @@ pub struct InlineSpan {
     pub style: InlineStyle,
     pub meta: SpanMeta,
     pub break_policy: BreakPolicy,
+}
+
+impl InlineSpan {
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        let action_bytes = self.meta.action.as_ref().map_or(0, |action| match action {
+            SpanAction::OpenUrl(url) => url.capacity(),
+            SpanAction::OpenFile { path, .. } => path.capacity(),
+        });
+        self.text
+            .capacity()
+            .saturating_add(self.meta.copy_as.as_ref().map_or(0, String::capacity))
+            .saturating_add(action_bytes)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {

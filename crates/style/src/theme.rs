@@ -9,7 +9,10 @@
 
 use crate::style::Style;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
+
+static NEXT_THEME_REVISION: AtomicU64 = AtomicU64::new(1);
 
 /// Interned highlight-group id. Stable for the process lifetime.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -146,11 +149,27 @@ pub fn names_since(from_idx: usize) -> Vec<String> {
 /// Resolved highlight-group → style map. `Theme` is materialized state:
 /// every group has its final `Style` baked in. Construct via
 /// `smelt_tui::theme::compile` or hand-build with [`Theme::set`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Theme {
     styles: HashMap<HlGroup, Style>,
     is_light: bool,
     syntax_theme: Option<String>,
+    revision: u64,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            styles: HashMap::new(),
+            is_light: false,
+            syntax_theme: None,
+            revision: next_theme_revision(),
+        }
+    }
+}
+
+fn next_theme_revision() -> u64 {
+    NEXT_THEME_REVISION.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Theme {
@@ -161,7 +180,23 @@ impl Theme {
     /// Set `name` to `style`. Overwrites any prior value.
     pub fn set(&mut self, name: impl Into<String>, style: Style) {
         let id = intern(&name.into());
+        if self.styles.get(&id) == Some(&style) {
+            return;
+        }
         self.styles.insert(id, style);
+        self.bump_revision();
+    }
+
+    /// Process-unique identifier for this exact theme state.
+    ///
+    /// Clones retain the revision. Any effective mutation assigns a fresh one,
+    /// allowing retained rendering to reuse rows only while their styles match.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = next_theme_revision();
     }
 
     /// Resolve a name to its current Style. Unknown names return `Style::default()`.
@@ -195,7 +230,10 @@ impl Theme {
     }
 
     pub fn set_light(&mut self, light: bool) {
-        self.is_light = light;
+        if self.is_light != light {
+            self.is_light = light;
+            self.bump_revision();
+        }
     }
 
     pub fn syntax_theme(&self) -> Option<&str> {
@@ -203,7 +241,10 @@ impl Theme {
     }
 
     pub fn set_syntax_theme(&mut self, name: Option<String>) {
-        self.syntax_theme = name;
+        if self.syntax_theme != name {
+            self.syntax_theme = name;
+            self.bump_revision();
+        }
     }
 
     /// Iterator over `(HlGroup, &Style)` for every group set on this theme.
@@ -289,6 +330,66 @@ mod tests {
         assert!(!t.is_light());
         t.set_light(true);
         assert!(t.is_light());
+    }
+
+    #[test]
+    fn clone_preserves_revision() {
+        let t = Theme::new();
+        assert_eq!(t.revision(), t.clone().revision());
+    }
+
+    #[test]
+    fn separate_themes_have_distinct_revisions() {
+        assert_ne!(Theme::new().revision(), Theme::new().revision());
+    }
+
+    #[test]
+    fn set_advances_revision_only_when_style_changes() {
+        let mut t = Theme::new();
+        let initial = t.revision();
+        let style = Style::new().fg(Color::Green);
+
+        t.set("style_audit_revision", style);
+        let changed = t.revision();
+        assert_ne!(changed, initial);
+
+        t.set("style_audit_revision", style);
+        assert_eq!(t.revision(), changed);
+
+        t.set("style_audit_revision", Style::new().fg(Color::Yellow));
+        assert_ne!(t.revision(), changed);
+    }
+
+    #[test]
+    fn light_flag_advances_revision_only_when_changed() {
+        let mut t = Theme::new();
+        let initial = t.revision();
+
+        t.set_light(false);
+        assert_eq!(t.revision(), initial);
+
+        t.set_light(true);
+        let changed = t.revision();
+        assert_ne!(changed, initial);
+
+        t.set_light(true);
+        assert_eq!(t.revision(), changed);
+    }
+
+    #[test]
+    fn syntax_theme_advances_revision_only_when_changed() {
+        let mut t = Theme::new();
+        let initial = t.revision();
+
+        t.set_syntax_theme(None);
+        assert_eq!(t.revision(), initial);
+
+        t.set_syntax_theme(Some("base16-ocean.dark".to_string()));
+        let changed = t.revision();
+        assert_ne!(changed, initial);
+
+        t.set_syntax_theme(Some("base16-ocean.dark".to_string()));
+        assert_eq!(t.revision(), changed);
     }
 
     // ── Interner ──────────────────────────────────────────────────────────

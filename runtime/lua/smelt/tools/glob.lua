@@ -21,7 +21,7 @@ local function glob_collapsed_detail(block)
     return transcript_defaults.display_count_text(block, { unit = "file" })
   end
 
-  return smelt.text.line_count((output and output.content) or "") .. " files"
+  return tostring((output and output.content_lines) or 0) .. " files"
 end
 
 smelt.transcript.register_tool("glob", {

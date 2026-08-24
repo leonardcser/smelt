@@ -1,9 +1,10 @@
 //! `smelt.layout` - declarative, width-independent content layout returned from Lua display callbacks.
 
 use crate::content::block_layout::{
-    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, FileViewSpec,
-    GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RefreshSpec, RowPrefixSpec,
-    RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
+    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, ContentDiffSpec,
+    ContentRenderSpec, ContentSpec, DiffSpec, FileViewSpec, GutterSpec, HboxItem, LineSpec,
+    LuaLeaf, MarkdownSpec, PanelSpec, RefreshSpec, RowPrefixSpec, RunsSpec, SeparatorSpec,
+    StyleSpec, TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -166,6 +167,115 @@ pub(super) fn register(
         },
     )?;
     m.fn_(
+        "content",
+        "Opaque transcript content leaf. `content_id` comes from renderer metadata and is resolved by Rust without exposing the complete payload to Lua. `opts.format` is `text` (default), `markdown`, `code`, or `file`; text accepts `hl_group` / `hl` and `ansi`, Markdown accepts `dim`, `italic`, and `inline`, code accepts `lang`, and file accepts `path` plus an optional `lang` override.",
+        &["content_id", "opts"],
+        |_, (content_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let format = opts
+                .as_ref()
+                .and_then(|table| table.get::<Option<String>>("format").ok().flatten())
+                .unwrap_or_else(|| "text".to_string());
+            let render = match format.as_str() {
+                "text" => {
+                    let hl_group = opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<String>>("hl_group").ok().flatten())
+                        .or_else(|| {
+                            opts.as_ref()
+                                .and_then(|table| table.get::<Option<String>>("hl").ok().flatten())
+                        });
+                    let ansi = opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<bool>>("ansi").ok().flatten())
+                        .unwrap_or(false);
+                    ContentRenderSpec::Text { hl_group, ansi }
+                }
+                "markdown" => ContentRenderSpec::Markdown {
+                    dim: opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<bool>>("dim").ok().flatten())
+                        .unwrap_or(false),
+                    italic: opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<bool>>("italic").ok().flatten())
+                        .unwrap_or(false),
+                    inline: opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<bool>>("inline").ok().flatten())
+                        .unwrap_or(false),
+                },
+                "code" => ContentRenderSpec::Code {
+                    lang: opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<String>>("lang").ok().flatten())
+                        .unwrap_or_default(),
+                    cache: Default::default(),
+                },
+                "file" => ContentRenderSpec::File {
+                    path: opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<String>>("path").ok().flatten())
+                        .unwrap_or_default(),
+                    lang: opts
+                        .as_ref()
+                        .and_then(|table| table.get::<Option<String>>("lang").ok().flatten()),
+                    cache: Default::default(),
+                },
+                _ => {
+                    return Err(mlua::Error::external(
+                        "smelt.layout.content: opts.format must be text, markdown, code, or file",
+                    ));
+                }
+            };
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Content(
+                ContentSpec {
+                    id: crate::transcript_content::ContentId::new(content_id),
+                    render,
+                },
+            ))))
+        },
+    )?;
+    m.fn_(
+        "content_diff",
+        "Retained diff leaf. `old_content_id` and `new_content_id` come from transcript renderer metadata and are resolved by Rust without exposing source payloads to Lua. `opts.anchor_content_id` optionally identifies the edited source fragment, `opts.path` selects syntax, `opts.lang` overrides path-based syntax, and `opts.full_file` marks complete before/after files.",
+        &["old_content_id", "new_content_id", "opts"],
+        |_, (old_content_id, new_content_id, opts): (u64, u64, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let anchor_id = opts
+                .as_ref()
+                .and_then(|table| table.get::<Option<u64>>("anchor_content_id").ok().flatten())
+                .map(crate::transcript_content::ContentId::new);
+            let path = opts
+                .as_ref()
+                .and_then(|table| table.get::<Option<String>>("path").ok().flatten())
+                .unwrap_or_default();
+            let lang = opts
+                .as_ref()
+                .and_then(|table| table.get::<Option<String>>("lang").ok().flatten());
+            let full_file = opts
+                .as_ref()
+                .and_then(|table| table.get::<Option<bool>>("full_file").ok().flatten())
+                .unwrap_or(false);
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::ContentDiff(
+                ContentDiffSpec {
+                    old_id: crate::transcript_content::ContentId::new(old_content_id),
+                    new_id: crate::transcript_content::ContentId::new(new_content_id),
+                    anchor_id,
+                    path,
+                    lang,
+                    full_file,
+                },
+            ))))
+        },
+    )?;
+    m.fn_(
+        "group_children",
+        "Opaque retained child-layout placeholder for transcript group renderers. Rust resolves each child independently, so updating one child does not serialize or recompile its siblings.",
+        &[],
+        |_, ()| -> LuaResult<LuaBlockLayout> {
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::GroupChildren)))
+        },
+    )?;
+    m.fn_(
         "runs",
         "Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`; `opts.continuation_indent` indents soft-wrapped continuation rows by display columns.",
         &["lines", "opts"],
@@ -182,6 +292,7 @@ pub(super) fn register(
                 lines: crate::lua::styled_lines_from_lua(lines, "smelt.layout.runs")?,
                 hl_group,
                 continuation_indent,
+                syntax_highlights: Default::default(),
             }))))
         },
     )?;
@@ -197,6 +308,7 @@ pub(super) fn register(
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Line(LineSpec {
                 spans: crate::lua::styled_line_from_lua(spans, "smelt.layout.line")?,
                 hl_group,
+                syntax_highlights: Default::default(),
             }))))
         },
     )?;

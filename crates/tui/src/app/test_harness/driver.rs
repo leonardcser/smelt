@@ -38,7 +38,7 @@ impl TestApp {
                     self.app.drive_lua_tasks();
                 }
                 SourceEvent::ExecOutput(line) => {
-                    self.app.append_exec_output(&line);
+                    self.app.append_exec_output(line);
                 }
                 SourceEvent::ExecDone(code) => {
                     self.app.finish_exec(code);
@@ -92,6 +92,7 @@ impl TestApp {
     /// responsible for terminal setup (raw mode, alternate screen).
     pub fn render(&mut self) {
         self.app.render_normal();
+        self.settle_transcript_hydration(&mut std::io::stdout());
     }
 
     /// Render variant that exercises the full projection pipeline (layout,
@@ -105,6 +106,7 @@ impl TestApp {
     pub fn render_silent(&mut self) {
         let mut sink = std::io::sink();
         self.app.render_normal_to(&mut sink);
+        self.settle_transcript_hydration(&mut sink);
         self.assert_render_layout_invariants();
         self.assert_prompt_cursor_projection();
     }
@@ -122,7 +124,41 @@ impl TestApp {
         self.app.publish_diff_signals();
         let mut sink = std::io::sink();
         self.app.render_normal_to(&mut sink);
+        self.settle_transcript_hydration(&mut sink);
         self.app.ui.flushed_snapshot()
+    }
+
+    fn settle_transcript_hydration(&mut self, out: &mut impl std::io::Write) {
+        const MAX_HYDRATION_ROUNDS: usize = 16;
+        const HYDRATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+        for _ in 0..MAX_HYDRATION_ROUNDS {
+            if !self.app.conversation.transcript_hydration_is_pending()
+                && !self.app.session_preview_is_pending()
+            {
+                return;
+            }
+            let deadline = std::time::Instant::now() + HYDRATION_TIMEOUT;
+            let event = loop {
+                if let Some(event) = self.app.platform.try_recv_app_event() {
+                    break event;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "background transcript hydration did not complete within {HYDRATION_TIMEOUT:?}"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            self.app.handle_app_event(event);
+            if self.app.frame_scheduler.has_pending() {
+                self.app.render_normal_to(out);
+            }
+        }
+        assert!(
+            !self.app.conversation.transcript_hydration_is_pending()
+                && !self.app.session_preview_is_pending(),
+            "background transcript hydration did not settle within {MAX_HYDRATION_ROUNDS} rounds"
+        );
     }
 
     pub(crate) fn ui_snapshot(&mut self) -> crate::smelt_edit::SnapshotFrame {

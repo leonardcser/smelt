@@ -5,9 +5,8 @@
 //! other. This module keeps the buffer-specific wrapping and `LineBuilder`
 //! emission helpers used by transcript rendering.
 
-use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Style;
-pub use smelt_ansi::{parse_ansi, AnsiSpan};
+pub use smelt_ansi::{advance_ansi_state, parse_ansi, parse_ansi_with_state, AnsiSpan, AnsiState};
 
 /// Cumulative byte boundaries for a list of spans.
 fn span_boundaries(spans: &[AnsiSpan]) -> Vec<usize> {
@@ -27,15 +26,27 @@ fn span_boundaries(spans: &[AnsiSpan]) -> Vec<usize> {
 /// ranges into the concatenated plain text, and `boundaries` maps span
 /// indices to their cumulative byte offsets.
 pub fn wrap_ansi(text: &str, width: usize) -> (Vec<AnsiSpan>, Vec<(usize, usize)>, Vec<usize>) {
-    let spans = parse_ansi(text);
-    let line = InlineLine::new(
-        spans
-            .iter()
-            .map(|span| InlineRun::new(span.text.clone(), (), BreakPolicy::BreakOnSpaces))
-            .collect(),
-    );
-    let ranges = line.wrap_plain_ranges(width);
+    let mut state = AnsiState::default();
+    wrap_ansi_with_state(text, width, &mut state)
+}
+
+/// Parse and wrap one logical line while carrying SGR state to the next line.
+pub fn wrap_ansi_with_state(
+    text: &str,
+    width: usize,
+    state: &mut AnsiState,
+) -> (Vec<AnsiSpan>, Vec<(usize, usize)>, Vec<usize>) {
+    let spans = parse_ansi_with_state(text, state);
     let boundaries = span_boundaries(&spans);
+    let ranges = if let [span] = spans.as_slice() {
+        smelt_buffer::wrap::wrap_line_ranges(&span.text, width)
+    } else {
+        let mut plain = String::with_capacity(boundaries.last().copied().unwrap_or(0));
+        for span in &spans {
+            plain.push_str(&span.text);
+        }
+        smelt_buffer::wrap::wrap_line_ranges(&plain, width)
+    };
     (spans, ranges, boundaries)
 }
 

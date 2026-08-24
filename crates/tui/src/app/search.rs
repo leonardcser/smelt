@@ -31,6 +31,18 @@ impl SearchDirection {
     }
 }
 
+pub(super) enum PendingTranscriptSearch {
+    Submit {
+        target: WinId,
+        direction: SearchDirection,
+        query: String,
+    },
+    Repeat {
+        target: WinId,
+        reverse: bool,
+    },
+}
+
 enum FullSearchRefresh {
     Unchanged,
     Changed(Option<DocRange>),
@@ -200,6 +212,8 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_search(&mut self) {
+        self.pending_transcript_search = None;
+        self.conversation.set_transcript_search_hydration_pin(None);
         let Some(session) = self.overlays.take_search_session() else {
             return;
         };
@@ -439,6 +453,9 @@ impl TuiApp {
                 direction,
                 None,
             );
+            let deferred_query = (current.is_none()
+                && self.conversation.transcript_hydration_is_pending())
+            .then(|| query.clone());
             self.overlays.install_search_session(SearchSession {
                 target: live.target,
                 target_buf: live.target_buf,
@@ -448,9 +465,13 @@ impl TuiApp {
             });
             if let Some(matched) = current {
                 self.jump_to_transcript_search_match(matched);
+            } else if let Some(query) = deferred_query {
+                self.defer_transcript_search(live.target, direction, query);
             } else {
                 self.restore_search_preview_anchor(live.original);
             }
+        } else if self.conversation.transcript_hydration_is_pending() {
+            self.defer_transcript_search(live.target, direction, query);
         } else {
             self.clear_search();
             self.restore_search_preview_anchor(live.original);
@@ -549,12 +570,60 @@ impl TuiApp {
         }
     }
 
+    fn defer_transcript_search(
+        &mut self,
+        target: WinId,
+        direction: SearchDirection,
+        query: String,
+    ) {
+        self.conversation
+            .defer_transcript_projection_until_hydrated();
+        self.pending_transcript_search = Some(PendingTranscriptSearch::Submit {
+            target,
+            direction,
+            query,
+        });
+        self.request_urgent_render();
+    }
+
+    fn defer_transcript_search_repeat(&mut self, target: WinId, reverse: bool) {
+        self.conversation
+            .defer_transcript_projection_until_hydrated();
+        self.pending_transcript_search = Some(PendingTranscriptSearch::Repeat { target, reverse });
+        self.request_urgent_render();
+    }
+
+    pub(super) fn retry_pending_transcript_search(&mut self) {
+        let Some(pending) = self.pending_transcript_search.take() else {
+            return;
+        };
+        match pending {
+            PendingTranscriptSearch::Submit {
+                target,
+                direction,
+                query,
+            } => self.submit_search(target, direction, query),
+            PendingTranscriptSearch::Repeat { target, reverse } => {
+                if let Some(mut session) = self.overlays.take_search_session() {
+                    if let SearchBackend::Transcript(transcript) = &mut session.backend {
+                        transcript.scanned.fill(false);
+                        transcript.scanned_blocks.clear();
+                    }
+                    self.overlays.install_search_session(session);
+                }
+                let _ = self.repeat_search(target, reverse);
+            }
+        }
+        self.request_urgent_render();
+    }
+
     pub(crate) fn submit_search(
         &mut self,
         target: WinId,
         direction: SearchDirection,
         query: String,
     ) {
+        self.pending_transcript_search = None;
         if query.is_empty() || query.contains('\n') {
             self.clear_search();
             return;
@@ -563,12 +632,21 @@ impl TuiApp {
             self.clear_search();
             return;
         };
+        let transcript_target = self.transcript_document_is_attached_to(target);
+        if transcript_target && self.conversation.transcript_hydration_is_pending() {
+            self.defer_transcript_search(target, direction, query);
+            return;
+        }
         let origin = self.search_origin(target).unwrap_or_default();
-        if self.transcript_document_is_attached_to(target) {
+        if transcript_target {
             let Some(mut transcript_session) =
                 self.new_transcript_search_session(&query, origin, direction)
             else {
-                self.clear_search();
+                if self.conversation.transcript_hydration_is_pending() {
+                    self.defer_transcript_search(target, direction, query);
+                } else {
+                    self.clear_search();
+                }
                 return;
             };
             let current = self.advance_transcript_search(
@@ -578,6 +656,9 @@ impl TuiApp {
                 direction,
                 None,
             );
+            let deferred_query = (current.is_none()
+                && self.conversation.transcript_hydration_is_pending())
+            .then(|| query.clone());
             self.overlays.install_search_session(SearchSession {
                 target,
                 target_buf,
@@ -587,6 +668,8 @@ impl TuiApp {
             });
             if let Some(matched) = current {
                 self.jump_to_transcript_search_match(matched);
+            } else if let Some(query) = deferred_query {
+                self.defer_transcript_search(target, direction, query);
             }
             return;
         }
@@ -642,6 +725,12 @@ impl TuiApp {
                 .take_search_session()
                 .expect("search session exists");
             let query = session.query.clone();
+            let previous_match = match &session.backend {
+                SearchBackend::Transcript(transcript) => transcript
+                    .current
+                    .and_then(|index| transcript.matches.get(index).copied()),
+                SearchBackend::Full { .. } => None,
+            };
             let matched = match &mut session.backend {
                 SearchBackend::Transcript(transcript) => {
                     let current_match = transcript
@@ -663,6 +752,10 @@ impl TuiApp {
                             self.new_transcript_search_session(&query, origin, direction)
                         else {
                             self.overlays.install_search_session(session);
+                            if self.conversation.transcript_hydration_is_pending() {
+                                self.defer_transcript_search_repeat(target, reverse);
+                                return true;
+                            }
                             return false;
                         };
                         *transcript = new_session;
@@ -680,8 +773,19 @@ impl TuiApp {
             };
             let Some(matched) = matched else {
                 self.overlays.install_search_session(session);
+                if self.conversation.transcript_hydration_is_pending() {
+                    self.defer_transcript_search_repeat(target, reverse);
+                    return true;
+                }
                 return false;
             };
+            if previous_match == Some(matched)
+                && self.conversation.transcript_hydration_is_pending()
+            {
+                self.overlays.install_search_session(session);
+                self.defer_transcript_search_repeat(target, reverse);
+                return true;
+            }
             self.overlays.install_search_session(session);
             self.jump_to_transcript_search_match(matched);
             return true;
@@ -851,6 +955,7 @@ impl TuiApp {
             window_scroll_before,
             hint,
         );
+        self.conversation.set_transcript_search_hydration_pin(None);
     }
 
     fn jump_to_search_range(&mut self, range: DocRange) {

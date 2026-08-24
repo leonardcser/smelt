@@ -382,8 +382,10 @@ pub async fn run_streaming_with_shell(
         match tick {
             StreamTick::Cancel => {
                 kill_process_group(&child);
+                let content = "cancelled".to_string();
+                on_line(content.clone());
                 return StreamOutput {
-                    content: "cancelled".to_string(),
+                    content,
                     is_error: true,
                     timed_out: false,
                     background_id: None,
@@ -393,10 +395,12 @@ pub async fn run_streaming_with_shell(
                 if let Some(detach) = config.detach.clone() {
                     let id =
                         detach_streaming_child(detach, child, stdout_reader, stderr_reader, output);
+                    let content = format!(
+                        "moved to background as {id}, you'll be notified when it completes"
+                    );
+                    on_line(content.clone());
                     return StreamOutput {
-                        content: format!(
-                            "moved to background as {id}, you'll be notified when it completes"
-                        ),
+                        content,
                         is_error: false,
                         timed_out: false,
                         background_id: Some(id),
@@ -430,11 +434,13 @@ pub async fn run_streaming_with_shell(
                             stderr_reader,
                             output,
                         );
+                        let content = format!(
+                            "timed out after {:.0}s; moved to background as {id}, you'll be notified when it completes",
+                            config.timeout.as_secs_f64()
+                        );
+                        on_line(content.clone());
                         return StreamOutput {
-                            content: format!(
-                                "timed out after {:.0}s; moved to background as {id}, you'll be notified when it completes",
-                                config.timeout.as_secs_f64()
-                            ),
+                            content,
                             is_error: false,
                             timed_out: true,
                             background_id: Some(id),
@@ -442,8 +448,10 @@ pub async fn run_streaming_with_shell(
                     }
                 }
                 kill_process_group(&child);
+                let content = format!("timed out after {:.0}s", config.timeout.as_secs_f64());
+                on_line(content.clone());
                 return StreamOutput {
-                    content: format!("timed out after {:.0}s", config.timeout.as_secs_f64()),
+                    content,
                     is_error: true,
                     timed_out: true,
                     background_id: None,
@@ -1148,8 +1156,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_lines_reconstruct_the_terminal_result() {
+        let mut lines = Vec::new();
+        let out = run_streaming_with_shell(
+            "printf 'first\\nβeta\\n'",
+            StreamConfig {
+                timeout: Duration::from_secs(2),
+                shell: ShellSpec::default(),
+                cwd: test_cwd(),
+                cancel: None,
+                detach: None,
+                detach_on_timeout: false,
+                manual_detach: false,
+            },
+            |line| lines.push(line),
+        )
+        .await;
+
+        assert!(!out.is_error);
+        assert!(!out.timed_out);
+        assert_eq!(lines, ["first", "βeta"]);
+        assert_eq!(lines.join("\n"), out.content);
+    }
+
+    #[tokio::test]
     async fn streaming_timeout_can_detach_to_registry() {
         let registry = ProcessRegistry::new();
+        let mut lines = Vec::new();
         let out = run_streaming_with_shell(
             "echo start; sleep 5",
             StreamConfig {
@@ -1165,7 +1198,7 @@ mod tests {
                 detach_on_timeout: true,
                 manual_detach: false,
             },
-            |_| {},
+            |line| lines.push(line),
         )
         .await;
 
@@ -1173,6 +1206,8 @@ mod tests {
         assert!(out.timed_out);
         assert!(!out.is_error);
         assert!(out.content.contains("you'll be notified when it completes"));
+        assert_eq!(lines.first().map(String::as_str), Some("start"));
+        assert_eq!(lines.last().map(String::as_str), Some(out.content.as_str()));
         assert_eq!(registry.running_count(), 1);
         let snapshot = registry.snapshot_output(&id).unwrap();
         assert!(snapshot.running);

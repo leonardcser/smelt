@@ -37,9 +37,14 @@ pub use history::{
     UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
 pub use message::{
-    supports_image_tool_attachment_mime, supports_tool_attachment_mime, FunctionCall, Message,
-    ReasoningBlock, Role, ToolAttachment, ToolAttachmentModality, ToolCall, ToolOutcome,
-    IMAGE_TOOL_ATTACHMENT_MIME_TYPES,
+    json_value_dynamic_retained_bytes, json_value_retained_bytes,
+    supports_image_tool_attachment_mime, supports_tool_attachment_mime,
+    validate_tool_display_content, validate_tool_display_field_names, validate_tool_metadata,
+    FunctionCall, Message, ReasoningBlock, Role, ToolAttachment, ToolAttachmentModality, ToolCall,
+    ToolDisplayContent, ToolOutcome, ToolResultValidationError, IMAGE_TOOL_ATTACHMENT_MIME_TYPES,
+    TOOL_DISPLAY_CONTENT_MAX_FIELDS, TOOL_DISPLAY_CONTENT_MAX_NAME_BYTES,
+    TOOL_DISPLAY_METADATA_FIELDS, TOOL_METADATA_MAX_BYTES, TOOL_METADATA_MAX_DEPTH,
+    TOOL_METADATA_MAX_KEY_BYTES, TOOL_METADATA_MAX_NODES,
 };
 pub use mode::{AgentMode, ReasoningEffort};
 pub use model::{ModelConfig, ModelMetadata, ModelTarget, RequestAuditMode, RequestRuntimeConfig};

@@ -186,6 +186,7 @@ impl TuiApp {
         Some(TranscriptProjectionRestore {
             cursor_screen_row: None,
             drag_endpoint_screen_row: Some(edge_row),
+            cursor_document_position: None,
         })
     }
 
@@ -1373,7 +1374,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1425,7 +1426,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1461,7 +1462,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1503,7 +1504,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1540,7 +1541,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1573,7 +1574,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1606,7 +1607,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.render_normal_to(&mut std::io::sink());
@@ -1647,7 +1648,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1691,7 +1692,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1757,7 +1758,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();
@@ -1804,7 +1805,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
-                content: format!("line {i}"),
+                content: format!("line {i}").into(),
             });
         }
         app.transcript_win_mut().follow_tail();

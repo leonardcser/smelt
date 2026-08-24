@@ -231,7 +231,7 @@ impl PlatformRuntime {
         self.app_event_tx.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "harness"))]
     pub(super) fn try_recv_app_event(&mut self) -> Option<AppEvent> {
         self.app_event_rx
             .as_mut()

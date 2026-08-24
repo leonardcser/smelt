@@ -115,10 +115,10 @@ pub use compression::{
 pub use diagnostics::{DoctorReport, StorageStats};
 pub use error::{Result, StoreError};
 pub use history::{
-    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptExtentChunk,
-    TranscriptExtentProfile, TranscriptRecordHydration, TranscriptRecordOffset,
-    TranscriptRecordRange, TranscriptRecordSlice, TranscriptSearchCandidate,
-    TranscriptSearchDirection, TRANSCRIPT_EXTENT_CHUNK_RECORDS, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
+    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptExtentProfile,
+    TranscriptNavigationRecord, TranscriptRecordHydration, TranscriptRecordOffset,
+    TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice, TranscriptRowLocation,
+    TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use lineage_access::{
     cleanup_abandoned_lineages, lineage_session_ids, verify_lineage_backup, LineageReclamation,

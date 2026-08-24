@@ -60,21 +60,6 @@ pub(crate) struct SessionInfoSnapshot {
     pub(crate) worktree_path: String,
 }
 
-pub(crate) struct SessionPreviewRender {
-    pub(crate) cache_key: String,
-    pub(crate) view: crate::app::transcript::TranscriptDocument,
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    pub(crate) scroll_top: Option<u64>,
-    pub(crate) buffer: crate::smelt_edit::BufId,
-    pub(crate) window: Option<crate::smelt_edit::WinId>,
-}
-
-pub(crate) enum SessionPreviewRenderOutcome {
-    Ready(crate::smelt_edit::MaterializedRows),
-    HydrationFailed(crate::app::transcript::TranscriptProjectionHydrationError),
-}
-
 pub(crate) enum DeferredLuaOperation {
     WindowKeymap {
         window: crate::smelt_edit::WinId,
@@ -340,8 +325,11 @@ pub(crate) struct ConversationLuaHost<'a> {
 
 impl ConversationLuaHost<'_> {
     pub(crate) fn replace_prompt_text(&mut self, text: String) {
-        let mut context = crate::input::prompt_ctx_mut(&mut self.app.ui);
-        self.app.prompt.replace_text(&mut context, text);
+        {
+            let mut context = crate::input::prompt_ctx_mut(&mut self.app.ui);
+            self.app.prompt.replace_text(&mut context, text);
+        }
+        let _ = self.app.queue_prompt_text_changed_if_dirty();
     }
 
     pub(crate) fn prompt_text(&self) -> String {
@@ -367,15 +355,19 @@ impl ConversationLuaHost<'_> {
     }
 
     pub(crate) fn replace_prompt_range(&mut self, start: i64, end: i64, text: &str) -> i64 {
-        let context = crate::input::prompt_ctx_mut(&mut self.app.ui);
-        let source = context.buf.source();
-        let start = smelt_buffer::text::snap(source, start.max(0) as usize);
-        let end = smelt_buffer::text::snap(source, end.max(0) as usize).max(start);
-        context.buf.text_mut().replace_range(start..end, text);
-        let cursor = start + text.len();
-        context.win.set_cpos(cursor);
-        context.win.clear_selection_anchor();
-        context.win.clamp_anchors_to_source(context.buf.source());
+        let cursor = {
+            let context = crate::input::prompt_ctx_mut(&mut self.app.ui);
+            let source = context.buf.source();
+            let start = smelt_buffer::text::snap(source, start.max(0) as usize);
+            let end = smelt_buffer::text::snap(source, end.max(0) as usize).max(start);
+            context.buf.text_mut().replace_range(start..end, text);
+            let cursor = start + text.len();
+            context.win.set_cpos(cursor);
+            context.win.clear_selection_anchor();
+            context.win.clamp_anchors_to_source(context.buf.source());
+            cursor
+        };
+        let _ = self.app.queue_prompt_text_changed_if_dirty();
         cursor as i64
     }
 
@@ -473,6 +465,20 @@ impl ConversationLuaHost<'_> {
         self.app
             .materialize_loaded_transcript_display_rows_expensive()
             .join("\n")
+    }
+
+    pub(crate) fn request_loaded_transcript_text(&mut self, callback: mlua::Function) {
+        self.app.request_transcript_detail(
+            crate::app::transcript_detail::TranscriptDetailKind::LoadedText,
+            callback,
+        );
+    }
+
+    pub(crate) fn request_loaded_transcript_blocks(&mut self, callback: mlua::Function) {
+        self.app.request_transcript_detail(
+            crate::app::transcript_detail::TranscriptDetailKind::LoadedBlocks,
+            callback,
+        );
     }
 
     pub(crate) fn transcript_is_empty(&self) -> bool {
@@ -1611,60 +1617,11 @@ impl SessionLuaHost<'_> {
         self.app.load_session_by_id(id);
     }
 
-    pub(crate) fn take_session_preview(
-        &mut self,
-        cache_key: Option<&str>,
-    ) -> (
-        Option<crate::app::transcript::TranscriptDocument>,
-        crate::lua::LuaExecution,
-        smelt_core::session::SessionStorage,
-    ) {
-        let preview = cache_key.and_then(|key| self.app.conversation.take_resume_preview(key));
-        (
-            preview,
-            self.app.lua.execution(),
-            self.app.conversation.sessions().clone(),
-        )
-    }
-
     pub(crate) fn render_session_preview(
         &mut self,
-        request: SessionPreviewRender,
-    ) -> Option<SessionPreviewRenderOutcome> {
-        let SessionPreviewRender {
-            cache_key,
-            mut view,
-            width,
-            height,
-            scroll_top,
-            buffer,
-            window,
-        } = request;
-        let inline_options = self.app.inline_options();
-        let theme = self.app.ui.theme().clone();
-        let execution = self.app.lua.execution();
-        view.set_inline_options(inline_options);
-        let scroll_target = scroll_top
-            .map(crate::content::transcript_buf::ScrollTarget::visible_row)
-            .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
-        let plan =
-            match view.plan_projection_measured(&execution, width, &theme, scroll_target, height) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    self.app.conversation.store_resume_preview(cache_key, view);
-                    return Some(SessionPreviewRenderOutcome::HydrationFailed(error));
-                }
-            };
-        let output = {
-            let target = self.app.ui.buf_mut(buffer)?;
-            view.project_planned(&execution, target, &theme, plan)
-        };
-        if let Some(window) = window.and_then(|window| self.app.ui.win_mut(window)) {
-            window.apply_materialized_rows(output);
-            window.pin_scroll(output.clamped_scroll);
-        }
-        self.app.conversation.store_resume_preview(cache_key, view);
-        Some(SessionPreviewRenderOutcome::Ready(output))
+        request: crate::app::session_preview::SessionPreviewRender,
+    ) -> crate::app::session_preview::SessionPreviewRenderOutcome {
+        self.app.render_session_preview(request)
     }
 
     pub(crate) fn list_session_entries(

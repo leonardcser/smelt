@@ -957,7 +957,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "render_preview_into",
-        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'unavailable', reason }` when persisted content cannot be hydrated, or `nil` when the session is missing.",
+        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'pending' }` while the background preview service reads or hydrates persisted content, or `{ status = 'unavailable', reason }` when persisted content cannot be hydrated.",
         &["id", "opts"],
         |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
             let _perf = smelt_perf::perf::begin("session:render_preview_into");
@@ -979,60 +979,34 @@ pub(super) fn register(
                 .ok()
                 .map(|ts| format!("{id}:{ts}"));
 
-            let (mut cached_view, execution, sessions) = crate::lua::with_session_host(|host| {
-                let _perf = smelt_perf::perf::begin("session:render_preview_into:app");
-                host.take_session_preview(cache_key_hint.as_deref())
-            });
-            smelt_perf::perf::record_value(
-                "session:render_preview_into:cache_hit",
-                u64::from(cached_view.is_some()),
-            );
             let cache_key = cache_key_hint.unwrap_or_else(|| id.clone());
-
-            if cached_view.is_none() {
-                let transcript = crate::app::history::load_transcript_tail_from_sqlite_id(
-                    &sessions, &id, width, height,
+            let outcome = crate::lua::with_session_host(|host| {
+                let _perf = smelt_perf::perf::begin("session:render_preview_into:app");
+                host.render_session_preview(
+                    crate::app::session_preview::SessionPreviewRender {
+                        id,
+                        cache_key,
+                        width,
+                        height,
+                        scroll_top,
+                        buffer: buf.id,
+                        window: win.map(|win| win.id),
+                    },
                 )
-                .or_else(|| {
-                    crate::app::history::materialize_full_transcript_read_only(
-                        &sessions, &execution, &id,
-                    )
-                });
-                if let Some(transcript) = transcript {
-                    cached_view = Some(
-                        crate::app::transcript::TranscriptDocument::from_loaded_transcript(
-                            transcript,
-                        ),
-                    );
-                }
-            }
-
-            let Some(view) = cached_view else {
-                return Ok(None);
-            };
-            let Some(outcome) = crate::lua::with_session_host(|host| {
-                host.render_session_preview(crate::lua::app_ref::SessionPreviewRender {
-                    cache_key,
-                    view,
-                    width,
-                    height,
-                    scroll_top,
-                    buffer: buf.id,
-                    window: win.map(|win| win.id),
-                })
-            }) else {
-                return Ok(None);
-            };
+            });
             let out = lua.create_table()?;
             match outcome {
-                crate::lua::app_ref::SessionPreviewRenderOutcome::Ready(rows) => {
+                crate::app::session_preview::SessionPreviewRenderOutcome::Ready(rows) => {
                     out.set("status", "ready")?;
                     out.set("total_rows", rows.total_rows)?;
                     out.set("scroll_top", rows.clamped_scroll)?;
                     out.set("row_base", rows.row_base)?;
                     out.set("materialized_rows", rows.materialized_rows)?;
                 }
-                crate::lua::app_ref::SessionPreviewRenderOutcome::HydrationFailed(error) => {
+                crate::app::session_preview::SessionPreviewRenderOutcome::Pending => {
+                    out.set("status", "pending")?;
+                }
+                crate::app::session_preview::SessionPreviewRenderOutcome::Unavailable(error) => {
                     smelt_perf::perf::record_value(
                         "session:render_preview_into:hydration_failure_required_blocks",
                         error.required_blocks as u64,

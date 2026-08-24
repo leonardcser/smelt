@@ -1,14 +1,16 @@
 use std::time::{Duration, Instant};
 
 use protocol::{HistoryItem, ReasoningEffort, TokenUsage, TurnMeta};
-use smelt_core::content::stream_parser::{StreamParser, ToolDraftUpdate, ToolStart};
+use smelt_core::content::stream_parser::{StreamParser, ToolStart};
 use smelt_core::session::{
     ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionStoreAddress,
 };
 use smelt_core::session_runtime::LiveSession;
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
-use crate::app::transcript::{TranscriptDocument, TranscriptRecordSaveBounds};
+use crate::app::transcript::{
+    TranscriptDocument, TranscriptRecordSaveBounds, TranscriptSaveHydrationError,
+};
 use crate::persist::SessionEpoch;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -113,6 +115,27 @@ impl SessionRecordSaveProjection {
 pub(crate) struct PreparedTranscriptRecordSuffix {
     pub(crate) start: smelt_store::TranscriptRecordIndex,
     pub(crate) records: Vec<smelt_core::TranscriptBlockRecordWithId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionBatchPreparationError {
+    HydrationPending,
+    Invalid(String),
+}
+
+impl From<String> for SessionBatchPreparationError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl std::fmt::Display for SessionBatchPreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HydrationPending => f.write_str("transcript hydration is pending"),
+            Self::Invalid(message) => f.write_str(message),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -399,7 +422,7 @@ impl TuiSessionDocument {
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-    ) -> Result<Option<PreparedSessionBatch>, String> {
+    ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
         self.prepare_save_with_history(session, metadata, None)
     }
 
@@ -408,7 +431,7 @@ impl TuiSessionDocument {
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
         source_history: &[HistoryItem],
-    ) -> Result<Option<PreparedSessionBatch>, String> {
+    ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
         self.prepare_save_with_history(session, metadata, Some(source_history))
     }
 
@@ -417,7 +440,7 @@ impl TuiSessionDocument {
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
         source_history: Option<&[HistoryItem]>,
-    ) -> Result<Option<PreparedSessionBatch>, String> {
+    ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
         let history = SessionHistoryRef::for_save(
             self.live_session.as_ref(),
             &session.history,
@@ -486,7 +509,16 @@ impl TuiSessionDocument {
             final_len: record_bounds
                 .map_or(acknowledged_record_len, |bounds| bounds.record_end_idx),
         };
-        let record_pins = self.transcript.pin_record_suffix_for_save(record_bounds)?;
+        self.transcript
+            .pin_record_suffix_for_save(record_bounds)
+            .map_err(|error| match error {
+                TranscriptSaveHydrationError::Pending => {
+                    SessionBatchPreparationError::HydrationPending
+                }
+                TranscriptSaveHydrationError::Failed => SessionBatchPreparationError::Invalid(
+                    "hydrate canonical transcript record suffix".to_owned(),
+                ),
+            })?;
         let records = record_bounds.map(|bounds| PreparedTranscriptRecordSuffix {
             start: smelt_store::TranscriptRecordIndex::new(bounds.record_start_idx as u64),
             records: self
@@ -494,7 +526,7 @@ impl TuiSessionDocument {
                 .history()
                 .block_records_with_ids_from(bounds.order_start),
         });
-        self.transcript.unpin_operation_blocks(&record_pins);
+        self.transcript.unpin_record_suffix_after_save();
         Ok(Some(PreparedSessionBatch {
             generation: self.changes.current,
             record_projection,
@@ -510,14 +542,17 @@ impl TuiSessionDocument {
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-    ) -> Result<PreparedSessionBatch, String> {
+    ) -> Result<PreparedSessionBatch, SessionBatchPreparationError> {
         if self.changes.current == self.changes.durable
             && self.transcript.history().record_dirty_from().is_none()
         {
             self.changes.force_dirty();
         }
-        self.prepare_event_batch(session, metadata)?
-            .ok_or_else(|| "a canonical turn update requires persisted session history".to_string())
+        self.prepare_event_batch(session, metadata)?.ok_or_else(|| {
+            SessionBatchPreparationError::Invalid(
+                "a canonical turn update requires persisted session history".to_string(),
+            )
+        })
     }
 
     pub(crate) fn acknowledge(
@@ -696,7 +731,7 @@ pub(crate) enum HistoryMutation {
     },
     CommitRequestItem {
         item: HistoryItem,
-        block: Option<Block>,
+        block: Option<Box<Block>>,
         first_user_message: Option<String>,
     },
     TruncateFrom {
@@ -757,7 +792,12 @@ pub(crate) enum StreamMutation {
     },
     AppendToolOutput {
         invocation_id: protocol::InvocationId,
-        chunk: String,
+        line: String,
+    },
+    AppendToolOutputSlice {
+        block_id: BlockId,
+        chunk: smelt_core::transcript_content::SharedContentSlice,
+        line_start: bool,
     },
     SetToolStatus {
         invocation_id: protocol::InvocationId,
@@ -782,8 +822,26 @@ pub(crate) enum StreamMutation {
         now: Instant,
     },
     ClearToolDrafts,
-    UpsertToolDraft {
-        update: ToolDraftUpdate,
+    StartToolDraft {
+        stream_id: String,
+        call_id: Option<String>,
+        name: Option<String>,
+    },
+    AppendToolDraft {
+        stream_id: String,
+        call_id: Option<String>,
+        name: Option<String>,
+        delta: String,
+    },
+    FinishToolDraft {
+        stream_id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    SetToolDraftSummary {
+        block_id: BlockId,
+        summary: protocol::StyledLines,
     },
     StartExec {
         command: String,
@@ -879,6 +937,7 @@ pub(crate) struct DocumentChange {
     pub(crate) history_idx: Option<usize>,
     pub(crate) history_dirty_from: Option<usize>,
     pub(crate) block_id: Option<BlockId>,
+    pub(crate) presentation_changed: bool,
     pub(crate) turn_meta: Option<TurnMeta>,
 }
 
@@ -1038,7 +1097,7 @@ impl SessionDocument {
                 live_session.as_deref_mut(),
                 transcript.expect("request history mutation requires a transcript"),
                 item,
-                block,
+                block.map(|block| *block),
                 first_user_message,
             ),
             HistoryMutation::TruncateFrom { index, identity } => {
@@ -1338,6 +1397,8 @@ impl SessionDocument {
         let before_generation = transcript.history().record_dirty_generation();
         let before_dirty_from = transcript.history().record_dirty_from();
         let mut applied = false;
+        let mut block_id = None;
+        let mut presentation_changed = false;
         match mutation {
             StreamMutation::AppendThinking { delta } => {
                 parser.append_streaming_thinking(transcript.history_mut(), &delta);
@@ -1359,9 +1420,21 @@ impl SessionDocument {
             }
             StreamMutation::AppendToolOutput {
                 invocation_id,
-                chunk,
+                line,
             } => {
-                parser.append_active_output(transcript.history_mut(), invocation_id, &chunk);
+                parser.append_active_output_line(transcript.history_mut(), invocation_id, line);
+            }
+            StreamMutation::AppendToolOutputSlice {
+                block_id,
+                chunk,
+                line_start,
+            } => {
+                parser.append_tool_output_slice(
+                    transcript.history_mut(),
+                    block_id,
+                    chunk,
+                    line_start,
+                );
             }
             StreamMutation::SetToolStatus {
                 invocation_id,
@@ -1410,14 +1483,63 @@ impl SessionDocument {
             StreamMutation::ClearToolDrafts => {
                 parser.clear_tool_drafts(transcript.history_mut());
             }
-            StreamMutation::UpsertToolDraft { update } => {
-                parser.upsert_tool_draft(transcript.history_mut(), update);
+            StreamMutation::StartToolDraft {
+                stream_id,
+                call_id,
+                name,
+            } => {
+                let change =
+                    parser.start_tool_draft(transcript.history_mut(), stream_id, call_id, name);
+                block_id = Some(change.block_id);
+                presentation_changed = change.presentation_changed;
+                applied = true;
+            }
+            StreamMutation::AppendToolDraft {
+                stream_id,
+                call_id,
+                name,
+                delta,
+            } => {
+                let change = parser.append_tool_draft(
+                    transcript.history_mut(),
+                    stream_id,
+                    call_id,
+                    name,
+                    delta,
+                );
+                block_id = Some(change.block_id);
+                presentation_changed = change.presentation_changed;
+                applied = true;
+            }
+            StreamMutation::FinishToolDraft {
+                stream_id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                let change = parser.finish_tool_draft(
+                    transcript.history_mut(),
+                    stream_id,
+                    call_id,
+                    name,
+                    arguments,
+                );
+                block_id = Some(change.block_id);
+                presentation_changed = change.presentation_changed;
+                applied = true;
+            }
+            StreamMutation::SetToolDraftSummary {
+                block_id: id,
+                summary,
+            } => {
+                applied = parser.set_tool_draft_summary(transcript.history_mut(), id, summary);
+                block_id = Some(id);
             }
             StreamMutation::StartExec { command } => {
                 parser.start_exec(transcript.history_mut(), command);
             }
             StreamMutation::AppendExecOutput { chunk } => {
-                parser.append_exec_output(transcript.history_mut(), &chunk);
+                parser.append_exec_output(transcript.history_mut(), chunk);
             }
             StreamMutation::FinishExec { exit_code } => {
                 parser.finish_exec(exit_code);
@@ -1433,6 +1555,8 @@ impl SessionDocument {
             transcript_dirty,
             records_unpersisted: transcript_dirty,
             applied,
+            block_id,
+            presentation_changed,
             ..Default::default()
         }
     }
@@ -2067,11 +2191,11 @@ mod tests {
             &mut transcript,
             HistoryMutation::CommitRequestItem {
                 item: HistoryItem::user(Content::text("new")),
-                block: Some(Block::User {
+                block: Some(Box::new(Block::User {
                     text: "new".into(),
                     image_labels: Vec::new(),
                     command: false,
-                }),
+                })),
                 first_user_message: None,
             },
         );
@@ -2098,11 +2222,11 @@ mod tests {
             &mut transcript,
             HistoryMutation::CommitRequestItem {
                 item: HistoryItem::user(Content::text("new")),
-                block: Some(Block::User {
+                block: Some(Box::new(Block::User {
                     text: "new".into(),
                     image_labels: Vec::new(),
                     command: false,
-                }),
+                })),
                 first_user_message: Some("new".into()),
             },
         );
@@ -2130,11 +2254,11 @@ mod tests {
             Some(&mut transcript),
             HistoryMutation::CommitRequestItem {
                 item: HistoryItem::user(Content::text("new")),
-                block: Some(Block::User {
+                block: Some(Box::new(Block::User {
                     text: "new".into(),
                     image_labels: Vec::new(),
                     command: false,
-                }),
+                })),
                 first_user_message: None,
             },
         );
@@ -2485,7 +2609,7 @@ mod tests {
     }
 
     #[test]
-    fn active_tool_elapsed_mutation_updates_transcript_and_reports_dirty() {
+    fn active_tool_elapsed_mutation_does_not_dirty_persistence() {
         let mut parser = StreamParser::new();
         let mut transcript = TranscriptDocument::new();
         let now = Instant::now();
@@ -2516,8 +2640,16 @@ mod tests {
             },
         );
 
-        assert!(result.transcript_dirty);
-        assert_eq!(transcript.history().record_dirty_from(), Some(0));
+        assert!(!result.transcript_dirty);
+        assert!(!result.records_unpersisted);
+        assert_eq!(transcript.history().record_dirty_from(), None);
+        assert_eq!(
+            transcript
+                .history()
+                .tool_state(transcript.history().order[0])
+                .and_then(|state| state.elapsed),
+            Some(Duration::from_secs(2)),
+        );
     }
 
     #[test]
@@ -2547,7 +2679,7 @@ mod tests {
             &mut transcript,
             StreamMutation::AppendToolOutput {
                 invocation_id: INVOCATION_ID,
-                chunk: "done".into(),
+                line: "done".into(),
             },
         );
         let finished = apply_stream_parser_transcript(
@@ -2575,19 +2707,14 @@ mod tests {
         let mut transcript = TranscriptDocument::new();
         let now = Instant::now();
 
-        let upserted = apply_stream_parser_transcript(
+        let appended = apply_stream_parser_transcript(
             &mut parser,
             &mut transcript,
-            StreamMutation::UpsertToolDraft {
-                update: ToolDraftUpdate {
-                    stream_id: "stream-1".into(),
-                    call_id: Some("tool-1".into()),
-                    name: "bash".into(),
-                    summary: StyledLines::from_plain("bash"),
-                    args: HashMap::new(),
-                    raw_arguments: "{}".into(),
-                    finished: false,
-                },
+            StreamMutation::AppendToolDraft {
+                stream_id: "stream-1".into(),
+                call_id: Some("tool-1".into()),
+                name: Some("bash".into()),
+                delta: "{}".into(),
             },
         );
         transcript.history_mut().clear_record_dirty();
@@ -2609,7 +2736,7 @@ mod tests {
             },
         );
 
-        assert!(upserted.transcript_dirty);
+        assert!(appended.transcript_dirty);
         assert!(promoted.applied);
         assert!(promoted.transcript_dirty);
         assert_eq!(transcript.history().record_dirty_from(), Some(0));
@@ -2817,11 +2944,11 @@ mod tests {
             &mut session,
             HistoryMutation::CommitRequestItem {
                 item: HistoryItem::user(Content::text("durable prompt")),
-                block: Some(Block::User {
+                block: Some(Box::new(Block::User {
                     text: "durable prompt".into(),
                     image_labels: Vec::new(),
                     command: false,
-                }),
+                })),
                 first_user_message: Some("durable prompt".into()),
             },
         );
@@ -3051,7 +3178,7 @@ mod tests {
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         for index in 0..320 {
             transcript.push(Block::Text {
-                content: format!("block {index}"),
+                content: format!("block {index}").into(),
             });
         }
         let records = transcript
@@ -3108,9 +3235,20 @@ mod tests {
 
         let mut metadata = runtime_metadata();
         metadata.updated_at_ms = session.created_at_ms.saturating_add(1);
+        assert!(matches!(
+            document.prepare_event_batch(&mut session, metadata.clone()),
+            Err(SessionBatchPreparationError::HydrationPending)
+        ));
+        let request = document
+            .transcript
+            .take_pending_hydration_request()
+            .expect("sparse save hydration request");
+        let result = crate::app::transcript_hydration::execute_hydration_request_for_test(request)
+            .expect("sparse save hydration result");
+        document.transcript.install_hydration_result(result);
         let intent = document
             .prepare_event_batch(&mut session, metadata)
-            .expect("prepare sparse save")
+            .expect("prepare hydrated sparse save")
             .expect("dirty sparse save");
         let suffix = intent.records.as_ref().expect("record suffix");
         assert_eq!(suffix.start.get(), 300);

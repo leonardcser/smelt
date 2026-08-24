@@ -50,6 +50,62 @@ fn lua_paint_callback_uses_scoped_tui_host_after_ui_paint() {
 }
 
 #[test]
+fn statusline_explicit_invalidation_repaints_plugin_state() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        local statusline = require("smelt.statusline")
+        _G.__plugin_status_text = "retained status before"
+        statusline.win:set_renderer(function(win)
+          win:buf():lines({ _G.__plugin_status_text })
+        end)
+        "#,
+    ));
+
+    let initial = app.render_to_frame();
+    assert!(initial.rows[11].contains("retained status before"));
+
+    assert!(app.run_lua(r#"_G.__plugin_status_text = "retained status after""#));
+    let retained = app.render_to_frame();
+    assert!(retained.rows[11].contains("retained status before"));
+    assert!(!retained.rows[11].contains("retained status after"));
+
+    assert!(app.run_lua(r#"require("smelt.statusline").invalidate()"#));
+    let invalidated = app.render_to_frame();
+    assert!(invalidated.rows[11].contains("retained status after"));
+}
+
+#[test]
+fn headerline_explicit_invalidation_recomposes_plugin_visibility() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        local headerline = require("smelt.headerline")
+        _G.__plugin_header_visible = false
+        headerline.add("retained-visibility-probe", {
+          visible = function() return _G.__plugin_header_visible end,
+          render = function()
+            return { text = "retained header visible", highlights = {} }
+          end,
+        })
+        "#,
+    ));
+
+    let initial = app.render_to_frame();
+    assert!(!initial.text().contains("retained header visible"));
+
+    assert!(app.run_lua(r#"_G.__plugin_header_visible = true"#));
+    let retained = app.render_to_frame();
+    assert!(!retained.text().contains("retained header visible"));
+
+    assert!(app.run_lua(r#"require("smelt.headerline").invalidate()"#));
+    let invalidated = app.render_to_frame();
+    assert!(invalidated.rows[0].contains("retained header visible"));
+}
+
+#[test]
 fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
     let mut app = TestApp::builder().build();
     let session_dir = app.app.conversation.current_artifact_dir();
@@ -65,8 +121,8 @@ fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
     let transcript = app.app.conversation.transcript();
     assert_eq!(
         transcript.projection_count_for_harness(),
-        3,
-        "test must exercise transcript projection"
+        1,
+        "unchanged frames must reuse the retained transcript projection"
     );
     assert_eq!(
         transcript.store_open_attempt_count_for_harness(),
@@ -278,7 +334,7 @@ fn tool_output_paints_before_a_coalesced_tool_completion() {
     app.inject_engine(EngineEvent::ToolOutput {
         invocation_id,
         call_id: call_id.clone(),
-        chunk: "coalesced live tool marker\n".into(),
+        line: "coalesced live tool marker".into(),
     })
     .expect("queue tool output");
     app.inject_engine(EngineEvent::ToolFinished {
@@ -303,6 +359,370 @@ fn tool_output_paints_before_a_coalesced_tool_completion() {
         streamed_frame.contains("coalesced live tool marker"),
         "no frame painted the tool output: {streamed_frame}"
     );
+}
+
+#[test]
+fn provider_tool_completion_reuses_streamed_content_identity() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    let call_id = "streamed-identity".to_string();
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: call_id.clone(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 0,
+    }));
+    for line in ["first streamed line", "second streamed line"] {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+            invocation_id,
+            call_id: call_id.clone(),
+            line: line.into(),
+        }));
+    }
+    app.render_silent();
+
+    let block_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("tool block");
+    let streamed_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .and_then(|state| state.output.as_ref())
+        .map(|output| output.content.id())
+        .expect("streamed output");
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+        invocation_id,
+        call_id,
+        result: protocol::ToolOutcome::new(
+            "provider final payload must not replace streamed content".into(),
+            false,
+            Some(serde_json::json!({ "exit_code": 0 })),
+        )
+        .with_display_content(vec![protocol::ToolDisplayContent::new(
+            "summary",
+            "display summary".into(),
+        )]),
+        elapsed_ms: Some(10),
+    }));
+
+    let output = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .and_then(|state| state.output.as_ref())
+        .expect("finished output");
+    assert_eq!(output.content.id(), streamed_id);
+    assert_eq!(
+        output.content.snapshot(),
+        "first streamed line\nsecond streamed line"
+    );
+    assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 0 })));
+    assert_eq!(
+        output
+            .content_field("summary")
+            .map(|content| content.snapshot()),
+        Some("display summary".to_string())
+    );
+}
+
+#[test]
+fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization() {
+    const SLICE_BYTES: usize = 4 * 1024 * 1024;
+
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    let call_id = "bounded-provider-output".to_string();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: call_id.clone(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 0,
+    }));
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id,
+        call_id: call_id.clone(),
+        line: "x".repeat(3 * SLICE_BYTES),
+    }));
+    app.render_silent();
+    let block_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("tool block");
+    let streamed_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .and_then(|state| state.output.as_ref())
+        .map(|output| output.content.id())
+        .expect("streamed output");
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .tool_state(block_id)
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.len()),
+        Some(SLICE_BYTES),
+        "provider dispatch must ingest only the first bounded slice"
+    );
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+        invocation_id,
+        call_id,
+        result: protocol::ToolOutcome::new(
+            "provider final payload must not replace streamed content".into(),
+            false,
+            Some(serde_json::json!({ "exit_code": 0 })),
+        ),
+        elapsed_ms: Some(10),
+    }));
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .tool_state(block_id)
+            .map(|state| state.status),
+        Some(smelt_core::transcript_model::ToolStatus::Pending),
+        "tool completion must wait for queued output slices"
+    );
+
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id: 42,
+        history: None,
+        meta: None,
+    }));
+    assert!(
+        app.app.conversation.is_active(),
+        "turn completion must wait for queued output slices"
+    );
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .tool_state(block_id)
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.len()),
+        Some(2 * SLICE_BYTES),
+        "the pre-event transient frame must ingest at most one slice"
+    );
+
+    app.render_silent();
+    let state = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .expect("streaming tool state");
+    assert_eq!(
+        state.status,
+        smelt_core::transcript_model::ToolStatus::Pending
+    );
+    assert_eq!(
+        state.output.as_ref().map(|output| output.content.len()),
+        Some(3 * SLICE_BYTES)
+    );
+
+    app.render_silent();
+    let state = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .expect("completed tool state");
+    let output = state.output.as_ref().expect("completed output");
+    assert_eq!(state.status, smelt_core::transcript_model::ToolStatus::Ok);
+    assert_eq!(output.content.id(), streamed_id);
+    assert_eq!(output.content.snapshot(), "x".repeat(3 * SLICE_BYTES));
+    assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 0 })));
+    assert!(
+        app.app.conversation.is_active(),
+        "turn finalization must remain queued behind tool completion"
+    );
+
+    app.render_silent();
+    assert!(
+        !app.app.conversation.is_active(),
+        "turn completes after retained output and tool lifecycle settle"
+    );
+}
+
+#[test]
+fn oversized_output_does_not_block_an_independent_tool() {
+    const SLICE_BYTES: usize = 4 * 1024 * 1024;
+
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    let first_invocation = protocol::InvocationId::new(1);
+    let second_invocation = protocol::InvocationId::new(2);
+    assert!(app.dispatch_engine_event(EngineEvent::ToolStarted {
+        invocation_id: first_invocation,
+        call_id: "large-tool".into(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 0,
+    }));
+    let first_block = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("large tool block");
+    assert!(app.dispatch_engine_event(EngineEvent::ToolStarted {
+        invocation_id: second_invocation,
+        call_id: "small-tool".into(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 0,
+    }));
+    let second_block = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("small tool block");
+
+    assert!(app.dispatch_engine_event(EngineEvent::ToolOutput {
+        invocation_id: first_invocation,
+        call_id: "large-tool".into(),
+        line: "a".repeat(2 * SLICE_BYTES),
+    }));
+    assert!(app.dispatch_engine_event(EngineEvent::ToolOutput {
+        invocation_id: second_invocation,
+        call_id: "small-tool".into(),
+        line: "small output".into(),
+    }));
+    assert!(app.dispatch_engine_event(EngineEvent::ToolFinished {
+        invocation_id: second_invocation,
+        call_id: "small-tool".into(),
+        result: protocol::ToolOutcome::new("ignored final output".into(), false, None),
+        elapsed_ms: Some(1),
+    }));
+
+    let history = app.conversation_probe().transcript().history();
+    assert_eq!(
+        history.tool_state(second_block).map(|state| state.status),
+        Some(smelt_core::transcript_model::ToolStatus::Ok)
+    );
+    assert_eq!(
+        history
+            .tool_state(second_block)
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.snapshot()),
+        Some("small output".to_string())
+    );
+    assert_eq!(
+        history
+            .tool_state(first_block)
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.len()),
+        Some(SLICE_BYTES),
+        "independent tool events must not synchronously drain the large output"
+    );
+
+    assert!(app.dispatch_engine_event(EngineEvent::ToolFinished {
+        invocation_id: first_invocation,
+        call_id: "large-tool".into(),
+        result: protocol::ToolOutcome::new("ignored final output".into(), false, None),
+        elapsed_ms: Some(2),
+    }));
+    app.render_silent();
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .tool_state(first_block)
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.len()),
+        Some(SLICE_BYTES),
+        "the first render boundary only schedules queued indexing"
+    );
+    app.render_silent();
+    app.render_silent();
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .history()
+            .tool_state(first_block)
+            .map(|state| state.status),
+        Some(smelt_core::transcript_model::ToolStatus::Ok)
+    );
+}
+
+#[test]
+fn cancellation_discards_queued_provider_output_and_lifecycle_events() {
+    const SLICE_BYTES: usize = 4 * 1024 * 1024;
+
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    assert!(app.dispatch_engine_event(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: "cancelled-large-tool".into(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 0,
+    }));
+    let block_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("tool block");
+    assert!(app.dispatch_engine_event(EngineEvent::ToolOutput {
+        invocation_id,
+        call_id: "cancelled-large-tool".into(),
+        line: "x".repeat(3 * SLICE_BYTES),
+    }));
+    assert!(app.dispatch_engine_event(EngineEvent::ToolFinished {
+        invocation_id,
+        call_id: "cancelled-large-tool".into(),
+        result: protocol::ToolOutcome::new("ignored final output".into(), false, None),
+        elapsed_ms: Some(1),
+    }));
+    assert!(app.dispatch_engine_event(EngineEvent::TurnComplete {
+        turn_id: 42,
+        history: None,
+        meta: None,
+    }));
+
+    app.cancel();
+    for _ in 0..4 {
+        app.render_silent();
+    }
+
+    let state = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .expect("cancelled tool state");
+    assert_eq!(
+        state.output.as_ref().map(|output| output.content.len()),
+        Some(SLICE_BYTES),
+        "queued slices must not append after cancellation"
+    );
+    assert_ne!(
+        state.status,
+        smelt_core::transcript_model::ToolStatus::Ok,
+        "deferred completion must not apply after cancellation"
+    );
+    assert!(!app.agent_running());
 }
 
 #[test]
@@ -362,8 +782,8 @@ fn repeated_provider_call_ids_keep_distinct_live_tool_blocks() {
                 .history()
                 .tool_state(*block_id)
                 .and_then(|state| state.output.as_ref())
-                .map(|output| output.content.as_str()),
-            Some(output)
+                .map(|output| output.content.snapshot()),
+            Some(output.to_string())
         );
     }
 
@@ -391,8 +811,11 @@ fn repeated_provider_call_ids_keep_distinct_live_tool_blocks() {
             .expect("persisted tool state");
         assert_eq!(state.called_at_ms, Some(called_at_ms));
         assert_eq!(
-            state.output.as_ref().map(|output| output.content.as_str()),
-            Some(output)
+            state
+                .output
+                .as_ref()
+                .map(|output| output.content.snapshot()),
+            Some(output.to_string())
         );
     }
 }
@@ -549,9 +972,10 @@ fn resume_overlay_materializes_tail_after_collapsed_estimates_move_viewport() {
                 invocation_id,
                 smelt_core::transcript_model::ToolStatus::Ok,
                 Some(Box::new(smelt_core::transcript_model::ToolOutput {
-                    content: format!("tool-{index} output ").repeat(180),
+                    content: format!("tool-{index} output ").repeat(180).into(),
                     is_error: false,
                     metadata: None,
+                    content_fields: Vec::new(),
                 })),
                 None,
             );
@@ -603,7 +1027,7 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for index in 0..80 {
             app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-                content: format!("corrupt preview fixture {index}"),
+                content: format!("corrupt preview fixture {index}").into(),
             });
         }
         app.save_session_and_flush();
@@ -786,7 +1210,6 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
             "local p = smelt.transcript.get_tool_presentation('edit_file'); return p ~= nil and type(p.draft) == 'function'",
         )
         .unwrap());
-
     let args = std::collections::HashMap::from([
         ("file_path".to_string(), serde_json::json!(path.as_str())),
         ("old_string".to_string(), serde_json::json!(old_string)),
@@ -829,13 +1252,26 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         .history()
         .last_block_id()
         .expect("tool block");
-    assert!(
-        app.conversation_probe()
-            .transcript()
-            .history()
-            .tool_state(block_id)
-            .is_some_and(|state| state.preview_output.is_some()),
-        "promoted finished draft should keep immutable preview output"
+    let preview_output = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .and_then(|state| state.preview_output.as_deref())
+        .expect("promoted finished draft should keep immutable preview output");
+    assert_eq!(
+        preview_output
+            .content_field("old_content")
+            .map(smelt_core::transcript_content::TranscriptContent::snapshot)
+            .as_deref(),
+        Some(old_content)
+    );
+    assert_eq!(
+        preview_output
+            .content_field("new_content")
+            .map(smelt_core::transcript_content::TranscriptContent::snapshot)
+            .as_deref(),
+        Some(new_content)
     );
     let pending_frame = app.render_to_frame().text();
     assert_edit_file_diff_visible(&pending_frame, "pending-promoted");
@@ -854,12 +1290,12 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         result: protocol::ToolOutcome::new(
             format!("edited {path}"),
             false,
-            Some(serde_json::json!({
-                "path": path.as_str(),
-                "old_content": old_content,
-                "new_content": new_content,
-            })),
-        ),
+            Some(serde_json::json!({ "path": path.as_str() })),
+        )
+        .with_display_content(vec![
+            protocol::ToolDisplayContent::new("old_content", old_content.into()),
+            protocol::ToolDisplayContent::new("new_content", new_content.into()),
+        ]),
         elapsed_ms: Some(5),
     }));
     assert!(
@@ -1381,7 +1817,7 @@ fn short_transcript_display_document_surfaces_actions() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-        content: format!("short [link]({url})"),
+        content: format!("short [link]({url})").into(),
     });
     app.render_silent();
     assert!(
@@ -1406,11 +1842,11 @@ fn row_backed_transcript_display_document_surfaces_actions() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-        content: format!("head [link]({url})"),
+        content: format!("head [link]({url})").into(),
     });
     for i in 0..120 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("tail {i}"),
+            content: format!("tail {i}").into(),
         });
     }
     app.render_silent();
@@ -1523,7 +1959,7 @@ fn transcript_user_resize_keeps_viewport_top_content_stable() {
     });
     for i in 0..120 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("tail {i}"),
+            content: format!("tail {i}").into(),
         });
     }
     app.render_silent();
@@ -1555,11 +1991,11 @@ fn transcript_resize_keeps_wrapped_line_anchor_visible() {
     let before = "before wrapping content ".repeat(10);
     let after = " after wrapping content".repeat(10);
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-        content: format!("{before} ANCHOR stay at viewport top {after}"),
+        content: format!("{before} ANCHOR stay at viewport top {after}").into(),
     });
     for i in 0..120 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("tail {i}"),
+            content: format!("tail {i}").into(),
         });
     }
     app.render_silent();
@@ -1598,11 +2034,12 @@ fn transcript_resize_keeps_markdown_anchor_visible() {
             "paragraph with `inline code`, **bold text**, and wrap pressure".repeat(5),
             "after anchor content that continues wrapping".repeat(4),
             "list item with enough words to wrap around the viewport".repeat(5),
-        ),
+        )
+        .into(),
     });
     for i in 0..120 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("tail {i}"),
+            content: format!("tail {i}").into(),
         });
     }
     app.render_silent();
@@ -1638,7 +2075,7 @@ fn transcript_height_resize_keeps_top_when_cursor_is_lower_in_viewport() {
     });
     for i in 0..160 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("tail {i}"),
+            content: format!("tail {i}").into(),
         });
     }
     app.render_silent();
@@ -1671,11 +2108,12 @@ fn transcript_width_resize_keeps_top_when_cursor_is_lower_in_viewport() {
             "{} ANCHOR pinned top before width resize {}",
             "leading wrapped text".repeat(4),
             "trailing wrapped text".repeat(8),
-        ),
+        )
+        .into(),
     });
     for i in 0..160 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("tail {i}"),
+            content: format!("tail {i}").into(),
         });
     }
     app.render_silent();
@@ -1818,7 +2256,7 @@ fn transcript_scroll_state_does_not_request_tail_repin_when_pinned_at_bottom() {
 }
 
 #[test]
-fn transcript_interaction_trace_records_click_and_projection_events() {
+fn transcript_interaction_trace_records_click_and_retained_frame_events() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = row_document_transcript_app(80, false);
@@ -1857,8 +2295,12 @@ fn transcript_interaction_trace_records_click_and_projection_events() {
         "missing click post-state trace in {kinds:?}"
     );
     assert!(
-        kinds.contains(&"projection_frame"),
-        "missing projection frame trace in {kinds:?}"
+        kinds.contains(&"retained_frame"),
+        "missing retained frame trace in {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&"projection_frame"),
+        "cursor-only click should reuse the retained row tape: {kinds:?}"
     );
 }
 
@@ -2221,7 +2663,8 @@ fn cold_transcript_wheel_moves_exact_visible_rows() {
             content: format!(
                 "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
                 "variable wrapped content ".repeat(index % 23),
-            ),
+            )
+            .into(),
         });
     }
     app.focus_transcript();
@@ -2457,7 +2900,8 @@ fn resumed_session_wheel_moves_exact_visible_rows_end_to_end() {
                 content: format!(
                     "record-{index:04} assistant paragraph\n\n```rust\nlet value = {index};\n```\n{}",
                     "variable wrapped content ".repeat(index % 23),
-                ),
+                )
+                .into(),
             });
         }
         app.save_session_and_flush();
@@ -2674,7 +3118,7 @@ fn assert_transcript_tail_follows_append(app: &mut TestApp, label: &str) {
     assert_transcript_window_at_tail(app, label);
     let append_marker = format!("tail-follow append via {label}");
     app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-        content: append_marker.clone(),
+        content: append_marker.clone().into(),
     });
     app.render_silent();
     let lines = transcript_viewport_lines(app);
@@ -2835,7 +3279,8 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
         content: (0..40)
             .map(|line| format!("tail assistant line {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
     });
     app.render_silent();
     app.focus_prompt();
@@ -2940,7 +3385,9 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
         } else {
             format!("assistant response {i:03}")
         };
-        app.push_transcript_block(smelt_core::transcript_model::Block::Text { content });
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: content.into(),
+        });
     }
     app.render_silent();
     app.focus_transcript();
@@ -3023,7 +3470,7 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
     app.set_terminal_size(100, 24);
     for i in 0..20 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("before write {i:02}"),
+            content: format!("before write {i:02}").into(),
         });
     }
     let content = (0..600)
@@ -3047,7 +3494,7 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
     );
     for i in 0..20 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("after write {i:02}"),
+            content: format!("after write {i:02}").into(),
         });
     }
     app.render_silent();
@@ -3060,7 +3507,10 @@ fn tall_write_file_expands_with_enter_and_scrolls_at_deep_offsets() {
     app.press(KeyCode::Enter);
     app.render_silent();
     let expanded_rows = transcript_total_rows(&app);
-    assert!(expanded_rows > collapsed_rows + 500);
+    assert!(
+        expanded_rows > collapsed_rows + 500,
+        "write_file did not expand retained content: collapsed={collapsed_rows}, expanded={expanded_rows}"
+    );
     let tool_top = app.transcript_window().scroll_top;
     let transcript_buf = app.transcript_window().buf;
     assert!(app
@@ -3094,7 +3544,8 @@ fn committed_view_watcher_dispatches_once_per_revision() {
         content: (0..40)
             .map(|line| format!("assistant line {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
     });
     app.render_silent();
     assert!(app.reveal_transcript_record_block(0, 0, false));
@@ -3142,6 +3593,36 @@ fn committed_view_watcher_dispatches_once_per_revision() {
 }
 
 #[test]
+fn committed_view_watcher_reuses_the_retained_sparse_reader() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 80, 18);
+    let opens_before = app
+        .conversation_probe()
+        .transcript()
+        .store_open_attempt_count_for_harness();
+
+    assert!(app.run_lua(
+        r#"
+        _G.sparse_committed_view_calls = 0
+        _G.sparse_committed_view_reg = smelt.transcript.watch_view(function(view)
+          local target = assert(view:previous_block({ role = "user" }))
+          assert(target.first_line ~= nil)
+          _G.sparse_committed_view_calls = _G.sparse_committed_view_calls + 1
+        end)
+        "#
+    ));
+    app.render_silent();
+
+    assert_eq!(app.lua_int_global("sparse_committed_view_calls"), Some(1));
+    assert_eq!(
+        app.conversation_probe()
+            .transcript()
+            .store_open_attempt_count_for_harness(),
+        opens_before,
+        "committed-view dispatch and navigation must use the reader retained at resume"
+    );
+}
+
+#[test]
 fn stale_committed_views_and_cross_session_targets_are_rejected() {
     let mut app = TestApp::builder().with_ephemeral(true).build();
     app.set_terminal_size(80, 16);
@@ -3162,7 +3643,8 @@ fn stale_committed_views_and_cross_session_targets_are_rejected() {
         content: (0..30)
             .map(|line| format!("second response {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
     });
     app.render_silent();
     assert!(app.run_lua(
@@ -5539,13 +6021,14 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 content: format!(
                     "{marker} assistant paragraph\n\n```diff\n- old {idx}\n+ new {idx}\n```\n{}",
                     "markdown wrap ".repeat(20)
-                ),
+                )
+                .into(),
             }),
             2 => source.push(Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
                 kind: protocol::ReasoningKind::Raw,
-                content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)),
+                content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)).into(),
             }),
             3 => source.push(Block::CodeLine {
                 content: format!("{marker} let value_{idx} = compute({idx});"),
@@ -5553,7 +6036,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
             }),
             4 => source.push(Block::Exec {
                 command: format!("echo {marker}"),
-                output: format!("{marker} stdout line\n{}", "exec output ".repeat(18)),
+                output: format!("{marker} stdout line\n{}", "exec output ".repeat(18)).into(),
             }),
             5 => source.push(Block::Compacted {
                 summary: format!("{marker} compacted summary {}", "summary ".repeat(10)),
@@ -5570,7 +6053,8 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 args: std::collections::HashMap::from([(
                     "file_path".to_string(),
                     serde_json::json!(format!("src/{idx}.rs")),
-                )]),
+                )])
+                .into(),
             }),
             8 => source.push(Block::ToolCall {
                 call_id: format!("grep-{idx}"),
@@ -5579,7 +6063,8 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 args: std::collections::HashMap::from([(
                     "pattern".to_string(),
                     serde_json::json!(marker),
-                )]),
+                )])
+                .into(),
             }),
             _ => source.push(Block::ProcessStatus {
                 text: format!("{marker} background process finished"),
@@ -5604,7 +6089,8 @@ fn tail_consecutive_user_records(count: usize) -> Vec<smelt_core::TranscriptBloc
             });
         } else {
             source.push(Block::Text {
-                content: format!("{marker} assistant output\n{}", "tail context ".repeat(18)),
+                content: format!("{marker} assistant output\n{}", "tail context ".repeat(18))
+                    .into(),
             });
         }
     }
@@ -5794,7 +6280,7 @@ fn transcript_tail_follow_keeps_cursor_fixed_relative_to_viewport() {
 
     for i in 0..10 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("new row {i:03} alpha beta"),
+            content: format!("new row {i:03} alpha beta").into(),
         });
     }
     app.render_silent();

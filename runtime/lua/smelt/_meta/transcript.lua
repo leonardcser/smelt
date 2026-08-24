@@ -68,13 +68,13 @@ transcript.is_empty = nil
 transcript.loaded_block_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded record window; prefer `visible_blocks()` when possible.
----@type fun(): table
+--- Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. In sparse sessions, the no-callback form can return an empty table while background hydration is pending. Pass `callback` to receive the active loaded-window blocks once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty table. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. Prefer `visible_blocks()` when possible.
+---@type fun(callback: fun(value: table)?): table
 transcript.loaded_blocks_expensive = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active record window loaded. Prefer `rows(start, count)` for bounded display reads.
----@type fun(): string
+--- Return the currently materialized transcript display text as a single newline-joined string. In sparse sessions, the no-callback form can return an empty string while background hydration is pending. Pass `callback` to receive the active loaded-window text once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty string. Prefer `rows(start, count)` for bounded display reads.
+---@type fun(callback: fun(value: string)?): string
 transcript.loaded_text_expensive = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
@@ -83,7 +83,7 @@ transcript.loaded_text_expensive = nil
 transcript.node_at_row = nil
 
 --- Register or replace presentation policy for a tool. The supported fields are
---- snapshotted, so later table mutation has no effect; re-register to change behavior
+--- copied, so later table mutation has no effect; re-register to change behavior
 --- or cache keys. The returned registration removes only this exact replacement.
 --- Registering presentation changes rebuilds the composed root renderer so all
 --- cached standalone and grouped nodes invalidate.
@@ -96,7 +96,7 @@ transcript.register_tool = nil
 transcript.reveal = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
+--- Return rendered transcript display rows in `[start, start + count)`, materializing only the bounded range needed for the query. Rows inside an unloaded sparse gap are returned as empty strings until that region becomes the active hydrated window.
 ---@type fun(start: integer, count: integer): table
 transcript.rows = nil
 

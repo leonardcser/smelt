@@ -736,6 +736,7 @@ fn tool_execute_preserves_result_metadata() {
             content,
             is_error,
             metadata,
+            ..
         } => {
             assert_eq!(content, "{\"ok\":true}");
             assert!(!is_error);
@@ -803,6 +804,7 @@ fn lsp_plugin_formats_semantic_results_as_text() {
             content,
             is_error,
             metadata,
+            ..
         } => (content, is_error, metadata),
         ToolExecResult::Pending => {
             rt.pump_task_events();
@@ -815,6 +817,7 @@ fn lsp_plugin_formats_semantic_results_as_text() {
                         content,
                         is_error,
                         metadata,
+                        ..
                     } if invocation.request_id == 4 && call_id == "call-get-file-outline" => {
                         Some((content, is_error, metadata))
                     }
@@ -1060,6 +1063,7 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
             content,
             is_error,
             metadata,
+            ..
         } => (content, is_error, metadata),
         ToolExecResult::Pending => {
             rt.pump_task_events();
@@ -1072,6 +1076,7 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
                         content,
                         is_error,
                         metadata,
+                        ..
                     } if invocation.request_id == 6 && call_id == "call-lsp-references-text" => {
                         Some((content, is_error, metadata))
                     }
@@ -1152,6 +1157,7 @@ fn lsp_plugin_truncates_large_structured_results() {
             content,
             is_error,
             metadata,
+            ..
         } => (content, is_error, metadata),
         ToolExecResult::Pending => {
             rt.pump_task_events();
@@ -1164,6 +1170,7 @@ fn lsp_plugin_truncates_large_structured_results() {
                         content,
                         is_error,
                         metadata,
+                        ..
                     } if invocation.request_id == 5 && call_id == "call-lsp-references" => {
                         Some((content, is_error, metadata))
                     }

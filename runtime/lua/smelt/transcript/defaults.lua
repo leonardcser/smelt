@@ -292,7 +292,7 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts, presenta
 
   local refresh_after = called_at_refresh
   if block.elapsed_active and status ~= "confirm" then
-    refresh_after = refresh_after and math.min(refresh_after, 250) or 250
+    refresh_after = refresh_after and math.min(refresh_after, 100) or 100
   end
   if refresh_after then header = layout.refresh(header, { after_ms = refresh_after }) end
   return header
@@ -452,7 +452,7 @@ function smelt.transcript.defaults.render_tool_body(block, ctx, opts, presentati
     return layout.gutter(body, { text = opts.gutter or "  " })
   end
 
-  local output = block.output or { content = "", is_error = false }
+  local output = block.output or block.preview_output or { content_preview = "", is_error = false }
   if renderer then
     local render_block = block
     if not block.output then
@@ -481,64 +481,12 @@ local function output_total_rows(output)
   return tonumber(display_count.value)
 end
 
-local MAX_RENDER_CONTENT_BYTES = 120000
-
 local function output_syntax(output)
   local metadata = output and output.metadata
   if type(metadata) ~= "table" then return nil end
   local syntax = metadata.syntax or metadata.lang or metadata.language
   if type(syntax) ~= "string" or syntax == "" then return nil end
   return syntax
-end
-
-local function preview_line(line)
-  if #line <= MAX_RENDER_CONTENT_BYTES then return line end
-  if smelt.text and smelt.text.truncate_cells then
-    return smelt.text.truncate_cells(line, 4000, { suffix = "…" })
-  end
-  return "<truncated long line>"
-end
-
-local function preview_render_content(content, keep)
-  if #content <= MAX_RENDER_CONTENT_BYTES then return content, nil end
-
-  local lines = {}
-  local first = 1
-  local total = 0
-  local bytes = 0
-  keep = keep or "tail"
-  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-    total = total + 1
-    local line_bytes = #line + 1
-    if keep == "head" then
-      if bytes + line_bytes <= MAX_RENDER_CONTENT_BYTES or #lines == 0 then
-        line = preview_line(line)
-        lines[#lines + 1] = line
-        bytes = bytes + #line + 1
-      end
-    else
-      line = preview_line(line)
-      lines[#lines + 1] = line
-      bytes = bytes + #line + 1
-      while bytes > MAX_RENDER_CONTENT_BYTES and first < #lines do
-        bytes = bytes - (#lines[first] + 1)
-        first = first + 1
-      end
-    end
-  end
-
-  local preview = {}
-  for i = first, #lines do preview[#preview + 1] = lines[i] end
-  return table.concat(preview, "\n"), total
-end
-
-local function syntax_lines(content, syntax)
-  local lines = {}
-  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = { { text = line, syntax = syntax } }
-  end
-  if #lines == 0 then lines[1] = { { text = "", syntax = syntax } } end
-  return lines
 end
 
 --- Render raw tool output without gutter using generic layout primitives: text/runs and
@@ -548,20 +496,21 @@ function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
   opts = opts or {}
   ctx = ctx or {}
   local limits = ctx.limits or {}
-  local content = output and output.content or ""
-  local preview_total_rows
-  content, preview_total_rows = preview_render_content(content, opts.keep or "tail")
   local is_error = output and output.is_error == true
   local rows = opts.rows or limits.tool_output_rows or 20
   local hl = opts.hl or opts.hl_group
   if not hl and is_error then hl = "ErrorMsg" end
 
-  local syntax = output_syntax(output)
   local body
-  if syntax and not hl then
-    body = layout.runs(syntax_lines(content, syntax))
+  if output and output.content_id then
+    body = layout.content(output.content_id, {
+      format = output_syntax(output) and not hl and "code" or "text",
+      lang = output_syntax(output),
+      hl_group = hl,
+      ansi = true,
+    })
   else
-    body = layout.text(content, {
+    body = layout.text((output and output.content_preview) or "", {
       hl_group = hl,
       ansi = true,
     })
@@ -573,7 +522,7 @@ function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
       rows = rows,
       keep = opts.keep or "tail",
       marker = opts.marker or "above",
-      total_rows = opts.total_rows or output_total_rows(output) or preview_total_rows,
+      total_rows = opts.total_rows or output_total_rows(output) or (output and output.content_lines),
     }
   )
 end
@@ -640,7 +589,10 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_assistant(block, ctx)
   local _ = ctx
-  return M.render_llm_markdown(block.content)
+  if block.content_id then
+    return layout.content(block.content_id, { format = "markdown" })
+  end
+  return M.render_llm_markdown(block.content_preview or "")
 end
 
 --- Render thinking for the current transcript view state.
@@ -654,20 +606,28 @@ function smelt.transcript.defaults.render_thinking(block, ctx)
   return M.render_thinking_full(block, ctx)
 end
 
-local function thinking_markdown(block, include_summary_history)
-  local sections = {}
+local function thinking_content_layout(block, include_summary_history)
+  local items = {}
   local titles = include_summary_history and block.summary_titles or nil
   if titles and #titles > 0 then
     for _, title in ipairs(titles) do
-      sections[#sections + 1] = "**" .. title .. "**"
+      items[#items + 1] = layout.markdown("**" .. title .. "**")
     end
   elseif block.title and block.title ~= "" then
-    sections[#sections + 1] = "**" .. block.title .. "**"
+    items[#items + 1] = layout.markdown("**" .. block.title .. "**")
   end
-  if block.content and block.content ~= "" then
-    sections[#sections + 1] = block.content
+  if block.content_id then
+    items[#items + 1] = layout.content(block.content_id, { format = "markdown" })
+  elseif block.content_preview and block.content_preview ~= "" then
+    items[#items + 1] = M.render_llm_markdown(block.content_preview)
   end
-  return table.concat(sections, "\n")
+  if #items == 0 then
+    items[1] = layout.markdown(block.thinking_summary or "thinking (0 lines)", { inline = true })
+  end
+  return layout.style(layout.vbox(items), {
+    dim = true,
+    italic = true,
+  })
 end
 
 --- Render the full thinking block with the current gutter.
@@ -675,32 +635,21 @@ end
 function smelt.transcript.defaults.render_thinking_full(block, ctx)
   local _ = ctx
   return layout.gutter(
-    layout.style(M.render_llm_markdown(thinking_markdown(block, true)), {
-      dim = true,
-      italic = true,
-    }),
+    thinking_content_layout(block, true),
     { text = "│ ", styled = true }
   )
-end
-
-local function thinking_content_layout(content)
-  return layout.style(M.render_llm_markdown(content), {
-    dim = true,
-    italic = true,
-  })
 end
 
 --- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_thinking_peek(block, ctx)
-  local content = thinking_markdown(block, false)
-  if content == "" then content = block.thinking_summary or "thinking (0 lines)" end
   return layout.gutter(
-    layout.cap(thinking_content_layout(content), {
+    layout.cap(thinking_content_layout(block, false), {
       rows = (ctx and ctx.limits and ctx.limits.thinking_peek_rows) or 4,
       keep = "head_tail",
       head_rows = (ctx and ctx.limits and ctx.limits.thinking_peek_head_rows) or 1,
       marker = "middle",
+      total_rows = block.content_lines,
     }),
     { text = "│ ", styled = true }
   )
@@ -737,15 +686,16 @@ function smelt.transcript.defaults.render_exec(block, ctx)
     layout.runs({ command_spans }),
     { hl = "SmeltUserBg", padding = 1 }
   )
-  if block.output and block.output ~= "" then
+  if block.output_id then
     local limits = ctx.limits or {}
     items[#items + 1] = layout.gutter(
       layout.cap(
-        layout.text(block.output, { ansi = true }),
+        layout.content(block.output_id, { format = "text", ansi = true }),
         {
           rows = limits.tool_output_rows or 20,
           keep = "tail",
           marker = "above",
+          total_rows = block.output_lines,
         }
       ),
       { text = "  ", styled = true }
@@ -843,23 +793,23 @@ end
 ---@field name? string Group spec name.
 ---@field title? string Optional display title.
 ---@field view_state? string Current group view state.
----@field children? smelt.transcript.Block[] Child block snapshots.
+---@field children? smelt.transcript.GroupChild[] Ordered bounded child presentation metadata.
 
---- Return child snapshots for a transcript group snapshot.
----@type fun(group: smelt.transcript.Group): smelt.transcript.Block[]
+--- Return bounded child presentation metadata for a transcript group.
+---@type fun(group: smelt.transcript.Group): smelt.transcript.GroupChild[]
 function smelt.transcript.defaults.group_children(group)
   return group.children or {}
 end
 
 --- True when a grouped child represents a failed or denied tool result.
----@type fun(child: smelt.transcript.Block): boolean
+---@type fun(child: smelt.transcript.GroupChild): boolean
 function smelt.transcript.defaults.child_failed(child)
   return child.status == "err"
     or child.status == "denied"
     or (child.output and child.output.is_error == true)
 end
 
---- Count failed and denied tool children in a transcript group snapshot.
+--- Count failed and denied tool children in a transcript group.
 ---@type fun(group: smelt.transcript.Group): integer, integer
 function smelt.transcript.defaults.group_failure_counts(group)
   local errors = 0
@@ -874,19 +824,12 @@ function smelt.transcript.defaults.group_failure_counts(group)
   return errors, denied
 end
 
---- Render all group children through the configured root renderer and middleware.
+--- Compose independently retained child layouts for an expanded group.
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_group_children(group, ctx)
-  if not ctx or type(ctx.render) ~= "function" then
-    error("smelt.transcript.defaults.render_group_children: ctx.render is required", 2)
-  end
-  local items = {}
-  for _, child in ipairs(M.group_children(group)) do
-    if #items > 0 then items[#items + 1] = layout.line("") end
-    items[#items + 1] = ctx.render(child, { view_state = child.view_state or ctx.view_state })
-  end
-  if #items == 0 then return layout.empty() end
-  return layout.vbox(items)
+  local _ = group
+  local _ctx = ctx
+  return layout.group_children()
 end
 
 --- Render a compact ordered child list for collapsed group nodes. Failed children

@@ -3,11 +3,36 @@
 
 smelt.transcript = smelt.transcript or {}
 
---- Tool output snapshot passed to transcript renderers.
+--- Bounded tool output metadata passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput
----@field content string Captured output text.
+---@field content_id integer Stable shared-content id accepted by `smelt.layout.content`.
+---@field content_revision integer Monotonic content revision.
+---@field content_bytes integer Current output size in bytes.
+---@field content_lines integer Current logical line count.
+---@field content_preview string Bounded text preview for labels and fallback UI, not complete output.
 ---@field is_error boolean True when the tool result is an error.
----@field metadata? table Tool-specific structured metadata.
+---@field metadata? table Bounded tool-specific structured metadata.
+---@field content_fields? table<string, smelt.transcript.ContentMetadata> Named retained payloads referenced by opaque content IDs.
+
+--- Metadata for a retained payload whose complete content remains in Rust and is
+--- available to renderers only through retained layout leaves.
+---@class smelt.transcript.ContentMetadata
+---@field content_id integer Stable shared-content id accepted by retained layout leaves.
+---@field content_revision integer Monotonic content revision.
+---@field content_bytes integer Current content size in bytes.
+---@field content_lines integer Current logical line count.
+---@field content_preview string Strictly bounded preview for labels, never the complete retained payload.
+
+--- Opaque top-level string argument passed to transcript renderers. Complete field
+--- content remains in Rust and is available only through `smelt.layout.content`.
+---@class smelt.transcript.ArgumentField
+---@field name string Top-level argument name.
+---@field content_id integer Stable shared-content id accepted by `smelt.layout.content`.
+---@field content_revision integer Monotonic content revision.
+---@field content_bytes integer Current field size in bytes.
+---@field content_lines integer Current logical line count.
+---@field content_preview string Bounded text preview for labels and fallback UI, not complete content.
+---@field complete boolean True when the JSON parser has consumed the complete field value.
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
 ---@class smelt.transcript.Context
@@ -18,14 +43,35 @@ smelt.transcript = smelt.transcript or {}
 ---@field now_ms integer Unix epoch milliseconds shared by the complete top-level render pass.
 ---@field render fun(node: smelt.transcript.Block, overrides?: { view_state?: string }): smelt.layout.Node Re-enter the composed root renderer for a semantic child.
 
---- Semantic transcript block snapshot passed to the root renderer.
+--- Bounded semantic metadata for one retained group child. Growing content and
+--- complete child payloads are never embedded in group renderer input.
+---@class smelt.transcript.GroupChild
+---@field id integer Stable child block id.
+---@field kind string Semantic block kind.
+---@field name? string Tool name.
+---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
+---@field summary_text? string Bounded plain-text summary.
+---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
+---@field args? table Bounded argument previews used by collapsed labels.
+---@field output? { content_lines?: integer, is_error?: boolean } Bounded output metadata.
+---@field event? string Process status event type.
+---@field event_data? { process_id?: string, exit_code?: integer } Bounded process metadata.
+---@field process_id? string Background process id.
+---@field exit_code? integer Background process exit code.
+
+--- Bounded semantic transcript metadata passed to the root renderer.
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
 ---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
----@field content? string Assistant/thinking/code content.
+---@field content? string Code content.
+---@field content_id? integer Stable shared-content id for assistant and thinking blocks.
+---@field content_revision? integer Monotonic shared-content revision.
+---@field content_bytes? integer Shared content size in bytes.
+---@field content_lines? integer Shared content logical line count.
+---@field content_preview? string Bounded preview for labels and fallback UI, not complete content.
 ---@field title? string Latest structured reasoning-summary title.
 ---@field summary_titles? string[] Ordered structured reasoning-summary title history.
 ---@field reasoning_kind? "summary"|"raw" Reasoning source for thinking blocks.
@@ -35,7 +81,8 @@ smelt.transcript = smelt.transcript or {}
 ---@field lang? string Code language.
 ---@field call_id? string Tool call id.
 ---@field name? string Tool name.
----@field args? table Tool arguments.
+---@field args? table Bounded tool-argument previews and complete non-string structured values.
+---@field argument_fields? smelt.transcript.ArgumentField[] Opaque top-level string arguments. Complete field content is never included in renderer metadata.
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
@@ -44,8 +91,8 @@ smelt.transcript = smelt.transcript or {}
 ---@field elapsed_active? boolean True only while elapsed time can continue advancing.
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
----@field preview_output? smelt.transcript.ToolOutput Immutable pending output snapshot for a promoted finished draft.
----@field output? smelt.transcript.ToolOutput Tool output snapshot.
+---@field preview_output? smelt.transcript.ToolOutput Immutable pending output metadata for a promoted finished draft.
+---@field output? smelt.transcript.ToolOutput Tool output metadata.
 ---@field event? string Process status event type, e.g. `"background_process_completed"`.
 ---@field event_type? string Alias for `event`.
 ---@field event_data? table Full typed process status event payload.
@@ -56,7 +103,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field group_kind? string Registered semantic group name.
 ---@field bucket? string Stable planner bucket for a group.
 ---@field view_state? "collapsed"|"peek"|"expanded" Effective group or child view state.
----@field children? smelt.transcript.Block[] Ordered semantic child snapshots for a group.
+---@field children? smelt.transcript.GroupChild[] Ordered bounded child presentation metadata for a group.
 ---@field child_ids? integer[] Ordered stable block ids for a group.
 ---@field child_count? integer Number of semantic children in a group.
 
@@ -116,7 +163,7 @@ smelt.transcript = smelt.transcript or {}
 
 --- Public presentation policy for one tool name. A complete `render` callback
 --- takes precedence; otherwise the default renderer composes the focused pieces.
---- Registrations are immutable snapshots.
+--- Registrations are copied and immutable.
 ---@class smelt.transcript.ToolPresentation
 ---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
@@ -269,7 +316,7 @@ function smelt.transcript.invalidate_renderer()
 end
 
 --- Register or replace presentation policy for a tool. The supported fields are
---- snapshotted, so later table mutation has no effect; re-register to change behavior
+--- copied, so later table mutation has no effect; re-register to change behavior
 --- or cache keys. The returned registration removes only this exact replacement.
 --- Registering presentation changes rebuilds the composed root renderer so all
 --- cached standalone and grouped nodes invalidate.
@@ -292,11 +339,11 @@ function smelt.transcript.register_tool(name, presentation)
     error("smelt.transcript.register_tool: presentation.cache_key must be a non-empty string", 2)
   end
 
-  local snapshot = copy_tool_presentation(presentation)
+  local retained = copy_tool_presentation(presentation)
   next_token = next_token + 1
   local token = next_token
   if not tool_presentations[name] then tool_order[#tool_order + 1] = name end
-  tool_presentations[name] = { presentation = snapshot, token = token }
+  tool_presentations[name] = { presentation = retained, token = token }
   rebuild_renderer()
 
   return smelt.reg.new(function()

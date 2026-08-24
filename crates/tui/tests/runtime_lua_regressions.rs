@@ -564,6 +564,9 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
             markdown = function(content, opts)
               return { kind = "markdown", content = content, opts = opts or {} }
             end,
+            content = function(content_id, opts)
+              return { kind = "content", content_id = content_id, opts = opts or {} }
+            end,
             text = function(content, opts)
               return { kind = "text", content = content, opts = opts or {} }
             end,
@@ -601,16 +604,24 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
         .expect("load transcript defaults");
     lua.load(WEB_FETCH_LUA).exec().expect("load web_fetch");
 
-    let (body_kind, output_kind, child_kind, dim, rows): (String, String, String, bool, i64) = lua
+    let (body_kind, output_kind, child_kind, format, dim, rows): (
+        String,
+        String,
+        String,
+        String,
+        bool,
+        i64,
+    ) = lua
         .load(
             r###"
             local renderer = assert(smelt.transcript.get_tool_presentation("web_fetch").body)
             local node = renderer({
               args = { prompt = "Summarise" },
-              output = { content = "## Title\n\n| A | B |\n|---|---|\n| 1 | 2 |", is_error = false },
+              output = { content_id = 42, content_lines = 5, is_error = false },
             }, { limits = { tool_output_rows = 7 } })
             local output = node.items[2]
-            return node.kind, output.kind, output.child.kind, output.child.opts.dim, output.opts.rows
+            return node.kind, output.kind, output.child.kind, output.child.opts.format,
+              output.child.opts.dim, output.opts.rows
             "###,
         )
         .eval()
@@ -618,7 +629,8 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
 
     assert_eq!(body_kind, "vbox");
     assert_eq!(output_kind, "cap");
-    assert_eq!(child_kind, "markdown");
+    assert_eq!(child_kind, "content");
+    assert_eq!(format, "markdown");
     assert!(dim);
     assert_eq!(rows, 7);
 }
@@ -755,7 +767,7 @@ fn web_fetch_auto_renders_spa_shell_with_installed_browser() {
 }
 
 #[test]
-fn structured_tool_output_uses_inline_syntax_runs() {
+fn structured_tool_output_uses_shared_code_content() {
     let lua = mlua::Lua::new();
     lua.load(
         r#"
@@ -765,6 +777,9 @@ fn structured_tool_output_uses_inline_syntax_runs() {
           layout = {
             text = function(content, opts)
               return { kind = "text", content = content, opts = opts or {} }
+            end,
+            content = function(content_id, opts)
+              return { kind = "content", content_id = content_id, opts = opts or {} }
             end,
             cap = function(child, opts)
               return { kind = "cap", child = child, opts = opts or {} }
@@ -785,22 +800,24 @@ fn structured_tool_output_uses_inline_syntax_runs() {
         .exec()
         .expect("load transcript defaults");
 
-    let (node_kind, child_kind, syntax): (String, String, String) = lua
+    let (node_kind, child_kind, format, lang): (String, String, String, String) = lua
         .load(
             r#"
             local node = smelt.transcript.defaults.render_tool_output_tail({
-              content = "{\n  \"state\": \"ready\"\n}",
+              content_id = 42,
+              content_lines = 3,
               metadata = { syntax = "json" },
             }, { limits = { tool_output_rows = 20 } })
-            return node.kind, node.child.kind, node.child.lines[1][1].syntax
+            return node.kind, node.child.kind, node.child.opts.format, node.child.opts.lang
             "#,
         )
         .eval()
         .expect("render structured tool output");
 
     assert_eq!(node_kind, "cap");
-    assert_eq!(child_kind, "runs");
-    assert_eq!(syntax, "json");
+    assert_eq!(child_kind, "content");
+    assert_eq!(format, "code");
+    assert_eq!(lang, "json");
 }
 
 #[test]
@@ -863,6 +880,8 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           },
           spinner = {
             glyph = function() return "*" end,
+            wave_state = function() return 0, 1, 3 end,
+            wave_level_at = function() return 2 end,
             wave_color_at = function() return { 1, 2, 3 } end,
           },
           prompt = {

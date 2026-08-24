@@ -57,7 +57,7 @@ mod transcript_groups;
 mod trust;
 
 use mlua::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -151,6 +151,172 @@ pub fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
         mlua::Value::Table(t) => lua_table_to_json(lua, t),
         _ => serde_json::Value::Null,
     }
+}
+
+struct BoundedToolMetadataConverter<'lua> {
+    lua: &'lua Lua,
+    active_tables: HashSet<usize>,
+    nodes: usize,
+    bytes: usize,
+}
+
+impl<'lua> BoundedToolMetadataConverter<'lua> {
+    fn new(lua: &'lua Lua) -> Self {
+        Self {
+            lua,
+            active_tables: HashSet::new(),
+            nodes: 0,
+            bytes: 0,
+        }
+    }
+
+    fn convert(
+        &mut self,
+        value: &mlua::Value,
+        depth: usize,
+        ignored_root_keys: &[&str],
+    ) -> Result<serde_json::Value, String> {
+        if depth > protocol::TOOL_METADATA_MAX_DEPTH {
+            return Err(protocol::ToolResultValidationError::MetadataTooDeep.to_string());
+        }
+        self.nodes = self.nodes.saturating_add(1);
+        if self.nodes > protocol::TOOL_METADATA_MAX_NODES {
+            return Err(protocol::ToolResultValidationError::MetadataTooManyNodes.to_string());
+        }
+        match value {
+            mlua::Value::Nil => Ok(serde_json::Value::Null),
+            mlua::Value::Boolean(value) => {
+                self.add_bytes(1)?;
+                Ok(serde_json::Value::Bool(*value))
+            }
+            mlua::Value::Integer(value) => {
+                self.add_bytes(std::mem::size_of::<i64>())?;
+                Ok(serde_json::json!(*value))
+            }
+            mlua::Value::Number(value) => {
+                if !value.is_finite() {
+                    return Err("tool metadata contains a non-finite number".into());
+                }
+                self.add_bytes(std::mem::size_of::<f64>())?;
+                Ok(serde_json::json!(*value))
+            }
+            mlua::Value::String(value) => {
+                let value = value.to_string_lossy();
+                self.add_bytes(value.len())?;
+                Ok(serde_json::Value::String(value))
+            }
+            mlua::Value::Table(table) => self.convert_table(table, depth, ignored_root_keys),
+            other => Err(format!(
+                "tool metadata contains unsupported Lua {} value",
+                other.type_name()
+            )),
+        }
+    }
+
+    fn convert_table(
+        &mut self,
+        table: &mlua::Table,
+        depth: usize,
+        ignored_root_keys: &[&str],
+    ) -> Result<serde_json::Value, String> {
+        let pointer = table.to_pointer() as usize;
+        if !self.active_tables.insert(pointer) {
+            return Err("tool metadata contains a table cycle".into());
+        }
+        let result = self.convert_table_inner(table, depth, ignored_root_keys);
+        self.active_tables.remove(&pointer);
+        result
+    }
+
+    fn convert_table_inner(
+        &mut self,
+        table: &mlua::Table,
+        depth: usize,
+        ignored_root_keys: &[&str],
+    ) -> Result<serde_json::Value, String> {
+        let mut pairs = Vec::new();
+        for pair in table.clone().pairs::<mlua::Value, mlua::Value>() {
+            let pair = pair.map_err(|error| format!("tool metadata table: {error}"))?;
+            if pairs.len() >= protocol::TOOL_METADATA_MAX_NODES {
+                return Err(protocol::ToolResultValidationError::MetadataTooManyNodes.to_string());
+            }
+            pairs.push(pair);
+        }
+
+        let is_array = (pairs.is_empty() && is_json_array(self.lua, table))
+            || (!pairs.is_empty()
+                && pairs
+                    .iter()
+                    .all(|(key, _)| matches!(key, mlua::Value::Integer(_)))
+                && {
+                    let mut indices = pairs
+                        .iter()
+                        .filter_map(|(key, _)| match key {
+                            mlua::Value::Integer(index) => Some(*index),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    indices.sort_unstable();
+                    indices.first().copied() == Some(1)
+                        && indices.windows(2).all(|pair| pair[1] == pair[0] + 1)
+                });
+
+        if is_array {
+            let mut array = Vec::with_capacity(pairs.len());
+            for index in 1..=pairs.len() {
+                let value = table
+                    .raw_get::<mlua::Value>(index)
+                    .map_err(|error| format!("tool metadata array: {error}"))?;
+                array.push(self.convert(&value, depth.saturating_add(1), &[])?);
+            }
+            return Ok(serde_json::Value::Array(array));
+        }
+
+        let mut object = serde_json::Map::with_capacity(pairs.len());
+        for (key, value) in pairs {
+            let key = match key {
+                mlua::Value::String(key) => key.to_string_lossy(),
+                mlua::Value::Integer(key) => key.to_string(),
+                other => {
+                    return Err(format!(
+                        "tool metadata object contains unsupported Lua {} key",
+                        other.type_name()
+                    ));
+                }
+            };
+            if depth == 0 && ignored_root_keys.contains(&key.as_str()) {
+                continue;
+            }
+            if key.len() > protocol::TOOL_METADATA_MAX_KEY_BYTES {
+                return Err(protocol::ToolResultValidationError::MetadataKeyTooLong.to_string());
+            }
+            self.add_bytes(key.len())?;
+            if object.contains_key(&key) {
+                return Err(format!("tool metadata contains duplicate key `{key}`"));
+            }
+            let value = self.convert(&value, depth.saturating_add(1), &[])?;
+            object.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(object))
+    }
+
+    fn add_bytes(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.bytes > protocol::TOOL_METADATA_MAX_BYTES {
+            return Err(protocol::ToolResultValidationError::MetadataTooLarge.to_string());
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn bounded_tool_metadata_from_lua(
+    lua: &Lua,
+    value: &mlua::Value,
+    ignored_root_keys: &[&str],
+) -> Result<serde_json::Value, String> {
+    let metadata = BoundedToolMetadataConverter::new(lua).convert(value, 0, ignored_root_keys)?;
+    protocol::validate_tool_metadata(&metadata).map_err(|error| error.to_string())?;
+    Ok(metadata)
 }
 
 /// Convert a Lua table into a `HashMap<String, serde_json::Value>`

@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. `smelt.ui.layout.set(fn)` registers a composer invoked once per frame; the composer returns a tree built from these constructors describing how the transcript, prompt, statusline, and any plugin-added windows split the screen.
+Composable layout-tree primitives for the retained main TUI layout. `smelt.ui.layout.set(fn)` registers a composer; call `invalidate()` when closed-over state changes the resulting tree.
 
 ## `smelt.ui.layout.hbox`
 
@@ -15,6 +15,14 @@ fun(items: table, opts: table?): smelt.ui.layout
 ```
 
 Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `justify = "space-between"`, `padding` (uniform inner inset on all sides, inside any border).
+
+## `smelt.ui.layout.invalidate`
+
+```lua
+fun(): nil
+```
+
+Invalidate the retained main layout so its composer runs during the next frame. Use this after changing closed-over state that affects layout structure or constraints.
 
 ## `smelt.ui.layout.leaf`
 
@@ -40,7 +48,7 @@ Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opt
 fun(composer: function?): nil
 ```
 
-Register the main layout composer. The callback receives a state table (`term_w`, `term_h`, `prompt_input_rows`, plus `dialog` while a root dialog is active) and returns a layout userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. `state.dialog` is an opaque transcript-dialog stage with host-owned sizing and expansion behavior. While a root dialog is active, the returned tree must include the current stage exactly once and no retained dialog stages from earlier calls; otherwise the host uses the safe transcript-dialog-statusline fallback. Passing `nil` clears the composer and reverts to the engine's hardcoded layout. Only the most recent registration is active; later calls replace earlier ones.
+Register the retained main layout composer. The callback receives a state table (`term_w`, `term_h`, `prompt_input_rows`, plus `dialog` while a root dialog is active) and returns a layout userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. `state.dialog` is an opaque transcript-dialog stage with host-owned sizing and expansion behavior. While a root dialog is active, the returned tree must include the current stage exactly once and no retained dialog stages from earlier calls; otherwise the host uses the safe transcript-dialog-statusline fallback. Passing `nil` clears the composer and reverts to the engine's hardcoded layout. The tree is retained until dimensions change or `smelt.ui.layout.invalidate()` is called.
 
 ## `smelt.ui.layout.vbox`
 

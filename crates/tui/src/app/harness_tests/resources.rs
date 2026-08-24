@@ -535,7 +535,12 @@ async fn read_file_result(
     provider_type: &str,
     modalities: &[&str],
     call_id: &str,
-) -> (String, bool, Option<serde_json::Value>) {
+) -> (
+    String,
+    bool,
+    Option<serde_json::Value>,
+    Option<protocol::ToolAttachment>,
+) {
     let mut app = TestApp::builder().with_vim(false).build();
     app.use_model(smelt_core::config::ResolvedModel {
         key: format!("{provider_type}/multimodal"),
@@ -573,10 +578,14 @@ async fn read_file_result(
                         content,
                         is_error,
                         metadata,
+                        attachment,
                         ..
-                    } if completed == call_id => {
-                        Some((content.clone(), *is_error, metadata.clone()))
-                    }
+                    } if completed == call_id => Some((
+                        content.clone(),
+                        *is_error,
+                        metadata.clone(),
+                        attachment.clone(),
+                    )),
                     _ => None,
                 },
                 _ => None,
@@ -595,10 +604,15 @@ async fn read_file_attachment_result(
     provider_type: &str,
     modalities: &[&str],
     call_id: &str,
-) -> (String, bool, serde_json::Value) {
-    let (content, is_error, metadata) =
+) -> (String, bool, serde_json::Value, protocol::ToolAttachment) {
+    let (content, is_error, metadata, attachment) =
         read_file_result(path, provider_type, modalities, call_id).await;
-    (content, is_error, metadata.expect("attachment metadata"))
+    (
+        content,
+        is_error,
+        metadata.expect("attachment metadata"),
+        attachment.expect("typed attachment"),
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -607,7 +621,7 @@ async fn codex_read_file_returns_image_attachment() {
     let path = dir.path().join("console.png");
     std::fs::write(&path, b"\x89PNG\r\n\x1a\nimage-bytes").unwrap();
 
-    let (content, is_error, metadata) =
+    let (content, is_error, metadata, attachment) =
         read_file_attachment_result(&path, "codex", &["text", "image"], "read-image").await;
 
     assert!(!is_error, "{content}");
@@ -616,9 +630,10 @@ async fn codex_read_file_returns_image_attachment() {
     assert_eq!(metadata["modality"], "image");
     assert_eq!(metadata["path"], path.to_string_lossy().as_ref());
     assert_eq!(metadata["mime"], "image/png");
-    assert!(metadata["data_url"]
-        .as_str()
-        .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+    assert!(metadata.get("data_url").is_none());
+    assert_eq!(attachment.modality, protocol::ToolAttachmentModality::Image);
+    assert_eq!(attachment.mime, "image/png");
+    assert!(attachment.data_url.starts_with("data:image/png;base64,"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -631,11 +646,15 @@ async fn codex_read_file_reads_svg_as_text() {
     )
     .unwrap();
 
-    let (content, is_error, metadata) =
+    let (content, is_error, metadata, attachment) =
         read_file_result(&path, "codex", &["text", "image"], "read-svg").await;
 
     assert!(!is_error, "{content}");
     assert!(metadata.is_none(), "unexpected metadata: {metadata:?}");
+    assert!(
+        attachment.is_none(),
+        "unexpected attachment: {attachment:?}"
+    );
     assert!(
         content
             .contains("   1\t<svg xmlns=\"http://www.w3.org/2000/svg\"><text>relay</text></svg>"),
@@ -649,15 +668,18 @@ async fn anthropic_read_file_captures_pdf_attachment() {
     let path = dir.path().join("document.pdf");
     std::fs::write(&path, b"%PDF-1.4").unwrap();
 
-    let (content, is_error, metadata) =
+    let (content, is_error, metadata, attachment) =
         read_file_attachment_result(&path, "anthropic", &["text", "pdf"], "read-pdf").await;
 
     assert!(!is_error, "{content}");
     assert_eq!(metadata["modality"], "pdf");
     assert_eq!(metadata["mime"], "application/pdf");
-    assert!(metadata["data_url"]
-        .as_str()
-        .is_some_and(|url| url.starts_with("data:application/pdf;base64,")));
+    assert!(metadata.get("data_url").is_none());
+    assert_eq!(attachment.modality, protocol::ToolAttachmentModality::Pdf);
+    assert_eq!(attachment.mime, "application/pdf");
+    assert!(attachment
+        .data_url
+        .starts_with("data:application/pdf;base64,"));
 }
 
 #[test]

@@ -13,16 +13,16 @@ pub(crate) enum SourceView<'a> {
 pub(crate) struct SourceViewTarget {
     indent_cells: u16,
     layout_width: u16,
-    skip_rows: u16,
-    max_rows: u16,
+    skip_rows: usize,
+    max_rows: usize,
 }
 
 impl SourceViewTarget {
     pub(crate) const fn new(
         indent_cells: u16,
         layout_width: u16,
-        skip_rows: u16,
-        max_rows: u16,
+        skip_rows: usize,
+        max_rows: usize,
     ) -> Self {
         Self {
             indent_cells,

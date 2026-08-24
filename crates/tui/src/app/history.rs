@@ -160,16 +160,6 @@ pub(crate) fn materialize_full_session_result(
     sessions.load_full_result(id)
 }
 
-pub(crate) fn materialize_full_transcript_read_only(
-    sessions: &session::SessionStorage,
-    lua: &smelt_core::lua::LuaRuntime,
-    id: &str,
-) -> Option<crate::app::transcript::LoadedTranscript> {
-    materialize_full_transcript_read_only_result(sessions, lua, id)
-        .ok()
-        .flatten()
-}
-
 pub(crate) fn materialize_full_transcript_read_only_result(
     sessions: &session::SessionStorage,
     lua: &smelt_core::lua::LuaRuntime,
@@ -316,6 +306,7 @@ pub(crate) fn load_transcript_tail_from_sqlite(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn load_transcript_tail_from_sqlite_id(
     sessions: &session::SessionStorage,
     id: &str,
@@ -587,7 +578,7 @@ fn push_assistant_blocks(
                 Block::Thinking {
                     title: None,
                     summary_titles: Vec::new(),
-                    content: reasoning.clone(),
+                    content: reasoning.clone().into(),
                     kind: protocol::ReasoningKind::Raw,
                 },
                 smelt_core::BlockOrigin::History(history_index),
@@ -597,7 +588,7 @@ fn push_assistant_blocks(
     if let Some(ref content) = turn.content {
         transcript.push_hydrated_block_with_origin(
             Block::Text {
-                content: content.text_content().into_owned(),
+                content: content.text_content().into_owned().into(),
             },
             smelt_core::BlockOrigin::History(history_index),
         );
@@ -614,11 +605,12 @@ fn push_assistant_blocks(
         } else {
             ToolStatus::Ok
         };
-        let output = ToolOutput {
-            content: inv.result.content.clone(),
-            is_error: inv.result.is_error,
-            metadata: inv.result.metadata.clone(),
-        };
+        let output = ToolOutput::from_display_content(
+            inv.result.content.clone(),
+            inv.result.is_error,
+            inv.result.metadata.clone(),
+            inv.result.display_content.clone(),
+        );
         let elapsed_ms = inv.elapsed_ms;
         let summary = summary_resolver.resolve(&inv.name, &args);
         transcript.push_hydrated_tool_block_with_origin(
@@ -626,7 +618,7 @@ fn push_assistant_blocks(
                 call_id: inv.call_id.clone(),
                 name: inv.name.clone(),
                 summary,
-                args,
+                args: args.into(),
             },
             ToolState {
                 status,
@@ -955,7 +947,7 @@ mod tests {
         smelt_store::StoredTranscriptBlock {
             block_idx,
             history_idx: None,
-            kind: "text".to_string(),
+            kind: "assistant".to_string(),
             tool_call_id: None,
             tool_name: None,
             content_hash: "0".to_string(),
@@ -963,7 +955,7 @@ mod tests {
             preview_text: content.to_string(),
             indexed_text: content.to_string(),
             block_json: serde_json::to_string(&Block::Text {
-                content: content.to_string(),
+                content: content.to_string().into(),
             })
             .unwrap(),
             origin_json: Some(
@@ -971,6 +963,7 @@ mod tests {
                     .unwrap(),
             ),
             tool_state_json: None,
+            tool_render_revision: 0,
         }
     }
 
@@ -2012,7 +2005,13 @@ impl TuiApp {
     pub(crate) fn retry_blocked_persistence(&mut self) -> bool {
         let metadata = self.runtime_session_metadata();
         match self.conversation.retry_blocked_persistence(metadata) {
-            Ok(retried) => retried,
+            Ok(crate::app::conversation::SaveStatus::Unchanged) => false,
+            Ok(crate::app::conversation::SaveStatus::DeferredHydration) => {
+                self.pending_session_save = true;
+                self.request_urgent_render();
+                true
+            }
+            Ok(_) => true,
             Err(message) => {
                 self.notify_session_save_failure(&self.conversation.session().id.clone(), &message);
                 false
@@ -2027,6 +2026,10 @@ impl TuiApp {
         match self.conversation.save(metadata) {
             Ok(crate::app::conversation::SaveStatus::Unchanged) => {
                 smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
+            }
+            Ok(crate::app::conversation::SaveStatus::DeferredHydration) => {
+                self.pending_session_save = true;
+                self.request_urgent_render();
             }
             Ok(crate::app::conversation::SaveStatus::SkippedReadOnly)
             | Ok(crate::app::conversation::SaveStatus::Blocked)
@@ -2743,7 +2746,7 @@ mod checkpoint_tests {
             .iter()
             .filter_map(|id| match history.block(*id) {
                 Some(Block::User { text, .. }) => Some(text.clone()),
-                Some(Block::Text { content }) => Some(content.clone()),
+                Some(Block::Text { content }) => Some(content.snapshot()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -3159,10 +3162,20 @@ mod checkpoint_tests {
             .expect("set session id");
         app.run_lua_result(
             r#"
-                    local buf = smelt.buf.new({})
+                    preview_buf = smelt.buf.new({})
+                    smelt.session.render_preview_into(
+                        session_id,
+                        { buf = preview_buf, width = 80, height = 12 }
+                    )
+                    "#,
+        )
+        .expect("request sparse session preview");
+        app.render_silent();
+        app.run_lua_result(
+            r#"
                     local out = smelt.session.render_preview_into(
                         session_id,
-                        { buf = buf, width = 80, height = 12 }
+                        { buf = preview_buf, width = 80, height = 12 }
                     )
                     assert(out ~= nil and out.total_rows > 0)
                     "#,
@@ -3195,10 +3208,20 @@ mod checkpoint_tests {
 
         app.run_lua_result(
             r#"
-                    local buf = smelt.buf.new({})
+                    history_preview_buf = smelt.buf.new({})
+                    smelt.session.render_preview_into(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        { buf = history_preview_buf, width = 80, height = 12 }
+                    )
+                    "#,
+        )
+        .expect("request history-only preview");
+        app.render_silent();
+        app.run_lua_result(
+            r#"
                     local out = smelt.session.render_preview_into(
                         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                        { buf = buf, width = 80, height = 12 }
+                        { buf = history_preview_buf, width = 80, height = 12 }
                     )
                     assert(out ~= nil, "preview returned nil")
                     assert(out.total_rows > 0, "preview was empty")
@@ -4345,10 +4368,20 @@ mod checkpoint_tests {
         app.app
             .conversation
             .replace_loaded_transcript_for_harness(loaded);
-        assert!(app
+        assert!(!app
             .app
             .conversation
             .activate_transcript_search_record_window(100, target_id.get(), 32));
+        let request = app
+            .app
+            .conversation
+            .take_pending_transcript_hydration_request()
+            .expect("target record hydration request");
+        let result = crate::app::transcript_hydration::execute_hydration_request_for_test(request)
+            .expect("target record hydration result");
+        app.app
+            .conversation
+            .install_transcript_hydration_result(result);
         app.app
             .conversation
             .set_transcript_memory_budget_for_harness(
@@ -4373,32 +4406,33 @@ mod checkpoint_tests {
             .position(|id| *id == target_id)
             .expect("target in active record window");
 
-        let restored = app
-            .app
-            .rewind_to(target_index)
-            .expect("rewind stored target");
-        assert_eq!(restored.0, expected);
-        assert!(app
+        let (commit_started, release_commit) =
+            app.app.conversation.install_persistence_commit_barrier();
+        app.app.rewind_to_block(Some(target_index), false);
+        app.render_silent();
+        assert_eq!(app.prompt_source(), expected);
+        let remaining_origins = app
             .app
             .conversation
             .transcript()
             .history()
             .order
             .iter()
-            .all(|id| {
+            .filter_map(|id| {
                 app.app
                     .conversation
                     .transcript()
                     .history()
                     .block_origin(*id)
-                    .is_none_or(|origin| {
-                        !matches!(origin, smelt_core::BlockOrigin::History(index) if index >= TARGET_HISTORY_INDEX)
-                    })
-            }));
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            remaining_origins.iter().all(|origin| {
+                !matches!(origin, smelt_core::BlockOrigin::History(index) if *index >= TARGET_HISTORY_INDEX)
+            }),
+            "rewind retained stale transcript origins: {remaining_origins:?}"
+        );
 
-        let (commit_started, release_commit) =
-            app.app.conversation.install_persistence_commit_barrier();
-        app.save_session();
         commit_started
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("truncating save reaches the commit barrier");

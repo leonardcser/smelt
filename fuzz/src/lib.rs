@@ -1885,7 +1885,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let ev = SourceEvent::engine(EngineEvent::ToolOutput {
                 invocation_id,
                 call_id: cid,
-                chunk,
+                line: chunk.replace(['\r', '\n'], " "),
             });
             (Some(ev), PostCheck::ToolOutput { invocation_id })
         }

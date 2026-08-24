@@ -8,14 +8,14 @@
 local transcript_defaults = {}
 
 --- True when a grouped child represents a failed or denied tool result.
----@type fun(child: smelt.transcript.Block): boolean
+---@type fun(child: smelt.transcript.GroupChild): boolean
 transcript_defaults.child_failed = nil
 
---- Return child snapshots for a transcript group snapshot.
----@type fun(group: smelt.transcript.Group): smelt.transcript.Block[]
+--- Return bounded child presentation metadata for a transcript group.
+---@type fun(group: smelt.transcript.Group): smelt.transcript.GroupChild[]
 transcript_defaults.group_children = nil
 
---- Count failed and denied tool children in a transcript group snapshot.
+--- Count failed and denied tool children in a transcript group.
 ---@type fun(group: smelt.transcript.Group): integer, integer
 transcript_defaults.group_failure_counts = nil
 
@@ -48,7 +48,7 @@ transcript_defaults.render_exec = nil
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
 transcript_defaults.render_group_child_list = nil
 
---- Render all group children through the configured root renderer and middleware.
+--- Compose independently retained child layouts for an expanded group.
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_group_children = nil
 

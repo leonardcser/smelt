@@ -47,11 +47,10 @@ pub(crate) struct LayoutState {
 }
 
 /// Minimal splits tree used before the Lua composer runs. The Lua layer
-/// (`runtime/lua/smelt/layout.lua`) replaces this on every frame once
-/// `bring_up_lua` has loaded `prompt_bar.lua` / `statusline.lua` and the
-/// bar/statusline windows exist. Keeping a seed tree means anchored
-/// overlays resolve correctly during the brief window between `Ui::new`
-/// and the first Lua-driven render.
+/// (`runtime/lua/smelt/layout.lua`) replaces it on the first composed frame and
+/// retains that result until dimensions or semantic layout state change. Keeping
+/// a seed tree means anchored overlays resolve correctly during the brief window
+/// between `Ui::new` and the first Lua-driven render.
 pub(crate) fn seed_layout_tree(prompt_input_rows: u16) -> crate::smelt_edit::LayoutTree {
     let rows = prompt_input_rows.max(1);
     crate::smelt_edit::LayoutTree::vbox(vec![

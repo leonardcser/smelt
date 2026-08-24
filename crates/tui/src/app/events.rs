@@ -2572,7 +2572,7 @@ mod tests {
         app.app.handle_resize(80, 16);
         app.app
             .push_block(smelt_core::transcript_model::Block::Text {
-                content: "transcript row".to_string(),
+                content: "transcript row".to_string().into(),
             });
         app.render_silent();
         app.app.app_focus = crate::app::AppFocus::Content;

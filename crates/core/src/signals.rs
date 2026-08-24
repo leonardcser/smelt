@@ -533,6 +533,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("cwd_worktree"),
     state("cwd_worktree_path"),
     state("errors"),
+    state("fast_mode"),
     event("history"),
     state("history_epoch"),
     state("input_epoch"),
@@ -542,6 +543,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("now"),
     state("notification_visible"),
     state("permission_pending"),
+    state("prompt_queue_revision"),
     state("prompt_resize_active"),
     state("prompt_resize_chrome"),
     state("reasoning"),
@@ -838,6 +840,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("agent_mode", seeds.agent_mode);
     signals.declare("model", seeds.model);
     signals.declare("reasoning", seeds.reasoning);
+    signals.declare("fast_mode", false);
     signals.declare("confirms_pending", false);
     signals.declare("tokens_used", TokenUsage::default());
     signals.declare("errors", 0u32);
@@ -861,6 +864,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("running_procs", 0u32);
     signals.declare("permission_pending", false);
     signals.declare("notification_visible", false);
+    signals.declare("prompt_queue_revision", 0u64);
     signals.declare("prompt_resize_active", false);
     signals.declare("prompt_resize_chrome", String::new());
     signals.declare("cursor_pos", CursorPos::default());

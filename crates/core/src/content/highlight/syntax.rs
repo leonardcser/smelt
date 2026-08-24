@@ -229,6 +229,14 @@ fn split_regions_into_rows(
     rows
 }
 
+/// One retained syntax-color range within an inline source span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InlineSyntaxSpan {
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub foreground: [u8; 3],
+}
+
 /// Stateful single-line syntax highlighter. The language token feeds `syntax_for_lang`,
 /// so `"bash"`, `"rust"`, `"py"`, etc. all work.
 pub struct InlineSyntax<'a> {
@@ -243,6 +251,31 @@ impl<'a> InlineSyntax<'a> {
         }
     }
 
+    /// Parse one logical line into retained byte ranges and syntax-theme colors.
+    pub fn highlight_spans(&mut self, line: &str) -> Vec<InlineSyntaxSpan> {
+        let line_with_nl = format!("{}\n", line);
+        let regions = self
+            .h
+            .highlight_line(&line_with_nl, &SYNTAX_SET)
+            .unwrap_or_default();
+        let mut spans = Vec::with_capacity(regions.len());
+        let mut byte_start = 0usize;
+        for (style, text) in regions {
+            let text = text.trim_end_matches('\n').trim_end_matches('\r');
+            if text.is_empty() {
+                continue;
+            }
+            let byte_end = byte_start.saturating_add(text.len());
+            spans.push(InlineSyntaxSpan {
+                byte_start,
+                byte_end,
+                foreground: [style.foreground.r, style.foreground.g, style.foreground.b],
+            });
+            byte_start = byte_end;
+        }
+        spans
+    }
+
     /// Print a byte range from one logical line with syntax highlighting.
     ///
     /// The whole logical line is highlighted before clipping, so soft-wrapped
@@ -253,37 +286,17 @@ impl<'a> InlineSyntax<'a> {
         line: &str,
         range: std::ops::Range<usize>,
     ) {
-        let line_with_nl = format!("{}\n", line);
-        let regions = self
-            .h
-            .highlight_line(&line_with_nl, &SYNTAX_SET)
-            .unwrap_or_default();
+        let spans = self.highlight_spans(line);
         out.save_style();
-        let mut pos = 0usize;
-        for (style, text) in &regions {
-            let text = text.trim_end_matches('\n').trim_end_matches('\r');
-            if text.is_empty() {
+        for span in spans {
+            let byte_start = span.byte_start.max(range.start);
+            let byte_end = span.byte_end.min(range.end);
+            if byte_start >= byte_end {
                 continue;
             }
-            let start = pos;
-            let end = pos + text.len();
-            pos = end;
-            let lo = start.max(range.start);
-            let hi = end.min(range.end);
-            if lo >= hi {
-                continue;
-            }
-            let piece = smelt_buffer::text::slice(text, lo - start..hi - start);
-            if piece.is_empty() {
-                continue;
-            }
-            let fg = Color::Rgb {
-                r: style.foreground.r,
-                g: style.foreground.g,
-                b: style.foreground.b,
-            };
-            out.set_fg(fg);
-            out.print(piece);
+            let [r, g, b] = span.foreground;
+            out.set_fg(Color::Rgb { r, g, b });
+            out.print(smelt_buffer::text::slice(line, byte_start..byte_end));
         }
         out.pop_style();
     }
@@ -292,26 +305,7 @@ impl<'a> InlineSyntax<'a> {
     /// Snapshots the caller's style on entry and restores it on exit, so per-region
     /// fg mutations don't leak (other axes - dim/bold/italic/group - stay in effect).
     pub fn print_line(&mut self, out: &mut LineBuilder, line: &str) {
-        let line_with_nl = format!("{}\n", line);
-        let regions = self
-            .h
-            .highlight_line(&line_with_nl, &SYNTAX_SET)
-            .unwrap_or_default();
-        out.save_style();
-        for (style, text) in &regions {
-            let text = text.trim_end_matches('\n').trim_end_matches('\r');
-            if text.is_empty() {
-                continue;
-            }
-            let fg = Color::Rgb {
-                r: style.foreground.r,
-                g: style.foreground.g,
-                b: style.foreground.b,
-            };
-            out.set_fg(fg);
-            out.print(text);
-        }
-        out.pop_style();
+        self.print_line_range(out, line, 0..line.len());
     }
 }
 

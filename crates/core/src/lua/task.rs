@@ -94,6 +94,8 @@ pub enum TaskDriveOutput {
         content: String,
         is_error: bool,
         metadata: Option<serde_json::Value>,
+        display_content: Vec<protocol::ToolDisplayContent>,
+        attachment: Option<Box<protocol::ToolAttachment>>,
     },
     Error(String),
 }
@@ -390,19 +392,22 @@ pub(crate) fn step_task_owned(
                     TaskCompletion::ToolResult {
                         invocation,
                         call_id,
-                    } => {
-                        let (content, is_error, metadata_lua) = coerce_tool_result(&v);
-                        let metadata = metadata_lua
-                            .as_ref()
-                            .and_then(|mv| crate::lua::lua_to_serde::<serde_json::Value>(lua, mv));
-                        outputs.push(TaskDriveOutput::ToolComplete {
+                    } => match coerce_tool_result(lua, &v) {
+                        Ok(result) => outputs.push(TaskDriveOutput::ToolComplete {
                             invocation: *invocation,
                             call_id: call_id.clone(),
-                            content,
-                            is_error,
-                            metadata,
-                        });
-                    }
+                            content: result.content,
+                            is_error: result.is_error,
+                            metadata: result.metadata,
+                            display_content: result.display_content,
+                            attachment: result.attachment.map(Box::new),
+                        }),
+                        Err(error) => emit_task_failure(
+                            &task,
+                            &format!("invalid tool result: {error}"),
+                            outputs,
+                        ),
+                    },
                 }
                 return None;
             }
@@ -552,6 +557,8 @@ fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<Tas
             content: format!("tool error: {msg}"),
             is_error: true,
             metadata: None,
+            display_content: Vec::new(),
+            attachment: None,
         });
     }
 }
@@ -599,26 +606,32 @@ fn decode_yield(_lua: &Lua, v: LuaValue) -> Result<Yield, String> {
     }
 }
 
-/// Coerce a task return value to `(content, is_error, metadata_lua_value)`:
-/// string or `{ content, is_error, metadata? }` table.
-fn coerce_tool_result(v: &LuaValue) -> (String, bool, Option<mlua::Value>) {
-    match v {
-        LuaValue::String(s) => (s.to_string_lossy().to_string(), false, None),
-        LuaValue::Table(t) => {
-            let content: String = t.get("content").unwrap_or_default();
-            let is_error: bool = t.get("is_error").unwrap_or(false);
-            let metadata = match t.get::<mlua::Value>("metadata") {
-                Ok(mlua::Value::Nil) | Err(_) => None,
-                Ok(metadata) => Some(metadata),
-            };
-            (content, is_error, metadata)
-        }
-        LuaValue::Nil => (String::new(), false, None),
-        other => (
-            format!("tool returned non-string value: {}", other.type_name()),
-            true,
-            None,
-        ),
+/// Coerce a task return value to content, status, bounded JSON metadata, and retained display
+/// content. Large presentation payloads and attachments are extracted before metadata limits.
+fn coerce_tool_result(lua: &Lua, value: &LuaValue) -> LuaResult<crate::lua::LuaToolResultParts> {
+    match value {
+        LuaValue::String(content) => Ok(crate::lua::LuaToolResultParts {
+            content: content.to_string_lossy(),
+            is_error: false,
+            metadata: None,
+            display_content: Vec::new(),
+            attachment: None,
+        }),
+        LuaValue::Table(result) => crate::lua::tool_result_from_lua_table(lua, result),
+        LuaValue::Nil => Ok(crate::lua::LuaToolResultParts {
+            content: String::new(),
+            is_error: false,
+            metadata: None,
+            display_content: Vec::new(),
+            attachment: None,
+        }),
+        other => Ok(crate::lua::LuaToolResultParts {
+            content: format!("tool returned non-string value: {}", other.type_name()),
+            is_error: true,
+            metadata: None,
+            display_content: Vec::new(),
+            attachment: None,
+        }),
     }
 }
 
@@ -814,15 +827,238 @@ mod tests {
                 content,
                 is_error,
                 metadata,
+                display_content,
+                attachment,
             } => {
                 assert_eq!(invocation.request_id, 7);
                 assert_eq!(call_id, "c1");
                 assert_eq!(content, "hello");
                 assert!(!*is_error);
                 assert!(metadata.is_none());
+                assert!(display_content.is_empty());
+                assert!(attachment.is_none());
             }
             _ => panic!("expected ToolComplete"),
         }
+    }
+
+    #[test]
+    fn tool_result_extracts_retained_display_content_outside_metadata() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                    return {
+                      content = "edited",
+                      metadata = { path = "src/lib.rs" },
+                      display_content = {
+                        old_content = "before",
+                        new_content = "after",
+                      },
+                    }
+                end"#,
+            )
+            .eval()
+            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::ToolResult {
+                invocation: tool_invocation(8),
+                call_id: "edit-1".into(),
+            },
+        )
+        .unwrap();
+
+        let out = rt.drive(&lua, Instant::now());
+        let TaskDriveOutput::ToolComplete {
+            metadata,
+            display_content,
+            ..
+        } = &out[0]
+        else {
+            panic!("expected tool completion");
+        };
+        assert_eq!(metadata, &Some(serde_json::json!({ "path": "src/lib.rs" })));
+        assert_eq!(display_content.len(), 2);
+        assert!(display_content
+            .iter()
+            .any(|field| field.name == "old_content" && field.content.as_str() == "before"));
+        assert!(display_content
+            .iter()
+            .any(|field| field.name == "new_content" && field.content.as_str() == "after"));
+        assert!(metadata
+            .as_ref()
+            .is_none_or(|metadata| metadata.get("old_content").is_none()));
+    }
+
+    #[test]
+    fn cyclic_tool_metadata_fails_without_recursing() {
+        let lua = lua_with_sleep();
+        let mut runtime = LuaTaskRuntime::new();
+        let function: mlua::Function = lua
+            .load(
+                r#"function()
+                    local metadata = {}
+                    metadata.self = metadata
+                    return { content = "bad", metadata = metadata }
+                end"#,
+            )
+            .eval()
+            .unwrap();
+        runtime
+            .spawn(
+                &lua,
+                function,
+                LuaMultiValue::new(),
+                TaskCompletion::ToolResult {
+                    invocation: tool_invocation(9),
+                    call_id: "cycle".into(),
+                },
+            )
+            .unwrap();
+
+        let output = runtime.drive(&lua, Instant::now());
+        assert!(output.iter().any(
+            |output| matches!(output, TaskDriveOutput::Error(message) if message.contains("table cycle"))
+        ));
+        assert!(output.iter().any(|output| matches!(
+            output,
+            TaskDriveOutput::ToolComplete { content, is_error: true, metadata: None, .. }
+                if content.contains("table cycle")
+        )));
+    }
+
+    #[test]
+    fn oversized_generic_tool_metadata_is_rejected_atomically() {
+        let lua = lua_with_sleep();
+        let mut runtime = LuaTaskRuntime::new();
+        let function: mlua::Function = lua
+            .load(format!(
+                "function() return {{ content = 'bad', metadata = {{ payload = string.rep('x', {}) }} }} end",
+                protocol::TOOL_METADATA_MAX_BYTES + 1
+            ))
+            .eval()
+            .unwrap();
+        runtime
+            .spawn(
+                &lua,
+                function,
+                LuaMultiValue::new(),
+                TaskCompletion::ToolResult {
+                    invocation: tool_invocation(10),
+                    call_id: "oversized".into(),
+                },
+            )
+            .unwrap();
+
+        let output = runtime.drive(&lua, Instant::now());
+        let completion = output
+            .iter()
+            .find_map(|output| match output {
+                TaskDriveOutput::ToolComplete {
+                    content,
+                    is_error,
+                    metadata,
+                    display_content,
+                    ..
+                } => Some((content, is_error, metadata, display_content)),
+                TaskDriveOutput::Error(_) => None,
+            })
+            .unwrap();
+        assert!(*completion.1);
+        assert!(completion.0.contains("tool metadata exceeds"));
+        assert!(completion.2.is_none());
+        assert!(completion.3.is_empty());
+    }
+
+    #[test]
+    fn historical_large_edit_metadata_is_promoted_before_bounding() {
+        let lua = lua_with_sleep();
+        let mut runtime = LuaTaskRuntime::new();
+        let function: mlua::Function = lua
+            .load(format!(
+                "function() return {{ content = 'edited', metadata = {{ path = 'a.rs', old_content = string.rep('x', {}), new_content = 'after' }} }} end",
+                protocol::TOOL_METADATA_MAX_BYTES * 2
+            ))
+            .eval()
+            .unwrap();
+        runtime
+            .spawn(
+                &lua,
+                function,
+                LuaMultiValue::new(),
+                TaskCompletion::ToolResult {
+                    invocation: tool_invocation(11),
+                    call_id: "historical-edit".into(),
+                },
+            )
+            .unwrap();
+
+        let output = runtime.drive(&lua, Instant::now());
+        let TaskDriveOutput::ToolComplete {
+            metadata,
+            display_content,
+            is_error,
+            ..
+        } = &output[0]
+        else {
+            panic!("expected tool completion");
+        };
+        assert!(!is_error);
+        assert_eq!(metadata, &Some(serde_json::json!({ "path": "a.rs" })));
+        assert_eq!(
+            display_content
+                .iter()
+                .find(|field| field.name == "old_content")
+                .unwrap()
+                .content
+                .len(),
+            protocol::TOOL_METADATA_MAX_BYTES * 2
+        );
+    }
+
+    #[test]
+    fn attachment_payload_bypasses_generic_metadata_budget() {
+        let lua = lua_with_sleep();
+        let mut runtime = LuaTaskRuntime::new();
+        let function: mlua::Function = lua
+            .load(format!(
+                "function() return {{ content = 'attached', metadata = {{ kind = 'file_attachment', modality = 'image', mime = 'image/png', data_url = 'data:image/png;base64,' .. string.rep('a', {}) }} }} end",
+                protocol::TOOL_METADATA_MAX_BYTES * 2
+            ))
+            .eval()
+            .unwrap();
+        runtime
+            .spawn(
+                &lua,
+                function,
+                LuaMultiValue::new(),
+                TaskCompletion::ToolResult {
+                    invocation: tool_invocation(12),
+                    call_id: "attachment".into(),
+                },
+            )
+            .unwrap();
+
+        let output = runtime.drive(&lua, Instant::now());
+        let TaskDriveOutput::ToolComplete {
+            metadata,
+            attachment,
+            is_error,
+            ..
+        } = &output[0]
+        else {
+            panic!("expected tool completion");
+        };
+        assert!(!is_error);
+        assert!(metadata.as_ref().unwrap().get("data_url").is_none());
+        assert_eq!(
+            attachment.as_ref().unwrap().data_url.len(),
+            "data:image/png;base64,".len() + protocol::TOOL_METADATA_MAX_BYTES * 2
+        );
     }
 
     #[test]

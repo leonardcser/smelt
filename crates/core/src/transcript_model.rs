@@ -2,8 +2,10 @@
 //! and mutable sidecar state (tool output, exec output). Held inside
 //! `app::transcript::Transcript`, which adds streaming and paint orchestration.
 
+use crate::content::tool_draft::{ToolArguments, ToolDraft, ToolDraftAppend};
 use crate::paused_timer::PausedTimer;
 use crate::permissions::PermissionGrant;
+use crate::transcript_content::{ContentId, ContentStore, TranscriptContent};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,17 +80,144 @@ impl ToolStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolOutputContentField {
+    pub name: String,
+    pub content: TranscriptContent,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
-    pub content: String,
+    pub content: TranscriptContent,
     pub is_error: bool,
     pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_fields: Vec<ToolOutputContentField>,
+}
+
+impl ToolOutput {
+    pub fn new(
+        content: impl Into<TranscriptContent>,
+        is_error: bool,
+        metadata: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            is_error,
+            metadata,
+            content_fields: Vec::new(),
+        }
+    }
+
+    pub fn from_display_content(
+        content: impl Into<TranscriptContent>,
+        is_error: bool,
+        metadata: Option<serde_json::Value>,
+        display_content: Vec<protocol::ToolDisplayContent>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            is_error,
+            metadata,
+            content_fields: display_content
+                .into_iter()
+                .map(|field| ToolOutputContentField {
+                    name: field.name,
+                    content: field.content.into(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn content_field(&self, name: &str) -> Option<&TranscriptContent> {
+        self.content_fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.content)
+    }
+
+    fn registered_contents(&self) -> impl Iterator<Item = &TranscriptContent> {
+        std::iter::once(&self.content).chain(self.content_fields.iter().map(|field| &field.content))
+    }
 }
 
 pub type ToolOutputRef = Box<ToolOutput>;
 
-/// Mutable sidecar for a committed `Block::ToolCall`, keyed by its `BlockId`.
-/// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
-/// layout can be cached permanently.
+/// Typed updates to the mutable state of a committed tool call.
+///
+/// Elapsed synchronization is animation state. It remains observable to renderers
+/// without changing the tool's retained presentation identity or dirtying its
+/// persisted record. Every other mutation can change renderer structure and advances
+/// the presentation revision.
+#[derive(Debug)]
+pub enum ToolStateMutation {
+    SyncElapsed(Duration),
+    SetElapsedActive {
+        elapsed: Duration,
+        active: bool,
+    },
+    SetStatus {
+        status: ToolStatus,
+        elapsed: Option<Duration>,
+    },
+    SetUserMessage(String),
+    Finish {
+        status: ToolStatus,
+        output: Option<ToolOutputRef>,
+        elapsed: Option<Duration>,
+    },
+}
+
+impl ToolStateMutation {
+    fn is_animation_only(&self) -> bool {
+        matches!(self, Self::SyncElapsed(_))
+    }
+
+    fn search_changed(&self) -> bool {
+        matches!(
+            self,
+            Self::SetStatus { .. } | Self::SetUserMessage(_) | Self::Finish { .. }
+        )
+    }
+
+    fn apply(self, state: &mut ToolState) {
+        match self {
+            Self::SyncElapsed(elapsed) => state.elapsed = Some(elapsed),
+            Self::SetElapsedActive { elapsed, active } => {
+                state.elapsed = Some(elapsed);
+                state.elapsed_active = active;
+            }
+            Self::SetStatus { status, elapsed } => {
+                state.status = status;
+                state.elapsed_active = status == ToolStatus::Pending;
+                if let Some(elapsed) = elapsed {
+                    state.elapsed = Some(elapsed);
+                }
+            }
+            Self::SetUserMessage(message) => state.user_message = Some(message),
+            Self::Finish {
+                status,
+                output,
+                elapsed,
+            } => {
+                state.status = status;
+                if let Some(output) = output {
+                    if let Some(streamed) = state.output.as_mut() {
+                        streamed.is_error = output.is_error;
+                        streamed.metadata = output.metadata;
+                        streamed.content_fields = output.content_fields;
+                    } else {
+                        state.output = Some(output);
+                    }
+                }
+                state.elapsed = elapsed;
+                state.elapsed_active = false;
+                state.preview_output = None;
+            }
+        }
+    }
+}
+
+/// Mutable side state for a committed `Block::ToolCall`, keyed by its `BlockId`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolState {
     pub status: ToolStatus,
@@ -104,52 +233,28 @@ pub struct ToolState {
 }
 
 impl ToolState {
+    pub fn content(&self, channel: ContentChannel) -> Option<&TranscriptContent> {
+        match channel {
+            ContentChannel::ToolOutput => self.output.as_deref().map(|output| &output.content),
+            ContentChannel::ToolPreview => {
+                self.preview_output.as_deref().map(|output| &output.content)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn registered_contents(&self) -> impl Iterator<Item = &TranscriptContent> {
+        self.output
+            .iter()
+            .chain(self.preview_output.iter())
+            .flat_map(|output| output.registered_contents())
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status,
             ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
         )
-    }
-
-    pub fn display_hash(&self) -> u64 {
-        #[derive(serde::Serialize)]
-        struct DisplayOutput<'a> {
-            content: &'a str,
-            is_error: bool,
-            metadata_hash: Option<u64>,
-        }
-
-        #[derive(serde::Serialize)]
-        struct DisplayState<'a> {
-            status: ToolStatus,
-            elapsed_ms: Option<u64>,
-            called_at_ms: Option<u64>,
-            elapsed_active: bool,
-            output: Option<DisplayOutput<'a>>,
-            preview_output: Option<DisplayOutput<'a>>,
-            user_message: &'a Option<String>,
-        }
-
-        fn display_output(output: &ToolOutput) -> DisplayOutput<'_> {
-            DisplayOutput {
-                content: output.content.as_str(),
-                is_error: output.is_error,
-                metadata_hash: output
-                    .metadata
-                    .as_ref()
-                    .map(crate::utils::hash_serializable),
-            }
-        }
-
-        crate::utils::hash_serializable(&DisplayState {
-            status: self.status,
-            elapsed_ms: self.elapsed.map(|elapsed| elapsed.as_millis() as u64),
-            called_at_ms: self.called_at_ms,
-            elapsed_active: self.elapsed_active,
-            output: self.output.as_deref().map(display_output),
-            preview_output: self.preview_output.as_deref().map(display_output),
-            user_message: &self.user_message,
-        })
     }
 }
 
@@ -178,27 +283,18 @@ pub enum Block {
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         summary_titles: Vec<String>,
-        content: String,
+        content: TranscriptContent,
         #[serde(default)]
         kind: protocol::ReasoningKind,
     },
     Text {
-        content: String,
+        content: TranscriptContent,
     },
     CodeLine {
         content: String,
         lang: String,
     },
-    ToolDraft {
-        stream_id: String,
-        call_id: Option<String>,
-        name: String,
-        /// Styled best-effort summary produced from partial arguments.
-        summary: protocol::StyledLines,
-        args: HashMap<String, serde_json::Value>,
-        raw_arguments: String,
-        finished: bool,
-    },
+    ToolDraft(ToolDraft),
     ToolCall {
         call_id: String,
         name: String,
@@ -206,11 +302,11 @@ pub enum Block {
         /// hook. The renderer consumes the styled spans; for plain-text
         /// callers (copy, search, snapshots) call `summary.as_plain_text()`.
         summary: protocol::StyledLines,
-        args: HashMap<String, serde_json::Value>,
+        args: ToolArguments,
     },
     Exec {
         command: String,
-        output: String,
+        output: TranscriptContent,
     },
     Compacted {
         summary: String,
@@ -231,9 +327,7 @@ impl Block {
             } => Block::Thinking {
                 title,
                 summary_titles,
-                content: crate::content::markdown_stream::normalize_thinking_title_spacing(
-                    &content,
-                ),
+                content: crate::content::markdown_stream::normalize_thinking_title_spacing(content),
                 kind,
             },
             other => other,
@@ -248,7 +342,7 @@ impl Block {
             Block::Thinking { .. } => "thinking",
             Block::Text { .. } => "assistant",
             Block::CodeLine { .. } => "code",
-            Block::ToolDraft { .. } | Block::ToolCall { .. } => "tool",
+            Block::ToolDraft(_) | Block::ToolCall { .. } => "tool",
             Block::Exec { .. } => "exec",
             Block::Compacted { .. } => "compacted",
             Block::CompactionPreview { .. } => "compaction_preview",
@@ -262,10 +356,10 @@ impl Block {
     pub fn is_stable_scroll_anchor(&self) -> bool {
         !matches!(
             self,
-            Block::ToolDraft {
+            Block::ToolDraft(ToolDraft {
                 finished: false,
                 ..
-            }
+            })
         )
     }
 
@@ -273,10 +367,10 @@ impl Block {
         match self {
             Block::User { text, .. }
             | Block::ProcessStatus { text, .. }
-            | Block::Text { content: text }
             | Block::Compacted { summary: text }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(BlockText::Plain(text)),
+            Block::Text { content } => Some(BlockText::Content(content)),
             Block::Thinking {
                 title,
                 summary_titles,
@@ -289,7 +383,7 @@ impl Block {
             }),
             Block::Mode { text, icon, .. } => Some(BlockText::Prefixed { prefix: icon, text }),
             Block::Exec { command, output } => Some(BlockText::Exec { command, output }),
-            Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
+            Block::ToolDraft(_) | Block::ToolCall { .. } => None,
         }
     }
 
@@ -300,7 +394,22 @@ impl Block {
     /// state lives separately and is invalidated via
     /// `BlockHistory::invalidate_block_layout`.
     pub fn content_hash(&self) -> u64 {
-        crate::utils::hash_serializable(self)
+        match self {
+            Self::ToolDraft(draft) => draft.content_hash(),
+            Self::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+            } => crate::utils::hash_serializable(&(
+                "tool_call",
+                call_id,
+                name,
+                summary,
+                args.content_hash(),
+            )),
+            _ => crate::utils::hash_serializable(self),
+        }
     }
 
     /// Raw source text for the block, before markdown rendering. Used
@@ -317,7 +426,7 @@ impl Block {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
             Block::ProcessStatus { text, .. } => Some(text.clone()),
-            Block::Text { content } => Some(content.clone()),
+            Block::Text { content } => Some(content.snapshot()),
             Block::Thinking {
                 title,
                 summary_titles,
@@ -326,27 +435,78 @@ impl Block {
             } => Some(thinking_markdown_source(
                 title.as_deref(),
                 summary_titles,
-                content,
+                &content.snapshot(),
             )),
             Block::Compacted { summary } | Block::CompactionPreview { summary } => {
                 Some(summary.clone())
             }
             Block::CodeLine { content, .. } => Some(content.clone()),
-            Block::Exec { command, output } => Some(format!("$ {command}\n{output}")),
-            Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
+            Block::Exec { command, output } => Some(format!("$ {command}\n{}", output.snapshot())),
+            Block::ToolDraft(_) | Block::ToolCall { .. } => None,
+        }
+    }
+
+    pub fn raw_text_len(&self) -> Option<usize> {
+        match self {
+            Block::User { text, .. }
+            | Block::ProcessStatus { text, .. }
+            | Block::Compacted { summary: text }
+            | Block::CompactionPreview { summary: text }
+            | Block::CodeLine { content: text, .. } => Some(text.len()),
+            Block::Mode { text, icon, .. } => Some(icon.len().saturating_add(text.len())),
+            Block::Text { content } => Some(content.len()),
+            Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                ..
+            } => Some(thinking_markdown_source_len(
+                title.as_deref(),
+                summary_titles,
+                content.len(),
+            )),
+            Block::Exec { command, output } => Some(
+                2usize
+                    .saturating_add(command.len())
+                    .saturating_add(1)
+                    .saturating_add(output.len()),
+            ),
+            Block::ToolDraft(_) | Block::ToolCall { .. } => None,
+        }
+    }
+
+    pub fn content(&self, channel: ContentChannel) -> Option<&TranscriptContent> {
+        match (self, channel) {
+            (Self::Text { content } | Self::Thinking { content, .. }, ContentChannel::Primary) => {
+                Some(content)
+            }
+            (Self::ToolDraft(draft), ContentChannel::DraftArguments) => Some(&draft.raw_arguments),
+            (Self::Exec { output, .. }, ContentChannel::ExecOutput) => Some(output),
+            _ => None,
+        }
+    }
+
+    pub fn registered_contents(&self) -> Vec<&TranscriptContent> {
+        match self {
+            Self::Text { content } | Self::Thinking { content, .. } => vec![content],
+            Self::ToolDraft(draft) => draft.contents().collect(),
+            Self::ToolCall { args, .. } => args.contents().collect(),
+            Self::Exec { output, .. } => vec![output],
+            _ => Vec::new(),
         }
     }
 
     pub fn tool_name(&self) -> Option<&str> {
         match self {
-            Self::ToolDraft { name, .. } | Self::ToolCall { name, .. } => Some(name),
+            Self::ToolDraft(draft) => Some(&draft.name),
+            Self::ToolCall { name, .. } => Some(name),
             _ => None,
         }
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {
         match self {
-            Self::ToolDraft { call_id, .. } => call_id.as_deref(),
+            Self::ToolDraft(draft) => draft.call_id.as_deref(),
             Self::ToolCall { call_id, .. } => Some(call_id),
             _ => None,
         }
@@ -363,7 +523,8 @@ impl Block {
 
     pub fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
         match self {
-            Self::ToolDraft { args, .. } | Self::ToolCall { args, .. } => args.get(arg),
+            Self::ToolDraft(draft) => draft.arguments.get(arg),
+            Self::ToolCall { args, .. } => args.get(arg),
             _ => None,
         }
     }
@@ -386,6 +547,27 @@ pub(crate) fn thinking_markdown_source(
         sections.push(content.to_string());
     }
     sections.join("\n")
+}
+
+fn thinking_markdown_source_len(
+    title: Option<&str>,
+    summary_titles: &[String],
+    content_len: usize,
+) -> usize {
+    let (title_bytes, title_count) = if summary_titles.is_empty() {
+        title.map_or((0, 0), |title| (title.len().saturating_add(4), 1))
+    } else {
+        (
+            summary_titles.iter().fold(0usize, |total, title| {
+                total.saturating_add(title.len().saturating_add(4))
+            }),
+            summary_titles.len(),
+        )
+    };
+    let section_count = title_count.saturating_add(usize::from(content_len > 0));
+    title_bytes
+        .saturating_add(content_len)
+        .saturating_add(section_count.saturating_sub(1))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -442,6 +624,16 @@ impl BlockId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentChannel {
+    Primary,
+    ToolOutput,
+    ToolPreview,
+    ExecOutput,
+    DraftArguments,
+    DraftField,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptPatchOperation {
     Insert {
@@ -450,6 +642,8 @@ pub enum TranscriptPatchOperation {
     },
     Append {
         id: BlockId,
+        content_id: ContentId,
+        channel: ContentChannel,
         byte_range: std::ops::Range<usize>,
     },
     Replace {
@@ -459,6 +653,9 @@ pub enum TranscriptPatchOperation {
         id: BlockId,
     },
     SetSideState {
+        id: BlockId,
+    },
+    SetAnimationState {
         id: BlockId,
     },
     Remove {
@@ -505,6 +702,7 @@ impl TranscriptPatch {
         let mut replaced = HashSet::new();
         let mut status_changed = HashSet::new();
         let mut side_state_changed = HashSet::new();
+        let mut animation_state_changed = HashSet::new();
         let mut committed = HashSet::new();
         let mut reset = false;
         for patch in patches {
@@ -522,6 +720,9 @@ impl TranscriptPatch {
                     }
                     TranscriptPatchOperation::SetSideState { id } => {
                         side_state_changed.insert(*id);
+                    }
+                    TranscriptPatchOperation::SetAnimationState { id } => {
+                        animation_state_changed.insert(*id);
                     }
                     TranscriptPatchOperation::Commit { id } => {
                         committed.insert(*id);
@@ -548,8 +749,16 @@ impl TranscriptPatch {
             }
             let mut side_state_changed = side_state_changed.into_iter().collect::<Vec<_>>();
             side_state_changed.sort_by_key(|id| id.get());
-            for id in side_state_changed {
-                operations.push(TranscriptPatchOperation::SetSideState { id });
+            for id in &side_state_changed {
+                operations.push(TranscriptPatchOperation::SetSideState { id: *id });
+            }
+            let mut animation_state_changed = animation_state_changed
+                .into_iter()
+                .filter(|id| !side_state_changed.contains(id))
+                .collect::<Vec<_>>();
+            animation_state_changed.sort_by_key(|id| id.get());
+            for id in animation_state_changed {
+                operations.push(TranscriptPatchOperation::SetAnimationState { id });
             }
             let mut committed = committed.into_iter().collect::<Vec<_>>();
             committed.sort_by_key(|id| id.get());
@@ -637,6 +846,7 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockText<'a> {
     Plain(&'a str),
+    Content(&'a TranscriptContent),
     Prefixed {
         prefix: &'a str,
         text: &'a str,
@@ -644,11 +854,11 @@ pub enum BlockText<'a> {
     Thinking {
         title: Option<&'a str>,
         summary_titles: &'a [String],
-        content: &'a str,
+        content: &'a TranscriptContent,
     },
     Exec {
         command: &'a str,
-        output: &'a str,
+        output: &'a TranscriptContent,
     },
 }
 
@@ -663,6 +873,7 @@ impl BlockText<'_> {
 
         match self {
             Self::Plain(text) => first_nonempty_line(text),
+            Self::Content(content) => content.read().first_nonempty_line(),
             Self::Prefixed { prefix, text } => {
                 let first_text_line = text.lines().next().unwrap_or_default();
                 let first_line = format!("{prefix}{first_text_line}");
@@ -684,7 +895,7 @@ impl BlockText<'_> {
                 let title = summary_titles.first().map(String::as_str).or(title);
                 title
                     .map(|title| format!("**{title}**"))
-                    .unwrap_or_else(|| first_nonempty_line(content))
+                    .unwrap_or_else(|| content.read().first_nonempty_line())
             }
             Self::Exec { command, .. } => format!("$ {command}"),
         }
@@ -708,6 +919,8 @@ pub struct TranscriptBlockRecord {
     pub content_hash: u64,
     pub origin: Option<BlockOrigin>,
     pub tool_state: Option<ToolState>,
+    #[serde(default)]
+    pub tool_render_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -747,6 +960,7 @@ impl TryFrom<smelt_store::StoredTranscriptBlock> for TranscriptBlockRecord {
             content_hash,
             origin,
             tool_state,
+            tool_render_revision: row.tool_render_revision,
         })
     }
 }
@@ -792,91 +1006,233 @@ pub struct TranscriptIndexedText {
     pub estimated_text_bytes: u64,
 }
 
+struct BoundedIndexedText {
+    max_bytes: usize,
+    total_bytes: usize,
+    head: String,
+    tail: String,
+    tail_offset: usize,
+    last_byte: Option<u8>,
+}
+
+impl BoundedIndexedText {
+    fn new(max_bytes: usize) -> Self {
+        debug_assert!(max_bytes > 0);
+        Self {
+            max_bytes,
+            total_bytes: 0,
+            head: String::new(),
+            tail: String::new(),
+            tail_offset: 0,
+            last_byte: None,
+        }
+    }
+
+    fn append_line(&mut self, text: Option<&str>) {
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            return;
+        };
+        self.ensure_line_separator();
+        self.append(text);
+    }
+
+    fn ensure_line_separator(&mut self) {
+        if self.total_bytes != 0 && self.last_byte != Some(b'\n') {
+            self.append("\n");
+        }
+    }
+
+    fn append(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let previous_total = self.total_bytes;
+        if previous_total < self.max_bytes {
+            let remaining = self.max_bytes - previous_total;
+            let end = if text.len() <= remaining {
+                text.len()
+            } else {
+                smelt_buffer::text::snap(text, remaining)
+            };
+            self.head.push_str(smelt_buffer::text::slice(text, 0..end));
+        }
+
+        if text.len() >= self.max_bytes {
+            let minimum = text.len() - self.max_bytes;
+            let start = next_char_boundary_at_or_after(text, minimum);
+            self.tail.clear();
+            self.tail
+                .push_str(smelt_buffer::text::slice(text, start..text.len()));
+            self.tail_offset = previous_total.saturating_add(start);
+        } else {
+            self.tail.push_str(text);
+            if self.tail.len() > self.max_bytes {
+                let minimum = self.tail.len() - self.max_bytes;
+                let start = next_char_boundary_at_or_after(&self.tail, minimum);
+                smelt_buffer::text::replace_range(&mut self.tail, 0..start, "");
+                self.tail_offset = self.tail_offset.saturating_add(start);
+            }
+        }
+
+        self.total_bytes = previous_total.saturating_add(text.len());
+        self.last_byte = text.as_bytes().last().copied();
+    }
+
+    fn finish(self) -> TranscriptIndexedText {
+        let estimated_text_bytes = self.total_bytes as u64;
+        if self.total_bytes <= self.max_bytes {
+            return TranscriptIndexedText {
+                indexed_text: self.head,
+                estimated_text_bytes,
+            };
+        }
+
+        let head_end = smelt_buffer::text::snap(&self.head, self.max_bytes / 2);
+        let tail_minimum = self
+            .total_bytes
+            .saturating_sub(self.max_bytes.saturating_sub(head_end));
+        let local_minimum = tail_minimum.saturating_sub(self.tail_offset);
+        let local_start = next_char_boundary_at_or_after(&self.tail, local_minimum);
+        let tail_start = self.tail_offset.saturating_add(local_start);
+        let omitted_bytes = tail_start.saturating_sub(head_end);
+        let marker = format!("\n… {omitted_bytes} bytes omitted from persistent search index …\n");
+        let mut indexed_text = String::with_capacity(
+            head_end
+                .saturating_add(marker.len())
+                .saturating_add(self.tail.len().saturating_sub(local_start)),
+        );
+        indexed_text.push_str(smelt_buffer::text::slice(&self.head, 0..head_end));
+        indexed_text.push_str(&marker);
+        indexed_text.push_str(smelt_buffer::text::slice(
+            &self.tail,
+            local_start..self.tail.len(),
+        ));
+        TranscriptIndexedText {
+            indexed_text,
+            estimated_text_bytes,
+        }
+    }
+}
+
+fn next_char_boundary_at_or_after(text: &str, minimum: usize) -> usize {
+    let snapped = smelt_buffer::text::snap(text, minimum);
+    if snapped == minimum {
+        snapped
+    } else {
+        smelt_buffer::text::next_char_boundary(text, minimum)
+    }
+}
+
 pub fn transcript_indexed_text(
     block: &Block,
     tool_state: Option<&ToolState>,
 ) -> TranscriptIndexedText {
-    let full_text = transcript_block_full_indexed_text(block, tool_state);
-    let estimated_text_bytes = full_text.len() as u64;
-    let indexed_text = cap_indexed_text(&full_text, TRANSCRIPT_INDEXED_TEXT_MAX_BYTES);
-    TranscriptIndexedText {
-        indexed_text,
-        estimated_text_bytes,
-    }
-}
-
-fn cap_indexed_text(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-
-    let head_end = smelt_buffer::text::snap(text, max_bytes / 2);
-    let tail_min = text.len().saturating_sub(max_bytes - head_end);
-    let snapped_tail = smelt_buffer::text::snap(text, tail_min);
-    let tail_start = if snapped_tail == tail_min {
-        snapped_tail
-    } else {
-        smelt_buffer::text::next_char_boundary(text, tail_min)
-    };
-    let omitted_bytes = tail_start.saturating_sub(head_end);
-    let marker = format!("\n… {omitted_bytes} bytes omitted from persistent search index …\n");
-    format!(
-        "{}{}{}",
-        smelt_buffer::text::slice(text, 0..head_end),
-        marker,
-        smelt_buffer::text::slice(text, tail_start..text.len())
-    )
-}
-
-fn transcript_block_full_indexed_text(block: &Block, tool_state: Option<&ToolState>) -> String {
+    let mut text = BoundedIndexedText::new(TRANSCRIPT_INDEXED_TEXT_MAX_BYTES);
     if block.tool_name().is_some() {
-        return tool_indexed_text(block, tool_state);
+        append_tool_indexed_text(&mut text, block, tool_state);
+    } else {
+        append_block_raw_indexed_text(&mut text, block);
+        text.append_line(thinking_summary(block).as_deref());
+        text.append_line(compacted_label(block));
+        text.append_line(compacted_separator(block));
     }
-
-    let mut text = block.raw_text().unwrap_or_default();
-    append_indexed_line(&mut text, thinking_summary(block).as_deref());
-    append_indexed_line(&mut text, compacted_label(block));
-    append_indexed_line(&mut text, compacted_separator(block));
-    text
+    text.finish()
 }
 
-fn tool_indexed_text(block: &Block, tool_state: Option<&ToolState>) -> String {
-    let mut text = String::new();
-    append_indexed_line(&mut text, block.tool_name());
-    append_indexed_line(&mut text, tool_state.map(|state| state.status.label()));
-    append_indexed_line(&mut text, tool_summary_text(block).as_deref());
-    append_indexed_line(&mut text, tool_arg_indexed_text(block).as_deref());
-    append_indexed_line(
-        &mut text,
-        tool_state.and_then(|state| state.user_message.as_deref()),
-    );
-    append_indexed_line(
-        &mut text,
-        tool_state
-            .and_then(|state| state.preview_output.as_ref())
-            .map(|output| output.content.as_str()),
-    );
-    append_indexed_line(
-        &mut text,
-        tool_state
-            .and_then(|state| state.output.as_ref())
-            .map(|output| output.content.as_str()),
-    );
-    append_indexed_line(
-        &mut text,
-        edit_file_indexed_text(block, tool_state).as_deref(),
-    );
-    if let Some(display_count) = tool_state.and_then(display_count_indexed_text) {
-        append_indexed_line(&mut text, Some(&display_count));
+fn append_block_raw_indexed_text(text: &mut BoundedIndexedText, block: &Block) {
+    match block {
+        Block::User { text: source, .. }
+        | Block::ProcessStatus { text: source, .. }
+        | Block::Compacted { summary: source }
+        | Block::CompactionPreview { summary: source }
+        | Block::CodeLine {
+            content: source, ..
+        } => text.append(source),
+        Block::Mode {
+            text: source, icon, ..
+        } => {
+            text.append(icon);
+            text.append(source);
+        }
+        Block::Text { content } => append_raw_indexed_content(text, content),
+        Block::Thinking {
+            title,
+            summary_titles,
+            content,
+            ..
+        } => append_thinking_indexed_text(text, title.as_deref(), summary_titles, content),
+        Block::Exec { command, output } => {
+            text.append("$ ");
+            text.append(command);
+            text.append("\n");
+            append_raw_indexed_content(text, output);
+        }
+        Block::ToolDraft(_) | Block::ToolCall { .. } => {}
     }
-    text
+}
+
+fn append_thinking_indexed_text(
+    text: &mut BoundedIndexedText,
+    title: Option<&str>,
+    summary_titles: &[String],
+    content: &TranscriptContent,
+) {
+    let mut has_section = false;
+    if summary_titles.is_empty() {
+        if let Some(title) = title {
+            append_thinking_title(text, title, has_section);
+            has_section = true;
+        }
+    } else {
+        for title in summary_titles {
+            append_thinking_title(text, title, has_section);
+            has_section = true;
+        }
+    }
+    if !content.is_empty() {
+        if has_section {
+            text.append("\n");
+        }
+        append_raw_indexed_content(text, content);
+    }
+}
+
+fn append_thinking_title(text: &mut BoundedIndexedText, title: &str, separate: bool) {
+    if separate {
+        text.append("\n");
+    }
+    text.append("**");
+    text.append(title);
+    text.append("**");
+}
+
+fn append_tool_indexed_text(
+    text: &mut BoundedIndexedText,
+    block: &Block,
+    tool_state: Option<&ToolState>,
+) {
+    text.append_line(block.tool_name());
+    text.append_line(tool_state.map(|state| state.status.label()));
+    text.append_line(tool_summary_text(block).as_deref());
+    text.append_line(tool_arg_indexed_text(block).as_deref());
+    text.append_line(tool_state.and_then(|state| state.user_message.as_deref()));
+    if let Some(output) = tool_state.and_then(|state| state.preview_output.as_ref()) {
+        append_indexed_content(text, Some(&output.content));
+    }
+    if let Some(output) = tool_state.and_then(|state| state.output.as_ref()) {
+        append_indexed_content(text, Some(&output.content));
+    }
+    append_edit_file_indexed_text(text, block, tool_state);
+    if let Some(display_count) = tool_state.and_then(display_count_indexed_text) {
+        text.append_line(Some(&display_count));
+    }
 }
 
 fn tool_summary_text(block: &Block) -> Option<String> {
     match block {
-        Block::ToolDraft { summary, .. } | Block::ToolCall { summary, .. } => {
-            Some(summary.as_plain_text())
-        }
+        Block::ToolDraft(draft) => Some(draft.summary.as_plain_text()),
+        Block::ToolCall { summary, .. } => Some(summary.as_plain_text()),
         _ => None,
     }
     .filter(|summary| !summary.is_empty())
@@ -884,9 +1240,8 @@ fn tool_summary_text(block: &Block) -> Option<String> {
 
 fn tool_arg_indexed_text(block: &Block) -> Option<String> {
     let (tool_name, args) = match block {
-        Block::ToolDraft { name, args, .. } | Block::ToolCall { name, args, .. } => {
-            (name.as_str(), args)
-        }
+        Block::ToolDraft(draft) => (draft.name.as_str(), draft.arguments.preview()),
+        Block::ToolCall { name, args, .. } => (name.as_str(), args.preview()),
         _ => return None,
     };
     if tool_name == "edit_file" {
@@ -970,6 +1325,27 @@ fn append_indexed_line(out: &mut String, text: Option<&str>) {
     out.push_str(text);
 }
 
+fn append_indexed_content(out: &mut BoundedIndexedText, content: Option<&TranscriptContent>) {
+    let Some(content) = content else {
+        return;
+    };
+    let read = content.read();
+    if read.is_empty() {
+        return;
+    }
+    out.ensure_line_separator();
+    for chunk in read.chunks() {
+        out.append(chunk);
+    }
+}
+
+fn append_raw_indexed_content(out: &mut BoundedIndexedText, content: &TranscriptContent) {
+    let read = content.read();
+    for chunk in read.chunks() {
+        out.append(chunk);
+    }
+}
+
 fn thinking_summary(block: &Block) -> Option<String> {
     let Block::Thinking { title, content, .. } = block else {
         return None;
@@ -987,10 +1363,14 @@ fn thinking_summary(block: &Block) -> Option<String> {
     ))
 }
 
-fn thinking_summary_label(content: &str) -> (String, usize) {
+fn thinking_summary_label(content: &TranscriptContent) -> (String, usize) {
+    let read = content.read();
     let mut label = None;
     let mut lines = 0usize;
-    for line in content.lines() {
+    for line_index in 0..read.logical_line_count() {
+        let Some(line) = read.line(line_index) else {
+            continue;
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1028,46 +1408,34 @@ fn compacted_separator(block: &Block) -> Option<&'static str> {
     matches!(block, Block::Compacted { .. }).then_some("─")
 }
 
-fn edit_file_indexed_text(block: &Block, tool_state: Option<&ToolState>) -> Option<String> {
-    let args = edit_file_args(block)?;
-    let mut text = String::new();
+fn append_edit_file_indexed_text(
+    text: &mut BoundedIndexedText,
+    block: &Block,
+    tool_state: Option<&ToolState>,
+) {
+    let Some(args) = edit_file_args(block) else {
+        return;
+    };
     let old_string = string_field(args, "old_string").unwrap_or_default();
     let new_string = string_field(args, "new_string").unwrap_or_default();
-    append_indexed_line(
-        &mut text,
-        Some(&replacement_line_detail(old_string, new_string)),
-    );
-    append_indexed_line(&mut text, string_field(args, "file_path"));
+    text.append_line(Some(&replacement_line_detail(old_string, new_string)));
+    text.append_line(string_field(args, "file_path"));
 
-    let metadata = tool_state
-        .and_then(|state| state.output.as_ref())
-        .and_then(|output| output.metadata.as_ref())
-        .and_then(serde_json::Value::as_object);
-    let has_snapshot = metadata.is_some_and(|metadata| {
-        let old_content = metadata
-            .get("old_content")
-            .and_then(serde_json::Value::as_str);
-        let new_content = metadata
-            .get("new_content")
-            .and_then(serde_json::Value::as_str);
-        append_indexed_line(&mut text, old_content);
-        append_indexed_line(&mut text, new_content);
-        old_content.is_some() || new_content.is_some()
-    });
-    if !has_snapshot {
-        append_indexed_line(&mut text, Some(old_string));
-        append_indexed_line(&mut text, Some(new_string));
+    let output = tool_state.and_then(|state| state.output.as_deref());
+    let old_content = output.and_then(|output| output.content_field("old_content"));
+    let new_content = output.and_then(|output| output.content_field("new_content"));
+    append_indexed_content(text, old_content);
+    append_indexed_content(text, new_content);
+    if old_content.is_none() && new_content.is_none() {
+        text.append_line(Some(old_string));
+        text.append_line(Some(new_string));
     }
-    (!text.is_empty()).then_some(text)
 }
 
 fn edit_file_args(block: &Block) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
     match block {
-        Block::ToolDraft { name, args, .. } | Block::ToolCall { name, args, .. }
-            if name == "edit_file" =>
-        {
-            Some(args)
-        }
+        Block::ToolDraft(draft) if draft.name == "edit_file" => Some(draft.arguments.preview()),
+        Block::ToolCall { name, args, .. } if name == "edit_file" => Some(args.preview()),
         _ => None,
     }
 }
@@ -1181,6 +1549,7 @@ pub fn transcript_block_row_with_block_idx(
         block_json,
         origin_json,
         tool_state_json,
+        tool_render_revision: record.tool_render_revision,
     })
 }
 
@@ -1192,6 +1561,106 @@ fn preview(text: &str, max_bytes: usize) -> String {
 }
 
 const STORED_SELECTOR_VALUE_MAX_BYTES: usize = 512;
+const STORED_SELECTOR_FIELDS_MAX_BYTES: usize = 4 * 1024;
+const GROUP_CHILD_SUMMARY_MAX_BYTES: usize = 4 * 1024;
+const GROUP_CHILD_PROCESS_FIELD_MAX_BYTES: usize = 512;
+
+fn bounded_selector_fields(
+    args: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut fields = args.iter().collect::<Vec<_>>();
+    fields.sort_unstable_by_key(|(key, _)| *key);
+    let mut remaining = STORED_SELECTOR_FIELDS_MAX_BYTES;
+    fields
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let encoded_len = serde_json::to_vec(value).ok()?.len();
+            let retained_len = key.len().saturating_add(encoded_len);
+            if encoded_len > STORED_SELECTOR_VALUE_MAX_BYTES || retained_len > remaining {
+                return None;
+            }
+            remaining = remaining.saturating_sub(retained_len);
+            Some((key.clone(), value.clone()))
+        })
+        .collect()
+}
+
+fn bounded_styled_text(lines: &protocol::StyledLines, max_bytes: usize) -> String {
+    let mut text = String::with_capacity(max_bytes.min(256));
+    for (line_index, line) in lines.0.iter().enumerate() {
+        if line_index > 0 {
+            if text.len() == max_bytes {
+                break;
+            }
+            text.push('\n');
+        }
+        for span in line {
+            let remaining = max_bytes.saturating_sub(text.len());
+            if remaining == 0 {
+                return text;
+            }
+            text.push_str(smelt_buffer::text::slice(&span.text, 0..remaining));
+        }
+    }
+    text
+}
+
+fn group_child_summary(block: &Block) -> Option<String> {
+    match block {
+        Block::ToolDraft(draft) => Some(bounded_styled_text(
+            &draft.summary,
+            GROUP_CHILD_SUMMARY_MAX_BYTES,
+        )),
+        Block::ToolCall { summary, .. } => {
+            Some(bounded_styled_text(summary, GROUP_CHILD_SUMMARY_MAX_BYTES))
+        }
+        _ => None,
+    }
+}
+
+fn group_child_args(block: &Block) -> Option<HashMap<String, serde_json::Value>> {
+    match block {
+        Block::ToolDraft(draft) => Some(bounded_selector_fields(draft.arguments.preview())),
+        Block::ToolCall { args, .. } => Some(bounded_selector_fields(args.preview())),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupChildOutputMetadata {
+    pub content_lines: Option<usize>,
+    pub is_error: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupChildProcessMetadata {
+    pub process_id: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
+/// Payload-independent semantic data exposed for one retained group child.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupChildMetadata {
+    pub id: BlockId,
+    pub kind: &'static str,
+    pub name: Option<String>,
+    pub status: Option<&'static str>,
+    pub summary_text: Option<String>,
+    pub called_at_ms: Option<u64>,
+    pub args: Option<HashMap<String, serde_json::Value>>,
+    pub output: TranscriptGroupChildOutputMetadata,
+    pub event: Option<String>,
+    pub process_id: Option<String>,
+    pub exit_code: Option<i32>,
+    pub event_data: TranscriptGroupChildProcessMetadata,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StoredProcessMetadata {
+    event: Option<String>,
+    process_id: Option<String>,
+    exit_code: Option<i32>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredBlockKind {
@@ -1252,13 +1721,17 @@ pub struct StoredBlockRef {
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<ToolStatus>,
-    pub tool_display_hash: u64,
+    pub tool_render_revision: u64,
     pub origin: Option<BlockOrigin>,
     pub stable_scroll_anchor: bool,
+    tool_draft: bool,
+    group_summary_text: Option<String>,
+    group_called_at_ms: Option<u64>,
+    group_output: TranscriptGroupChildOutputMetadata,
+    group_process: StoredProcessMetadata,
     starts_with_thinking_title: bool,
     ends_with_heading: bool,
     selector_fields: HashMap<String, serde_json::Value>,
-    process_fields: HashMap<String, String>,
     retained_bytes: usize,
 }
 
@@ -1276,51 +1749,63 @@ impl StoredBlockRef {
             .expect("transcript blocks use a known block kind");
         let tool_call_id = block.tool_call_id().map(str::to_string);
         let tool_name = block.tool_name().map(str::to_string);
-        let selector_fields = match block {
-            Block::ToolDraft { args, .. } | Block::ToolCall { args, .. } => args
-                .iter()
-                .filter_map(|(key, value)| {
-                    let encoded = serde_json::to_string(value).ok()?;
-                    (encoded.len() <= STORED_SELECTOR_VALUE_MAX_BYTES)
-                        .then(|| (key.clone(), value.clone()))
-                })
-                .collect(),
-            _ => HashMap::new(),
+        let selector_fields = group_child_args(block).unwrap_or_default();
+        let tool_draft = matches!(block, Block::ToolDraft(_));
+        let group_summary_text = group_child_summary(block);
+        let group_called_at_ms = tool_state.and_then(|state| state.called_at_ms);
+        let group_output = tool_state
+            .and_then(|state| state.output.as_deref())
+            .map(|output| TranscriptGroupChildOutputMetadata {
+                content_lines: Some(output.content.read().logical_line_count()),
+                is_error: Some(output.is_error),
+            })
+            .unwrap_or_default();
+        let group_process = match block {
+            Block::ProcessStatus {
+                event: Some(event), ..
+            } => StoredProcessMetadata {
+                event: Some(event.event_type().to_string()),
+                process_id: event.process_id().map(|value| {
+                    smelt_buffer::text::slice(value, 0..GROUP_CHILD_PROCESS_FIELD_MAX_BYTES)
+                        .to_string()
+                }),
+                exit_code: event.exit_code(),
+            },
+            _ => StoredProcessMetadata::default(),
         };
-        let process_fields: HashMap<String, String> =
-            ["event", "event_type", "process_id", "exit_code"]
-                .into_iter()
-                .filter_map(|field| {
-                    block
-                        .process_field(field)
-                        .map(|value| (field.to_string(), value))
-                })
-                .collect();
         let starts_with_thinking_title = match block {
             Block::Thinking { title, content, .. } => has_thinking_title(title.as_deref(), content),
             _ => false,
         };
         let ends_with_heading = match block {
-            Block::Text { content } => crate::content::markdown_ir::ends_with_heading(content),
+            Block::Text { content } => content.ends_with_markdown_heading(),
             _ => false,
         };
         let retained_bytes = std::mem::size_of::<Self>()
             .saturating_add(preview.capacity())
             .saturating_add(tool_call_id.as_ref().map_or(0, String::capacity))
             .saturating_add(tool_name.as_ref().map_or(0, String::capacity))
+            .saturating_add(group_summary_text.as_ref().map_or(0, String::capacity))
+            .saturating_add(group_process.event.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                group_process
+                    .process_id
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                selector_fields.capacity().saturating_mul(
+                    std::mem::size_of::<(String, serde_json::Value)>()
+                        .saturating_add(std::mem::size_of::<usize>()),
+                ),
+            )
             .saturating_add(
                 selector_fields
                     .iter()
                     .map(|(key, value)| {
                         key.capacity()
-                            .saturating_add(serde_json::to_string(value).map_or(0, |v| v.len()))
+                            .saturating_add(protocol::json_value_dynamic_retained_bytes(value))
                     })
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                process_fields
-                    .iter()
-                    .map(|(key, value)| key.capacity().saturating_add(value.capacity()))
                     .sum::<usize>(),
             );
         (
@@ -1337,20 +1822,29 @@ impl StoredBlockRef {
                 },
                 tool_call_id,
                 tool_name,
-                tool_status: tool_state.map(|state| state.status),
-                tool_display_hash: tool_state.map_or(0, ToolState::display_hash),
+                tool_status: match block {
+                    Block::ToolCall { .. } => {
+                        Some(tool_state.map_or(ToolStatus::Pending, |state| state.status))
+                    }
+                    _ => tool_state.map(|state| state.status),
+                },
+                tool_render_revision: record.tool_render_revision,
                 origin: record.origin,
                 stable_scroll_anchor: !matches!(
                     block,
-                    Block::ToolDraft {
+                    Block::ToolDraft(ToolDraft {
                         finished: false,
                         ..
-                    }
+                    })
                 ),
+                tool_draft,
+                group_summary_text,
+                group_called_at_ms,
+                group_output,
+                group_process,
                 starts_with_thinking_title,
                 ends_with_heading,
                 selector_fields,
-                process_fields,
                 retained_bytes,
             }),
         )
@@ -1372,52 +1866,264 @@ impl StoredBlockRef {
     }
 
     fn process_field(&self, field: &str) -> Option<String> {
-        self.process_fields.get(field).cloned()
+        match field {
+            "event" | "event_type" => self.group_process.event.clone(),
+            "process_id" => self.group_process.process_id.clone(),
+            "exit_code" => self.group_process.exit_code.map(|code| code.to_string()),
+            _ => None,
+        }
+    }
+
+    fn group_child_metadata(&self, id: BlockId) -> TranscriptGroupChildMetadata {
+        let process_id = self.group_process.process_id.clone();
+        let exit_code = self.group_process.exit_code;
+        TranscriptGroupChildMetadata {
+            id,
+            kind: self.kind.as_str(),
+            name: self.tool_name.clone(),
+            status: if self.tool_draft {
+                Some("drafting")
+            } else {
+                self.tool_status.map(ToolStatus::label)
+            },
+            summary_text: self.group_summary_text.clone(),
+            called_at_ms: self.group_called_at_ms,
+            args: (self.kind == StoredBlockKind::Tool).then(|| self.selector_fields.clone()),
+            output: self.group_output.clone(),
+            event: self.group_process.event.clone(),
+            process_id: process_id.clone(),
+            exit_code,
+            event_data: TranscriptGroupChildProcessMetadata {
+                process_id,
+                exit_code,
+            },
+        }
     }
 }
 
-fn serialized_retained_bytes<T: serde::Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
+fn materialized_group_child_metadata(
+    id: BlockId,
+    block: &Block,
+    tool_state: Option<&ToolState>,
+) -> TranscriptGroupChildMetadata {
+    let output = tool_state
+        .and_then(|state| state.output.as_deref())
+        .map(|output| TranscriptGroupChildOutputMetadata {
+            content_lines: Some(output.content.read().logical_line_count()),
+            is_error: Some(output.is_error),
+        })
+        .unwrap_or_default();
+    let (event, process_id, exit_code) = match block {
+        Block::ProcessStatus {
+            event: Some(event), ..
+        } => (
+            Some(event.event_type().to_string()),
+            event
+                .process_id()
+                .map(|value| preview(value, GROUP_CHILD_PROCESS_FIELD_MAX_BYTES)),
+            event.exit_code(),
+        ),
+        _ => (None, None, None),
+    };
+    TranscriptGroupChildMetadata {
+        id,
+        kind: block.kind(),
+        name: block.tool_name().map(str::to_string),
+        status: match block {
+            Block::ToolDraft(_) => Some("drafting"),
+            Block::ToolCall { .. } => Some(
+                tool_state
+                    .map_or(ToolStatus::Pending, |state| state.status)
+                    .label(),
+            ),
+            _ => None,
+        },
+        summary_text: group_child_summary(block),
+        called_at_ms: tool_state.and_then(|state| state.called_at_ms),
+        args: group_child_args(block),
+        output,
+        event,
+        process_id: process_id.clone(),
+        exit_code,
+        event_data: TranscriptGroupChildProcessMetadata {
+            process_id,
+            exit_code,
+        },
+    }
+}
+
+impl ToolOutputContentField {
+    fn dynamic_retained_bytes(&self) -> usize {
+        self.name
+            .capacity()
+            .saturating_add(self.content.dynamic_retained_bytes())
+    }
+}
+
+impl ToolOutput {
+    fn dynamic_retained_bytes(&self) -> usize {
+        self.content
+            .dynamic_retained_bytes()
+            .saturating_add(
+                self.metadata
+                    .as_ref()
+                    .map_or(0, protocol::json_value_dynamic_retained_bytes),
+            )
+            .saturating_add(
+                self.content_fields
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ToolOutputContentField>()),
+            )
+            .saturating_add(
+                self.content_fields
+                    .iter()
+                    .map(ToolOutputContentField::dynamic_retained_bytes)
+                    .sum::<usize>(),
+            )
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
+impl ToolState {
+    fn dynamic_retained_bytes(&self) -> usize {
+        self.output
+            .as_deref()
+            .map_or(0, ToolOutput::retained_bytes)
+            .saturating_add(self.user_message.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                self.preview_output
+                    .as_deref()
+                    .map_or(0, ToolOutput::retained_bytes),
+            )
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
+impl Block {
+    fn dynamic_retained_bytes(&self) -> usize {
+        match self {
+            Self::User {
+                text, image_labels, ..
+            } => text
+                .capacity()
+                .saturating_add(
+                    image_labels
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                )
+                .saturating_add(image_labels.iter().map(String::capacity).sum::<usize>()),
+            Self::Mode {
+                text,
+                icon,
+                hl_group,
+            } => text
+                .capacity()
+                .saturating_add(icon.capacity())
+                .saturating_add(hl_group.capacity()),
+            Self::ProcessStatus { text, event } => {
+                text.capacity()
+                    .saturating_add(event.as_ref().map_or(0, |event| match event {
+                        protocol::ProcessStatusEvent::BackgroundProcessCompleted {
+                            process_id,
+                            ..
+                        } => process_id.capacity(),
+                    }))
+            }
+            Self::Thinking {
+                title,
+                summary_titles,
+                content,
+                ..
+            } => title
+                .as_ref()
+                .map_or(0, String::capacity)
+                .saturating_add(
+                    summary_titles
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                )
+                .saturating_add(summary_titles.iter().map(String::capacity).sum::<usize>())
+                .saturating_add(content.dynamic_retained_bytes()),
+            Self::Text { content } => content.dynamic_retained_bytes(),
+            Self::CodeLine { content, lang } => content.capacity().saturating_add(lang.capacity()),
+            Self::ToolDraft(draft) => draft.dynamic_retained_bytes(),
+            Self::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+            } => call_id
+                .capacity()
+                .saturating_add(name.capacity())
+                .saturating_add(summary.dynamic_retained_bytes())
+                .saturating_add(args.dynamic_retained_bytes()),
+            Self::Exec { command, output } => command
+                .capacity()
+                .saturating_add(output.dynamic_retained_bytes()),
+            Self::Compacted { summary } | Self::CompactionPreview { summary } => summary.capacity(),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
 }
 
 pub fn block_retained_bytes(block: &Block) -> usize {
-    std::mem::size_of::<Block>().saturating_add(serialized_retained_bytes(block))
+    block.retained_bytes()
 }
 
 pub fn tool_state_retained_bytes(state: &ToolState) -> usize {
-    std::mem::size_of::<ToolState>().saturating_add(serialized_retained_bytes(state))
+    state.retained_bytes()
 }
 
 #[derive(Clone)]
 enum ToolStateEntry {
-    Live(ToolState),
-    Hydrated(ToolState),
+    Live {
+        state: ToolState,
+        render_revision: u64,
+    },
+    Hydrated {
+        state: ToolState,
+        render_revision: u64,
+    },
     Stored {
         status: ToolStatus,
-        display_hash: u64,
+        render_revision: u64,
     },
 }
 
 impl ToolStateEntry {
     fn state(&self) -> Option<&ToolState> {
         match self {
-            Self::Live(state) | Self::Hydrated(state) => Some(state),
+            Self::Live { state, .. } | Self::Hydrated { state, .. } => Some(state),
             Self::Stored { .. } => None,
         }
     }
 
-    fn display_hash(&self) -> u64 {
+    fn render_revision(&self) -> u64 {
         match self {
-            Self::Live(state) | Self::Hydrated(state) => state.display_hash(),
-            Self::Stored { display_hash, .. } => *display_hash,
+            Self::Live {
+                render_revision, ..
+            }
+            | Self::Hydrated {
+                render_revision, ..
+            }
+            | Self::Stored {
+                render_revision, ..
+            } => *render_revision,
         }
     }
 
     fn status(&self) -> ToolStatus {
         match self {
-            Self::Live(state) | Self::Hydrated(state) => state.status,
+            Self::Live { state, .. } | Self::Hydrated { state, .. } => state.status,
             Self::Stored { status, .. } => *status,
         }
     }
@@ -1439,7 +2145,7 @@ struct LiveBlock {
 
 fn append_navigation_open(block: &Block) -> bool {
     match block {
-        Block::Text { content } | Block::Thinking { content, .. } => !content.contains('\n'),
+        Block::Text { content } | Block::Thinking { content, .. } => !content.contains("\n"),
         _ => false,
     }
 }
@@ -1483,21 +2189,14 @@ impl BlockEntry {
     fn tool_name(&self) -> Option<&str> {
         match self {
             Self::Stored(stored) => stored.tool_name.as_deref(),
-            _ => match self.block()? {
-                Block::ToolDraft { name, .. } | Block::ToolCall { name, .. } => Some(name),
-                _ => None,
-            },
+            _ => self.block()?.tool_name(),
         }
     }
 
     fn tool_call_id(&self) -> Option<&str> {
         match self {
             Self::Stored(stored) => stored.tool_call_id.as_deref(),
-            _ => match self.block()? {
-                Block::ToolDraft { call_id, .. } => call_id.as_deref(),
-                Block::ToolCall { call_id, .. } => Some(call_id),
-                _ => None,
-            },
+            _ => self.block()?.tool_call_id(),
         }
     }
 
@@ -1516,16 +2215,17 @@ impl BlockEntry {
     fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
         match self {
             Self::Stored(stored) => stored.arg_field(arg),
-            _ => match self.block()? {
-                Block::ToolDraft { args, .. } | Block::ToolCall { args, .. } => args.get(arg),
-                _ => None,
-            },
+            _ => self.block()?.arg_field(arg),
         }
     }
 
     fn is_tool_draft(&self) -> bool {
-        self.block()
-            .is_some_and(|block| matches!(block, Block::ToolDraft { .. }))
+        match self {
+            Self::Stored(stored) => stored.tool_draft,
+            _ => self
+                .block()
+                .is_some_and(|block| matches!(block, Block::ToolDraft(_))),
+        }
     }
 
     fn is_persisted_block(&self) -> bool {
@@ -1544,7 +2244,7 @@ impl BlockEntry {
     fn estimated_text_bytes(&self) -> u64 {
         match self {
             Self::Stored(stored) | Self::Hydrated { stored, .. } => stored.estimated_text_bytes,
-            Self::Live(live) => live.block.raw_text().map_or(0, |text| text.len() as u64),
+            Self::Live(live) => live.block.raw_text_len().unwrap_or_default() as u64,
         }
     }
 
@@ -1608,6 +2308,7 @@ pub struct BlockHistory {
     order_indices: HashMap<BlockId, usize>,
     order_indices_valid: bool,
     entries: HashMap<BlockId, BlockEntry>,
+    content_store: ContentStore,
     pub(crate) next_id: u64,
     tool_states: HashMap<BlockId, ToolStateEntry>,
     /// Blocks that transitioned `Streaming` → `Done` since last drain;
@@ -1615,6 +2316,8 @@ pub struct BlockHistory {
     pub finished_blocks: Vec<BlockId>,
     /// Bumped on every mutation; used by `TranscriptSnapshot` to detect staleness.
     generation: u64,
+    /// High-water mark for payload-independent tool presentation revisions.
+    tool_render_revision_clock: u64,
     /// Bumped only when transcript order changes, so projections can reuse
     /// block-to-node structure across content and sidecar updates.
     order_generation: u64,
@@ -1648,10 +2351,12 @@ impl BlockHistory {
             order_indices: HashMap::new(),
             order_indices_valid: true,
             entries: HashMap::new(),
+            content_store: ContentStore::default(),
             next_id: 0,
             tool_states: HashMap::new(),
             finished_blocks: Vec::new(),
             generation: 0,
+            tool_render_revision_clock: 0,
             order_generation: 0,
             navigation_generation: 0,
             persisted_block_count: 0,
@@ -1805,6 +2510,14 @@ impl BlockHistory {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    fn next_tool_render_revision(&mut self) -> u64 {
+        self.tool_render_revision_clock = self
+            .tool_render_revision_clock
+            .checked_add(1)
+            .expect("tool render revision overflow");
+        self.tool_render_revision_clock
+    }
+
     pub(crate) fn bump_order_generation(&mut self) {
         self.bump_generation();
         self.order_generation = self.order_generation.wrapping_add(1);
@@ -1850,7 +2563,28 @@ impl BlockHistory {
         let tool_state_bytes = entry.hydrated_tool_state_weight();
         let hydrated = matches!(&entry, BlockEntry::Hydrated { .. });
         let persisted = entry.is_persisted_block();
+        let new_contents = entry
+            .block()
+            .map(Block::registered_contents)
+            .unwrap_or_default()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let previous = self.entries.insert(id, entry);
+        let previous_content_ids = previous
+            .as_ref()
+            .and_then(BlockEntry::block)
+            .map(Block::registered_contents)
+            .unwrap_or_default()
+            .into_iter()
+            .map(TranscriptContent::id)
+            .collect::<Vec<_>>();
+        for content in &new_contents {
+            self.content_store.register(content);
+        }
+        for content_id in previous_content_ids {
+            self.content_store.remove(content_id);
+        }
         let was_persisted = previous
             .as_ref()
             .is_some_and(BlockEntry::is_persisted_block);
@@ -1885,6 +2619,11 @@ impl BlockHistory {
 
     fn remove_entry(&mut self, id: BlockId) -> Option<BlockEntry> {
         let entry = self.entries.remove(&id)?;
+        if let Some(block) = entry.block() {
+            for content in block.registered_contents() {
+                self.content_store.remove(content.id());
+            }
+        }
         if entry.is_persisted_block() {
             self.persisted_block_count = self.persisted_block_count.saturating_sub(1);
         }
@@ -1903,6 +2642,7 @@ impl BlockHistory {
         self.rebuild_order_indices();
         self.recount_persisted_blocks();
         self.recount_hydrated_entries();
+        self.rebuild_content_store();
         self.bump_order_generation();
         self.mark_record_dirty_from(0);
         self.record_patch(vec![TranscriptPatchOperation::Reset], true, true, true);
@@ -1999,6 +2739,65 @@ impl BlockHistory {
         }
     }
 
+    pub fn content(&self, id: BlockId, channel: ContentChannel) -> Option<&TranscriptContent> {
+        self.block(id)
+            .and_then(|block| block.content(channel))
+            .or_else(|| self.tool_state(id).and_then(|state| state.content(channel)))
+    }
+
+    pub fn content_by_id(&self, id: ContentId) -> Option<&TranscriptContent> {
+        self.content_store.get(id)
+    }
+
+    fn unregister_tool_state_content(&mut self, state: &ToolState) {
+        for content in state.registered_contents() {
+            self.content_store.remove(content.id());
+        }
+    }
+
+    fn rebuild_content_store(&mut self) {
+        let mut contents = self
+            .entries
+            .values()
+            .filter_map(BlockEntry::block)
+            .flat_map(Block::registered_contents)
+            .cloned()
+            .collect::<Vec<_>>();
+        for state in self.tool_states.values().filter_map(ToolStateEntry::state) {
+            contents.extend(state.registered_contents().cloned());
+        }
+        self.content_store.clear();
+        for content in contents {
+            self.content_store.register(&content);
+        }
+    }
+
+    fn set_tool_state_entry(&mut self, id: BlockId, entry: ToolStateEntry) {
+        self.tool_render_revision_clock =
+            self.tool_render_revision_clock.max(entry.render_revision());
+        let new_contents = entry
+            .state()
+            .map(|state| state.registered_contents().cloned().collect::<Vec<_>>());
+        if let Some(previous) = self.tool_states.insert(id, entry) {
+            if let Some(state) = previous.state() {
+                self.unregister_tool_state_content(state);
+            }
+        }
+        if let Some(contents) = new_contents {
+            for content in contents {
+                self.content_store.register(&content);
+            }
+        }
+    }
+
+    fn remove_tool_state_entry(&mut self, id: BlockId) -> Option<ToolStateEntry> {
+        let entry = self.tool_states.remove(&id)?;
+        if let Some(state) = entry.state() {
+            self.unregister_tool_state_content(state);
+        }
+        Some(entry)
+    }
+
     pub fn tool_state(&self, id: BlockId) -> Option<&ToolState> {
         self.tool_states.get(&id).and_then(ToolStateEntry::state)
     }
@@ -2041,6 +2840,17 @@ impl BlockHistory {
 
     pub fn stored_ref(&self, id: BlockId) -> Option<&Arc<StoredBlockRef>> {
         self.entries.get(&id).and_then(BlockEntry::stored)
+    }
+
+    pub fn group_child_metadata(&self, id: BlockId) -> Option<TranscriptGroupChildMetadata> {
+        match self.entries.get(&id)? {
+            BlockEntry::Stored(stored) => Some(stored.group_child_metadata(id)),
+            entry => Some(materialized_group_child_metadata(
+                id,
+                entry.block()?,
+                self.tool_state(id),
+            )),
+        }
     }
 
     pub fn reindex_stored_records_from(&mut self, order_start: usize, record_start: usize) {
@@ -2201,6 +3011,7 @@ impl BlockHistory {
                 content_hash,
                 origin: self.block_origin(id),
                 tool_state,
+                tool_render_revision: self.sidecar_hash(id),
             },
         })
     }
@@ -2285,13 +3096,16 @@ impl BlockHistory {
         let mut next_order = Vec::with_capacity(records.len().saturating_add(preserved_live.len()));
         for (id, stored) in records {
             self.next_id = self.next_id.max(id.0.saturating_add(1));
+            self.tool_render_revision_clock = self
+                .tool_render_revision_clock
+                .max(stored.tool_render_revision);
             next_order.push(id);
             let state_entry = self.tool_states.entry(id);
             if let std::collections::hash_map::Entry::Vacant(state_entry) = state_entry {
                 if let Some(status) = stored.tool_status {
                     state_entry.insert(ToolStateEntry::Stored {
                         status,
-                        display_hash: stored.tool_display_hash,
+                        render_revision: stored.tool_render_revision,
                     });
                 }
             }
@@ -2347,7 +3161,10 @@ impl BlockHistory {
         {
             return false;
         }
-        let block = record.block.clone().normalize_content();
+        let TranscriptBlockRecord {
+            block, tool_state, ..
+        } = record;
+        let block = block.normalize_content();
         if block.kind() != stored.kind.as_str() {
             return false;
         }
@@ -2355,17 +3172,20 @@ impl BlockHistory {
         if stored.content_hash != 0 && stored.content_hash != block_hash {
             return false;
         }
-        let tool_state_weight = record
-            .tool_state
-            .as_ref()
-            .map_or(0, tool_state_retained_bytes);
+        let tool_state_weight = tool_state.as_ref().map_or(0, tool_state_retained_bytes);
         let block_weight = block_retained_bytes(&block);
         let weight = block_weight.saturating_add(tool_state_weight);
         let had_entry = self.entries.contains_key(&id);
         debug_assert_eq!(had_entry, self.order_index(id).is_some());
-        if let Some(state) = record.tool_state {
-            if !matches!(self.tool_states.get(&id), Some(ToolStateEntry::Live(_))) {
-                self.tool_states.insert(id, ToolStateEntry::Hydrated(state));
+        if let Some(state) = tool_state {
+            if !matches!(self.tool_states.get(&id), Some(ToolStateEntry::Live { .. })) {
+                self.set_tool_state_entry(
+                    id,
+                    ToolStateEntry::Hydrated {
+                        state,
+                        render_revision: stored.tool_render_revision,
+                    },
+                );
             }
         }
         if !had_entry {
@@ -2409,8 +3229,18 @@ impl BlockHistory {
             origin: stored.origin,
             ..BlockMetadata::default()
         };
-        if let Some(ToolStateEntry::Hydrated(state)) = self.tool_states.remove(&id) {
-            self.tool_states.insert(id, ToolStateEntry::Live(state));
+        if let Some(ToolStateEntry::Hydrated {
+            state,
+            render_revision,
+        }) = self.remove_tool_state_entry(id)
+        {
+            self.set_tool_state_entry(
+                id,
+                ToolStateEntry::Live {
+                    state,
+                    render_revision,
+                },
+            );
         }
         self.insert_entry(
             id,
@@ -2436,17 +3266,20 @@ impl BlockHistory {
             unreachable!("entry was checked as hydrated");
         };
         let weight = block_weight.saturating_add(tool_state_weight);
-        if matches!(self.tool_states.get(&id), Some(ToolStateEntry::Hydrated(_))) {
+        if matches!(
+            self.tool_states.get(&id),
+            Some(ToolStateEntry::Hydrated { .. })
+        ) {
             if let Some(status) = stored.tool_status {
-                self.tool_states.insert(
+                self.set_tool_state_entry(
                     id,
                     ToolStateEntry::Stored {
                         status,
-                        display_hash: stored.tool_display_hash,
+                        render_revision: stored.tool_render_revision,
                     },
                 );
             } else {
-                self.tool_states.remove(&id);
+                self.remove_tool_state_entry(id);
             }
         }
         self.insert_entry(id, BlockEntry::Stored(stored));
@@ -2462,15 +3295,15 @@ impl BlockHistory {
             unreachable!("entry was checked as live");
         };
         let mut weight = block_retained_bytes(&live.block);
-        if let Some(ToolStateEntry::Live(state)) = self.tool_states.remove(&id) {
+        if let Some(ToolStateEntry::Live { state, .. }) = self.remove_tool_state_entry(id) {
             weight = weight.saturating_add(tool_state_retained_bytes(&state));
         }
         if let Some(status) = stored.tool_status {
-            self.tool_states.insert(
+            self.set_tool_state_entry(
                 id,
                 ToolStateEntry::Stored {
                     status,
-                    display_hash: stored.tool_display_hash,
+                    render_revision: stored.tool_render_revision,
                 },
             );
         }
@@ -2492,7 +3325,9 @@ impl BlockHistory {
                 self.tool_states
                     .get(&id)
                     .and_then(|entry| match entry {
-                        ToolStateEntry::Live(state) => Some(tool_state_retained_bytes(state)),
+                        ToolStateEntry::Live { state, .. } => {
+                            Some(tool_state_retained_bytes(state))
+                        }
                         _ => None,
                     })
                     .unwrap_or_default(),
@@ -2516,7 +3351,7 @@ impl BlockHistory {
         self.tool_states
             .values()
             .filter_map(|entry| match entry {
-                ToolStateEntry::Live(state) => Some(tool_state_retained_bytes(state)),
+                ToolStateEntry::Live { state, .. } => Some(tool_state_retained_bytes(state)),
                 _ => None,
             })
             .sum()
@@ -2530,7 +3365,7 @@ impl BlockHistory {
         self.hydrated_tool_state_bytes
     }
 
-    pub fn tool_state_metadata_retained_bytes(&self) -> usize {
+    pub fn tool_state_index_retained_bytes(&self) -> usize {
         self.tool_states
             .capacity()
             .saturating_mul(std::mem::size_of::<(BlockId, ToolStateEntry)>())
@@ -2721,6 +3556,7 @@ impl BlockHistory {
             content_hash: hash,
             origin,
             tool_state,
+            tool_render_revision: self.sidecar_hash(id),
         };
         let indexed = transcript_indexed_text(&record.block, record.tool_state.as_ref());
         let (_, stored) = StoredBlockRef::from_record(
@@ -2730,15 +3566,14 @@ impl BlockHistory {
             indexed.estimated_text_bytes,
             preview(&indexed.indexed_text, 512),
         );
-        let block = record.block.clone();
-        let block_weight = block_retained_bytes(&block);
+        let block_weight = block_retained_bytes(&record.block);
         let tool_state_weight = record
             .tool_state
             .as_ref()
             .map_or(0, tool_state_retained_bytes);
         let entry = BlockEntry::Hydrated {
             stored,
-            block: Box::new(block),
+            block: Box::new(record.block),
             block_weight,
             tool_state_weight,
         };
@@ -2817,7 +3652,7 @@ impl BlockHistory {
             return None;
         }
         self.remove_order_index(idx);
-        self.tool_states.remove(&id);
+        self.remove_tool_state_entry(id);
         let block = self
             .remove_entry(id)
             .and_then(BlockEntry::into_materialized);
@@ -2834,7 +3669,14 @@ impl BlockHistory {
 
     pub(crate) fn push_with_state(&mut self, block: Block, state: ToolState) -> BlockId {
         let id = self.push(block);
-        self.tool_states.insert(id, ToolStateEntry::Live(state));
+        let render_revision = self.next_tool_render_revision();
+        self.set_tool_state_entry(
+            id,
+            ToolStateEntry::Live {
+                state,
+                render_revision,
+            },
+        );
         id
     }
 
@@ -2845,7 +3687,14 @@ impl BlockHistory {
         origin: BlockOrigin,
     ) -> BlockId {
         let id = self.push_with_origin(block, origin);
-        self.tool_states.insert(id, ToolStateEntry::Live(state));
+        let render_revision = self.next_tool_render_revision();
+        self.set_tool_state_entry(
+            id,
+            ToolStateEntry::Live {
+                state,
+                render_revision,
+            },
+        );
         id
     }
 
@@ -2856,19 +3705,66 @@ impl BlockHistory {
         origin: BlockOrigin,
     ) -> BlockId {
         let id = BlockId(self.next_id);
-        self.tool_states.insert(id, ToolStateEntry::Hydrated(state));
+        let render_revision = self.next_tool_render_revision();
+        self.set_tool_state_entry(
+            id,
+            ToolStateEntry::Hydrated {
+                state,
+                render_revision,
+            },
+        );
         self.add_hydrated_block_with_id(id, None, block, Some(origin), None)
     }
 
-    pub fn update_tool_state(&mut self, id: BlockId, mutator: impl FnOnce(&mut ToolState)) -> bool {
+    pub fn apply_tool_state_mutation(&mut self, id: BlockId, mutation: ToolStateMutation) -> bool {
         let dirty_idx = self.order_index(id);
         if dirty_idx.is_some() {
             self.promote_hydrated(id);
         }
-        let Some(ToolStateEntry::Live(state)) = self.tool_states.get_mut(&id) else {
+        if !matches!(self.tool_states.get(&id), Some(ToolStateEntry::Live { .. })) {
             return false;
+        }
+
+        if mutation.is_animation_only() {
+            let Some(ToolStateEntry::Live { state, .. }) = self.tool_states.get_mut(&id) else {
+                unreachable!("tool state was checked as live");
+            };
+            mutation.apply(state);
+            self.bump_generation();
+            self.record_patch(
+                vec![TranscriptPatchOperation::SetAnimationState { id }],
+                false,
+                false,
+                false,
+            );
+            return true;
+        }
+
+        let search_changed = mutation.search_changed();
+        let next_render_revision = self.next_tool_render_revision();
+        let (old_content_ids, new_contents) = {
+            let Some(ToolStateEntry::Live {
+                state,
+                render_revision,
+            }) = self.tool_states.get_mut(&id)
+            else {
+                unreachable!("tool state was checked as live");
+            };
+            let old_content_ids = state
+                .registered_contents()
+                .map(TranscriptContent::id)
+                .collect::<Vec<_>>();
+            mutation.apply(state);
+            *render_revision = next_render_revision;
+            let new_contents = state.registered_contents().cloned().collect::<Vec<_>>();
+            (old_content_ids, new_contents)
         };
-        mutator(state);
+        for content_id in old_content_ids {
+            self.content_store.remove(content_id);
+        }
+        for content in new_contents {
+            self.content_store.register(&content);
+        }
         self.bump_generation();
         if let Some(idx) = dirty_idx {
             self.mark_record_dirty_from(idx);
@@ -2876,10 +3772,263 @@ impl BlockHistory {
         self.record_patch(
             vec![TranscriptPatchOperation::SetSideState { id }],
             false,
-            true,
+            search_changed,
             true,
         );
         true
+    }
+
+    pub(crate) fn append_tool_draft(
+        &mut self,
+        id: BlockId,
+        call_id: Option<String>,
+        name: Option<String>,
+        delta: String,
+    ) -> Option<ToolDraftAppend> {
+        let (mut append, identity_changed) = {
+            let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                return None;
+            };
+            let Block::ToolDraft(draft) = &mut live.block else {
+                return None;
+            };
+            let identity_changed = draft.update_identity(call_id, name);
+            let append = draft.append(delta);
+            live.metadata.live_revision = live
+                .metadata
+                .live_revision
+                .checked_add(1)
+                .expect("live transcript revision overflow");
+            (append, identity_changed)
+        };
+        append.presentation_changed |= identity_changed;
+        for content in &append.new_fields {
+            self.content_store.register(content);
+        }
+        for content_id in &append.removed_field_ids {
+            self.content_store.remove(*content_id);
+        }
+        let mut operations = Vec::with_capacity(append.field_appends.len().saturating_add(2));
+        if !append.raw_range.is_empty() {
+            operations.push(TranscriptPatchOperation::Append {
+                id,
+                content_id: append.raw_content_id,
+                channel: ContentChannel::DraftArguments,
+                byte_range: append.raw_range.clone(),
+            });
+        }
+        operations.extend(append.field_appends.iter().map(|field| {
+            TranscriptPatchOperation::Append {
+                id,
+                content_id: field.content.id(),
+                channel: ContentChannel::DraftField,
+                byte_range: field.byte_range.clone(),
+            }
+        }));
+        if append.presentation_changed {
+            operations.push(TranscriptPatchOperation::Replace { id });
+        }
+        if operations.is_empty() {
+            return Some(append);
+        }
+        self.bump_generation();
+        self.record_patch(operations, false, true, false);
+        Some(append)
+    }
+
+    pub(crate) fn finish_tool_draft(
+        &mut self,
+        id: BlockId,
+        call_id: String,
+        name: String,
+        arguments: String,
+    ) -> Option<ToolDraftAppend> {
+        let (mut append, identity_changed) = {
+            let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                return None;
+            };
+            let Block::ToolDraft(draft) = &mut live.block else {
+                return None;
+            };
+            let identity_changed = draft.update_identity(Some(call_id), Some(name));
+            let append = draft.finish(arguments);
+            live.metadata.live_revision = live
+                .metadata
+                .live_revision
+                .checked_add(1)
+                .expect("live transcript revision overflow");
+            (append, identity_changed)
+        };
+        append.presentation_changed |= identity_changed;
+        for content in &append.new_fields {
+            self.content_store.register(content);
+        }
+        for content_id in &append.removed_field_ids {
+            self.content_store.remove(*content_id);
+        }
+        let mut operations = Vec::with_capacity(append.field_appends.len().saturating_add(2));
+        if !append.raw_range.is_empty() {
+            operations.push(TranscriptPatchOperation::Append {
+                id,
+                content_id: append.raw_content_id,
+                channel: ContentChannel::DraftArguments,
+                byte_range: append.raw_range.clone(),
+            });
+        }
+        operations.extend(append.field_appends.iter().map(|field| {
+            TranscriptPatchOperation::Append {
+                id,
+                content_id: field.content.id(),
+                channel: ContentChannel::DraftField,
+                byte_range: field.byte_range.clone(),
+            }
+        }));
+        operations.push(TranscriptPatchOperation::Replace { id });
+        self.bump_generation();
+        self.record_patch(operations, false, true, false);
+        Some(append)
+    }
+
+    pub(crate) fn set_tool_draft_summary(
+        &mut self,
+        id: BlockId,
+        summary: protocol::StyledLines,
+    ) -> bool {
+        let changed = {
+            let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                return false;
+            };
+            let Block::ToolDraft(draft) = &mut live.block else {
+                return false;
+            };
+            if draft.summary == summary {
+                return false;
+            }
+            draft.summary = summary;
+            true
+        };
+        if changed {
+            self.bump_generation();
+            self.record_patch(
+                vec![TranscriptPatchOperation::Replace { id }],
+                false,
+                true,
+                false,
+            );
+        }
+        changed
+    }
+
+    pub(crate) fn append_live_output_line(
+        &mut self,
+        id: BlockId,
+        channel: ContentChannel,
+        line: String,
+    ) -> Option<std::ops::Range<usize>> {
+        self.append_live_output_slice(
+            id,
+            channel,
+            crate::transcript_content::SharedContentSlice::from_owned(line),
+            true,
+        )
+    }
+
+    pub(crate) fn append_live_output_slice(
+        &mut self,
+        id: BlockId,
+        channel: ContentChannel,
+        chunk: crate::transcript_content::SharedContentSlice,
+        line_start: bool,
+    ) -> Option<std::ops::Range<usize>> {
+        if chunk.is_empty() {
+            return None;
+        }
+
+        let dirty_idx = self.order_index(id);
+        if channel == ContentChannel::ToolOutput && dirty_idx.is_some() {
+            self.promote_hydrated(id);
+        }
+
+        let mut attached = false;
+        let content = match channel {
+            ContentChannel::ToolOutput => {
+                let next_render_revision = self.next_tool_render_revision();
+                let Some(ToolStateEntry::Live {
+                    state,
+                    render_revision,
+                }) = self.tool_states.get_mut(&id)
+                else {
+                    return None;
+                };
+                attached = state.output.is_none();
+                let output = state.output.get_or_insert_with(|| {
+                    Box::new(ToolOutput {
+                        content: TranscriptContent::new(),
+                        is_error: false,
+                        metadata: None,
+                        content_fields: Vec::new(),
+                    })
+                });
+                if attached {
+                    *render_revision = next_render_revision;
+                }
+                output.content.clone()
+            }
+            ContentChannel::ExecOutput => {
+                let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                    return None;
+                };
+                let Block::Exec { output, .. } = &live.block else {
+                    return None;
+                };
+                output.clone()
+            }
+            _ => return None,
+        };
+
+        let start = content.len();
+        let needs_separator = line_start
+            && start != 0
+            && match channel {
+                ContentChannel::ToolOutput => true,
+                ContentChannel::ExecOutput => !content.ends_with('\n'),
+                _ => unreachable!("output line channels were validated"),
+            };
+        if needs_separator {
+            content.append_owned("\n".to_owned());
+        }
+        content.append_shared(chunk);
+        let byte_range = start..content.len();
+
+        if channel == ContentChannel::ExecOutput {
+            let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                unreachable!("exec output target disappeared during append");
+            };
+            live.metadata.live_revision = live
+                .metadata
+                .live_revision
+                .checked_add(1)
+                .expect("live transcript revision overflow");
+        }
+        if attached {
+            self.content_store.register(&content);
+        }
+        self.bump_generation();
+        if let Some(idx) = dirty_idx {
+            self.mark_record_dirty_from(idx);
+        }
+        self.record_patch(
+            vec![TranscriptPatchOperation::Append {
+                id,
+                content_id: content.id(),
+                channel,
+                byte_range: byte_range.clone(),
+            }],
+            false,
+            true,
+            true,
+        );
+        Some(byte_range)
     }
 
     pub(crate) fn append_live_text_segments<'a>(
@@ -2887,7 +4036,7 @@ impl BlockHistory {
         id: BlockId,
         segments: impl IntoIterator<Item = &'a str>,
     ) -> Option<std::ops::Range<usize>> {
-        let (start, end, navigation_changed) = {
+        let (content_id, start, end, navigation_changed) = {
             let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
                 return None;
             };
@@ -2912,7 +4061,7 @@ impl BlockHistory {
                 .live_revision
                 .checked_add(1)
                 .expect("live transcript revision overflow");
-            (start, end, navigation_changed)
+            (content.id(), start, end, navigation_changed)
         };
 
         self.bump_generation();
@@ -2924,6 +4073,8 @@ impl BlockHistory {
         self.record_patch(
             vec![TranscriptPatchOperation::Append {
                 id,
+                content_id,
+                channel: ContentChannel::Primary,
                 byte_range: byte_range.clone(),
             }],
             navigation_changed,
@@ -2931,6 +4082,40 @@ impl BlockHistory {
             true,
         );
         Some(byte_range)
+    }
+
+    pub(crate) fn trim_live_exec_output(&mut self, id: BlockId) -> bool {
+        let changed = {
+            let Some(BlockEntry::Live(live)) = self.entries.get_mut(&id) else {
+                return false;
+            };
+            let Block::Exec { output, .. } = &mut live.block else {
+                return false;
+            };
+            let trimmed_len = output.trimmed_end_len();
+            if trimmed_len == output.len() {
+                return false;
+            }
+            output.truncate(trimmed_len);
+            live.metadata.live_revision = live
+                .metadata
+                .live_revision
+                .checked_add(1)
+                .expect("live transcript revision overflow");
+            true
+        };
+
+        if changed {
+            self.bump_generation();
+            self.mark_record_dirty_for_id(id);
+            self.record_patch(
+                vec![TranscriptPatchOperation::Replace { id }],
+                false,
+                true,
+                true,
+            );
+        }
+        changed
     }
 
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
@@ -2987,7 +4172,17 @@ impl BlockHistory {
 
     pub(crate) fn rewrite_with_tool_state(&mut self, id: BlockId, block: Block, state: ToolState) {
         self.rewrite(id, block);
-        self.tool_states.insert(id, ToolStateEntry::Live(state));
+        let render_revision = self
+            .generation
+            .checked_add(1)
+            .expect("tool render revision overflow");
+        self.set_tool_state_entry(
+            id,
+            ToolStateEntry::Live {
+                state,
+                render_revision,
+            },
+        );
         self.bump_generation();
         self.mark_record_dirty_for_id(id);
         self.record_patch(
@@ -3004,7 +4199,7 @@ impl BlockHistory {
         };
         self.remove_order_index(index);
         self.remove_entry(id);
-        self.tool_states.remove(&id);
+        self.remove_tool_state_entry(id);
         self.bump_order_generation();
         self.mark_record_dirty_from(index);
         self.record_patch(
@@ -3021,24 +4216,28 @@ impl BlockHistory {
             self.order_indices.clear();
             self.order_indices_valid = true;
             self.entries.clear();
+            self.content_store.clear();
             self.persisted_block_count = 0;
             self.hydrated_ids.clear();
             self.hydrated_block_bytes = 0;
             self.hydrated_tool_state_bytes = 0;
             self.next_id = 0;
             self.tool_states.clear();
+            self.tool_render_revision_clock = 0;
             return;
         }
         self.order.clear();
         self.order_indices.clear();
         self.order_indices_valid = true;
         self.entries.clear();
+        self.content_store.clear();
         self.persisted_block_count = 0;
         self.hydrated_ids.clear();
         self.hydrated_block_bytes = 0;
         self.hydrated_tool_state_bytes = 0;
         self.next_id = 0;
         self.tool_states.clear();
+        self.tool_render_revision_clock = 0;
         self.bump_order_generation();
         self.mark_record_dirty_from(0);
         self.record_patch(vec![TranscriptPatchOperation::Reset], true, true, true);
@@ -3068,7 +4267,7 @@ impl BlockHistory {
     pub fn sidecar_hash(&self, id: BlockId) -> u64 {
         self.tool_states
             .get(&id)
-            .map_or(0, ToolStateEntry::display_hash)
+            .map_or(0, ToolStateEntry::render_revision)
     }
 
     /// Substitute the actual per-block content and sidecar hash into a base
@@ -3109,6 +4308,7 @@ impl BlockHistory {
             .filter(|id| self.tool_call_id(*id).is_some())
             .collect();
         self.tool_states.retain(|id, _| live.contains(id));
+        self.rebuild_content_store();
     }
 }
 
@@ -3168,7 +4368,7 @@ fn entry_ends_with_heading(entry: &BlockEntry) -> bool {
         return stored.ends_with_heading;
     }
     match entry.block() {
-        Some(Block::Text { content }) => crate::content::markdown_ir::ends_with_heading(content),
+        Some(Block::Text { content }) => content.ends_with_markdown_heading(),
         _ => false,
     }
 }
@@ -3180,12 +4380,9 @@ fn starts_with_thinking_title(block: &Block) -> bool {
     }
 }
 
-fn has_thinking_title(title: Option<&str>, content: &str) -> bool {
+fn has_thinking_title(title: Option<&str>, content: &TranscriptContent) -> bool {
     title.is_some()
-        || content
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .and_then(crate::content::markdown_stream::thinking_title)
+        || crate::content::markdown_stream::thinking_title(&content.read().first_nonempty_line())
             .is_some()
 }
 
@@ -3193,7 +4390,7 @@ fn ends_with_heading(block: &Block) -> bool {
     let Block::Text { content } = block else {
         return false;
     };
-    crate::content::markdown_ir::ends_with_heading(content)
+    content.ends_with_markdown_heading()
 }
 
 #[cfg(test)]
@@ -3218,9 +4415,10 @@ mod tests {
             called_at_ms: None,
             elapsed_active: false,
             output: Some(Box::new(ToolOutput {
-                content: content.to_string(),
+                content: content.to_string().into(),
                 is_error: false,
                 metadata: Some(metadata),
+                content_fields: Vec::new(),
             })),
             user_message: None,
             preview_output: None,
@@ -3229,6 +4427,244 @@ mod tests {
 
     fn indexed_tool_state(metadata: serde_json::Value) -> ToolState {
         indexed_tool_state_with_content("output", metadata)
+    }
+
+    #[test]
+    fn content_store_follows_block_and_tool_lifecycles() {
+        let block_content: TranscriptContent = "assistant".into();
+        let block_content_id = block_content.id();
+        let mut history = BlockHistory::new();
+        let block_id = history.push(Block::Text {
+            content: block_content,
+        });
+        assert_eq!(
+            history
+                .content_by_id(block_content_id)
+                .map(TranscriptContent::snapshot),
+            Some("assistant".into())
+        );
+
+        let replacement: TranscriptContent = "replacement".into();
+        let replacement_id = replacement.id();
+        let replacement_owner = replacement.clone();
+        history.rewrite(
+            block_id,
+            Block::Text {
+                content: replacement,
+            },
+        );
+        let _replacement_owner_id = history.push(Block::Text {
+            content: replacement_owner,
+        });
+        history.remove_block(block_id);
+        assert!(history.content_by_id(block_content_id).is_none());
+        assert!(history.content_by_id(replacement_id).is_some());
+
+        let output: TranscriptContent = "output".into();
+        let output_id = output.id();
+        let preview: TranscriptContent = "preview".into();
+        let preview_id = preview.id();
+        let tool_id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain("run"),
+                args: HashMap::new().into(),
+            },
+            ToolState {
+                status: ToolStatus::Pending,
+                elapsed: None,
+                called_at_ms: None,
+                elapsed_active: false,
+                output: Some(Box::new(ToolOutput {
+                    content: output,
+                    is_error: false,
+                    metadata: None,
+                    content_fields: Vec::new(),
+                })),
+                user_message: None,
+                preview_output: Some(Box::new(ToolOutput {
+                    content: preview,
+                    is_error: false,
+                    metadata: None,
+                    content_fields: Vec::new(),
+                })),
+            },
+        );
+        assert!(history.content_by_id(output_id).is_some());
+        assert!(history.content_by_id(preview_id).is_some());
+
+        let next_output: TranscriptContent = "next output".into();
+        let next_output_id = next_output.id();
+        assert!(history.apply_tool_state_mutation(
+            tool_id,
+            ToolStateMutation::Finish {
+                status: ToolStatus::Err,
+                output: Some(Box::new(ToolOutput {
+                    content: next_output,
+                    is_error: true,
+                    metadata: Some(serde_json::json!({ "exit_code": 1 })),
+                    content_fields: Vec::new(),
+                })),
+                elapsed: None,
+            },
+        ));
+        assert!(history.content_by_id(output_id).is_some());
+        assert!(history.content_by_id(preview_id).is_none());
+        assert!(history.content_by_id(next_output_id).is_none());
+        let state = history.tool_state(tool_id).expect("finished tool state");
+        let output = state.output.as_ref().expect("streamed output");
+        assert_eq!(state.status, ToolStatus::Err);
+        assert_eq!(output.content.id(), output_id);
+        assert_eq!(output.content.snapshot(), "output");
+        assert!(output.is_error);
+        assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 1 })));
+
+        history.remove_block(tool_id);
+        assert!(history.content_by_id(output_id).is_none());
+        assert!(history.content_by_id(replacement_id).is_some());
+
+        history.clear();
+        assert!(history.content_by_id(replacement_id).is_none());
+    }
+
+    #[test]
+    fn retained_tool_display_content_reuses_the_protocol_allocation() {
+        let source = Arc::new("display payload".repeat(1_024));
+        let source_ptr = source.as_ptr();
+        let output = ToolOutput::from_display_content(
+            "edited file",
+            false,
+            None,
+            vec![protocol::ToolDisplayContent {
+                name: "new_content".into(),
+                content: Arc::clone(&source),
+            }],
+        );
+
+        let content = output
+            .content_field("new_content")
+            .expect("display content");
+        assert_eq!(content.read().chunks()[0].as_ptr(), source_ptr);
+    }
+
+    #[test]
+    fn retained_accounting_tracks_reserved_payload_capacity() {
+        let mut block_text = String::with_capacity(1024 * 1024);
+        block_text.push_str("short code line");
+        let block_capacity = block_text.capacity();
+        let block = Block::CodeLine {
+            content: block_text,
+            lang: "rust".into(),
+        };
+        assert!(
+            block_retained_bytes(&block)
+                >= std::mem::size_of::<Block>().saturating_add(block_capacity)
+        );
+
+        let mut output_text = String::with_capacity(2 * 1024 * 1024);
+        output_text.push_str("short output");
+        let output_capacity = output_text.capacity();
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            called_at_ms: None,
+            elapsed_active: false,
+            output: Some(Box::new(ToolOutput::new(output_text, false, None))),
+            user_message: None,
+            preview_output: None,
+        };
+        assert!(
+            tool_state_retained_bytes(&state)
+                >= std::mem::size_of::<ToolState>()
+                    .saturating_add(std::mem::size_of::<ToolOutput>())
+                    .saturating_add(output_capacity)
+        );
+
+        let mut process_id = String::with_capacity(4 * 1024);
+        process_id.push_str("42");
+        let process_capacity = process_id.capacity();
+        let process = Block::ProcessStatus {
+            text: "complete".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                process_id,
+                Some(0),
+            )),
+        };
+        assert!(
+            block_retained_bytes(&process)
+                >= std::mem::size_of::<Block>().saturating_add(process_capacity)
+        );
+    }
+
+    #[test]
+    fn retained_tool_display_content_is_registered_by_name_and_id() {
+        let output = ToolOutput::from_display_content(
+            "edited file",
+            false,
+            Some(serde_json::json!({ "path": "src/lib.rs" })),
+            vec![
+                protocol::ToolDisplayContent::new("old_content", "before".into()),
+                protocol::ToolDisplayContent::new("new_content", "after".into()),
+            ],
+        );
+        let old_id = output.content_field("old_content").unwrap().id();
+        let new_id = output.content_field("new_content").unwrap().id();
+        let mut history = BlockHistory::new();
+        let block_id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "edit-1".into(),
+                name: "edit_file".into(),
+                summary: protocol::StyledLines::from_plain("src/lib.rs"),
+                args: HashMap::new().into(),
+            },
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                called_at_ms: None,
+                elapsed_active: false,
+                output: Some(Box::new(output)),
+                user_message: None,
+                preview_output: None,
+            },
+        );
+
+        assert_eq!(
+            history
+                .content_by_id(old_id)
+                .map(TranscriptContent::snapshot),
+            Some("before".into())
+        );
+        assert_eq!(
+            history
+                .content_by_id(new_id)
+                .map(TranscriptContent::snapshot),
+            Some("after".into())
+        );
+        history.remove_block(block_id);
+        assert!(history.content_by_id(old_id).is_none());
+        assert!(history.content_by_id(new_id).is_none());
+    }
+
+    #[test]
+    fn mark_changed_rebuilds_content_store_after_external_mutation() {
+        let original: TranscriptContent = "original".into();
+        let original_id = original.id();
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text { content: original });
+        let replacement: TranscriptContent = "replacement".into();
+        let replacement_id = replacement.id();
+        let Some(BlockEntry::Live(live)) = history.entries.get_mut(&id) else {
+            panic!("live block");
+        };
+        live.block = Block::Text {
+            content: replacement,
+        };
+
+        history.mark_changed();
+
+        assert!(history.content_by_id(original_id).is_none());
+        assert!(history.content_by_id(replacement_id).is_some());
     }
 
     fn edit_file_block(old_string: &str, new_string: &str) -> Block {
@@ -3249,7 +4685,7 @@ mod tests {
             call_id: "call-1".to_string(),
             name: "edit_file".to_string(),
             summary: protocol::StyledLines::from_plain("example.rs"),
-            args,
+            args: args.into(),
         }
     }
 
@@ -3267,14 +4703,15 @@ mod tests {
                 ("bravo".into(), serde_json::json!([1, 2, 3])),
                 ("charlie".into(), serde_json::json!(null)),
                 ("delta".into(), serde_json::json!(4)),
-            ]),
+            ])
+            .into(),
         }
     }
 
     #[test]
     fn indexed_text_preserves_full_size_for_extent_estimation() {
         let block = Block::Text {
-            content: "alpha λ".to_string(),
+            content: "alpha λ".to_string().into(),
         };
 
         let indexed = transcript_indexed_text(&block, None);
@@ -3284,14 +4721,100 @@ mod tests {
     }
 
     #[test]
-    fn indexed_text_cap_is_utf8_safe() {
-        let text = format!("α{}ω", "日".repeat(100));
+    fn raw_text_length_does_not_materialize_retained_content() {
+        for block in [
+            Block::Text {
+                content: "assistant".into(),
+            },
+            Block::Thinking {
+                title: Some("Reasoning".into()),
+                summary_titles: Vec::new(),
+                content: "details".into(),
+                kind: protocol::ReasoningKind::default(),
+            },
+            Block::Thinking {
+                title: None,
+                summary_titles: vec!["First".into(), "Second".into()],
+                content: "details".into(),
+                kind: protocol::ReasoningKind::default(),
+            },
+            Block::Exec {
+                command: "printf hi".into(),
+                output: "hi".into(),
+            },
+        ] {
+            assert_eq!(
+                block.raw_text_len(),
+                block.raw_text().map(|text| text.len()),
+                "raw text length differs for {block:?}"
+            );
+        }
+    }
 
-        let capped = cap_indexed_text(&text, 17);
+    fn cap_indexed_text_reference(text: &str, max_bytes: usize) -> String {
+        if text.len() <= max_bytes {
+            return text.to_string();
+        }
+        let head_end = smelt_buffer::text::snap(text, max_bytes / 2);
+        let tail_min = text.len().saturating_sub(max_bytes - head_end);
+        let tail_start = next_char_boundary_at_or_after(text, tail_min);
+        let omitted_bytes = tail_start.saturating_sub(head_end);
+        format!(
+            "{}\n… {omitted_bytes} bytes omitted from persistent search index …\n{}",
+            smelt_buffer::text::slice(text, 0..head_end),
+            smelt_buffer::text::slice(text, tail_start..text.len())
+        )
+    }
 
-        assert!(capped.starts_with("α"));
-        assert!(capped.ends_with("ω"));
-        assert!(capped.contains("bytes omitted"));
+    #[test]
+    fn bounded_indexed_text_matches_contiguous_utf8_cap() {
+        let cases = [
+            vec!["short"],
+            vec!["α", "日", "本", "語", "ω"],
+            vec!["head", "α日本語", "middle", "λ", "tail"],
+            vec!["α日本語middleλtail"],
+        ];
+        for parts in cases {
+            let full = parts.concat();
+            for max_bytes in [5, 8, 11, 17] {
+                let mut bounded = BoundedIndexedText::new(max_bytes);
+                for part in &parts {
+                    bounded.append(part);
+                }
+                assert_eq!(
+                    bounded.finish().indexed_text,
+                    cap_indexed_text_reference(&full, max_bytes),
+                    "parts={parts:?}, max_bytes={max_bytes}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_text_cap_is_utf8_safe_across_retained_chunks() {
+        let content = TranscriptContent::new();
+        content.append_owned(format!(
+            "α{}",
+            "a".repeat(TRANSCRIPT_INDEXED_TEXT_MAX_BYTES)
+        ));
+        content.append_owned("日".repeat(TRANSCRIPT_INDEXED_TEXT_MAX_BYTES));
+        content.append_owned(format!(
+            "{}ω",
+            "b".repeat(TRANSCRIPT_INDEXED_TEXT_MAX_BYTES)
+        ));
+        let source = content.snapshot();
+        let block = Block::Text { content };
+
+        let indexed = transcript_indexed_text(&block, None);
+
+        assert_eq!(
+            indexed.indexed_text,
+            cap_indexed_text_reference(&source, TRANSCRIPT_INDEXED_TEXT_MAX_BYTES)
+        );
+        assert_eq!(indexed.estimated_text_bytes, source.len() as u64);
+        assert!(indexed.indexed_text.starts_with("α"));
+        assert!(indexed.indexed_text.ends_with("ω"));
+        assert!(indexed.indexed_text.contains("bytes omitted"));
     }
 
     #[test]
@@ -3301,7 +4824,7 @@ mod tests {
                 call_id: "call-1".to_string(),
                 name: "bash".to_string(),
                 summary: protocol::StyledLines::from_plain("bash"),
-                args: std::collections::HashMap::new(),
+                args: std::collections::HashMap::new().into(),
             },
             content_hash: 42,
             origin: None,
@@ -3309,6 +4832,7 @@ mod tests {
                 "alpha λ",
                 serde_json::json!({}),
             )),
+            tool_render_revision: 17,
         };
 
         let row = transcript_block_row(7, &record).expect("block row");
@@ -3327,6 +4851,7 @@ mod tests {
             block,
             origin: Some(BlockOrigin::History(0)),
             tool_state: None,
+            tool_render_revision: 0,
         };
         let row = transcript_block_row(0, &record).unwrap();
         let stored = compact_block_rows(0, vec![row.clone()])
@@ -3360,7 +4885,7 @@ mod tests {
             call_id: "call-1".to_string(),
             name: "bash".to_string(),
             summary: protocol::StyledLines::from_plain("printf needle"),
-            args,
+            args: args.into(),
         };
         let output = format!(
             "visible head\n{}\nhidden needle\n{}\nvisible tail",
@@ -3408,7 +4933,7 @@ mod tests {
                 "Inspecting the report".to_string(),
                 "Analyzing the bug".to_string(),
             ],
-            content: "Checking files\nReviewing output".to_string(),
+            content: "Checking files\nReviewing output".to_string().into(),
             kind: protocol::ReasoningKind::Summary,
         };
         assert_eq!(
@@ -3419,7 +4944,7 @@ mod tests {
         let block = Block::Thinking {
             title: None,
             summary_titles: Vec::new(),
-            content: "Checking files\nReviewing output".to_string(),
+            content: "Checking files\nReviewing output".to_string().into(),
             kind: protocol::ReasoningKind::Raw,
         };
         assert_eq!(
@@ -3440,25 +4965,31 @@ mod tests {
     }
 
     #[test]
-    fn indexed_text_includes_edit_file_snapshot_metadata() {
+    fn indexed_text_includes_retained_edit_file_content() {
         let block = edit_file_block("old needle", "new needle");
-        let state = indexed_tool_state_with_content(
+        let mut state = indexed_tool_state_with_content(
             "edited example.rs",
-            serde_json::json!({
-                "path": "/tmp/example.rs",
-                "old_content": "fn old_snapshot() {}\n",
-                "new_content": "fn new_snapshot() {}\n",
-            }),
+            serde_json::json!({ "path": "/tmp/example.rs" }),
         );
+        state.output.as_mut().unwrap().content_fields = vec![
+            ToolOutputContentField {
+                name: "old_content".into(),
+                content: "fn old_retained() {}\n".into(),
+            },
+            ToolOutputContentField {
+                name: "new_content".into(),
+                content: "fn new_retained() {}\n".into(),
+            },
+        ];
 
         assert_eq!(
             transcript_indexed_text(&block, Some(&state)).indexed_text,
-            "edit_file\nok\nexample.rs\nedited example.rs\n1 old line, 1 new line\n/tmp/example.rs\nfn old_snapshot() {}\nfn new_snapshot() {}\n"
+            "edit_file\nok\nexample.rs\nedited example.rs\n1 old line, 1 new line\n/tmp/example.rs\nfn old_retained() {}\nfn new_retained() {}\n"
         );
     }
 
     #[test]
-    fn indexed_text_includes_edit_file_planned_strings_without_snapshot() {
+    fn indexed_text_includes_edit_file_planned_strings_without_retained_content() {
         let block = edit_file_block("alpha\nbeta", "gamma");
 
         assert_eq!(
@@ -3543,6 +5074,11 @@ mod tests {
             patches[0].operations,
             vec![TranscriptPatchOperation::Append {
                 id,
+                content_id: history
+                    .content(id, ContentChannel::Primary)
+                    .expect("primary content")
+                    .id(),
+                channel: ContentChannel::Primary,
                 byte_range: 5..11,
             }]
         );
@@ -3560,6 +5096,134 @@ mod tests {
                 TranscriptPatchOperation::Commit { id },
             ]
         );
+    }
+
+    #[test]
+    fn tool_output_append_changes_structure_only_when_attaching_the_channel() {
+        let mut history = BlockHistory::new();
+        let id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "call-1".to_string(),
+                name: "bash".to_string(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new().into(),
+            },
+            ToolState {
+                status: ToolStatus::Pending,
+                elapsed: None,
+                called_at_ms: None,
+                elapsed_active: false,
+                output: None,
+                user_message: None,
+                preview_output: None,
+            },
+        );
+        let before_attach = history.sidecar_hash(id);
+        let revision = history.patch_revision();
+
+        assert_eq!(
+            history.append_live_output_line(id, ContentChannel::ToolOutput, "hello".to_string(),),
+            Some(0..5)
+        );
+        let after_attach = history.sidecar_hash(id);
+        assert_ne!(after_attach, before_attach);
+
+        assert_eq!(
+            history.append_live_output_line(id, ContentChannel::ToolOutput, "world".to_string(),),
+            Some(5..11)
+        );
+        assert_eq!(history.sidecar_hash(id), after_attach);
+        let content = history
+            .content(id, ContentChannel::ToolOutput)
+            .expect("tool output");
+        assert_eq!(content.snapshot(), "hello\nworld");
+        let content_id = content.id();
+        assert_eq!(
+            history
+                .patches_since(revision)
+                .expect("tool output patches")
+                .flat_map(|patch| patch.operations.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                TranscriptPatchOperation::Append {
+                    id,
+                    content_id,
+                    channel: ContentChannel::ToolOutput,
+                    byte_range: 0..5,
+                },
+                TranscriptPatchOperation::Append {
+                    id,
+                    content_id,
+                    channel: ContentChannel::ToolOutput,
+                    byte_range: 5..11,
+                },
+            ]
+        );
+
+        let revision = history.patch_revision();
+        assert_eq!(
+            history.append_live_output_line(id, ContentChannel::ToolOutput, String::new()),
+            None
+        );
+        assert_eq!(history.patch_revision(), revision);
+    }
+
+    #[test]
+    fn exec_output_appends_owned_utf8_lines_to_the_stable_content_channel() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Exec {
+            command: "printf".to_string(),
+            output: TranscriptContent::new(),
+        });
+        let content_id = history
+            .content(id, ContentChannel::ExecOutput)
+            .expect("exec output")
+            .id();
+        let revision = history.patch_revision();
+
+        assert_eq!(
+            history.append_live_output_line(id, ContentChannel::ExecOutput, "hello".to_string(),),
+            Some(0..5)
+        );
+        assert_eq!(
+            history.append_live_output_line(id, ContentChannel::ExecOutput, "β".to_string()),
+            Some(5..8)
+        );
+        let content = history
+            .content(id, ContentChannel::ExecOutput)
+            .expect("exec output");
+        assert_eq!(content.id(), content_id);
+        assert_eq!(content.snapshot(), "hello\nβ");
+        assert_eq!(
+            history
+                .patches_since(revision)
+                .expect("exec output patches")
+                .flat_map(|patch| patch.operations.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                TranscriptPatchOperation::Append {
+                    id,
+                    content_id,
+                    channel: ContentChannel::ExecOutput,
+                    byte_range: 0..5,
+                },
+                TranscriptPatchOperation::Append {
+                    id,
+                    content_id,
+                    channel: ContentChannel::ExecOutput,
+                    byte_range: 5..8,
+                },
+            ]
+        );
+
+        let revision = history.patch_revision();
+        assert_eq!(
+            history.append_live_output_line(id, ContentChannel::ExecOutput, String::new()),
+            None
+        );
+        assert_eq!(history.patch_revision(), revision);
     }
 
     #[test]
@@ -3604,6 +5268,11 @@ mod tests {
             statuses: HashMap<BlockId, Status>,
         }
 
+        fn detached_block(block: &Block) -> Block {
+            serde_json::from_value(serde_json::to_value(block).expect("serialize block"))
+                .expect("deserialize block")
+        }
+
         fn apply_since(source: &BlockHistory, revision: &mut u64, replica: &mut Replica) {
             for patch in source
                 .patches_since(*revision)
@@ -3613,30 +5282,37 @@ mod tests {
                     match operation {
                         TranscriptPatchOperation::Insert { id, index } => {
                             replica.order.insert(*index, *id);
-                            replica
-                                .blocks
-                                .insert(*id, source.block(*id).expect("inserted block").clone());
+                            replica.blocks.insert(
+                                *id,
+                                detached_block(source.block(*id).expect("inserted block")),
+                            );
                         }
-                        TranscriptPatchOperation::Append { id, byte_range } => {
-                            let source_text = source
-                                .block(*id)
-                                .and_then(Block::raw_text)
-                                .expect("appended text block");
-                            let suffix = source_text
-                                .get(byte_range.clone())
-                                .expect("append patch is on UTF-8 boundaries");
-                            let replica_text = match replica.blocks.get_mut(id) {
+                        TranscriptPatchOperation::Append {
+                            id,
+                            content_id,
+                            channel,
+                            byte_range,
+                        } => {
+                            assert_eq!(*channel, ContentChannel::Primary);
+                            let source_content = source
+                                .content(*id, *channel)
+                                .expect("appended content channel");
+                            assert_eq!(source_content.id(), *content_id);
+                            let suffix =
+                                source_content.read().slice(byte_range.clone()).into_owned();
+                            let replica_content = match replica.blocks.get_mut(id) {
                                 Some(Block::Text { content })
                                 | Some(Block::Thinking { content, .. }) => content,
                                 _ => panic!("replica append target is text"),
                             };
-                            assert_eq!(replica_text.len(), byte_range.start);
-                            replica_text.push_str(suffix);
+                            assert_eq!(replica_content.len(), byte_range.start);
+                            replica_content.append_owned(suffix);
                         }
                         TranscriptPatchOperation::Replace { id } => {
-                            replica
-                                .blocks
-                                .insert(*id, source.block(*id).expect("replaced block").clone());
+                            replica.blocks.insert(
+                                *id,
+                                detached_block(source.block(*id).expect("replaced block")),
+                            );
                         }
                         TranscriptPatchOperation::SetStatus { id } => {
                             replica
@@ -3649,6 +5325,7 @@ mod tests {
                             replica.statuses.remove(id);
                         }
                         TranscriptPatchOperation::SetSideState { .. }
+                        | TranscriptPatchOperation::SetAnimationState { .. }
                         | TranscriptPatchOperation::Commit { .. } => {}
                         TranscriptPatchOperation::Reset => {
                             replica.order.clone_from(&source.order);
@@ -3656,7 +5333,7 @@ mod tests {
                                 .order
                                 .iter()
                                 .filter_map(|id| {
-                                    source.block(*id).cloned().map(|block| (*id, block))
+                                    source.block(*id).map(|block| (*id, detached_block(block)))
                                 })
                                 .collect();
                         }
@@ -3701,7 +5378,7 @@ mod tests {
     fn transcript_patch_compaction_preserves_streaming_suffix_after_structural_prefix() {
         let mut history = BlockHistory::new();
         let id = history.push(Block::Text {
-            content: String::new(),
+            content: String::new().into(),
         });
         let scene_revision = history.patch_revision();
         let mut mid_stream_revision = scene_revision;
@@ -3759,6 +5436,62 @@ mod tests {
             history.patches_since(scene_revision - 1).is_some(),
             "the structural-prefix reset remains available for older revisions"
         );
+    }
+
+    #[test]
+    fn animation_patches_coalesce_and_yield_to_presentation_state() {
+        let presentation_id = BlockId::new(1);
+        let animation_id = BlockId::new(2);
+        let patches = [
+            TranscriptPatch {
+                revision: 1,
+                operations: vec![TranscriptPatchOperation::SetAnimationState {
+                    id: presentation_id,
+                }],
+                navigation_changed: false,
+                search_changed: false,
+                persistable_changed: false,
+            },
+            TranscriptPatch {
+                revision: 2,
+                operations: vec![
+                    TranscriptPatchOperation::SetAnimationState {
+                        id: presentation_id,
+                    },
+                    TranscriptPatchOperation::SetAnimationState { id: animation_id },
+                ],
+                navigation_changed: false,
+                search_changed: false,
+                persistable_changed: false,
+            },
+            TranscriptPatch {
+                revision: 3,
+                operations: vec![
+                    TranscriptPatchOperation::SetAnimationState { id: animation_id },
+                    TranscriptPatchOperation::SetSideState {
+                        id: presentation_id,
+                    },
+                ],
+                navigation_changed: false,
+                search_changed: true,
+                persistable_changed: true,
+            },
+        ];
+
+        let compacted = TranscriptPatch::coalesce(3, patches.iter());
+
+        assert_eq!(
+            compacted.operations,
+            vec![
+                TranscriptPatchOperation::SetSideState {
+                    id: presentation_id,
+                },
+                TranscriptPatchOperation::SetAnimationState { id: animation_id },
+            ]
+        );
+        assert!(!compacted.navigation_changed);
+        assert!(compacted.search_changed);
+        assert!(compacted.persistable_changed);
     }
 
     #[test]
@@ -3831,11 +5564,12 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "read_file".into(),
                 summary: "read".into(),
-                args: HashMap::from([("path".into(), serde_json::json!("/tmp/a"))]),
+                args: HashMap::from([("path".into(), serde_json::json!("/tmp/a"))]).into(),
             },
             content_hash: 0,
             origin: Some(BlockOrigin::History(0)),
             tool_state: None,
+            tool_render_revision: 0,
         };
         let history = BlockHistory::from_block_records(vec![record]);
         let id = history.order[0];
@@ -3865,6 +5599,38 @@ mod tests {
     }
 
     #[test]
+    fn hydration_moves_large_block_payload_without_cloning() {
+        let mut content = String::with_capacity(2 * 1024 * 1024);
+        content.push_str("retained code");
+        let source_ptr = content.as_ptr();
+        let id = BlockId::new(17);
+        let record = TranscriptBlockRecord {
+            block: Block::CodeLine {
+                content,
+                lang: "text".into(),
+            },
+            content_hash: 0,
+            origin: Some(BlockOrigin::History(0)),
+            tool_state: None,
+            tool_render_revision: 0,
+        };
+        let (_, stored) = StoredBlockRef::from_record(
+            0,
+            id,
+            &record,
+            "retained code".len() as u64,
+            "retained code".into(),
+        );
+        let mut history = BlockHistory::new();
+
+        assert!(history.install_hydrated_record(id, stored, record));
+        let Some(Block::CodeLine { content, .. }) = history.block(id) else {
+            panic!("hydrated code block");
+        };
+        assert_eq!(content.as_ptr(), source_ptr);
+    }
+
+    #[test]
     fn explicit_hydration_and_eviction_preserve_exact_record() {
         let state = ToolState {
             status: ToolStatus::Ok,
@@ -3875,6 +5641,7 @@ mod tests {
                 content: "hi".into(),
                 is_error: false,
                 metadata: Some(serde_json::json!({"small": true})),
+                content_fields: Vec::new(),
             })),
             user_message: None,
             preview_output: None,
@@ -3884,11 +5651,12 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "bash".into(),
                 summary: "run".into(),
-                args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
+                args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]).into(),
             },
             content_hash: 0,
             origin: Some(BlockOrigin::History(1)),
             tool_state: Some(state.clone()),
+            tool_render_revision: 23,
         };
         let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         assert_eq!(history.block_metadata_retained_bytes(), 0);
@@ -3914,7 +5682,14 @@ mod tests {
             .tool_state(id)
             .and_then(|tool_state| tool_state.output.as_ref())
             .expect("hydrated tool output");
-        assert_eq!(output.content, "hi");
+        assert_eq!(output.content.snapshot(), "hi");
+        let output_id = output.content.id();
+        assert_eq!(
+            history
+                .content_by_id(output_id)
+                .map(TranscriptContent::snapshot),
+            Some("hi".into())
+        );
         assert_eq!(
             history.tool_state(id).and_then(|state| state.called_at_ms),
             Some(1_742_573_823_000)
@@ -3929,6 +5704,7 @@ mod tests {
         assert_eq!(history.hydrated_retained_bytes(), 0);
         assert_eq!(history.tool_status(id), Some(ToolStatus::Ok));
         assert!(history.tool_state(id).is_none());
+        assert!(history.content_by_id(output_id).is_none());
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(1)));
     }
 
@@ -3941,6 +5717,7 @@ mod tests {
             content_hash: 0,
             origin: None,
             tool_state: None,
+            tool_render_revision: 0,
         };
         let mut stored_history = BlockHistory::from_block_records(vec![record.clone()]);
         let stored_id = stored_history.order[0];
@@ -3982,6 +5759,7 @@ mod tests {
             content_hash: 0,
             origin: Some(BlockOrigin::History(0)),
             tool_state: None,
+            tool_render_revision: 0,
         };
         let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         let id = history.order[0];
@@ -4014,6 +5792,7 @@ mod tests {
                 content: "before".into(),
                 is_error: false,
                 metadata: None,
+                content_fields: Vec::new(),
             })),
             user_message: None,
             preview_output: None,
@@ -4023,20 +5802,31 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "bash".into(),
                 summary: "run".into(),
-                args: HashMap::new(),
+                args: HashMap::new().into(),
             },
             content_hash: 0,
             origin: Some(BlockOrigin::History(0)),
             tool_state: Some(state),
+            tool_render_revision: 29,
         };
         let mut history = BlockHistory::from_block_records(vec![record.clone()]);
         let id = history.order[0];
         let stored = history.stored_ref(id).cloned().expect("stored ref");
         assert!(history.install_hydrated_record(id, stored, record));
 
-        assert!(history.update_tool_state(id, |tool_state| {
-            tool_state.output.as_mut().unwrap().content = "after".into();
-        }));
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::Finish {
+                status: ToolStatus::Ok,
+                output: Some(Box::new(ToolOutput {
+                    content: "after".into(),
+                    is_error: false,
+                    metadata: None,
+                    content_fields: Vec::new(),
+                })),
+                elapsed: None,
+            },
+        ));
 
         assert!(history.is_live(id));
         assert_eq!(history.hydrated_block_count(), 0);
@@ -4047,8 +5837,8 @@ mod tests {
             history
                 .tool_state(id)
                 .and_then(|tool_state| tool_state.output.as_ref())
-                .map(|output| output.content.as_str()),
-            Some("after")
+                .map(|output| output.content.snapshot()),
+            Some("before".to_string())
         );
         assert!(history.live_tool_state_retained_bytes() > 0);
         assert_eq!(history.hydrated_tool_state_retained_bytes(), 0);
@@ -4060,15 +5850,10 @@ mod tests {
         history.push(Block::Text {
             content: "before".into(),
         });
-        history.push(Block::ToolDraft {
-            stream_id: "stream-1".into(),
-            call_id: Some("call-1".into()),
-            name: "bash".into(),
-            summary: protocol::StyledLines::from_plain("echo hi"),
-            args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
-            raw_arguments: "{\"command\":\"echo hi\"}".into(),
-            finished: false,
-        });
+        let mut draft = ToolDraft::new("stream-1".into(), Some("call-1".into()), "bash".into());
+        draft.summary = protocol::StyledLines::from_plain("echo hi");
+        draft.append("{\"command\":\"echo hi\"}".into());
+        history.push(Block::ToolDraft(draft));
         history.push(Block::Text {
             content: "after".into(),
         });
@@ -4078,7 +5863,7 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert!(records
             .iter()
-            .all(|record| !matches!(record.block, Block::ToolDraft { .. })));
+            .all(|record| !matches!(record.block, Block::ToolDraft(_))));
         assert_eq!(records[0].block.raw_text().as_deref(), Some("before"));
         assert_eq!(records[1].block.raw_text().as_deref(), Some("after"));
     }
@@ -4112,18 +5897,12 @@ mod tests {
         history.push(Block::Text {
             content: "before".into(),
         });
-        let draft = history.push_hydrated_block_with_origin(
-            Block::ToolDraft {
-                stream_id: "stream-1".into(),
-                call_id: Some("call-1".into()),
-                name: "bash".into(),
-                summary: protocol::StyledLines::from_plain("echo hi"),
-                args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
-                raw_arguments: "{\"command\":\"echo hi\"}".into(),
-                finished: false,
-            },
-            BlockOrigin::History(1),
-        );
+        let mut tool_draft =
+            ToolDraft::new("stream-1".into(), Some("call-1".into()), "bash".into());
+        tool_draft.summary = protocol::StyledLines::from_plain("echo hi");
+        tool_draft.append("{\"command\":\"echo hi\"}".into());
+        let draft = history
+            .push_hydrated_block_with_origin(Block::ToolDraft(tool_draft), BlockOrigin::History(1));
         history.push(Block::CompactionPreview {
             summary: "streaming summary".into(),
         });
@@ -4235,7 +6014,7 @@ mod tests {
             call_id: "c1".into(),
             name: "bash".into(),
             summary: "ls".into(),
-            args: HashMap::new(),
+            args: HashMap::new().into(),
         }
         .raw_text()
         .is_none());
@@ -4266,60 +6045,132 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_hash_includes_raw_timing_facts() {
-        let mut a = pending_state();
-        a.elapsed = Some(std::time::Duration::from_millis(1_000));
-        let mut b = a.clone();
-        b.elapsed = Some(std::time::Duration::from_millis(1_100));
-        assert_ne!(a.display_hash(), b.display_hash());
+    fn tool_presentation_revision_ignores_elapsed_and_persists() {
+        let mut state = pending_state();
+        state.output = Some(Box::new(ToolOutput {
+            content: "visible output".repeat(4_096).into(),
+            is_error: false,
+            metadata: Some(serde_json::json!({ "payload": "metadata".repeat(4_096) })),
+            content_fields: Vec::new(),
+        }));
+        let mut history = BlockHistory::new();
+        let id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new().into(),
+            },
+            state,
+        );
+        let initial_revision = history.sidecar_hash(id);
+        history.clear_record_dirty();
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::SyncElapsed(std::time::Duration::from_millis(1_100)),
+        ));
+        assert_eq!(history.sidecar_hash(id), initial_revision);
+        assert_eq!(history.record_dirty_from(), None);
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::SetElapsedActive {
+                elapsed: std::time::Duration::from_millis(1_100),
+                active: true,
+            },
+        ));
+        let updated_revision = history.sidecar_hash(id);
+        assert_ne!(updated_revision, initial_revision);
 
-        b = a.clone();
-        b.called_at_ms = Some(1_700_000_000_000);
-        assert_ne!(a.display_hash(), b.display_hash());
+        let record = history
+            .block_record_with_id(id)
+            .expect("persisted tool record")
+            .record;
+        assert_eq!(record.tool_render_revision, updated_revision);
+        let row = transcript_block_row_with_block_idx(0, id.get(), &record).unwrap();
+        let loaded = TranscriptBlockRecordWithId::try_from(row).unwrap();
+        assert_eq!(loaded.record.tool_render_revision, updated_revision);
+        assert_eq!(loaded.record.tool_state, record.tool_state);
 
-        b = a.clone();
-        b.elapsed_active = true;
-        assert_ne!(a.display_hash(), b.display_hash());
-
-        b.status = ToolStatus::Ok;
-        assert_ne!(a.display_hash(), b.display_hash());
+        let loaded_record = loaded.record.clone();
+        let mut restored = BlockHistory::from_block_records_with_ids(vec![loaded]);
+        assert_eq!(restored.sidecar_hash(id), updated_revision);
+        let stored = Arc::clone(restored.stored_ref(id).expect("stored tool projection"));
+        assert!(restored.install_hydrated_record(id, Arc::clone(&stored), loaded_record.clone(),));
+        assert_eq!(restored.sidecar_hash(id), updated_revision);
+        assert!(restored.promote_hydrated(id));
+        assert_eq!(restored.sidecar_hash(id), updated_revision);
+        assert!(restored.dematerialize_live(id, Arc::clone(&stored)) > 0);
+        assert_eq!(restored.sidecar_hash(id), updated_revision);
+        assert!(restored.install_hydrated_record(id, Arc::clone(&stored), loaded_record.clone(),));
+        assert!(restored.evict_hydrated(id) > 0);
+        assert_eq!(restored.sidecar_hash(id), updated_revision);
+        assert!(restored.install_hydrated_record(id, stored, loaded_record));
+        assert!(restored.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::SetUserMessage("still running".into()),
+        ));
+        assert!(restored.sidecar_hash(id) > updated_revision);
     }
 
     #[test]
-    fn tool_display_hash_includes_preview_output() {
-        let a = pending_state();
-        let mut b = pending_state();
-        b.preview_output = Some(Box::new(ToolOutput {
-            content: String::new(),
-            is_error: false,
-            metadata: Some(serde_json::json!({ "old_content": "before", "new_content": "after" })),
-        }));
+    fn tool_presentation_revision_tracks_structural_state_not_payload_appends() {
+        let mut history = BlockHistory::new();
+        let id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new().into(),
+            },
+            pending_state(),
+        );
 
-        assert_ne!(a.display_hash(), b.display_hash());
-    }
+        let initial_revision = history.sidecar_hash(id);
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::SyncElapsed(std::time::Duration::from_secs(1)),
+        ));
+        assert_eq!(history.sidecar_hash(id), initial_revision);
 
-    #[test]
-    fn tool_display_hash_includes_display_metadata() {
-        let mut a = pending_state();
-        a.status = ToolStatus::Ok;
-        a.output = Some(Box::new(ToolOutput {
-            content: "visible output".into(),
-            is_error: false,
-            metadata: Some(serde_json::json!({ "old_content": "a".repeat(32 * 1024) })),
-        }));
-        let mut b = a.clone();
-        b.output.as_mut().unwrap().metadata = Some(serde_json::json!({
-            "old_content": "b".repeat(32 * 1024),
-            "new_content": "c".repeat(32 * 1024),
-        }));
+        assert!(history
+            .append_live_output_line(id, ContentChannel::ToolOutput, "first".into())
+            .is_some());
+        let attached_revision = history.sidecar_hash(id);
+        assert!(attached_revision > initial_revision);
+        assert!(history
+            .append_live_output_line(id, ContentChannel::ToolOutput, "second".into())
+            .is_some());
+        assert_eq!(history.sidecar_hash(id), attached_revision);
 
-        assert_ne!(a.display_hash(), b.display_hash());
+        assert!(history
+            .apply_tool_state_mutation(id, ToolStateMutation::SetUserMessage("working".into()),));
+        let message_revision = history.sidecar_hash(id);
+        assert!(message_revision > attached_revision);
 
-        b.output.as_mut().unwrap().metadata = a.output.as_ref().unwrap().metadata.clone();
-        assert_eq!(a.display_hash(), b.display_hash());
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::SetStatus {
+                status: ToolStatus::Confirm,
+                elapsed: Some(std::time::Duration::from_secs(2)),
+            },
+        ));
+        let status_revision = history.sidecar_hash(id);
+        assert!(status_revision > message_revision);
 
-        b.output.as_mut().unwrap().content.push_str(" changed");
-        assert_ne!(a.display_hash(), b.display_hash());
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::Finish {
+                status: ToolStatus::Err,
+                output: Some(Box::new(ToolOutput {
+                    content: "replacement".into(),
+                    is_error: true,
+                    metadata: Some(serde_json::json!({ "result": "changed" })),
+                    content_fields: Vec::new(),
+                })),
+                elapsed: Some(std::time::Duration::from_secs(3)),
+            },
+        ));
+        assert!(history.sidecar_hash(id) > status_revision);
     }
 
     #[test]
@@ -4439,6 +6290,7 @@ mod tests {
             content_hash: 0,
             origin: None,
             tool_state: None,
+            tool_render_revision: 0,
         };
         let mut history = BlockHistory::from_block_records(vec![record]);
         let id = history.order[0];
@@ -4577,7 +6429,7 @@ mod tests {
                 call_id: "tc1".into(),
                 name: "x".into(),
                 summary: "s".into(),
-                args: HashMap::new(),
+                args: HashMap::new().into(),
             },
             pending_state(),
         );
@@ -4673,7 +6525,7 @@ mod tests {
                 call_id: "tc1".into(),
                 name: "x".into(),
                 summary: "s".into(),
-                args: HashMap::new(),
+                args: HashMap::new().into(),
             },
             pending_state(),
         );
@@ -4755,6 +6607,7 @@ mod tests {
                     content_hash: 0,
                     origin: Some(BlockOrigin::History(index)),
                     tool_state: None,
+                    tool_render_revision: 0,
                 })
                 .collect(),
         );
@@ -4822,7 +6675,7 @@ mod tests {
             call_id: call_id.into(),
             name: "x".into(),
             summary: "s".into(),
-            args: HashMap::new(),
+            args: HashMap::new().into(),
         }
     }
     fn exec() -> Block {

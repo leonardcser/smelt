@@ -114,8 +114,9 @@ pub struct LuaToolDef {
     /// `preview(args) -> smelt.layout` - pre-execute preview render. The
     /// confirm dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
-    /// `preview_output(args) -> { content, is_error?, metadata? }|nil` - immutable
-    /// pending transcript output derived from final streamed arguments before execution.
+    /// `preview_output(args) -> { content, is_error?, metadata?, display_content? }|nil` -
+    /// immutable pending transcript output derived from final streamed arguments before execution.
+    /// Growing display payloads belong in `display_content`, not JSON metadata.
     pub preview_output: Option<mlua::Function>,
     /// `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort
     /// renderer for streamed partial arguments in the transcript.
@@ -451,20 +452,18 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             let invocation_id = crate::lua::current_tool_invocation()
                 .map(|invocation| invocation.invocation_id)
                 .ok_or_else(|| mlua::Error::external("tools.resolve: no active tool invocation"))?;
-            let content: String = result.get("content").unwrap_or_default();
-            let is_error: bool = result.get("is_error").unwrap_or(false);
-            let metadata = result
-                .get::<mlua::Value>("metadata")
-                .ok()
-                .and_then(|v| crate::lua::lua_to_serde::<serde_json::Value>(lua, &v));
+            let result = crate::lua::tool_result_from_lua_table(lua, &result)
+                .map_err(|error| mlua::Error::external(format!("tools.resolve: {error}")))?;
             crate::host::with_core(|core| {
                 core.engine.send(protocol::UiCommand::ToolResult {
                     request_id,
                     invocation_id,
                     call_id,
-                    content,
-                    is_error,
-                    metadata,
+                    content: result.content,
+                    is_error: result.is_error,
+                    metadata: result.metadata,
+                    display_content: result.display_content,
+                    attachment: result.attachment,
                 })
             });
             Ok(())

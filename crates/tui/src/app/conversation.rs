@@ -1,10 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::{
-    agent::TurnLifecycle,
-    drafts::{ToolDraftController, ToolDraftEvent, ToolDraftSnapshot},
-    session_document::TuiSessionDocument,
-    transcript::ResumePreviewCache,
+    agent::TurnLifecycle, session_document::TuiSessionDocument, transcript::ResumePreviewCache,
     CommittedTranscriptView, SessionAccess, SessionPersistence, SharedSessionState,
 };
 
@@ -19,6 +16,7 @@ pub(crate) struct PersistenceReport {
 pub(crate) enum SaveStatus {
     SkippedReadOnly,
     Blocked,
+    DeferredHydration,
     Unchanged,
     DurableEphemeral,
     Submitted,
@@ -40,7 +38,6 @@ pub(crate) struct ConversationRuntime {
     /// Earliest canonical suffix whose transcript projection must be rebuilt
     /// after live stream-parser blocks finish.
     pending_transcript_history_rebuild_from: Option<usize>,
-    draft_tools: ToolDraftController,
     resume_preview_cache: ResumePreviewCache,
     shared_session: Arc<Mutex<Option<SharedSessionState>>>,
     turn: TurnLifecycle,
@@ -70,7 +67,6 @@ impl ConversationRuntime {
             committed_transcript_view: None,
             parser: smelt_core::content::stream_parser::StreamParser::new(),
             pending_transcript_history_rebuild_from: None,
-            draft_tools: ToolDraftController::default(),
             resume_preview_cache,
             shared_session,
             turn,
@@ -110,6 +106,55 @@ impl ConversationRuntime {
         self.parser.active_tool_block_id(invocation_id)
     }
 
+    pub(crate) fn active_tool_output_content(
+        &self,
+        invocation_id: protocol::InvocationId,
+    ) -> Option<smelt_core::transcript_content::TranscriptContent> {
+        let block_id = self.parser.active_tool_block_id(invocation_id)?;
+        self.document
+            .transcript
+            .history()
+            .tool_state(block_id)?
+            .output
+            .as_ref()
+            .map(|output| output.content.clone())
+    }
+
+    pub(crate) fn defer_last_reasoning_summary_hydration(
+        &mut self,
+    ) -> Option<smelt_core::transcript_model::BlockId> {
+        self.document
+            .transcript
+            .defer_last_reasoning_summary_hydration()
+    }
+
+    pub(crate) fn deferred_engine_block_is_ready(
+        &self,
+        id: smelt_core::transcript_model::BlockId,
+    ) -> bool {
+        self.document.transcript.deferred_engine_block_is_ready(id)
+    }
+
+    pub(crate) fn deferred_engine_block_failed(
+        &self,
+        id: smelt_core::transcript_model::BlockId,
+    ) -> bool {
+        self.document.transcript.deferred_engine_block_failed(id)
+    }
+
+    pub(crate) fn release_deferred_engine_block(
+        &mut self,
+        id: smelt_core::transcript_model::BlockId,
+    ) {
+        self.document.transcript.release_deferred_engine_block(id);
+    }
+
+    pub(crate) fn release_all_deferred_engine_blocks(&mut self) {
+        self.document
+            .transcript
+            .release_all_deferred_engine_blocks();
+    }
+
     pub(crate) fn promote_last_reasoning_summary(
         &mut self,
     ) -> Option<super::transcript::ReasoningSummarySnapshot> {
@@ -120,6 +165,22 @@ impl ConversationRuntime {
         &self,
     ) -> Option<smelt_core::transcript_model::BlockId> {
         self.document.transcript.compaction_preview_id()
+    }
+
+    pub(super) fn transcript_rewind_order_index_for_block(
+        &self,
+        block_id: smelt_core::transcript_model::BlockId,
+    ) -> Option<usize> {
+        self.document
+            .transcript
+            .rewind_order_index_for_block(block_id)
+    }
+
+    pub(super) fn set_transcript_search_hydration_pin(
+        &mut self,
+        block_id: Option<smelt_core::transcript_model::BlockId>,
+    ) {
+        self.document.transcript.set_search_hydration_pin(block_id);
     }
 
     pub(crate) fn activate_transcript_search_record_window(
@@ -353,6 +414,17 @@ impl ConversationRuntime {
         f(&mut document)
     }
 
+    pub(super) fn trace_retained_transcript_frame(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+    ) {
+        self.document
+            .transcript
+            .trace_retained_view_frame(lua, width, viewport_rows);
+    }
+
     pub(super) fn prepare_transcript_window(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -371,6 +443,76 @@ impl ConversationRuntime {
             render_now,
             search_projection,
         );
+    }
+
+    pub(super) fn transcript_hydration_context_id(&self) -> u64 {
+        self.document.transcript.hydration_context_id()
+    }
+
+    pub(super) fn transcript_hydration_is_pending(&self) -> bool {
+        self.document.transcript.hydration_is_pending()
+    }
+
+    pub(super) fn transcript_record_hydration_failed(&self) -> bool {
+        self.document.transcript.record_hydration_failed()
+    }
+
+    pub(super) fn take_pending_transcript_hydration_request(
+        &mut self,
+    ) -> Option<super::transcript_hydration::TranscriptHydrationRequest> {
+        self.document.transcript.take_pending_hydration_request()
+    }
+
+    pub(super) fn install_transcript_hydration_result(
+        &mut self,
+        result: super::transcript_hydration::TranscriptHydrationWorkerResult,
+    ) -> bool {
+        self.document.transcript.install_hydration_result(result)
+    }
+
+    pub(super) fn loaded_transcript_block_ids(&self) -> Vec<smelt_core::transcript_model::BlockId> {
+        self.document.transcript.history().order.clone()
+    }
+
+    pub(super) fn pin_deferred_transcript_operation(
+        &mut self,
+        ids: &[smelt_core::transcript_model::BlockId],
+    ) {
+        self.document.transcript.pin_deferred_operation_blocks(ids);
+    }
+
+    pub(super) fn deferred_transcript_operation_is_ready(
+        &self,
+        ids: &[smelt_core::transcript_model::BlockId],
+    ) -> bool {
+        self.document
+            .transcript
+            .deferred_operation_blocks_are_ready(ids)
+    }
+
+    pub(super) fn deferred_transcript_operation_failed(
+        &self,
+        ids: &[smelt_core::transcript_model::BlockId],
+    ) -> bool {
+        self.document
+            .transcript
+            .deferred_operation_blocks_failed(ids)
+    }
+
+    pub(super) fn request_deferred_transcript_operation(
+        &mut self,
+        ids: &[smelt_core::transcript_model::BlockId],
+    ) {
+        self.document
+            .transcript
+            .request_deferred_operation_blocks(ids);
+    }
+
+    pub(super) fn unpin_transcript_operation(
+        &mut self,
+        ids: &[smelt_core::transcript_model::BlockId],
+    ) {
+        self.document.transcript.unpin_operation_blocks(ids);
     }
 
     pub(crate) fn transcript_trace_anchor_at_row(
@@ -428,6 +570,10 @@ impl ConversationRuntime {
         );
     }
 
+    pub(crate) fn defer_transcript_projection_until_hydrated(&mut self) {
+        self.document.transcript.defer_projection_until_hydrated();
+    }
+
     pub(crate) fn set_next_transcript_scroll_trace_input(
         &mut self,
         input: super::transcript_scroll_trace::TranscriptScrollTraceRenderInput,
@@ -461,7 +607,7 @@ impl ConversationRuntime {
             .replace_loaded_transcript(transcript);
     }
 
-    #[cfg(all(test, feature = "transcript-bench"))]
+    #[cfg(feature = "transcript-bench")]
     pub(crate) fn ensure_transcript_blocks_hydrated_for_harness(
         &mut self,
         ids: &[smelt_core::transcript_model::BlockId],
@@ -616,6 +762,7 @@ impl ConversationRuntime {
     ) -> Result<Option<super::session_document::PreparedSessionBatch>, String> {
         self.document
             .prepare_fork_save(forked, metadata, &self.session.history)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn refresh_live_session_header(&mut self) {
@@ -777,7 +924,7 @@ impl ConversationRuntime {
         self.apply_history_mutation(
             super::session_document::HistoryMutation::CommitRequestItem {
                 item,
-                block,
+                block: block.map(Box::new),
                 first_user_message,
             },
         )
@@ -1094,15 +1241,75 @@ impl ConversationRuntime {
         });
     }
 
-    pub(crate) fn append_tool_output(
+    pub(super) fn append_tool_output_line(
         &mut self,
         invocation_id: protocol::InvocationId,
-        chunk: String,
+        line: String,
+    ) -> Option<super::transcript_work::PendingToolOutputAppend> {
+        let block_id = self.parser.active_tool_block_id(invocation_id)?;
+        if line.len() <= super::transcript_work::STREAM_CONTENT_SLICE_BYTES {
+            self.apply_stream_mutation(super::session_document::StreamMutation::AppendToolOutput {
+                invocation_id,
+                line,
+            });
+            return None;
+        }
+
+        let source = Arc::new(line);
+        let end = super::transcript_work::stream_content_slice_end(
+            &source,
+            0,
+            super::transcript_work::STREAM_CONTENT_SLICE_BYTES,
+        );
+        self.append_tool_output_slice(
+            block_id,
+            smelt_core::transcript_content::SharedContentSlice::new(Arc::clone(&source), 0..end),
+            true,
+        );
+        (end < source.len()).then(|| {
+            super::transcript_work::PendingToolOutputAppend::new(
+                block_id,
+                invocation_id,
+                source,
+                end,
+                false,
+            )
+        })
+    }
+
+    pub(super) fn advance_tool_output_append(
+        &mut self,
+        mut pending: super::transcript_work::PendingToolOutputAppend,
+    ) -> Option<super::transcript_work::PendingToolOutputAppend> {
+        let start = pending.offset;
+        let end = super::transcript_work::stream_content_slice_end(
+            &pending.source,
+            start,
+            super::transcript_work::STREAM_CONTENT_SLICE_BYTES,
+        );
+        let chunk = smelt_core::transcript_content::SharedContentSlice::new(
+            Arc::clone(&pending.source),
+            start..end,
+        );
+        let line_start = std::mem::take(&mut pending.line_start);
+        pending.offset = end;
+        self.append_tool_output_slice(pending.block_id, chunk, line_start);
+        (end < pending.source.len()).then_some(pending)
+    }
+
+    fn append_tool_output_slice(
+        &mut self,
+        block_id: smelt_core::transcript_model::BlockId,
+        chunk: smelt_core::transcript_content::SharedContentSlice,
+        line_start: bool,
     ) {
-        self.apply_stream_mutation(super::session_document::StreamMutation::AppendToolOutput {
-            invocation_id,
-            chunk,
-        });
+        self.apply_stream_mutation(
+            super::session_document::StreamMutation::AppendToolOutputSlice {
+                block_id,
+                chunk,
+                line_start,
+            },
+        );
     }
 
     pub(crate) fn set_tool_status(
@@ -1170,13 +1377,83 @@ impl ConversationRuntime {
         self.apply_stream_mutation(super::session_document::StreamMutation::ClearToolDrafts);
     }
 
-    pub(crate) fn upsert_tool_draft(
+    pub(crate) fn start_tool_draft(
         &mut self,
-        update: smelt_core::content::stream_parser::ToolDraftUpdate,
+        stream_id: String,
+        call_id: Option<String>,
+        name: Option<String>,
+    ) -> Option<smelt_core::transcript_model::BlockId> {
+        self.apply_stream_mutation(super::session_document::StreamMutation::StartToolDraft {
+            stream_id,
+            call_id,
+            name,
+        })
+        .block_id
+    }
+
+    pub(crate) fn append_tool_draft(
+        &mut self,
+        stream_id: String,
+        call_id: Option<String>,
+        name: Option<String>,
+        delta: String,
+    ) -> Option<(smelt_core::transcript_model::BlockId, bool)> {
+        let change =
+            self.apply_stream_mutation(super::session_document::StreamMutation::AppendToolDraft {
+                stream_id,
+                call_id,
+                name,
+                delta,
+            });
+        change
+            .block_id
+            .map(|block_id| (block_id, change.presentation_changed))
+    }
+
+    pub(crate) fn finish_tool_draft(
+        &mut self,
+        stream_id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    ) -> Option<smelt_core::transcript_model::BlockId> {
+        self.apply_stream_mutation(super::session_document::StreamMutation::FinishToolDraft {
+            stream_id,
+            call_id,
+            name,
+            arguments,
+        })
+        .block_id
+    }
+
+    pub(crate) fn set_tool_draft_summary(
+        &mut self,
+        block_id: smelt_core::transcript_model::BlockId,
+        summary: protocol::StyledLines,
     ) {
-        self.apply_stream_mutation(super::session_document::StreamMutation::UpsertToolDraft {
-            update,
-        });
+        self.apply_stream_mutation(
+            super::session_document::StreamMutation::SetToolDraftSummary { block_id, summary },
+        );
+    }
+
+    pub(crate) fn tool_draft_preview(
+        &self,
+        block_id: smelt_core::transcript_model::BlockId,
+    ) -> Option<(
+        String,
+        std::collections::HashMap<String, serde_json::Value>,
+        bool,
+    )> {
+        let smelt_core::transcript_model::Block::ToolDraft(draft) =
+            self.document.transcript.history().block(block_id)?
+        else {
+            return None;
+        };
+        Some((
+            draft.name.clone(),
+            draft.arguments.preview().clone(),
+            draft.finished,
+        ))
     }
 
     pub(crate) fn start_exec(&mut self, command: String) {
@@ -1539,42 +1816,19 @@ impl ConversationRuntime {
             .clear_token_baseline_for_loaded_model(&mut self.session, identity);
     }
 
-    pub(super) fn update_tool_draft(
-        &mut self,
-        event: ToolDraftEvent,
-        now: std::time::Instant,
-        force_render: bool,
-    ) -> Option<ToolDraftSnapshot> {
-        self.draft_tools.update(event, now, force_render)
-    }
-
     pub(crate) fn tool_draft_state(&self, call_id: &str) -> (Option<String>, bool) {
-        (
-            self.draft_tools.stream_id_for_call(call_id),
-            self.draft_tools.finished_for_call(call_id),
-        )
-    }
-
-    pub(crate) fn remove_tool_draft(&mut self, stream_id: &str) {
-        self.draft_tools.remove_by_stream_id(stream_id);
-    }
-
-    pub(crate) fn clear_tool_draft_state(&mut self) {
-        self.draft_tools.clear();
-    }
-
-    pub(super) fn drain_due_tool_drafts(
-        &mut self,
-        now: std::time::Instant,
-    ) -> Vec<ToolDraftSnapshot> {
-        self.draft_tools.drain_due_renders(now)
-    }
-
-    pub(crate) fn next_tool_draft_render_delay(
-        &self,
-        now: std::time::Instant,
-    ) -> Option<std::time::Duration> {
-        self.draft_tools.next_render_delay(now)
+        let Some(block_id) = self
+            .parser
+            .tool_draft_block_for_call(self.document.transcript.history(), call_id)
+        else {
+            return (None, false);
+        };
+        let Some(smelt_core::transcript_model::Block::ToolDraft(draft)) =
+            self.document.transcript.history().block(block_id)
+        else {
+            return (None, false);
+        };
+        (Some(draft.stream_id.clone()), draft.finished)
     }
 
     pub(crate) fn next_transcript_refresh_at(&self) -> Option<std::time::Instant> {
@@ -2013,7 +2267,10 @@ impl ConversationRuntime {
         {
             Ok(Some(intent)) => intent,
             Ok(None) => return Ok(SaveStatus::Unchanged),
-            Err(message) => {
+            Err(super::session_document::SessionBatchPreparationError::HydrationPending) => {
+                return Ok(SaveStatus::DeferredHydration);
+            }
+            Err(super::session_document::SessionBatchPreparationError::Invalid(message)) => {
                 self.persistence_preparation_block = Some(PersistencePreparationBlock {
                     desired: self.document.generation(),
                     cause: crate::persist::PersistenceCause::invariant(message.clone()),
@@ -2039,7 +2296,7 @@ impl ConversationRuntime {
     pub(crate) fn retry_blocked_persistence(
         &mut self,
         metadata: super::session_document::RuntimeSessionMetadata,
-    ) -> Result<bool, String> {
+    ) -> Result<SaveStatus, String> {
         let preparation_blocked = self.persistence_preparation_block.is_some();
         let actor_blocked_at = self
             .persistence
@@ -2050,19 +2307,26 @@ impl ConversationRuntime {
                 _ => None,
             });
         if !preparation_blocked && actor_blocked_at.is_none() {
-            return Ok(false);
+            return Ok(SaveStatus::Unchanged);
         }
 
         let latest_generation = self.document.generation();
         let prepare_latest = preparation_blocked
             || actor_blocked_at.is_some_and(|blocked| blocked < latest_generation);
+        if preparation_blocked {
+            self.document.transcript.retry_failed_hydrations();
+        }
         if prepare_latest {
             let intent = match self
                 .document
                 .prepare_event_batch(&mut self.session, metadata)
             {
                 Ok(intent) => intent,
-                Err(message) => {
+                Err(super::session_document::SessionBatchPreparationError::HydrationPending) => {
+                    self.persistence_preparation_block = None;
+                    return Ok(SaveStatus::DeferredHydration);
+                }
+                Err(super::session_document::SessionBatchPreparationError::Invalid(message)) => {
                     self.persistence_preparation_block = Some(PersistencePreparationBlock {
                         desired: self.document.generation(),
                         cause: crate::persist::PersistenceCause::invariant(message.clone()),
@@ -2094,7 +2358,7 @@ impl ConversationRuntime {
                 .retry_blocked()
                 .map_err(|cause| cause.message)?;
         }
-        Ok(true)
+        Ok(SaveStatus::Submitted)
     }
 
     pub(crate) fn flush_persistence(&self) -> crate::persist::PersistenceFlushOutcome {
@@ -2231,7 +2495,7 @@ impl ConversationRuntime {
         let intent = self
             .document
             .prepare_turn_batch(&mut self.session, metadata)
-            .map_err(crate::persist::PersistenceCause::invariant)?;
+            .map_err(|error| crate::persist::PersistenceCause::invariant(error.to_string()))?;
         self.publish_shared_state();
         let acknowledgement = self
             .persistence
@@ -2264,7 +2528,7 @@ impl ConversationRuntime {
         let intent = self
             .document
             .prepare_turn_batch(&mut self.session, metadata)
-            .map_err(crate::persist::PersistenceCause::invariant)?;
+            .map_err(|error| crate::persist::PersistenceCause::invariant(error.to_string()))?;
         self.publish_shared_state();
         self.persistence
             .as_ref()
@@ -2290,7 +2554,7 @@ impl ConversationRuntime {
         let intent = self
             .document
             .prepare_turn_batch(&mut self.session, metadata)
-            .map_err(crate::persist::PersistenceCause::invariant)?;
+            .map_err(|error| crate::persist::PersistenceCause::invariant(error.to_string()))?;
         self.publish_shared_state();
         let outcome = self
             .persistence

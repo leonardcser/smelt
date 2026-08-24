@@ -479,6 +479,9 @@ impl TuiApp {
         else {
             return;
         };
+        self.conversation.set_transcript_search_hydration_pin(Some(
+            smelt_core::transcript_model::BlockId::new(block_idx),
+        ));
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
         let _ = self.conversation.activate_transcript_search_record_window(
@@ -1101,6 +1104,9 @@ impl TuiApp {
             return;
         }
         self.sync_transcript_renderer_generation();
+        self.conversation.set_transcript_search_hydration_pin(Some(
+            smelt_core::transcript_model::BlockId::new(block_idx),
+        ));
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
         let _ = self.conversation.activate_transcript_search_record_window(
@@ -1429,7 +1435,7 @@ mod tests {
             };
             app.app
                 .push_block(smelt_core::transcript_model::Block::Text {
-                    content: format!("search block {index}: {marker}"),
+                    content: format!("search block {index}: {marker}").into(),
                 });
         }
         let match_id = app
@@ -1509,7 +1515,15 @@ mod tests {
             "render reread a block that remained in the viewport working set"
         );
 
-        assert!(app.app.reveal_transcript_record_block(699, 0, true));
+        app.app.clear_search();
+        assert!(!app.app.reveal_transcript_record_block(699, 0, true));
+        app.render_silent();
+        assert!(app.app.reveal_transcript_target_at_top(
+            699,
+            smelt_core::transcript_model::BlockId::new(699),
+            0,
+            true,
+        ));
         app.render_silent();
         assert!(!app
             .app

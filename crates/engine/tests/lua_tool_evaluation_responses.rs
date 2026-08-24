@@ -383,6 +383,8 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                             content: "ok".into(),
                             is_error: false,
                             metadata: None,
+                            display_content: Vec::new(),
+                            attachment: None,
                         });
                     }
                     Ok(Some(EngineEvent::TurnError { message, .. })) => {

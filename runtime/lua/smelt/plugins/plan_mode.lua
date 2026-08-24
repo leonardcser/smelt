@@ -7,8 +7,22 @@ local function read_text(path)
 end
 
 local function output_plan_path(output)
-  local content = output and output.content or ""
-  return content:match("wrote plan to ([^\n]+)")
+  local metadata = output and output.metadata
+  return type(metadata) == "table" and metadata.plan_path or nil
+end
+
+local function plan_result(content, path, artifact_dir, action, plan)
+  return {
+    content = content,
+    metadata = {
+      plan_path = path,
+      artifact_dir = artifact_dir,
+      action = action,
+    },
+    display_content = {
+      plan = plan,
+    },
+  }
 end
 
 local function plan_file_view(args, path)
@@ -23,12 +37,21 @@ local function plan_file_view(args, path)
   })
 end
 
+local function retained_plan_file_view(output)
+  local content = output and output.content_fields and output.content_fields.plan
+  if not (content and content.content_id) then return nil end
+  return smelt.layout.content(content.content_id, {
+    format = "file",
+    path = output_plan_path(output) or "",
+    lang = "markdown",
+  })
+end
+
 smelt.transcript.register_tool("present_plan", {
-  cache_key = "smelt.plugin.plan-mode.present-plan:v1",
+  cache_key = "smelt.plugin.plan-mode.present-plan:v2",
   body = function(block)
     if block.status == "pending" or block.status == "confirm" or not block.output then return nil end
-    local args = block.args or {}
-    return plan_file_view(args, output_plan_path(block.output))
+    return retained_plan_file_view(block.output)
   end,
 })
 
@@ -400,21 +423,39 @@ local function register_present_plan()
 
       if action == "approve" then
         smelt.mode.set("normal")
-        return "wrote plan to " .. path
+        return plan_result(
+          "wrote plan to " .. path
             .. "\nplan artifact directory: " .. artifact_dir
-            .. "\nplan approved\n\nproceed with the implementation using normal-mode permissions and this saved plan as the reference"
+            .. "\nplan approved\n\nproceed with the implementation using normal-mode permissions and this saved plan as the reference",
+          path,
+          artifact_dir,
+          action,
+          plan
+        )
       end
 
       if action == "apply" then
         smelt.mode.set("apply")
-        return "wrote plan to " .. path
+        return plan_result(
+          "wrote plan to " .. path
             .. "\nplan artifact directory: " .. artifact_dir
-            .. "\nplan approved\n\nproceed with the implementation in apply mode, using this saved plan as the reference"
+            .. "\nplan approved\n\nproceed with the implementation in apply mode, using this saved plan as the reference",
+          path,
+          artifact_dir,
+          action,
+          plan
+        )
       end
 
-      return "wrote plan to " .. path
+      return plan_result(
+        "wrote plan to " .. path
           .. "\nplan artifact directory: " .. artifact_dir
-          .. "\n\nstay in plan mode and continue refining the plan before implementation; use read_file and edit_file with the full plan path above when revising this draft"
+          .. "\n\nstay in plan mode and continue refining the plan before implementation; use read_file and edit_file with the full plan path above when revising this draft",
+        path,
+        artifact_dir,
+        action,
+        plan
+      )
     end,
   })
 end

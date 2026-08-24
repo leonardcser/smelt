@@ -15,6 +15,14 @@ layout.cap = nil
 ---@type fun(content: string, opts: table?): smelt.layout.Node
 layout.code = nil
 
+--- Opaque transcript content leaf. `content_id` comes from renderer metadata and is resolved by Rust without exposing the complete payload to Lua. `opts.format` is `text` (default), `markdown`, `code`, or `file`; text accepts `hl_group` / `hl` and `ansi`, Markdown accepts `dim`, `italic`, and `inline`, code accepts `lang`, and file accepts `path` plus an optional `lang` override.
+---@type fun(content_id: integer, opts: table?): smelt.layout.Node
+layout.content = nil
+
+--- Retained diff leaf. `old_content_id` and `new_content_id` come from transcript renderer metadata and are resolved by Rust without exposing source payloads to Lua. `opts.anchor_content_id` optionally identifies the edited source fragment, `opts.path` selects syntax, `opts.lang` overrides path-based syntax, and `opts.full_file` marks complete before/after files.
+---@type fun(old_content_id: integer, new_content_id: integer, opts: table?): smelt.layout.Node
+layout.content_diff = nil
+
 --- Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax; `opts.full_file` treats `opts.old` as the complete pre-edit file for stable previews after writes.
 ---@type fun(opts: table): smelt.layout.Node
 layout.diff = nil
@@ -26,6 +34,10 @@ layout.empty = nil
 --- Syntax-highlighted file-view render directive. Uses a single line-number column and no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
 ---@type fun(opts: table): smelt.layout.Node
 layout.file_view = nil
+
+--- Opaque retained child-layout placeholder for transcript group renderers. Rust resolves each child independently, so updating one child does not serialize or recompile its siblings.
+---@type fun(): smelt.layout.Node
+layout.group_children = nil
 
 --- Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child; `opts.styled = true` lets row-level styles include the prefix.
 ---@type fun(child: any, opts: table?): smelt.layout.Node

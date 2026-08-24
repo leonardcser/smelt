@@ -4,9 +4,11 @@ mod layout_ir;
 mod markdown;
 mod temp_rows;
 
+#[cfg(test)]
+pub(crate) use layout_ir::measure_layout_ir_with_options;
 pub(crate) use layout_ir::{
-    measure_layout_ir_with_options, render_layout_ir_into, render_layout_ir_into_with_history,
-    render_layout_ir_range_into, render_layout_ir_range_into_with_history,
+    measure_layout_ir_plan, refresh_layout_ir_content_measurements, render_layout_ir_into,
+    render_layout_ir_into_with_history, render_layout_ir_range_into_measured, MeasuredLayout,
 };
 pub(crate) use markdown::render_markdown_inner;
 
@@ -89,7 +91,7 @@ mod tests {
 
     fn text(s: &str) -> Block {
         Block::Text {
-            content: s.to_string(),
+            content: s.to_string().into(),
         }
     }
 
@@ -105,7 +107,7 @@ mod tests {
         Block::Thinking {
             title: None,
             summary_titles: Vec::new(),
-            content: s.to_string(),
+            content: s.to_string().into(),
             kind: protocol::ReasoningKind::Raw,
         }
     }
@@ -114,7 +116,7 @@ mod tests {
         Block::Thinking {
             title: Some(title.to_string()),
             summary_titles: vec![title.to_string()],
-            content: content.to_string(),
+            content: content.to_string().into(),
             kind: protocol::ReasoningKind::Summary,
         }
     }
@@ -124,7 +126,7 @@ mod tests {
             call_id: String::new(),
             name: String::new(),
             summary: protocol::StyledLines::default(),
-            args: HashMap::new(),
+            args: HashMap::new().into(),
         }
     }
 
@@ -135,7 +137,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "bash".into(),
             summary: protocol::StyledLines::from_plain("ls"),
-            args,
+            args: args.into(),
         }
     }
 
@@ -528,7 +530,7 @@ mod tests {
         let (mut buf, theme) = mk_collector_buf();
         let block = Block::Exec {
             command: command.into(),
-            output: String::new(),
+            output: String::new().into(),
         };
         let rows = render_block_test_into(
             &mut buf,
@@ -650,7 +652,7 @@ mod tests {
         // Exec command (no output): content rows start with chrome pad.
         let exec_no_output = Block::Exec {
             command: "ls".into(),
-            output: String::new(),
+            output: String::new().into(),
         };
         let lines = render(&exec_no_output, None);
         for line in lines.iter().filter(|line| !line.text.is_empty()) {

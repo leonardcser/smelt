@@ -459,6 +459,7 @@ fn encode_session_commit(
                 encoder.json_text(&record.block_json)?;
                 encoder.optional_json_text(record.origin_json.as_deref())?;
                 encoder.optional_json_text(record.tool_state_json.as_deref())?;
+                encoder.u64(record.tool_render_revision);
             }
         }
         None => encoder.bool(false),

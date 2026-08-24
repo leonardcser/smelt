@@ -184,7 +184,7 @@ pub(super) fn lineage_doctor_report(
             let snapshot = lineage::lineage_session_snapshot(conn, lineage, &branch_id)?;
             lineage::validate_sequence(conn, lineage, &snapshot.history_root)?;
             lineage::validate_sequence(conn, lineage, &snapshot.transcript_root)?;
-            lineage::lineage_transcript_extent_chunks(conn, lineage, &snapshot.transcript_root)?;
+            lineage::validate_transcript_indexes(conn, lineage, &snapshot.transcript_root)?;
             Ok::<(), StoreError>(())
         })();
         if let Err(error) = result {

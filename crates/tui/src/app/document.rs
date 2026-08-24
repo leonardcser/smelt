@@ -610,6 +610,7 @@ impl TuiApp {
             let restore = TranscriptProjectionRestore {
                 cursor_screen_row: Some(viewport_rows.saturating_sub(1)),
                 drag_endpoint_screen_row: None,
+                cursor_document_position: None,
             };
             let total_rows = self
                 .conversation
@@ -664,6 +665,7 @@ impl TuiApp {
                 let restore = TranscriptProjectionRestore {
                     cursor_screen_row: Some(local_scroll.cursor_screen_row),
                     drag_endpoint_screen_row: None,
+                    cursor_document_position: None,
                 };
                 self.record_transcript_scroll_intent_from_document_command(
                     "document_command",
@@ -753,7 +755,9 @@ impl TuiApp {
                             screen_padding_top: 0,
                         }
                     } else {
-                        self.transcript_anchor_or_approximate_row_seek(viewport_cols, scroll_top)
+                        TranscriptScrollIntent::RevealFirstRecord {
+                            screen_padding_top: 0,
+                        }
                     }
                 } else {
                     self.transcript_anchor_or_approximate_row_seek(viewport_cols, scroll_top)
@@ -766,6 +770,7 @@ impl TuiApp {
                             viewport_rows,
                         )),
                         drag_endpoint_screen_row: None,
+                        cursor_document_position: None,
                     }
                 } else {
                     TranscriptProjectionRestore::default()

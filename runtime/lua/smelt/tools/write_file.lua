@@ -2,23 +2,40 @@
 
 local transcript_defaults = require("smelt.transcript.defaults")
 
-local function file_view(args)
+local function argument_field(block, name)
+  for _, field in ipairs(block.argument_fields or {}) do
+    if field.name == name then return field end
+  end
+  return nil
+end
+
+local function retained_file_view(block)
+  local content = argument_field(block, "content")
+  if not content or not content.content_id then return smelt.layout.empty() end
+  local path = (block.args and block.args.file_path) or ""
+  return smelt.layout.content(content.content_id, {
+    format = "file",
+    path = path,
+  })
+end
+
+local function argument_file_view(args)
   return smelt.layout.file_view({
     content = args.content or "",
-    path    = args.file_path or "",
+    path = args.file_path or "",
   })
 end
 
 smelt.transcript.register_tool("write_file", {
-  cache_key = "smelt.tool-presentation.write_file:v1",
+  cache_key = "smelt.tool-presentation.write_file:v2",
   body = function(block, ctx, opts)
     if block.output and block.output.is_error then
       return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
     end
-    return file_view(block.args or {})
+    return retained_file_view(block)
   end,
   draft = function(block)
-    return file_view(block.args or {})
+    return retained_file_view(block)
   end,
   compact = function(block, ctx)
     if block.output and block.output.is_error then
@@ -28,7 +45,9 @@ smelt.transcript.register_tool("write_file", {
         marker = "below",
       })
     end
-    return "wrote " .. smelt.text.line_count((block.args and block.args.content) or "") .. " lines"
+    local content = argument_field(block, "content")
+    local lines = content and content.content_lines or 0
+    return "wrote " .. lines .. " lines"
   end,
 })
 
@@ -60,7 +79,7 @@ smelt.tools.register({
     return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   preview = function(args)
-    return file_view(args)
+    return argument_file_view(args)
   end,
   execute = function(args)
     local path = args.file_path or ""

@@ -40,6 +40,21 @@ pub struct StyledSpan {
     pub title_suffix: bool,
 }
 
+impl StyledSpan {
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        self.text
+            .capacity()
+            .saturating_add(self.syntax.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.hl.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.fg.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.bg.as_ref().map_or(0, String::capacity))
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
 impl Default for StyledSpan {
     fn default() -> Self {
         Self {
@@ -260,6 +275,30 @@ impl StyledLines {
             }
         }
         out
+    }
+
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        self.0
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Vec<StyledSpan>>())
+            .saturating_add(
+                self.0
+                    .iter()
+                    .map(|line| {
+                        line.capacity()
+                            .saturating_mul(std::mem::size_of::<StyledSpan>())
+                            .saturating_add(
+                                line.iter()
+                                    .map(StyledSpan::dynamic_retained_bytes)
+                                    .sum::<usize>(),
+                            )
+                    })
+                    .sum::<usize>(),
+            )
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
     }
 }
 

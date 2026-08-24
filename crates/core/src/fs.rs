@@ -490,13 +490,17 @@ impl FileStateCache {
     }
 
     pub fn get(&self, path: &str) -> Option<FileState> {
+        self.with_state(path, Clone::clone)
+    }
+
+    fn with_state<T>(&self, path: &str, inspect: impl FnOnce(&FileState) -> T) -> Option<T> {
         let key = normalize_path(path);
         self.0
             .lock()
             .ok()?
             .entries
             .get(&key)
-            .map(|e| e.state.clone())
+            .map(|entry| inspect(&entry.state))
     }
 
     pub fn has(&self, path: &str) -> bool {
@@ -693,12 +697,12 @@ pub fn checked_write_file(
     Ok(content.len())
 }
 
-fn plan_edit_file(
-    content: String,
+fn validate_edit_replacement(
+    content: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-) -> Result<EditFileOutcome, String> {
+) -> Result<(), String> {
     if old_string == new_string {
         return Err("old_string and new_string are identical".into());
     }
@@ -715,6 +719,16 @@ fn plan_edit_file(
             "old_string matched {count} times; make it unique or set replace_all to true"
         ));
     }
+    Ok(())
+}
+
+fn plan_edit_file(
+    content: String,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<EditFileOutcome, String> {
+    validate_edit_replacement(&content, old_string, new_string, replace_all)?;
 
     let new_content = if replace_all {
         content.replace(old_string, new_string)
@@ -726,6 +740,22 @@ fn plan_edit_file(
         old_content: content,
         new_content,
     })
+}
+
+pub fn checked_validate_edit_file(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    cache: &FileStateCache,
+) -> Result<(), String> {
+    validate_edit_file_path(path)?;
+    cache
+        .with_state(path, |cached| {
+            ensure_cached_state_is_current(path, cached, "file")?;
+            validate_edit_replacement(&cached.content, old_string, new_string, replace_all)
+        })
+        .unwrap_or_else(|| Err("read the file with read_file before editing".into()))
 }
 
 pub fn checked_plan_edit_file(

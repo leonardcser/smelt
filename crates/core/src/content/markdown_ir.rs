@@ -53,6 +53,97 @@ pub enum MarkdownTextKind {
     List,
 }
 
+impl MarkdownBlock<'_> {
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        self.nodes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<MarkdownNode>())
+            .saturating_add(
+                self.nodes
+                    .iter()
+                    .map(MarkdownNode::dynamic_retained_bytes)
+                    .sum::<usize>(),
+            )
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
+impl MarkdownLine {
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        self.spans
+            .capacity()
+            .saturating_mul(std::mem::size_of::<InlineSpan>())
+            .saturating_add(
+                self.spans
+                    .iter()
+                    .map(InlineSpan::dynamic_retained_bytes)
+                    .sum::<usize>(),
+            )
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
+impl MarkdownNode {
+    pub fn dynamic_retained_bytes(&self) -> usize {
+        match self {
+            Self::Source { .. } | Self::Rule { .. } => 0,
+            Self::Text { lines, .. } => lines
+                .capacity()
+                .saturating_mul(std::mem::size_of::<MarkdownLine>())
+                .saturating_add(
+                    lines
+                        .iter()
+                        .map(MarkdownLine::dynamic_retained_bytes)
+                        .sum::<usize>(),
+                ),
+            Self::Code { lang, body, .. } => lang.capacity().saturating_add(
+                body.capacity()
+                    .saturating_mul(std::mem::size_of::<Range<usize>>()),
+            ),
+            Self::Table {
+                alignments, rows, ..
+            } => alignments
+                .capacity()
+                .saturating_mul(std::mem::size_of::<ColumnAlignment>())
+                .saturating_add(
+                    rows.capacity()
+                        .saturating_mul(std::mem::size_of::<Vec<String>>()),
+                )
+                .saturating_add(
+                    rows.iter()
+                        .map(|row| {
+                            row.capacity()
+                                .saturating_mul(std::mem::size_of::<String>())
+                                .saturating_add(row.iter().map(String::capacity).sum::<usize>())
+                        })
+                        .sum::<usize>(),
+                ),
+        }
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.dynamic_retained_bytes())
+    }
+}
+
+pub fn markdown_nodes_retained_bytes(nodes: &[MarkdownNode]) -> usize {
+    nodes
+        .len()
+        .saturating_mul(std::mem::size_of::<MarkdownNode>())
+        .saturating_add(
+            nodes
+                .iter()
+                .map(MarkdownNode::dynamic_retained_bytes)
+                .sum::<usize>(),
+        )
+}
+
 #[derive(Clone, Debug)]
 enum SpecialBlock {
     Text {
@@ -213,7 +304,7 @@ fn is_closing_fence(line: &str, marker: char, open_len: usize) -> bool {
     len >= open_len && line[len..].trim().is_empty()
 }
 
-fn is_atx_heading(line: &str) -> bool {
+pub(crate) fn is_atx_heading(line: &str) -> bool {
     let line = strip_markdown_indent(line.trim_end());
     let hashes = line.bytes().take_while(|b| *b == b'#').count();
     if hashes == 0 || hashes > 6 {
@@ -224,7 +315,7 @@ fn is_atx_heading(line: &str) -> bool {
         .is_none_or(|b| b.is_ascii_whitespace())
 }
 
-fn is_setext_underline(line: &str) -> bool {
+pub(crate) fn is_setext_underline(line: &str) -> bool {
     let line = strip_markdown_indent(line.trim_end());
     let mut marker = None;
     let mut saw_marker = false;
@@ -247,7 +338,7 @@ fn is_setext_underline(line: &str) -> bool {
     saw_marker
 }
 
-fn is_thematic_break(line: &str) -> bool {
+pub(crate) fn is_thematic_break(line: &str) -> bool {
     let line = strip_markdown_indent(line.trim_end());
     let mut marker = None;
     let mut markers = 0usize;
@@ -592,6 +683,32 @@ mod tests {
                 ],
             ])
         );
+    }
+
+    #[test]
+    fn retained_accounting_includes_table_cells_and_inline_spans() {
+        let cell = "x".repeat(64 * 1024);
+        let table_source = format!("| value |\n| --- |\n| {cell} |\n");
+        let table = parse_markdown(&table_source);
+        assert!(
+            table.retained_bytes()
+                >= std::mem::size_of::<MarkdownBlock<'_>>().saturating_add(cell.len())
+        );
+
+        let span_source = "**word** ".repeat(2_048);
+        let spans = parse_markdown(&span_source);
+        let span_count = spans
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                MarkdownNode::Text { lines, .. } => {
+                    Some(lines.iter().map(|line| line.spans.len()).sum::<usize>())
+                }
+                _ => None,
+            })
+            .sum::<usize>();
+        assert!(span_count >= 2_048);
+        assert!(spans.dynamic_retained_bytes() > span_source.len());
     }
 
     #[test]

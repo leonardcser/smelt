@@ -71,7 +71,7 @@ pub struct LuaTranscriptRevealOpts {
     pub move_cursor: Option<bool>,
 }
 
-fn block_snapshot_table(
+pub(crate) fn block_snapshot_table(
     lua: &Lua,
     snap: crate::app::transcript::TranscriptBlockSnapshot,
 ) -> LuaResult<mlua::Table> {
@@ -524,9 +524,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "loaded_text_expensive",
-        "Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active record window loaded. Prefer `rows(start, count)` for bounded display reads.",
-        &[],
-        |_, ()| -> LuaResult<String> {
+        "Return the currently materialized transcript display text as a single newline-joined string. In sparse sessions, the no-callback form can return an empty string while background hydration is pending. Pass `callback` to receive the active loaded-window text once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty string. Prefer `rows(start, count)` for bounded display reads.",
+        &["callback"],
+        |_, callback: Option<LuaCallback<(String,), ()>>| -> LuaResult<String> {
+            if let Some(callback) = callback {
+                crate::lua::with_conversation_host(|host| {
+                    host.request_loaded_transcript_text(callback.into_inner())
+                });
+                return Ok(String::new());
+            }
             Ok(crate::lua::try_with_conversation_host(|host| host.loaded_transcript_text())
                 .unwrap_or_default())
         },
@@ -541,9 +547,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "loaded_blocks_expensive",
-        "Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded record window; prefer `visible_blocks()` when possible.",
-        &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
+        "Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. In sparse sessions, the no-callback form can return an empty table while background hydration is pending. Pass `callback` to receive the active loaded-window blocks once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty table. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. Prefer `visible_blocks()` when possible.",
+        &["callback"],
+        |lua, callback: Option<LuaCallback<(mlua::Table,), ()>>| -> LuaResult<mlua::Table> {
+            if let Some(callback) = callback {
+                crate::lua::with_conversation_host(|host| {
+                    host.request_loaded_transcript_blocks(callback.into_inner())
+                });
+                return lua.create_table();
+            }
             let snaps = crate::lua::try_with_conversation_host(|host| host.loaded_transcript_blocks())
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(snaps.len(), 0)?;
@@ -569,7 +581,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "rows",
-        "Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.",
+        "Return rendered transcript display rows in `[start, start + count)`, materializing only the bounded range needed for the query. Rows inside an unloaded sparse gap are returned as empty strings until that region becomes the active hydrated window.",
         &["start", "count"],
         |lua, (start, count): (crate::smelt_edit::RowIndex, crate::smelt_edit::RowIndex)| -> LuaResult<mlua::Table> {
             let rows = crate::lua::try_with_conversation_host(|host| host.transcript_rows(start, count))

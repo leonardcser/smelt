@@ -91,4 +91,13 @@ smelt.ui.layout.set(function(state)
   })
 end)
 
-return {}
+local subscriptions = {}
+if type(smelt.signal.subscribe) == "function" then
+  subscriptions[#subscriptions + 1] = smelt.signal.subscribe(
+    "prompt_queue_revision",
+    function()
+      smelt.ui.layout.invalidate()
+    end)
+end
+
+return { subscriptions = subscriptions }

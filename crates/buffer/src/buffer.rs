@@ -276,6 +276,86 @@ pub struct Span {
     pub on_cursor_row: bool,
 }
 
+#[derive(Clone, Debug)]
+struct RenderedHighlight {
+    row: usize,
+    span: Span,
+}
+
+/// Contiguous renderer-owned metadata for a batch of display rows.
+///
+/// Unlike generic extmarks, this representation retains two flat vectors and
+/// can be cleared and refilled without allocating one tree node per span or row.
+#[derive(Clone, Debug, Default)]
+pub struct RenderedRowMetadata {
+    highlights: Vec<RenderedHighlight>,
+    decorations: Vec<LineDecoration>,
+}
+
+impl RenderedRowMetadata {
+    pub fn push_highlight(
+        &mut self,
+        row: usize,
+        col_start: u16,
+        col_end: u16,
+        hl: HlGroup,
+        meta: SpanMeta,
+    ) {
+        self.highlights.push(RenderedHighlight {
+            row,
+            span: Span {
+                col_start,
+                col_end,
+                hl,
+                meta,
+                hl_eol: false,
+                on_cursor_row: false,
+            },
+        });
+    }
+
+    fn push_span(&mut self, row: usize, span: Span) {
+        self.highlights.push(RenderedHighlight { row, span });
+    }
+
+    pub fn push_decoration(&mut self, row: usize, decoration: LineDecoration) {
+        debug_assert_eq!(row, self.decorations.len());
+        if row == self.decorations.len() {
+            self.decorations.push(decoration);
+        } else if let Some(target) = self.decorations.get_mut(row) {
+            *target = decoration;
+        }
+    }
+
+    pub fn push_default_decoration(&mut self, row: usize) {
+        self.push_decoration(row, LineDecoration::default());
+    }
+
+    pub fn highlights_at(&self, row: usize) -> Vec<Span> {
+        self.highlights
+            .iter()
+            .filter(|highlight| highlight.row == row)
+            .map(|highlight| highlight.span.clone())
+            .collect()
+    }
+
+    pub fn decoration_at(&self, row: usize) -> Option<&LineDecoration> {
+        self.decorations.get(row)
+    }
+
+    fn clear(&mut self) {
+        self.highlights.clear();
+        self.decorations.clear();
+    }
+}
+
+/// Text and row metadata temporarily owned while rebuilding a rendered buffer.
+#[derive(Default)]
+pub struct RenderedBufferRebuild {
+    pub lines: Vec<String>,
+    pub metadata: RenderedRowMetadata,
+}
+
 /// One-line virtual text overlay. Derived from `ExtmarkPayload::VirtText` marks.
 #[derive(Clone, Debug)]
 pub struct VirtualText {
@@ -634,6 +714,7 @@ pub struct Buffer {
     /// Arc-wrapped so clones and sync-to-view are cheap refcount bumps;
     /// `Arc::make_mut` deep-copies only when the Arc is shared.
     lines: Arc<Vec<String>>,
+    rendered_rows: Arc<RenderedRowMetadata>,
     extmarks: ExtmarkStore,
     /// Bumped on every lines mutation.
     changedtick: u64,
@@ -671,6 +752,7 @@ impl Buffer {
         Self {
             id,
             lines: Arc::new(vec![String::new()]),
+            rendered_rows: Arc::new(RenderedRowMetadata::default()),
             extmarks,
             changedtick: 0,
             last_line_edit: None,
@@ -884,6 +966,7 @@ impl Buffer {
     }
 
     pub fn set_lines(&mut self, start: usize, end: usize, replacement: Vec<String>) {
+        self.rendered_rows = Arc::new(RenderedRowMetadata::default());
         let end = end.min(self.lines.len());
         let start = start.min(end);
         let old_line_count = self.lines.len();
@@ -916,13 +999,49 @@ impl Buffer {
         });
     }
 
+    /// Take ownership of the current line allocations before immediately
+    /// rebuilding the whole buffer with [`Self::set_all_lines`].
+    ///
+    /// When no cloned buffer still shares the line store, the returned strings
+    /// retain their capacities so a retained projection can overwrite rows
+    /// without allocating them again.
+    pub fn take_all_lines_for_rebuild(&mut self) -> Vec<String> {
+        let lines = std::mem::replace(&mut self.lines, Arc::new(Vec::new()));
+        Arc::try_unwrap(lines).unwrap_or_else(|shared| shared.iter().cloned().collect())
+    }
+
+    /// Begin rebuilding renderer-owned rows while retaining their text and
+    /// metadata allocations.
+    pub fn begin_rendered_lines_rebuild(&mut self) -> RenderedBufferRebuild {
+        let lines = self.take_all_lines_for_rebuild();
+        let metadata = std::mem::replace(
+            &mut self.rendered_rows,
+            Arc::new(RenderedRowMetadata::default()),
+        );
+        let mut metadata =
+            Arc::try_unwrap(metadata).unwrap_or_else(|shared| shared.as_ref().clone());
+        metadata.clear();
+        self.clear_extmark_row_metadata();
+        RenderedBufferRebuild { lines, metadata }
+    }
+
+    /// Finish a rebuild started by [`Self::begin_rendered_lines_rebuild`].
+    pub fn finish_rendered_lines_rebuild(&mut self, rebuild: RenderedBufferRebuild) {
+        self.rendered_rows = Arc::new(rebuild.metadata);
+        self.install_all_lines(rebuild.lines);
+    }
+
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
-        let new_lines = if lines.is_empty() {
-            vec![String::new()]
-        } else {
-            lines
-        };
-        self.lines = Arc::new(new_lines);
+        self.clear_rendered_row_metadata();
+        self.install_all_lines(lines);
+    }
+
+    fn clear_rendered_row_metadata(&mut self) {
+        self.rendered_rows = Arc::new(RenderedRowMetadata::default());
+        self.clear_extmark_row_metadata();
+    }
+
+    fn clear_extmark_row_metadata(&mut self) {
         // Drop well-known namespaces; custom namespaces persist.
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, 0, usize::MAX);
@@ -930,6 +1049,15 @@ impl Buffer {
         for layer in &mut self.range_layers {
             layer.clear();
         }
+    }
+
+    fn install_all_lines(&mut self, lines: Vec<String>) {
+        let new_lines = if lines.is_empty() {
+            vec![String::new()]
+        } else {
+            lines
+        };
+        self.lines = Arc::new(new_lines);
         self.changedtick += 1;
         self.last_line_edit = None;
     }
@@ -1238,6 +1366,9 @@ impl Buffer {
     }
 
     pub fn clear_highlights(&mut self, start_line: usize, end_line: usize) {
+        Arc::make_mut(&mut self.rendered_rows)
+            .highlights
+            .retain(|highlight| highlight.row < start_line || highlight.row >= end_line);
         let ns = self.ns_highlights;
         self.clear_namespace(ns, start_line, end_line);
     }
@@ -1246,6 +1377,33 @@ impl Buffer {
         let mut out = Vec::new();
         self.highlights_at_into(line, &mut out);
         out
+    }
+
+    /// Append one renderer-owned source row to a contiguous metadata batch.
+    pub fn append_rendered_row_metadata(
+        &self,
+        source_row: usize,
+        target_row: usize,
+        target: &mut RenderedRowMetadata,
+    ) {
+        if self.rendered_rows.decorations.get(source_row).is_some() {
+            target.highlights.extend(
+                self.rendered_rows
+                    .highlights
+                    .iter()
+                    .filter(|highlight| highlight.row == source_row)
+                    .cloned()
+                    .map(|mut highlight| {
+                        highlight.row = target_row;
+                        highlight
+                    }),
+            );
+        } else {
+            for span in self.highlights_at(source_row) {
+                target.push_span(target_row, span);
+            }
+        }
+        target.push_decoration(target_row, self.decoration_at(source_row).clone());
     }
 
     pub fn action_at_cell(&self, line: usize, cell_col: usize) -> Option<SpanAction> {
@@ -1275,6 +1433,20 @@ impl Buffer {
         }
         SCRATCH.with_borrow_mut(|buf| {
             buf.clear();
+            for (index, highlight) in self
+                .rendered_rows
+                .highlights
+                .iter()
+                .filter(|highlight| highlight.row == line)
+                .enumerate()
+            {
+                buf.push((
+                    0,
+                    self.ns_highlights.0,
+                    index.min(u32::MAX as usize) as u32,
+                    highlight.span.clone(),
+                ));
+            }
             // namespaces iterates in NsId order (BTreeMap); marks_at filters by
             // row in O(k) using the secondary index. Priority/ns/id sort below.
             for (ns, state) in self.extmarks.namespaces.iter() {
@@ -1315,6 +1487,16 @@ impl Buffer {
     }
 
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
+        if line < self.rendered_rows.decorations.len() {
+            Arc::make_mut(&mut self.rendered_rows).decorations[line] = decoration;
+            self.changedtick += 1;
+            if let Some(edit) = self.last_line_edit.as_mut() {
+                if line >= edit.start {
+                    edit.after_tick = self.changedtick;
+                }
+            }
+            return;
+        }
         // One decoration per line: replace any prior mark at this row.
         let ns = self.ns_decorations;
         let to_remove: Vec<ExtmarkId> = self
@@ -1339,6 +1521,9 @@ impl Buffer {
     }
 
     pub fn decoration_at(&self, line: usize) -> &LineDecoration {
+        if let Some(decoration) = self.rendered_rows.decorations.get(line) {
+            return decoration;
+        }
         static DEFAULT: LineDecoration = LineDecoration {
             fill_bg: None,
             soft_wrapped: false,

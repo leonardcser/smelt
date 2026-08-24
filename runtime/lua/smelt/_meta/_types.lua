@@ -631,7 +631,7 @@
 ---@field preflight? function `preflight(args, ctx) -> table?` - validation hook; nil result skips.
 ---@field paths_for_workspace? function `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
 ---@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. The confirm dialog renders it directly into the preview pane.
----@field preview_output? function `preview_output(args) -> { content, is_error?, metadata? }|nil` - immutable pending transcript output derived from final streamed arguments before execution.
+---@field preview_output? function `preview_output(args) -> { content, is_error?, metadata?, display_content? }|nil` - immutable pending transcript output derived from final streamed arguments before execution. Growing display payloads belong in `display_content`, not JSON metadata.
 ---@field draft_preview? function `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript.
 ---@field watchdog_timeout_ms? integer Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally.
 ---@field watchdog_max_timeout_ms? integer Maximum watchdog deadline accepted from tool arguments, in milliseconds.
@@ -641,14 +641,30 @@
 ---@field headless? boolean Whether the tool is available when running headless. Defaults to true. Set to false for tools that require a UI surface (dialogs, menus, managed worktree creation, cwd switching).
 ---@field override? boolean Replace a core tool of the same name (advanced).
 
---- Semantic transcript block snapshot passed to the root renderer.
+--- Opaque top-level string argument passed to transcript renderers. Complete field
+--- content remains in Rust and is available only through `smelt.layout.content`.
+---@class smelt.transcript.ArgumentField
+---@field name string Top-level argument name.
+---@field content_id integer Stable shared-content id accepted by `smelt.layout.content`.
+---@field content_revision integer Monotonic content revision.
+---@field content_bytes integer Current field size in bytes.
+---@field content_lines integer Current logical line count.
+---@field content_preview string Bounded text preview for labels and fallback UI, not complete content.
+---@field complete boolean True when the JSON parser has consumed the complete field value.
+
+--- Bounded semantic transcript metadata passed to the root renderer.
 ---@class smelt.transcript.Block
 ---@field id integer Stable block id within the session.
 ---@field index integer Zero-based block index in transcript order.
 ---@field kind "user"|"assistant"|"thinking"|"tool"|"group"|"code"|"exec"|"mode"|"process_status"|"compacted"|"compaction_preview" Block kind.
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
----@field content? string Assistant/thinking/code content.
+---@field content? string Code content.
+---@field content_id? integer Stable shared-content id for assistant and thinking blocks.
+---@field content_revision? integer Monotonic shared-content revision.
+---@field content_bytes? integer Shared content size in bytes.
+---@field content_lines? integer Shared content logical line count.
+---@field content_preview? string Bounded preview for labels and fallback UI, not complete content.
 ---@field title? string Latest structured reasoning-summary title.
 ---@field summary_titles? string[] Ordered structured reasoning-summary title history.
 ---@field reasoning_kind? "summary"|"raw" Reasoning source for thinking blocks.
@@ -658,7 +674,8 @@
 ---@field lang? string Code language.
 ---@field call_id? string Tool call id.
 ---@field name? string Tool name.
----@field args? table Tool arguments.
+---@field args? table Bounded tool-argument previews and complete non-string structured values.
+---@field argument_fields? smelt.transcript.ArgumentField[] Opaque top-level string arguments. Complete field content is never included in renderer metadata.
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
@@ -667,8 +684,8 @@
 ---@field elapsed_active? boolean True only while elapsed time can continue advancing.
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
----@field preview_output? smelt.transcript.ToolOutput Immutable pending output snapshot for a promoted finished draft.
----@field output? smelt.transcript.ToolOutput Tool output snapshot.
+---@field preview_output? smelt.transcript.ToolOutput Immutable pending output metadata for a promoted finished draft.
+---@field output? smelt.transcript.ToolOutput Tool output metadata.
 ---@field event? string Process status event type, e.g. `"background_process_completed"`.
 ---@field event_type? string Alias for `event`.
 ---@field event_data? table Full typed process status event payload.
@@ -679,9 +696,18 @@
 ---@field group_kind? string Registered semantic group name.
 ---@field bucket? string Stable planner bucket for a group.
 ---@field view_state? "collapsed"|"peek"|"expanded" Effective group or child view state.
----@field children? smelt.transcript.Block[] Ordered semantic child snapshots for a group.
+---@field children? smelt.transcript.GroupChild[] Ordered bounded child presentation metadata for a group.
 ---@field child_ids? integer[] Ordered stable block ids for a group.
 ---@field child_count? integer Number of semantic children in a group.
+
+--- Metadata for a retained payload whose complete content remains in Rust and is
+--- available to renderers only through retained layout leaves.
+---@class smelt.transcript.ContentMetadata
+---@field content_id integer Stable shared-content id accepted by retained layout leaves.
+---@field content_revision integer Monotonic content revision.
+---@field content_bytes integer Current content size in bytes.
+---@field content_lines integer Current logical line count.
+---@field content_preview string Strictly bounded preview for labels, never the complete retained payload.
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
 ---@class smelt.transcript.Context
@@ -701,7 +727,23 @@
 ---@field name? string Group spec name.
 ---@field title? string Optional display title.
 ---@field view_state? string Current group view state.
----@field children? smelt.transcript.Block[] Child block snapshots.
+---@field children? smelt.transcript.GroupChild[] Ordered bounded child presentation metadata.
+
+--- Bounded semantic metadata for one retained group child. Growing content and
+--- complete child payloads are never embedded in group renderer input.
+---@class smelt.transcript.GroupChild
+---@field id integer Stable child block id.
+---@field kind string Semantic block kind.
+---@field name? string Tool name.
+---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
+---@field summary_text? string Bounded plain-text summary.
+---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
+---@field args? table Bounded argument previews used by collapsed labels.
+---@field output? { content_lines?: integer, is_error?: boolean } Bounded output metadata.
+---@field event? string Process status event type.
+---@field event_data? { process_id?: string, exit_code?: integer } Bounded process metadata.
+---@field process_id? string Background process id.
+---@field exit_code? integer Background process exit code.
 
 --- Group selector declared through `smelt.transcript.groups.register`.
 ---@class smelt.transcript.GroupSelector
@@ -781,15 +823,20 @@
 ---@class smelt.transcript.ToolHeaderOptions
 ---@field hl? string Status marker highlight group.
 
---- Tool output snapshot passed to transcript renderers.
+--- Bounded tool output metadata passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput
----@field content string Captured output text.
+---@field content_id integer Stable shared-content id accepted by `smelt.layout.content`.
+---@field content_revision integer Monotonic content revision.
+---@field content_bytes integer Current output size in bytes.
+---@field content_lines integer Current logical line count.
+---@field content_preview string Bounded text preview for labels and fallback UI, not complete output.
 ---@field is_error boolean True when the tool result is an error.
----@field metadata? table Tool-specific structured metadata.
+---@field metadata? table Bounded tool-specific structured metadata.
+---@field content_fields? table<string, smelt.transcript.ContentMetadata> Named retained payloads referenced by opaque content IDs.
 
 --- Public presentation policy for one tool name. A complete `render` callback
 --- takes precedence; otherwise the default renderer composes the focused pieces.
---- Registrations are immutable snapshots.
+--- Registrations are copied and immutable.
 ---@class smelt.transcript.ToolPresentation
 ---@field cache_key? string Stable persisted-layout key. Omit for dynamic presentation state.
 ---@field render? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation: smelt.transcript.ToolPresentation): smelt.layout.Node Complete replacement renderer.
@@ -874,6 +921,8 @@
 ---@field row_highlights fun(specs: table?): smelt.win.Win Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.
 ---@field link_scroll fun(others: smelt.win.Win): smelt.win.Win Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.
 ---@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
+---@field set_renderer fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win Register a retained renderer for this window, or clear it with nil. While the window is mounted, the renderer runs once after registration and again only after `invalidate_renderer`; its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.
+---@field invalidate_renderer fun(): smelt.win.Win Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.
 
 --- Where a virtual-text chunk is rendered relative to the line.
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"
@@ -893,7 +942,7 @@
 ---@alias smelt.reasoning.Effort "off"|"low"|"medium"|"high"|"max"
 
 --- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
----@alias smelt.signal.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 ---@alias smelt.tools.Decision "allow"|"ask"|"deny"

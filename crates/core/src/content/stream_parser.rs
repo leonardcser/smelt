@@ -2,9 +2,10 @@
 //! (paragraphs, code blocks, tables), and writes finished blocks into `BlockHistory`.
 
 use super::markdown_stream::MarkdownStream;
+use super::tool_draft::{ToolArguments, ToolDraft};
 use crate::transcript_model::{
-    ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput, ToolOutputRef, ToolState,
-    ToolStatus,
+    ActiveTool, Block, BlockHistory, BlockId, ContentChannel, Status, ToolOutputRef, ToolState,
+    ToolStateMutation, ToolStatus,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -17,14 +18,10 @@ pub struct StreamParser {
     tool_drafts: HashMap<String, BlockId>,
 }
 
-pub struct ToolDraftUpdate {
-    pub stream_id: String,
-    pub call_id: Option<String>,
-    pub name: String,
-    pub summary: protocol::StyledLines,
-    pub args: HashMap<String, serde_json::Value>,
-    pub raw_arguments: String,
-    pub finished: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolDraftChange {
+    pub block_id: BlockId,
+    pub presentation_changed: bool,
 }
 
 pub struct ToolStart {
@@ -70,9 +67,8 @@ impl StreamParser {
             if elapsed_bucket(state.elapsed) == elapsed_bucket(Some(elapsed)) {
                 continue;
             }
-            history.update_tool_state(tool.block_id, |state| {
-                state.elapsed = Some(elapsed);
-            });
+            history
+                .apply_tool_state_mutation(tool.block_id, ToolStateMutation::SyncElapsed(elapsed));
         }
     }
 
@@ -98,10 +94,13 @@ impl StreamParser {
             updates.push((tool.block_id, tool.elapsed_at(now)));
         }
         for (block_id, elapsed) in updates {
-            history.update_tool_state(block_id, |state| {
-                state.elapsed = Some(elapsed);
-                state.elapsed_active = !paused;
-            });
+            history.apply_tool_state_mutation(
+                block_id,
+                ToolStateMutation::SetElapsedActive {
+                    elapsed,
+                    active: !paused,
+                },
+            );
         }
     }
 
@@ -169,35 +168,98 @@ impl StreamParser {
 
     // ── Tool lifecycle ──────────────────────────────────────────────
 
-    pub fn upsert_tool_draft(&mut self, history: &mut BlockHistory, update: ToolDraftUpdate) {
+    pub fn start_tool_draft(
+        &mut self,
+        history: &mut BlockHistory,
+        stream_id: String,
+        call_id: Option<String>,
+        name: Option<String>,
+    ) -> ToolDraftChange {
         self.flush_streaming_thinking(history);
         self.flush_streaming_text(history);
-        let ToolDraftUpdate {
-            stream_id,
-            call_id,
-            name,
-            summary,
-            args,
-            raw_arguments,
-            finished,
-        } = update;
-        let block = Block::ToolDraft {
-            stream_id: stream_id.clone(),
-            call_id,
-            name,
-            summary,
-            args,
-            raw_arguments,
-            finished,
-        };
-        if let Some(id) = self.tool_drafts.get(&stream_id).copied() {
-            history.rewrite(id, block);
-            history.set_status(id, Status::Streaming);
-        } else {
-            let id = history.push(block);
-            history.set_status(id, Status::Streaming);
-            self.tool_drafts.insert(stream_id, id);
+        if let Some(block_id) = self.tool_drafts.get(&stream_id).copied() {
+            return ToolDraftChange {
+                block_id,
+                presentation_changed: false,
+            };
         }
+        let name = name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "tool".into());
+        let block_id = history.push(Block::ToolDraft(ToolDraft::new(
+            stream_id.clone(),
+            call_id,
+            name,
+        )));
+        history.set_status(block_id, Status::Streaming);
+        self.tool_drafts.insert(stream_id, block_id);
+        ToolDraftChange {
+            block_id,
+            presentation_changed: true,
+        }
+    }
+
+    pub fn append_tool_draft(
+        &mut self,
+        history: &mut BlockHistory,
+        stream_id: String,
+        call_id: Option<String>,
+        name: Option<String>,
+        delta: String,
+    ) -> ToolDraftChange {
+        let change =
+            self.start_tool_draft(history, stream_id.clone(), call_id.clone(), name.clone());
+        let presentation_changed = history
+            .append_tool_draft(change.block_id, call_id, name, delta)
+            .is_some_and(|append| append.presentation_changed);
+        ToolDraftChange {
+            block_id: change.block_id,
+            presentation_changed: change.presentation_changed || presentation_changed,
+        }
+    }
+
+    pub fn finish_tool_draft(
+        &mut self,
+        history: &mut BlockHistory,
+        stream_id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    ) -> ToolDraftChange {
+        let change = self.start_tool_draft(
+            history,
+            stream_id,
+            Some(call_id.clone()),
+            Some(name.clone()),
+        );
+        let presentation_changed = history
+            .finish_tool_draft(change.block_id, call_id, name, arguments)
+            .is_some_and(|append| append.presentation_changed);
+        ToolDraftChange {
+            block_id: change.block_id,
+            presentation_changed: change.presentation_changed || presentation_changed,
+        }
+    }
+
+    pub fn set_tool_draft_summary(
+        &mut self,
+        history: &mut BlockHistory,
+        block_id: BlockId,
+        summary: protocol::StyledLines,
+    ) -> bool {
+        history.set_tool_draft_summary(block_id, summary)
+    }
+
+    pub fn tool_draft_block_for_call(
+        &self,
+        history: &BlockHistory,
+        call_id: &str,
+    ) -> Option<BlockId> {
+        self.tool_drafts.values().copied().find(|id| {
+            history
+                .block(*id)
+                .is_some_and(|block| block.tool_call_id() == Some(call_id))
+        })
     }
 
     pub fn promote_tool_draft(
@@ -220,11 +282,18 @@ impl StreamParser {
         let Some(block_id) = block_id else {
             return false;
         };
+        let arguments = ToolArguments::from_values_reusing(
+            args,
+            history.block(block_id).and_then(|block| match block {
+                Block::ToolDraft(draft) => Some(draft),
+                _ => None,
+            }),
+        );
         let block = Block::ToolCall {
             call_id: call_id.clone(),
             name,
             summary,
-            args,
+            args: arguments,
         };
         let state = ToolState {
             status: ToolStatus::Pending,
@@ -264,7 +333,7 @@ impl StreamParser {
             call_id: call_id.clone(),
             name,
             summary,
-            args,
+            args: args.into(),
         };
         let state = ToolState {
             status: ToolStatus::Pending,
@@ -294,32 +363,45 @@ impl StreamParser {
             .map(|tool| tool.block_id)
     }
 
-    pub fn append_active_output(
+    pub fn append_active_output_line(
         &mut self,
         history: &mut BlockHistory,
         invocation_id: protocol::InvocationId,
-        chunk: &str,
+        line: String,
     ) {
         let Some(active_idx) = self.active_tool_index(invocation_id) else {
             return;
         };
         let block_id = self.active_tools[active_idx].block_id;
-        let chunk = chunk.to_string();
-        history.update_tool_state(block_id, move |state| match state.output {
-            Some(ref mut out) => {
-                if !out.content.is_empty() {
-                    out.content.push('\n');
-                }
-                out.content.push_str(&chunk);
+        self.append_tool_output_slice(
+            history,
+            block_id,
+            crate::transcript_content::SharedContentSlice::from_owned(line),
+            true,
+        );
+    }
+
+    pub fn append_tool_output_slice(
+        &mut self,
+        history: &mut BlockHistory,
+        block_id: BlockId,
+        chunk: crate::transcript_content::SharedContentSlice,
+        line_start: bool,
+    ) {
+        let _perf = smelt_perf::perf::begin("transcript:stream:append_tool_output");
+        history.append_live_output_slice(block_id, ContentChannel::ToolOutput, chunk, line_start);
+        if smelt_perf::perf::enabled() {
+            if let Some(output_bytes) = history
+                .tool_state(block_id)
+                .and_then(|state| state.output.as_ref())
+                .map(|output| output.content.len())
+            {
+                smelt_perf::perf::record_value(
+                    "transcript:stream:tool_output_accumulated_bytes",
+                    output_bytes as u64,
+                );
             }
-            None => {
-                state.output = Some(Box::new(ToolOutput {
-                    content: chunk,
-                    is_error: false,
-                    metadata: None,
-                }));
-            }
-        });
+        }
     }
 
     pub fn set_active_status(
@@ -341,13 +423,8 @@ impl StreamParser {
             _ => {}
         }
         let elapsed = (status == ToolStatus::Confirm).then(|| active.elapsed_at(now));
-        history.update_tool_state(block_id, |state| {
-            state.status = status;
-            state.elapsed_active = status == ToolStatus::Pending;
-            if let Some(elapsed) = elapsed {
-                state.elapsed = Some(elapsed);
-            }
-        });
+        history
+            .apply_tool_state_mutation(block_id, ToolStateMutation::SetStatus { status, elapsed });
     }
 
     pub fn set_active_user_message(
@@ -360,7 +437,7 @@ impl StreamParser {
             return;
         };
         let block_id = self.active_tools[active_idx].block_id;
-        history.update_tool_state(block_id, |state| state.user_message = Some(msg));
+        history.apply_tool_state_mutation(block_id, ToolStateMutation::SetUserMessage(msg));
     }
 
     pub fn finish_tool(
@@ -379,15 +456,14 @@ impl StreamParser {
         let block_id = active.block_id;
         // The UI timer excludes time spent in blocking dialogs.
         let elapsed = (status != ToolStatus::Denied).then(|| active.elapsed_at(now));
-        history.update_tool_state(block_id, |state| {
-            state.status = status;
-            if let Some(out) = output {
-                state.output = Some(out);
-            }
-            state.elapsed = elapsed;
-            state.elapsed_active = false;
-            state.preview_output = None;
-        });
+        history.apply_tool_state_mutation(
+            block_id,
+            ToolStateMutation::Finish {
+                status,
+                output,
+                elapsed,
+            },
+        );
         self.active_tools.remove(active_idx);
         history.set_status(block_id, Status::Done);
     }
@@ -409,12 +485,14 @@ impl StreamParser {
                 Some(tool.elapsed_at(now))
             };
             history.set_status(tool.block_id, Status::Done);
-            history.update_tool_state(tool.block_id, |state| {
-                state.status = status;
-                state.elapsed = elapsed;
-                state.elapsed_active = false;
-                state.preview_output = None;
-            });
+            history.apply_tool_state_mutation(
+                tool.block_id,
+                ToolStateMutation::Finish {
+                    status,
+                    output: None,
+                    elapsed,
+                },
+            );
         }
     }
 
@@ -423,31 +501,33 @@ impl StreamParser {
     pub fn start_exec(&mut self, history: &mut BlockHistory, command: String) {
         let id = history.push(Block::Exec {
             command,
-            output: String::new(),
+            output: String::new().into(),
         });
         history.set_status(id, Status::Streaming);
         self.stream_exec_id = Some(id);
     }
 
-    pub fn append_exec_output(&mut self, history: &mut BlockHistory, chunk: &str) {
+    pub fn append_exec_output(&mut self, history: &mut BlockHistory, line: String) {
+        let _perf = smelt_perf::perf::begin("transcript:stream:append_exec_output");
         let Some(id) = self.stream_exec_id else {
             return;
         };
-        let Some(Block::Exec { command, output }) = history.block(id).cloned() else {
-            return;
-        };
-        let mut new_output = output;
-        if !new_output.is_empty() && !new_output.ends_with('\n') {
-            new_output.push('\n');
+        if history
+            .append_live_output_line(id, ContentChannel::ExecOutput, line)
+            .is_some()
+        {
+            let output_bytes = history
+                .block(id)
+                .and_then(|block| match block {
+                    Block::Exec { output, .. } => Some(output.len()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            smelt_perf::perf::record_value(
+                "transcript:stream:exec_output_accumulated_bytes",
+                output_bytes as u64,
+            );
         }
-        new_output.push_str(chunk);
-        history.rewrite(
-            id,
-            Block::Exec {
-                command,
-                output: new_output,
-            },
-        );
     }
 
     pub fn finish_exec(&mut self, _exit_code: Option<i32>) {}
@@ -456,17 +536,7 @@ impl StreamParser {
         let Some(id) = self.stream_exec_id.take() else {
             return;
         };
-        if let Some(Block::Exec { command, output }) = history.block(id).cloned() {
-            let mut trimmed = output;
-            trimmed.truncate(trimmed.trim_end().len());
-            history.rewrite(
-                id,
-                Block::Exec {
-                    command,
-                    output: trimmed,
-                },
-            );
-        }
+        history.trim_live_exec_output(id);
         history.set_status(id, Status::Done);
     }
 }
@@ -916,6 +986,54 @@ mod tests {
     }
 
     #[test]
+    fn tool_finish_retains_streamed_content_identity() {
+        let (mut parser, mut history) = setup();
+        let start = Instant::now();
+        parser.start_tool(
+            &mut history,
+            ToolStart {
+                invocation_id: INVOCATION_ID,
+                call_id: "c1".into(),
+                name: "bash".into(),
+                summary: "bash".into(),
+                args: HashMap::new(),
+                preview_output: None,
+                called_at_ms: 0,
+            },
+            start,
+        );
+        parser.append_active_output_line(&mut history, INVOCATION_ID, "first".into());
+        parser.append_active_output_line(&mut history, INVOCATION_ID, "second".into());
+        let block_id = history.order[0];
+        let content_id = history
+            .tool_state(block_id)
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.id())
+            .expect("streamed output");
+
+        parser.finish_tool(
+            &mut history,
+            INVOCATION_ID,
+            ToolStatus::Err,
+            Some(Box::new(crate::transcript_model::ToolOutput {
+                content: "first\nsecond".into(),
+                is_error: true,
+                metadata: Some(serde_json::json!({ "exit_code": 1 })),
+                content_fields: Vec::new(),
+            })),
+            None,
+            start + Duration::from_secs(1),
+        );
+
+        let finished = history.tool_state(block_id).expect("finished state");
+        let output = finished.output.as_ref().expect("finished output");
+        assert_eq!(output.content.id(), content_id);
+        assert_eq!(output.content.snapshot(), "first\nsecond");
+        assert!(output.is_error);
+        assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 1 })));
+    }
+
+    #[test]
     fn tool_elapsed_pauses_while_waiting_for_confirm() {
         let (mut parser, mut history) = setup();
         let start = Instant::now();
@@ -1048,7 +1166,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         let exec_id = history.order[0];
         assert_eq!(history.status(exec_id), Some(Status::Streaming));
-        parser.append_exec_output(&mut history, "file.txt");
+        parser.append_exec_output(&mut history, "file.txt".into());
         assert_eq!(
             block_at(&history, 0),
             &Block::Exec {
@@ -1169,57 +1287,90 @@ mod tests {
 
     // -- Tool drafts -----------------------------------------------------
 
-    fn draft_update(
-        stream_id: &str,
-        call_id: Option<&str>,
-        raw_arguments: &str,
-    ) -> ToolDraftUpdate {
-        ToolDraftUpdate {
-            stream_id: stream_id.to_string(),
-            call_id: call_id.map(str::to_string),
-            name: "bash".to_string(),
-            summary: protocol::StyledLines::from_plain("echo hi"),
-            args: HashMap::new(),
-            raw_arguments: raw_arguments.to_string(),
-            finished: false,
-        }
-    }
-
     #[test]
-    fn tool_draft_upserts_in_place() {
+    fn tool_draft_appends_and_finishes_in_place_without_replay() {
         let (mut parser, mut history) = setup();
-        parser.upsert_tool_draft(&mut history, draft_update("s1", None, "{\"command\":\"ec"));
+        let first = parser.append_tool_draft(
+            &mut history,
+            "s1".into(),
+            None,
+            Some("bash".into()),
+            "{\"command\":\"ec".into(),
+        );
         let id = history.order[0];
+        assert_eq!(first.block_id, id);
 
-        let mut update = draft_update("s1", Some("call-1"), "{\"command\":\"echo hi\"}");
-        update.finished = true;
-        parser.upsert_tool_draft(&mut history, update);
+        parser.append_tool_draft(
+            &mut history,
+            "s1".into(),
+            Some("call-1".into()),
+            Some("bash".into()),
+            "ho hi\"}".into(),
+        );
+        let raw_revision = match block_at(&history, 0) {
+            Block::ToolDraft(draft) => draft.raw_arguments.revision(),
+            block => panic!("expected draft block, got {block:?}"),
+        };
+        let layout_key = history.resolve_key(
+            id,
+            crate::transcript_model::LayoutKey {
+                width: 80,
+                view_state: crate::transcript_model::ViewState::Expanded,
+                content_hash: 0,
+                sidecar_hash: 0,
+            },
+        );
+        parser.finish_tool_draft(
+            &mut history,
+            "s1".into(),
+            "call-1".into(),
+            "bash".into(),
+            "{\"command\":\"echo hi\"}".into(),
+        );
 
         assert_eq!(history.len(), 1);
         assert_eq!(history.order[0], id);
         match block_at(&history, 0) {
-            Block::ToolDraft {
-                stream_id,
-                call_id,
-                raw_arguments,
-                finished,
-                ..
-            } => {
-                assert_eq!(stream_id, "s1");
-                assert_eq!(call_id.as_deref(), Some("call-1"));
-                assert_eq!(raw_arguments, "{\"command\":\"echo hi\"}");
-                assert!(*finished);
+            Block::ToolDraft(draft) => {
+                assert_eq!(draft.stream_id, "s1");
+                assert_eq!(draft.call_id.as_deref(), Some("call-1"));
+                assert_eq!(draft.raw_arguments.snapshot(), "{\"command\":\"echo hi\"}");
+                assert_eq!(draft.raw_arguments.revision(), raw_revision);
+                assert!(draft.finished);
             }
             block => panic!("expected draft block, got {block:?}"),
         }
         assert_eq!(history.status(id), Some(Status::Streaming));
+        assert_ne!(
+            history.resolve_key(
+                id,
+                crate::transcript_model::LayoutKey {
+                    width: 80,
+                    view_state: crate::transcript_model::ViewState::Expanded,
+                    content_hash: 0,
+                    sidecar_hash: 0,
+                },
+            ),
+            layout_key,
+            "draft completion changes structural renderer inputs even without new bytes"
+        );
     }
 
     #[test]
-    fn tool_draft_promotes_in_place() {
+    fn tool_draft_promotes_in_place_and_reuses_field_content() {
         let (mut parser, mut history) = setup();
-        parser.upsert_tool_draft(&mut history, draft_update("s1", Some("call-1"), "{}"));
+        parser.append_tool_draft(
+            &mut history,
+            "s1".into(),
+            Some("call-1".into()),
+            Some("bash".into()),
+            "{\"command\":\"echo hi\"}".into(),
+        );
         let id = history.order[0];
+        let field_id = match block_at(&history, 0) {
+            Block::ToolDraft(draft) => draft.string_field("command").unwrap().content.id(),
+            block => panic!("expected draft block, got {block:?}"),
+        };
 
         let promoted = parser.promote_tool_draft(
             &mut history,
@@ -1229,7 +1380,7 @@ mod tests {
                 call_id: "call-1".to_string(),
                 name: "bash".to_string(),
                 summary: protocol::StyledLines::from_plain("echo hi"),
-                args: HashMap::new(),
+                args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
                 preview_output: None,
                 called_at_ms: 0,
             },
@@ -1239,10 +1390,19 @@ mod tests {
         assert!(promoted);
         assert_eq!(history.len(), 1);
         assert_eq!(history.order[0], id);
-        assert!(matches!(
-            block_at(&history, 0),
-            Block::ToolCall { call_id, name, .. } if call_id == "call-1" && name == "bash"
-        ));
+        match block_at(&history, 0) {
+            Block::ToolCall {
+                call_id,
+                name,
+                args,
+                ..
+            } => {
+                assert_eq!(call_id, "call-1");
+                assert_eq!(name, "bash");
+                assert_eq!(args.string_field("command").unwrap().content.id(), field_id);
+            }
+            block => panic!("expected tool call, got {block:?}"),
+        }
         assert_eq!(history.status(id), Some(Status::Streaming));
         assert_eq!(
             history.tool_state(id).map(|state| state.status),
@@ -1253,8 +1413,8 @@ mod tests {
     #[test]
     fn clear_tool_drafts_removes_draft_blocks() {
         let (mut parser, mut history) = setup();
-        parser.upsert_tool_draft(&mut history, draft_update("s1", None, "{}"));
-        parser.upsert_tool_draft(&mut history, draft_update("s2", None, "{}"));
+        parser.start_tool_draft(&mut history, "s1".into(), None, Some("bash".into()));
+        parser.start_tool_draft(&mut history, "s2".into(), None, Some("bash".into()));
 
         parser.clear_tool_drafts(&mut history);
 

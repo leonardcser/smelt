@@ -4,8 +4,10 @@
 //! such as source diffs into serializable `LayoutIr` before caching/rendering.
 //! Width and theme are intentionally absent from these types.
 
-use crate::content::highlight::DiffIr;
+use crate::content::highlight::{DiffIr, InlineSyntaxSpan, RetainedFileViewCache};
+use crate::transcript_content::{ContentId, TranscriptContent};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub const DEFAULT_TOOL_BLOCK_ROWS: u16 = 20;
 
@@ -42,6 +44,59 @@ pub struct TextSpec {
     pub ansi: bool,
 }
 
+/// Clone-cheap syntax ranges compiled into display IR. Source spans are stored in
+/// line order, with one shared highlighted range slice per source span.
+#[derive(Clone, Debug, Default)]
+pub struct RetainedInlineSyntax {
+    source_spans: Arc<[Arc<[InlineSyntaxSpan]>]>,
+    line_offsets: Arc<[usize]>,
+}
+
+impl RetainedInlineSyntax {
+    pub fn new(source_spans: Vec<Arc<[InlineSyntaxSpan]>>, line_offsets: Vec<usize>) -> Self {
+        debug_assert_eq!(line_offsets.first().copied(), Some(0));
+        debug_assert!(line_offsets.windows(2).all(|range| range[0] <= range[1]));
+        debug_assert!(line_offsets
+            .last()
+            .is_some_and(|offset| *offset == source_spans.len()));
+        Self {
+            source_spans: source_spans.into(),
+            line_offsets: line_offsets.into(),
+        }
+    }
+
+    pub fn spans(&self, line: usize, source_span: usize) -> Option<&[InlineSyntaxSpan]> {
+        let start = *self.line_offsets.get(line)?;
+        let end = *self.line_offsets.get(line.saturating_add(1))?;
+        let index = start.checked_add(source_span)?;
+        (index < end)
+            .then(|| self.source_spans.get(index))
+            .flatten()
+            .map(AsRef::as_ref)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.source_spans
+            .len()
+            .saturating_mul(std::mem::size_of::<Arc<[InlineSyntaxSpan]>>())
+            .saturating_add(
+                self.line_offsets
+                    .len()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
+            .saturating_add(
+                self.source_spans
+                    .iter()
+                    .map(|spans| {
+                        spans
+                            .len()
+                            .saturating_mul(std::mem::size_of::<InlineSyntaxSpan>())
+                    })
+                    .sum::<usize>(),
+            )
+    }
+}
+
 /// Styled inline text leaf. Each line is wrapped at measurement/render time,
 /// preserving span-level syntax, theme, and selectability metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +105,9 @@ pub struct RunsSpec {
     pub hl_group: Option<String>,
     #[serde(default)]
     pub continuation_indent: u16,
+    /// Theme-specific syntax ranges retained only in compiled display IR.
+    #[serde(skip)]
+    pub syntax_highlights: RetainedInlineSyntax,
 }
 
 /// One preformatted styled line. Unlike [`RunsSpec`], this leaf does not wrap.
@@ -57,6 +115,9 @@ pub struct RunsSpec {
 pub struct LineSpec {
     pub spans: Vec<protocol::StyledSpan>,
     pub hl_group: Option<String>,
+    /// Theme-specific syntax ranges retained only in compiled display IR.
+    #[serde(skip)]
+    pub syntax_highlights: RetainedInlineSyntax,
 }
 
 /// Markdown text leaf. `inline` preserves the historical thinking renderer's
@@ -68,6 +129,56 @@ pub struct MarkdownSpec {
     pub dim: bool,
     pub italic: bool,
     pub inline: bool,
+}
+
+/// Rendering policy for an opaque transcript content reference.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ContentRenderSpec {
+    Text {
+        hl_group: Option<String>,
+        ansi: bool,
+    },
+    Markdown {
+        dim: bool,
+        italic: bool,
+        inline: bool,
+    },
+    Code {
+        lang: String,
+        #[serde(skip)]
+        cache: RetainedFileViewCache,
+    },
+    File {
+        path: String,
+        lang: Option<String>,
+        #[serde(skip)]
+        cache: RetainedFileViewCache,
+    },
+}
+
+/// Payload-independent leaf resolved by Rust through the transcript content store.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContentSpec {
+    pub id: ContentId,
+    pub render: ContentRenderSpec,
+}
+
+/// Retained diff directive whose source payloads stay behind opaque transcript content IDs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContentDiffSpec {
+    pub old_id: ContentId,
+    pub new_id: ContentId,
+    pub anchor_id: Option<ContentId>,
+    pub path: String,
+    pub lang: Option<String>,
+    pub full_file: bool,
+}
+
+/// Resolved shared content retained by display IR. Cloning this leaf clones only the handle.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetainedContentSpec {
+    pub content: TranscriptContent,
+    pub render: ContentRenderSpec,
 }
 
 /// Syntax-highlighted code leaf.
@@ -115,6 +226,7 @@ pub enum SourceViewIr {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayoutLeaf {
     Text(TextSpec),
+    Content(RetainedContentSpec),
     Runs(RunsSpec),
     Line(LineSpec),
     Markdown(MarkdownSpec),
@@ -128,6 +240,10 @@ pub enum LayoutLeaf {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LuaLeaf {
     Text(TextSpec),
+    Content(ContentSpec),
+    ContentDiff(ContentDiffSpec),
+    GroupChildren,
+
     Runs(RunsSpec),
     Line(LineSpec),
     Markdown(MarkdownSpec),
@@ -135,7 +251,6 @@ pub enum LuaLeaf {
     Separator(SeparatorSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
-    SourceView(SourceViewIr),
 }
 
 pub type IrLeaf = LayoutLeaf;
@@ -303,11 +418,23 @@ fn leaf_dynamic_bytes(leaf: &LayoutLeaf) -> usize {
             .content
             .capacity()
             .saturating_add(optional_string_bytes(&spec.hl_group)),
-        LayoutLeaf::Runs(spec) => {
-            styled_lines_bytes(&spec.lines).saturating_add(optional_string_bytes(&spec.hl_group))
-        }
+        LayoutLeaf::Content(spec) => match &spec.render {
+            ContentRenderSpec::Text { hl_group, .. } => optional_string_bytes(hl_group),
+            ContentRenderSpec::Markdown { .. } => 0,
+            ContentRenderSpec::Code { lang, cache } => {
+                lang.capacity().saturating_add(cache.retained_bytes())
+            }
+            ContentRenderSpec::File { path, lang, cache } => path
+                .capacity()
+                .saturating_add(optional_string_bytes(lang))
+                .saturating_add(cache.retained_bytes()),
+        },
+        LayoutLeaf::Runs(spec) => styled_lines_bytes(&spec.lines)
+            .saturating_add(optional_string_bytes(&spec.hl_group))
+            .saturating_add(spec.syntax_highlights.retained_bytes()),
         LayoutLeaf::Line(spec) => styled_spans_bytes(&spec.spans, spec.spans.capacity())
-            .saturating_add(optional_string_bytes(&spec.hl_group)),
+            .saturating_add(optional_string_bytes(&spec.hl_group))
+            .saturating_add(spec.syntax_highlights.retained_bytes()),
         LayoutLeaf::Markdown(spec) => spec.content.capacity(),
         LayoutLeaf::Code(spec) => spec.content.capacity().saturating_add(spec.lang.capacity()),
         LayoutLeaf::Separator(spec) => styled_spans_bytes(&spec.label, spec.label.capacity()),

@@ -3,7 +3,7 @@
 smelt.transcript.register_tool("load_skill", {
   cache_key = "smelt.tool-presentation.load_skill:v1",
   compact = function(block)
-    return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
+    return tostring((block.output and block.output.content_lines) or 0) .. " lines"
   end,
 })
 

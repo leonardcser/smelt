@@ -11,22 +11,22 @@ Bundled default transcript renderers. These are ordinary Lua helpers used by the
 ## `smelt.transcript.defaults.child_failed`
 
 ```lua
-fun(child: smelt.transcript.Block): boolean
+fun(child: smelt.transcript.GroupChild): boolean
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock)
+Types: [`smelt.transcript.GroupChild`](types.md#smelttranscriptgroupchild)
 
 True when a grouped child represents a failed or denied tool result.
 
 ## `smelt.transcript.defaults.group_children`
 
 ```lua
-fun(group: smelt.transcript.Group): smelt.transcript.Block[]
+fun(group: smelt.transcript.Group): smelt.transcript.GroupChild[]
 ```
 
-Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup), [`smelt.transcript.Block`](types.md#smelttranscriptblock)
+Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup), [`smelt.transcript.GroupChild`](types.md#smelttranscriptgroupchild)
 
-Return child snapshots for a transcript group snapshot.
+Return bounded child presentation metadata for a transcript group.
 
 ## `smelt.transcript.defaults.group_failure_counts`
 
@@ -36,7 +36,7 @@ fun(group: smelt.transcript.Group): integer, integer
 
 Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup)
 
-Count failed and denied tool children in a transcript group snapshot.
+Count failed and denied tool children in a transcript group.
 
 ## `smelt.transcript.defaults.render`
 
@@ -117,7 +117,7 @@ fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.
 
 Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render all group children through the configured root renderer and middleware.
+Compose independently retained child layouts for an expanded group.
 
 ## `smelt.transcript.defaults.render_llm_markdown`
 

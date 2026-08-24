@@ -309,7 +309,7 @@ fn lua_goal_banner_stays_above_transcript_scroll_pill() {
     });
     for i in 0..40 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("assistant row {i:02}"),
+            content: format!("assistant row {i:02}").into(),
         });
     }
     app.render_silent();

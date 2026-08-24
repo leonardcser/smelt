@@ -22,8 +22,8 @@ pub use runtime::{
 pub use shared::{
     AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, CommandBusyBehavior, DefaultShell, Hooks,
     LuaHostServices, LuaResumeSink, LuaShared, Phase, RegisteredCommand, RegisteredKeymap,
-    ToolHandles, TranscriptGroupBucket, TranscriptGroupFieldMatch, TranscriptGroupSelector,
-    TranscriptGroupSpec, LUA_BUF_ID_BASE,
+    RegisteredWinRenderer, ToolHandles, TranscriptGroupBucket, TranscriptGroupFieldMatch,
+    TranscriptGroupSelector, TranscriptGroupSpec, LUA_BUF_ID_BASE,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{
@@ -47,9 +47,147 @@ pub enum ToolExecResult {
         content: String,
         is_error: bool,
         metadata: Option<serde_json::Value>,
+        display_content: Vec<protocol::ToolDisplayContent>,
+        attachment: Option<Box<protocol::ToolAttachment>>,
     },
     /// Handler yielded; result arrives later via `drive_tasks() -> TaskDriveOutput::ToolComplete`.
     Pending,
+}
+
+pub(crate) struct LuaToolResultParts {
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
+    pub(crate) metadata: Option<serde_json::Value>,
+    pub(crate) display_content: Vec<protocol::ToolDisplayContent>,
+    pub(crate) attachment: Option<protocol::ToolAttachment>,
+}
+
+pub(crate) fn tool_result_from_lua_table(
+    lua: &mlua::Lua,
+    result: &mlua::Table,
+) -> mlua::Result<LuaToolResultParts> {
+    let content = result.get("content").unwrap_or_default();
+    let is_error = result.get("is_error").unwrap_or(false);
+    let mut display_content = tool_display_content_from_lua(result)?;
+    let metadata_value = result
+        .get::<mlua::Value>("metadata")
+        .unwrap_or(mlua::Value::Nil);
+    let (metadata, attachment) =
+        tool_metadata_from_lua(lua, &metadata_value, &mut display_content)?;
+    protocol::validate_tool_display_content(&display_content).map_err(mlua::Error::external)?;
+    Ok(LuaToolResultParts {
+        content,
+        is_error,
+        metadata,
+        display_content,
+        attachment,
+    })
+}
+
+fn tool_display_content_from_lua(
+    result: &mlua::Table,
+) -> mlua::Result<Vec<protocol::ToolDisplayContent>> {
+    let Some(fields) = result.get::<Option<mlua::Table>>("display_content")? else {
+        return Ok(Vec::new());
+    };
+    let mut display_content = Vec::new();
+    for pair in fields.pairs::<mlua::Value, mlua::Value>() {
+        if display_content.len() >= protocol::TOOL_DISPLAY_CONTENT_MAX_FIELDS {
+            return Err(mlua::Error::external(
+                protocol::ToolResultValidationError::TooManyDisplayFields,
+            ));
+        }
+        let (name, content) = pair?;
+        let mlua::Value::String(name) = name else {
+            return Err(mlua::Error::external(
+                "tool display content field names must be strings",
+            ));
+        };
+        let mlua::Value::String(content) = content else {
+            return Err(mlua::Error::external(
+                "tool display content field values must be strings",
+            ));
+        };
+        display_content.push(protocol::ToolDisplayContent::new(
+            name.to_string_lossy(),
+            content.to_string_lossy(),
+        ));
+    }
+    display_content.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    protocol::validate_tool_display_content(&display_content).map_err(mlua::Error::external)?;
+    Ok(display_content)
+}
+
+fn tool_metadata_from_lua(
+    lua: &mlua::Lua,
+    value: &mlua::Value,
+    display_content: &mut Vec<protocol::ToolDisplayContent>,
+) -> mlua::Result<(Option<serde_json::Value>, Option<protocol::ToolAttachment>)> {
+    if matches!(value, mlua::Value::Nil) {
+        return Ok((None, None));
+    }
+    let mlua::Value::Table(table) = value else {
+        let metadata =
+            api::bounded_tool_metadata_from_lua(lua, value, &[]).map_err(mlua::Error::external)?;
+        return Ok((Some(metadata), None));
+    };
+
+    let mut ignored_keys = Vec::with_capacity(protocol::TOOL_DISPLAY_METADATA_FIELDS.len() + 1);
+    for name in protocol::TOOL_DISPLAY_METADATA_FIELDS {
+        let value = table
+            .raw_get::<mlua::Value>(name)
+            .unwrap_or(mlua::Value::Nil);
+        let mlua::Value::String(content) = value else {
+            continue;
+        };
+        ignored_keys.push(name);
+        if display_content.iter().any(|field| field.name == name) {
+            continue;
+        }
+        display_content.push(protocol::ToolDisplayContent::new(
+            name,
+            content.to_string_lossy(),
+        ));
+    }
+
+    let attachment = attachment_from_lua_metadata(table)?;
+    if attachment.is_some() {
+        ignored_keys.push("data_url");
+    }
+    let metadata = api::bounded_tool_metadata_from_lua(lua, value, &ignored_keys)
+        .map_err(mlua::Error::external)?;
+    Ok((Some(metadata), attachment))
+}
+
+fn attachment_from_lua_metadata(
+    metadata: &mlua::Table,
+) -> mlua::Result<Option<protocol::ToolAttachment>> {
+    if metadata.get::<Option<String>>("kind")?.as_deref() != Some("file_attachment") {
+        return Ok(None);
+    }
+    let modality = match metadata.get::<String>("modality")?.as_str() {
+        "image" => protocol::ToolAttachmentModality::Image,
+        "pdf" => protocol::ToolAttachmentModality::Pdf,
+        modality => {
+            return Err(mlua::Error::external(format!(
+                "tool attachment has unsupported modality `{modality}`"
+            )));
+        }
+    };
+    let mime = metadata.get::<String>("mime")?;
+    let data_url = metadata.get::<String>("data_url")?;
+    let expected_prefix = format!("data:{mime};base64,");
+    if !data_url.starts_with(&expected_prefix) {
+        return Err(mlua::Error::external(format!(
+            "tool attachment data URL must start with `{expected_prefix}`"
+        )));
+    }
+    Ok(Some(protocol::ToolAttachment {
+        modality,
+        mime,
+        data_url,
+        label: metadata.get::<Option<String>>("label")?,
+    }))
 }
 
 use mlua::prelude::*;

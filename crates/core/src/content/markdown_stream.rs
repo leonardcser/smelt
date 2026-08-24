@@ -9,6 +9,7 @@
 //! produce stable rows; final Markdown parsing and formatting still belong to
 //! the normal rendering path.
 
+use crate::transcript_content::{ContentRead, TranscriptContent};
 use crate::transcript_model::{Block, BlockHistory, BlockId, Status};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,11 +50,13 @@ pub enum MarkdownStreamKind {
 impl MarkdownStreamKind {
     fn block(self, content: String) -> Block {
         match self {
-            Self::Text => Block::Text { content },
+            Self::Text => Block::Text {
+                content: content.into(),
+            },
             Self::Thinking => Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
-                content,
+                content: content.into(),
                 kind: protocol::ReasoningKind::Raw,
             },
         }
@@ -84,19 +87,52 @@ impl MarkdownStreamKind {
     }
 }
 
-pub(crate) fn normalize_thinking_title_spacing(content: &str) -> String {
-    let mut lines = Vec::new();
+pub(crate) fn normalize_thinking_title_spacing(content: TranscriptContent) -> TranscriptContent {
+    let read = content.read();
+    let line_count = read.split_line_count();
+    let mut kept_runs = Vec::<std::ops::Range<usize>>::new();
     let mut drop_blank_after_title = false;
+    let mut changed = false;
 
-    for line in content.split('\n') {
-        if drop_blank_after_title && line.trim().is_empty() {
+    for line in 0..line_count {
+        let Some(range) = read.split_line_range(line) else {
+            continue;
+        };
+        let trimmed = read.trimmed_range(range.clone());
+        if drop_blank_after_title && trimmed.is_empty() {
+            changed = true;
             continue;
         }
-        drop_blank_after_title = thinking_title(line).is_some();
-        lines.push(line);
+        drop_blank_after_title = retained_thinking_title(&read, trimmed);
+        if let Some(run) = kept_runs
+            .last_mut()
+            .filter(|run| run.end.saturating_add(1) == range.start)
+        {
+            run.end = range.end;
+        } else {
+            kept_runs.push(range);
+        }
     }
+    drop(read);
+    if changed {
+        content.copy_ranges_joined(&kept_runs, "\n")
+    } else {
+        content
+    }
+}
 
-    lines.join("\n")
+fn retained_thinking_title(read: &ContentRead<'_>, trimmed: std::ops::Range<usize>) -> bool {
+    if trimmed.len() <= 4
+        || read.byte_at(trimmed.start) != Some(b'*')
+        || read.byte_at(trimmed.start.saturating_add(1)) != Some(b'*')
+        || read.byte_at(trimmed.end.saturating_sub(2)) != Some(b'*')
+        || read.byte_at(trimmed.end.saturating_sub(1)) != Some(b'*')
+    {
+        return false;
+    }
+    !read
+        .trimmed_range(trimmed.start.saturating_add(2)..trimmed.end.saturating_sub(2))
+        .is_empty()
 }
 
 enum ActiveMarkdownBlock {
@@ -670,22 +706,22 @@ mod tests {
         (MarkdownStream::thinking(), BlockHistory::new())
     }
 
-    fn text_at(history: &BlockHistory, index: usize) -> &str {
+    fn text_at(history: &BlockHistory, index: usize) -> String {
         match history
             .materialized_block_at(index)
             .expect("materialized test block")
         {
-            Block::Text { content } => content,
+            Block::Text { content } => content.snapshot(),
             block => panic!("expected text block, got {block:?}"),
         }
     }
 
-    fn thinking_at(history: &BlockHistory, index: usize) -> &str {
+    fn thinking_at(history: &BlockHistory, index: usize) -> String {
         match history
             .materialized_block_at(index)
             .expect("materialized test block")
         {
-            Block::Thinking { content, .. } => content,
+            Block::Thinking { content, .. } => content.snapshot(),
             block => panic!("expected thinking block, got {block:?}"),
         }
     }
@@ -729,10 +765,16 @@ mod tests {
             .expect("continuation patch is retained")
             .collect::<Vec<_>>();
         assert_eq!(patches.len(), 1);
+        let id = history.last_block_id().expect("stream block");
         assert_eq!(
             patches[0].operations,
             vec![crate::transcript_model::TranscriptPatchOperation::Append {
-                id: history.last_block_id().expect("stream block"),
+                id,
+                content_id: history
+                    .content(id, crate::transcript_model::ContentChannel::Primary)
+                    .expect("primary content")
+                    .id(),
+                channel: crate::transcript_model::ContentChannel::Primary,
                 byte_range: 1..3,
             }]
         );
@@ -850,15 +892,33 @@ mod tests {
 
     #[test]
     fn thinking_title_spacing_removes_blank_before_body() {
+        let normalize = |source: &str| {
+            normalize_thinking_title_spacing(TranscriptContent::from(source)).snapshot()
+        };
         assert_eq!(
-            normalize_thinking_title_spacing("**Assessing directory exclusions**\n\nbody"),
+            normalize("**Assessing directory exclusions**\n\nbody"),
             "**Assessing directory exclusions**\nbody"
         );
         assert_eq!(
-            normalize_thinking_title_spacing("first paragraph\n\nsecond paragraph"),
+            normalize("first paragraph\n\nsecond paragraph"),
             "first paragraph\n\nsecond paragraph"
         );
-        assert_eq!(normalize_thinking_title_spacing("body\n"), "body\n");
+        assert_eq!(normalize("body\n"), "body\n");
+        assert_eq!(normalize("**title**\r\n\r\nbody"), "**title**\r\nbody");
+        assert_eq!(normalize("**title**\n"), "**title**");
+    }
+
+    #[test]
+    fn thinking_title_spacing_normalizes_retained_chunks_without_a_snapshot() {
+        let content = TranscriptContent::new();
+        content.append_owned("**Plan**\n".into());
+        content.append_owned("\n".into());
+        content.append_owned("body\ncontinued".into());
+
+        let normalized = normalize_thinking_title_spacing(content);
+
+        assert_eq!(normalized.snapshot(), "**Plan**\nbody\ncontinued");
+        assert_eq!(normalized.read().chunks().len(), 3);
     }
 
     #[test]

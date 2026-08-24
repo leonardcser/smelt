@@ -226,20 +226,46 @@ CREATE TABLE IF NOT EXISTS lineage_sequence_roots (
         REFERENCES lineage_sequence_nodes(lineage_id, node_id)
 ) STRICT;
 
-CREATE TABLE IF NOT EXISTS lineage_transcript_extent_chunks (
+CREATE TABLE IF NOT EXISTS lineage_transcript_record_profiles (
     lineage_id TEXT NOT NULL,
-    transcript_root_id TEXT NOT NULL,
-    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
-    record_count INTEGER NOT NULL CHECK (record_count BETWEEN 1 AND 64),
+    payload_id TEXT NOT NULL,
+    block_idx INTEGER NOT NULL CHECK (block_idx >= 0),
+    history_idx INTEGER CHECK (history_idx IS NULL OR history_idx >= 0),
+    kind TEXT NOT NULL CHECK (kind IN (
+        'user', 'mode', 'process_status', 'thinking', 'assistant',
+        'code', 'tool', 'exec', 'compacted', 'compaction_preview'
+    )),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'mode', 'process_status')),
+    first_line TEXT NOT NULL CHECK (length(first_line) <= 512),
+    estimated_text_bytes INTEGER NOT NULL CHECK (estimated_text_bytes >= 0),
+    rows_20 INTEGER NOT NULL CHECK (rows_20 >= 1),
+    rows_40 INTEGER NOT NULL CHECK (rows_40 >= 1 AND rows_40 <= rows_20),
+    rows_80 INTEGER NOT NULL CHECK (rows_80 >= 1 AND rows_80 <= rows_40),
+    rows_120 INTEGER NOT NULL CHECK (rows_120 >= 1 AND rows_120 <= rows_80),
+    rows_160 INTEGER NOT NULL CHECK (rows_160 >= 1 AND rows_160 <= rows_120),
+    rows_240 INTEGER NOT NULL CHECK (rows_240 >= 1 AND rows_240 <= rows_160),
+    PRIMARY KEY (lineage_id, payload_id),
+    FOREIGN KEY (lineage_id, payload_id)
+        REFERENCES lineage_payload_object_refs(lineage_id, payload_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS lineage_transcript_extent_nodes (
+    lineage_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    record_count INTEGER NOT NULL CHECK (record_count > 0),
+    first_block_idx INTEGER NOT NULL CHECK (first_block_idx >= 0),
+    last_block_idx INTEGER NOT NULL CHECK (last_block_idx >= first_block_idx),
+    kind_mask INTEGER NOT NULL CHECK (kind_mask > 0),
+    role_mask INTEGER NOT NULL CHECK (role_mask > 0),
     rows_20 INTEGER NOT NULL CHECK (rows_20 >= record_count),
     rows_40 INTEGER NOT NULL CHECK (rows_40 >= record_count AND rows_40 <= rows_20),
     rows_80 INTEGER NOT NULL CHECK (rows_80 >= record_count AND rows_80 <= rows_40),
     rows_120 INTEGER NOT NULL CHECK (rows_120 >= record_count AND rows_120 <= rows_80),
     rows_160 INTEGER NOT NULL CHECK (rows_160 >= record_count AND rows_160 <= rows_120),
     rows_240 INTEGER NOT NULL CHECK (rows_240 >= record_count AND rows_240 <= rows_160),
-    PRIMARY KEY (lineage_id, transcript_root_id, chunk_index),
-    FOREIGN KEY (lineage_id, transcript_root_id)
-        REFERENCES lineage_sequence_roots(lineage_id, root_id)
+    PRIMARY KEY (lineage_id, node_id),
+    FOREIGN KEY (lineage_id, node_id)
+        REFERENCES lineage_sequence_nodes(lineage_id, node_id) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS lineage_revisions (
@@ -443,6 +469,8 @@ CREATE INDEX IF NOT EXISTS lineage_payload_objects_idx
     ON lineage_payload_object_refs(lineage_id, object_hash);
 CREATE INDEX IF NOT EXISTS lineage_payload_nested_objects_idx
     ON lineage_payload_nested_object_refs(lineage_id, object_hash);
+CREATE INDEX IF NOT EXISTS lineage_transcript_profiles_block_idx
+    ON lineage_transcript_record_profiles(lineage_id, block_idx, payload_id);
 CREATE INDEX IF NOT EXISTS lineage_receipts_result_idx
     ON lineage_commit_receipts(lineage_id, result_revision_id);
 CREATE INDEX IF NOT EXISTS lineage_branch_revisions_revision_idx
@@ -566,6 +594,18 @@ CREATE TRIGGER IF NOT EXISTS lineage_payload_nested_object_ref_update
 BEFORE UPDATE ON lineage_payload_nested_object_refs
 BEGIN
     SELECT RAISE(ABORT, 'lineage nested payload references are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS lineage_transcript_record_profile_update
+BEFORE UPDATE ON lineage_transcript_record_profiles
+BEGIN
+    SELECT RAISE(ABORT, 'transcript record profiles are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS lineage_transcript_extent_node_update
+BEFORE UPDATE ON lineage_transcript_extent_nodes
+BEGIN
+    SELECT RAISE(ABORT, 'transcript extent nodes are immutable');
 END;
 
 CREATE TRIGGER IF NOT EXISTS lineage_sequence_node_update

@@ -89,23 +89,6 @@ impl ProcessStatusEvent {
         }
     }
 
-    pub fn snapshot_json_fields(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut fields = serde_json::Map::new();
-        let event_type = self.event_type();
-        fields.insert("event".into(), serde_json::json!(event_type));
-        fields.insert("event_type".into(), serde_json::json!(event_type));
-        if let Ok(event_data) = serde_json::to_value(self) {
-            fields.insert("event_data".into(), event_data);
-        }
-        if let Some(process_id) = self.process_id() {
-            fields.insert("process_id".into(), serde_json::json!(process_id));
-        }
-        if let Some(exit_code) = self.exit_code() {
-            fields.insert("exit_code".into(), serde_json::json!(exit_code));
-        }
-        fields
-    }
-
     pub fn display_text(&self) -> String {
         match self {
             Self::BackgroundProcessCompleted {

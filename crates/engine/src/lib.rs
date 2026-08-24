@@ -403,12 +403,12 @@ impl EventInjector {
         &self,
         invocation_id: protocol::InvocationId,
         call_id: String,
-        chunk: String,
+        line: String,
     ) {
         let _ = self.event_tx.send(EngineEvent::ToolOutput {
             invocation_id,
             call_id,
-            chunk,
+            line,
         });
     }
 }
@@ -592,12 +592,12 @@ mod tests {
         let _ = event_tx.send(EngineEvent::ToolOutput {
             invocation_id: protocol::InvocationId::new(1),
             call_id: "id".into(),
-            chunk: "x".into(),
+            line: "x".into(),
         });
         match handle.recv().await.unwrap() {
-            EngineEvent::ToolOutput { call_id, chunk, .. } => {
+            EngineEvent::ToolOutput { call_id, line, .. } => {
                 assert_eq!(call_id, "id");
-                assert_eq!(chunk, "x");
+                assert_eq!(line, "x");
             }
             _ => panic!("unexpected event"),
         }
@@ -650,9 +650,9 @@ mod tests {
         let injector = handle.injector();
         injector.inject_tool_output(protocol::InvocationId::new(1), "c".into(), "out".into());
         match handle.recv().await.unwrap() {
-            EngineEvent::ToolOutput { call_id, chunk, .. } => {
+            EngineEvent::ToolOutput { call_id, line, .. } => {
                 assert_eq!(call_id, "c");
-                assert_eq!(chunk, "out");
+                assert_eq!(line, "out");
             }
             _ => panic!("unexpected event"),
         }

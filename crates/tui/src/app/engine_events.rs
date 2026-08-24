@@ -11,6 +11,29 @@ struct EngineEventResult {
     assistant_output_started: bool,
 }
 
+fn waits_for_pending_transcript_work(event: &EngineEvent) -> bool {
+    matches!(
+        event,
+        EngineEvent::HistoryAppended { .. }
+            | EngineEvent::HistoryUpdated { .. }
+            | EngineEvent::TurnComplete { .. }
+            | EngineEvent::TurnError { .. }
+    )
+}
+
+fn is_reasoning_summary(event: &EngineEvent) -> bool {
+    matches!(
+        event,
+        EngineEvent::ReasoningPartFinished {
+            kind: protocol::ReasoningKind::Summary,
+            ..
+        } | EngineEvent::Reasoning {
+            kind: protocol::ReasoningKind::Summary,
+            ..
+        }
+    )
+}
+
 impl TuiApp {
     pub(crate) fn publish_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         self.core
@@ -129,6 +152,17 @@ impl TuiApp {
         elapsed_ms: Option<u64>,
         status: ToolStatus,
     ) {
+        self.finish_tool_now_for_engine_event(pending, invocation_id, result, elapsed_ms, status);
+    }
+
+    fn finish_tool_now_for_engine_event(
+        &mut self,
+        pending: &mut Vec<PendingTool>,
+        invocation_id: protocol::InvocationId,
+        result: protocol::ToolOutcome,
+        elapsed_ms: Option<u64>,
+        status: ToolStatus,
+    ) {
         let mut finished_tool_name: Option<String> = None;
         let mut finished_is_error = false;
         if let Some(idx) = pending
@@ -138,11 +172,16 @@ impl TuiApp {
             let removed = pending.remove(idx);
             finished_tool_name = Some(removed.name.clone());
             finished_is_error = result.is_error;
-            let output = Some(Box::new(ToolOutput {
-                content: result.content,
-                is_error: result.is_error,
-                metadata: result.metadata,
-            }));
+            let content = self
+                .conversation
+                .active_tool_output_content(invocation_id)
+                .unwrap_or_else(|| result.content.into());
+            let output = Some(Box::new(ToolOutput::from_display_content(
+                content,
+                result.is_error,
+                result.metadata,
+                result.display_content,
+            )));
             let elapsed = elapsed_ms.map(Duration::from_millis);
             self.finish_tool(invocation_id, status, output, elapsed);
         }
@@ -173,7 +212,7 @@ impl TuiApp {
             self.push_block(Block::Thinking {
                 summary_titles: title.iter().cloned().collect(),
                 title,
-                content,
+                content: content.into(),
                 kind: protocol::ReasoningKind::Summary,
             });
             return true;
@@ -188,17 +227,19 @@ impl TuiApp {
                 summary_titles.push(title.clone());
             }
         }
-        let content = match (previous_content.is_empty(), content.is_empty()) {
-            (_, true) => previous_content,
-            (true, false) => content,
-            (false, false) => format!("{previous_content}\n{content}"),
-        };
+        let mut combined_content = previous_content;
+        if !content.is_empty() {
+            if !combined_content.is_empty() {
+                combined_content.push_owned("\n".to_string());
+            }
+            combined_content.push_owned(content);
+        }
         self.conversation.rewrite_block(
             id,
             Block::Thinking {
                 title: title.or(previous_title),
                 summary_titles,
-                content,
+                content: combined_content,
                 kind: protocol::ReasoningKind::Summary,
             },
         );
@@ -216,7 +257,116 @@ impl TuiApp {
         self.dispatch_engine_event_inner(ev)
     }
 
+    pub(crate) fn queue_engine_continuation(&mut self, event: EngineEvent) {
+        if matches!(event, EngineEvent::EngineAskDelta { .. }) {
+            self.transcript_work.push_auxiliary_continuation(event);
+        } else {
+            self.transcript_work.push_provider_continuation(event);
+        }
+    }
+
+    #[cfg(all(test, feature = "transcript-bench"))]
+    pub(crate) fn transcript_work_pending_for_harness(&self) -> bool {
+        !self.transcript_work.is_empty()
+    }
+
+    pub(crate) fn discard_pending_transcript_work(&mut self) {
+        self.transcript_work.discard_main_turn_work();
+        self.conversation.release_all_deferred_engine_blocks();
+    }
+
+    pub(crate) fn apply_pending_transcript_work(&mut self) {
+        use crate::app::transcript_work::TranscriptWork;
+
+        let _perf = smelt_perf::perf::begin("transcript:apply_pending_work");
+        let mut applied = 0u64;
+        while let Some(work) = self.transcript_work.pop_front() {
+            let stop_at_frame_boundary = match work {
+                TranscriptWork::ProviderContinuation(event) => {
+                    let keep_streaming = self.dispatch_engine_event_now(event);
+                    debug_assert!(keep_streaming, "a continuation cannot terminate its turn");
+                    self.transcript_work.front_is_tool_output_append()
+                }
+                TranscriptWork::AuxiliaryContinuation(event) => {
+                    self.dispatch_engine_event_now(event);
+                    false
+                }
+                TranscriptWork::ToolOutputAppend(mut pending) => {
+                    if pending.defer_until_frame {
+                        pending.defer_until_frame = false;
+                        self.transcript_work.push_front_tool_output(pending);
+                    } else if let Some(pending) =
+                        self.conversation.advance_tool_output_append(pending)
+                    {
+                        self.transcript_work.push_front_tool_output(pending);
+                    }
+                    true
+                }
+                TranscriptWork::DeferredReasoningSummary { event, block_id } => {
+                    if self.conversation.deferred_engine_block_is_ready(block_id) {
+                        self.dispatch_engine_event_now(event);
+                        self.conversation.release_deferred_engine_block(block_id);
+                    } else if self.conversation.deferred_engine_block_failed(block_id) {
+                        self.conversation.release_deferred_engine_block(block_id);
+                        self.dispatch_engine_event_now(event);
+                    } else {
+                        self.transcript_work
+                            .push_front_deferred_reasoning_summary(event, block_id);
+                    }
+                    true
+                }
+                TranscriptWork::OrderedEngineEvent(event) => {
+                    self.dispatch_engine_event_now(event);
+                    true
+                }
+                TranscriptWork::AppendExecOutput(chunk) => {
+                    self.conversation.append_exec_output(chunk);
+                    false
+                }
+                TranscriptWork::FinishExec(exit_code) => {
+                    self.conversation.finish_exec(exit_code);
+                    false
+                }
+                TranscriptWork::FinalizeExec => {
+                    self.conversation.finalize_exec();
+                    false
+                }
+            };
+            applied = applied.saturating_add(1);
+            if stop_at_frame_boundary {
+                break;
+            }
+        }
+        smelt_perf::perf::record_value("transcript:pending_work:applied", applied);
+    }
+
     fn dispatch_engine_event_inner(&mut self, ev: EngineEvent) -> bool {
+        if is_reasoning_summary(&ev) {
+            if let Some(block_id) = self.conversation.defer_last_reasoning_summary_hydration() {
+                self.transcript_work
+                    .push_deferred_reasoning_summary(ev, block_id);
+                self.request_continuation_render();
+                return true;
+            }
+        }
+        let wait_for_work = match &ev {
+            EngineEvent::ToolFinished { invocation_id, .. } => {
+                self.transcript_work.has_pending_tool_output(*invocation_id)
+            }
+            _ if waits_for_pending_transcript_work(&ev) => {
+                self.transcript_work.has_main_turn_work()
+            }
+            _ => false,
+        };
+        if wait_for_work {
+            self.transcript_work.push_ordered_engine_event(ev);
+            self.request_continuation_render();
+            return true;
+        }
+        self.dispatch_engine_event_now(ev)
+    }
+
+    fn dispatch_engine_event_now(&mut self, ev: EngineEvent) -> bool {
         if !self.conversation.is_active() {
             self.handle_idle_engine_event(ev);
             return true;
@@ -321,11 +471,11 @@ impl TuiApp {
             }
             EngineEvent::ToolOutput {
                 invocation_id,
-                chunk,
+                line,
                 ..
             } => {
                 assistant_output_started = true;
-                self.append_active_output(invocation_id, &chunk);
+                self.append_active_output_line(invocation_id, line);
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
@@ -405,7 +555,7 @@ impl TuiApp {
                     assistant_output_started = self.try_push_block(Block::Thinking {
                         title,
                         summary_titles: Vec::new(),
-                        content,
+                        content: content.into(),
                         kind,
                     });
                 }
@@ -458,7 +608,9 @@ impl TuiApp {
             }
             EngineEvent::Text { content } => {
                 self.flush_streaming_text();
-                assistant_output_started = self.try_push_block(Block::Text { content });
+                assistant_output_started = self.try_push_block(Block::Text {
+                    content: content.into(),
+                });
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -611,11 +763,13 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::EngineAskDelta { id, delta } => {
+                self.continuing_engine_ask_ids.insert(id);
                 let lua = self.lua.execution();
                 crate::lua::scope_app(self, || lua.fire_ask_delta_callback(id, &delta));
                 SessionControl::Continue
             }
             EngineEvent::EngineAskResponse { id, message, error } => {
+                self.continuing_engine_ask_ids.remove(&id);
                 let lua = self.lua.execution();
                 crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
                 SessionControl::Continue
@@ -776,10 +930,12 @@ impl TuiApp {
                 self.save_session();
             }
             EngineEvent::EngineAskDelta { id, delta } => {
+                self.continuing_engine_ask_ids.insert(id);
                 let lua = self.lua.execution();
                 crate::lua::scope_app(self, || lua.fire_ask_delta_callback(id, &delta));
             }
             EngineEvent::EngineAskResponse { id, message, error } => {
+                self.continuing_engine_ask_ids.remove(&id);
                 let lua = self.lua.execution();
                 crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
             }

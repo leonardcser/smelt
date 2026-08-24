@@ -1,20 +1,24 @@
 use crate::content::transcript_scene::{
-    NodeLayoutKey, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
+    NodeLayoutKey, RenderGroupNode, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
 };
-use crate::smelt_edit::{Buffer, Theme};
+use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
+use smelt_core::buffer::LineDecoration;
 use smelt_core::content::block_layout::{
-    BlockLayout, GutterSpec, HboxItem, IrLeaf, LayoutIr, LuaLeaf, MarkdownSpec, SourceViewIr,
-    StyleSpec, TextSpec,
+    BlockLayout, ContentRenderSpec, GutterSpec, HboxItem, IrLeaf, LayoutIr, LineSpec, LuaLeaf,
+    RetainedContentSpec, RetainedInlineSyntax, RunsSpec, SourceViewIr, StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::highlight::InlineOptions;
-use smelt_core::lua::runtime::LuaRuntime;
+use smelt_core::lua::runtime::{LuaRuntime, TranscriptRenderNode};
 use smelt_core::theme::intern;
+use smelt_core::transcript_content::TranscriptContent;
 #[cfg(test)]
 use smelt_core::transcript_model::BlockId;
 use smelt_core::transcript_model::{Block, BlockHistory, Status, ViewState};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 12;
 
@@ -138,11 +142,21 @@ pub(crate) struct CompileJob {
 }
 
 enum CompileJobSource {
-    Snapshot {
-        value: serde_json::Value,
-        cache_source_views: bool,
+    Metadata {
+        node: TranscriptRenderNode,
+        content_sources: Vec<TranscriptContent>,
+    },
+    Group {
+        node: TranscriptRenderNode,
+        children: Vec<GroupChildCompileSource>,
     },
     Ready(LayoutIr),
+}
+
+struct GroupChildCompileSource {
+    node: TranscriptRenderNode,
+    view_state: ViewState,
+    content_sources: Vec<TranscriptContent>,
 }
 
 struct CompiledLayout {
@@ -150,11 +164,27 @@ struct CompiledLayout {
     refresh_after_ms: Option<u64>,
 }
 
+fn earliest_delay(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
+fn blank_line_layout() -> LayoutIr {
+    BlockLayout::Leaf(IrLeaf::Line(LineSpec {
+        spans: vec![protocol::StyledSpan::default()],
+        hl_group: None,
+        syntax_highlights: Default::default(),
+    }))
+}
+
 impl CompileJob {
     fn compile(
         self,
         env: TranscriptRenderEnv<'_>,
-        source_views: &mut SourceViewCache,
+        inline_syntax: &mut InlineSyntaxCache,
     ) -> (
         RenderNodeId,
         DisplayCacheKey,
@@ -162,21 +192,60 @@ impl CompileJob {
         Option<std::time::Instant>,
     ) {
         let compiled = match self.source {
-            CompileJobSource::Snapshot {
-                value,
-                cache_source_views,
+            CompileJobSource::Metadata {
+                node,
+                content_sources,
             } => {
                 let mut cache = CompileLayoutCache {
-                    source_views,
-                    source_views_enabled: cache_source_views,
+                    inline_syntax,
+                    content_sources: &content_sources,
+                    group_children: None,
                     refresh_after_ms: None,
                 };
-                compile_node_with_lua(env.clone(), &value, self.view_state, &mut cache)
+                compile_node_with_lua(env.clone(), &node, self.view_state, &mut cache)
             }
-            CompileJobSource::Ready(layout) => CompiledLayout {
-                layout,
-                refresh_after_ms: None,
-            },
+            CompileJobSource::Group { node, children } => {
+                let mut child_layouts = Vec::with_capacity(children.len().saturating_mul(2));
+                let mut refresh_after_ms = None;
+                for child in children {
+                    let mut cache = CompileLayoutCache {
+                        inline_syntax,
+                        content_sources: &child.content_sources,
+                        group_children: None,
+                        refresh_after_ms: None,
+                    };
+                    let compiled = compile_node_with_lua(
+                        env.clone(),
+                        &child.node,
+                        child.view_state,
+                        &mut cache,
+                    );
+                    if !child_layouts.is_empty() {
+                        child_layouts.push(blank_line_layout());
+                    }
+                    child_layouts.push(compiled.layout);
+                    refresh_after_ms = earliest_delay(refresh_after_ms, compiled.refresh_after_ms);
+                }
+                let children = BlockLayout::Vbox(child_layouts);
+                let mut cache = CompileLayoutCache {
+                    inline_syntax,
+                    content_sources: &[],
+                    group_children: Some(&children),
+                    refresh_after_ms: None,
+                };
+                let mut compiled =
+                    compile_node_with_lua(env.clone(), &node, self.view_state, &mut cache);
+                compiled.refresh_after_ms =
+                    earliest_delay(compiled.refresh_after_ms, refresh_after_ms);
+                compiled
+            }
+            CompileJobSource::Ready(mut layout) => {
+                compile_layout_syntax(&mut layout, inline_syntax);
+                CompiledLayout {
+                    layout,
+                    refresh_after_ms: None,
+                }
+            }
         };
         (
             self.id,
@@ -209,71 +278,284 @@ pub(crate) struct RenderCtx<'a> {
 struct CachedLayout {
     key: DisplayCacheKey,
     layout: LayoutIr,
+    syntax_theme_revision: u64,
+    measurements: VecDeque<CachedMeasurement>,
+    rendered_ranges: VecDeque<CachedRenderRange>,
     weight: usize,
     refresh_at: Option<std::time::Instant>,
     content_hash_pending: bool,
 }
 
-struct CachedSourceView {
-    ir: SourceViewIr,
-    weight: usize,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MeasurementKey {
+    width: u16,
+    inline_options: InlineOptions,
 }
 
-#[derive(Default)]
-struct SourceViewCache {
-    entries: HashMap<u64, CachedSourceView>,
-    lru: VecDeque<u64>,
+struct CachedMeasurement {
+    key: MeasurementKey,
+    layout: crate::content::display_renderers::MeasuredLayout,
+    retained_bytes: usize,
+    dirty: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderRangeKey {
+    width: u16,
+    view_state: ViewState,
+    theme_revision: u64,
+    row_start: usize,
+    row_count: usize,
+}
+
+struct CachedRenderRange {
+    key: RenderRangeKey,
+    buffer: Buffer,
+    line_count: usize,
+    retained_bytes: usize,
+    dirty: bool,
+}
+
+impl CachedRenderRange {
+    fn new(key: RenderRangeKey, buffer: Buffer, line_count: usize) -> Self {
+        let retained_bytes = rendered_buffer_retained_bytes(&buffer);
+        Self {
+            key,
+            buffer,
+            line_count,
+            retained_bytes,
+            dirty: false,
+        }
+    }
+}
+
+fn rendered_buffer_retained_bytes(buffer: &Buffer) -> usize {
+    std::mem::size_of::<Buffer>()
+        .saturating_add(
+            buffer
+                .lines()
+                .len()
+                .saturating_mul(std::mem::size_of::<String>()),
+        )
+        .saturating_add(buffer.lines().iter().map(String::capacity).sum::<usize>())
+        .saturating_add(
+            buffer
+                .line_count()
+                .saturating_mul(std::mem::size_of::<LineDecoration>()),
+        )
+}
+
+fn ensure_cached_syntax_theme(
+    entry: &mut CachedLayout,
+    theme_revision: u64,
+    inline_syntax: &mut InlineSyntaxCache,
+) -> isize {
+    if entry.syntax_theme_revision == theme_revision {
+        return 0;
+    }
+    let old_bytes = entry.layout.retained_bytes();
+    compile_layout_syntax(&mut entry.layout, inline_syntax);
+    let new_bytes = entry.layout.retained_bytes();
+    entry.syntax_theme_revision = theme_revision;
+    entry.weight = entry
+        .weight
+        .saturating_sub(old_bytes)
+        .saturating_add(new_bytes);
+    new_bytes as isize - old_bytes as isize
+}
+
+fn ensure_cached_measurement(entry: &mut CachedLayout, key: MeasurementKey) -> isize {
+    let _perf = smelt_perf::perf::begin("transcript:layout_cache:ensure_measurement");
+    if let Some(position) = entry
+        .measurements
+        .iter()
+        .position(|measurement| measurement.key == key)
+    {
+        let measurement = entry
+            .measurements
+            .remove(position)
+            .expect("cached measurement position");
+        entry.measurements.push_back(measurement);
+    }
+    if entry
+        .measurements
+        .back()
+        .is_some_and(|measurement| measurement.key == key && !measurement.dirty)
+    {
+        return 0;
+    }
+    if let Some(measurement) = entry
+        .measurements
+        .back_mut()
+        .filter(|measurement| measurement.key == key)
+    {
+        if crate::content::display_renderers::refresh_layout_ir_content_measurements(
+            &entry.layout,
+            &mut measurement.layout,
+            key.width,
+            &key.inline_options,
+        ) {
+            measurement.dirty = false;
+            return 0;
+        }
+    }
+
+    let mut retained_delta = 0isize;
+    if entry
+        .measurements
+        .back()
+        .is_some_and(|measurement| measurement.key == key)
+    {
+        let old = entry
+            .measurements
+            .pop_back()
+            .expect("dirty cached measurement");
+        entry.weight = entry.weight.saturating_sub(old.retained_bytes);
+        retained_delta -= old.retained_bytes as isize;
+    } else if entry.measurements.len() >= 2 {
+        let old = entry
+            .measurements
+            .pop_front()
+            .expect("oldest cached measurement");
+        entry.weight = entry.weight.saturating_sub(old.retained_bytes);
+        retained_delta -= old.retained_bytes as isize;
+    }
+
+    let layout = crate::content::display_renderers::measure_layout_ir_plan(
+        &entry.layout,
+        key.width,
+        &key.inline_options,
+    );
+    let retained_bytes = layout.retained_bytes();
+    entry.weight = entry.weight.saturating_add(retained_bytes);
+    retained_delta += retained_bytes as isize;
+    entry.measurements.push_back(CachedMeasurement {
+        key,
+        layout,
+        retained_bytes,
+        dirty: false,
+    });
+    retained_delta
+}
+
+const INLINE_SYNTAX_CACHE_BUDGET: usize = 256 * 1024;
+
+struct CachedInlineSyntax {
+    language: String,
+    source: String,
+    spans: Arc<[smelt_core::content::highlight::InlineSyntaxSpan]>,
     retained_bytes: usize,
 }
 
-impl SourceViewCache {
-    fn get(&mut self, key: u64) -> Option<&SourceViewIr> {
-        let ir = self.entries.get(&key)?;
-        self.lru.retain(|candidate| *candidate != key);
-        self.lru.push_back(key);
-        Some(&ir.ir)
+#[derive(Default)]
+struct InlineSyntaxCache {
+    entries: HashMap<u64, Vec<CachedInlineSyntax>>,
+    lru: VecDeque<u64>,
+    retained_bytes: usize,
+    theme_revision: u64,
+}
+
+impl InlineSyntaxCache {
+    fn get_or_compile(
+        &mut self,
+        theme_revision: u64,
+        language: &str,
+        source: &str,
+    ) -> Arc<[smelt_core::content::highlight::InlineSyntaxSpan]> {
+        self.ensure_theme(theme_revision);
+        let mut hasher = DefaultHasher::new();
+        language.hash(&mut hasher);
+        source.hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(spans) = self.entries.get(&key).and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.language == language && entry.source == source)
+                .map(|entry| Arc::clone(&entry.spans))
+        }) {
+            self.touch(key);
+            return spans;
+        }
+
+        let spans: Arc<[_]> = smelt_core::content::highlight::InlineSyntax::new(language)
+            .highlight_spans(source)
+            .into();
+        let retained_bytes = std::mem::size_of::<CachedInlineSyntax>()
+            .saturating_add(language.len())
+            .saturating_add(source.len())
+            .saturating_add(spans.len().saturating_mul(std::mem::size_of::<
+                smelt_core::content::highlight::InlineSyntaxSpan,
+            >()));
+        if retained_bytes <= INLINE_SYNTAX_CACHE_BUDGET {
+            self.entries
+                .entry(key)
+                .or_default()
+                .push(CachedInlineSyntax {
+                    language: language.to_owned(),
+                    source: source.to_owned(),
+                    spans: Arc::clone(&spans),
+                    retained_bytes,
+                });
+            self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+            self.touch(key);
+            while self.retained_bytes > INLINE_SYNTAX_CACHE_BUDGET {
+                if !self.evict_oldest() {
+                    break;
+                }
+            }
+        }
+        spans
     }
 
-    fn insert(&mut self, key: u64, ir: SourceViewIr) {
-        let weight = ir.retained_bytes();
-        if let Some(previous) = self.entries.remove(&key) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(previous.weight);
+    fn ensure_theme(&mut self, theme_revision: u64) {
+        if self.theme_revision == theme_revision {
+            return;
         }
+        self.entries.clear();
+        self.lru.clear();
+        self.retained_bytes = 0;
+        self.theme_revision = theme_revision;
+    }
+
+    fn touch(&mut self, key: u64) {
         self.lru.retain(|candidate| *candidate != key);
         self.lru.push_back(key);
-        self.retained_bytes = self.retained_bytes.saturating_add(weight);
-        self.entries.insert(key, CachedSourceView { ir, weight });
     }
 
     fn evict_oldest(&mut self) -> bool {
         let Some(key) = self.lru.pop_front() else {
             return false;
         };
-        if let Some(entry) = self.entries.remove(&key) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
-            return true;
-        }
-        false
+        let Some(entries) = self.entries.remove(&key) else {
+            return false;
+        };
+        self.retained_bytes = self.retained_bytes.saturating_sub(
+            entries
+                .iter()
+                .map(|entry| entry.retained_bytes)
+                .sum::<usize>(),
+        );
+        true
     }
 }
 
 struct CompileLayoutCache<'a> {
-    source_views: &'a mut SourceViewCache,
-    source_views_enabled: bool,
+    inline_syntax: &'a mut InlineSyntaxCache,
+    content_sources: &'a [TranscriptContent],
+    group_children: Option<&'a LayoutIr>,
     refresh_after_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DisplayMemorySnapshot {
     pub(crate) layout_bytes: usize,
-    pub(crate) source_view_bytes: usize,
     pub(crate) pinned_layout_bytes: usize,
     pub(crate) oversize_debt_bytes: usize,
 }
 
 pub(crate) struct LayoutCache {
     blocks: HashMap<RenderNodeId, CachedLayout>,
-    source_views: SourceViewCache,
+    inline_syntax: InlineSyntaxCache,
     lru: RefCell<VecDeque<RenderNodeId>>,
     pinned: HashSet<RenderNodeId>,
     retained_bytes: usize,
@@ -285,7 +567,7 @@ impl Default for LayoutCache {
     fn default() -> Self {
         Self {
             blocks: HashMap::new(),
-            source_views: SourceViewCache::default(),
+            inline_syntax: InlineSyntaxCache::default(),
             lru: RefCell::new(VecDeque::new()),
             pinned: HashSet::new(),
             retained_bytes: 0,
@@ -313,7 +595,7 @@ impl LayoutCache {
 
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained_bytes
-            .saturating_add(self.source_views.retained_bytes)
+            .saturating_add(self.inline_syntax.retained_bytes)
     }
 
     pub(crate) fn memory_snapshot(&self) -> DisplayMemorySnapshot {
@@ -323,52 +605,41 @@ impl LayoutCache {
             .filter_map(|id| self.blocks.get(id).map(|entry| entry.weight))
             .sum();
         DisplayMemorySnapshot {
-            layout_bytes: self.retained_bytes,
-            source_view_bytes: self.source_views.retained_bytes,
+            layout_bytes: self
+                .retained_bytes
+                .saturating_add(self.inline_syntax.retained_bytes),
             pinned_layout_bytes,
             oversize_debt_bytes: self.retained_bytes().saturating_sub(self.budget),
         }
     }
 
-    pub(crate) fn apply_streaming_text_append(
+    pub(crate) fn apply_content_append(
         &mut self,
         id: RenderNodeId,
-        content: &str,
+        content: &TranscriptContent,
         ranges: &[std::ops::Range<usize>],
     ) -> bool {
         let Some(entry) = self.blocks.get_mut(&id) else {
             return false;
         };
-        let Some(spec) = single_markdown_spec_mut(&mut entry.layout) else {
+        if ranges
+            .iter()
+            .any(|range| range.end < range.start || range.end > content.len())
+            || retained_content_spec_mut(&mut entry.layout, content.id()).is_none()
+        {
             return false;
-        };
-        let mut expected_start = spec.content.len();
-        for range in ranges {
-            if range.start != expected_start
-                || range.end < range.start
-                || range.end > content.len()
-                || smelt_buffer::text::slice(content, range.clone()).len()
-                    != range.end.saturating_sub(range.start)
-            {
-                return false;
-            }
-            expected_start = range.end;
         }
-        let old_weight = entry.weight;
-        for range in ranges {
-            spec.content
-                .push_str(smelt_buffer::text::slice(content, range.clone()));
-        }
-        entry.weight = entry.layout.retained_bytes();
         entry.content_hash_pending = true;
-        self.retained_bytes = self
-            .retained_bytes
-            .saturating_sub(old_weight)
-            .saturating_add(entry.weight);
+        for measurement in &mut entry.measurements {
+            measurement.dirty = true;
+        }
+        for range in &mut entry.rendered_ranges {
+            range.dirty = true;
+        }
         true
     }
 
-    fn promote_streaming_content_key(&mut self, id: RenderNodeId, key: DisplayCacheKey) -> bool {
+    fn promote_appended_content_key(&mut self, id: RenderNodeId, key: DisplayCacheKey) -> bool {
         let Some(entry) = self.blocks.get_mut(&id) else {
             return false;
         };
@@ -411,7 +682,7 @@ impl LayoutCache {
                 attempts = self.lru.borrow().len();
             }
         }
-        while self.retained_bytes() > self.budget && self.source_views.evict_oldest() {}
+        while self.retained_bytes() > self.budget && self.inline_syntax.evict_oldest() {}
         self.recompute_earliest_refresh_at();
         smelt_perf::perf::record_value(
             "transcript:render_cache:retained_bytes",
@@ -498,20 +769,53 @@ impl LayoutCache {
             let id = node.id();
             let display_key =
                 DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
-            if self
-                .blocks
-                .get(&id)
-                .is_some_and(|cached| cached.key == display_key)
-            {
+            let cached_key = self.blocks.get(&id).map(|cached| cached.key);
+            if cached_key == Some(display_key) {
                 self.touch(id);
                 continue;
             }
-            if let RenderNode::Block { id: block_id, .. } = &node {
-                if history.status(*block_id) == Some(Status::Streaming)
-                    && self.promote_streaming_content_key(id, display_key)
-                {
-                    continue;
+            smelt_perf::perf::record_value(
+                if cached_key.is_some() {
+                    "transcript:layout_cache:key_miss"
+                } else {
+                    "transcript:layout_cache:entry_miss"
+                },
+                1,
+            );
+            if let Some(cached_key) = cached_key {
+                for (changed, label) in [
+                    (
+                        cached_key.content_hash != display_key.content_hash,
+                        "transcript:layout_cache:content_key_miss",
+                    ),
+                    (
+                        cached_key.sidecar_hash != display_key.sidecar_hash,
+                        "transcript:layout_cache:sidecar_key_miss",
+                    ),
+                    (
+                        cached_key.renderer_generation != display_key.renderer_generation,
+                        "transcript:layout_cache:renderer_key_miss",
+                    ),
+                    (
+                        cached_key.render_context_hash != display_key.render_context_hash,
+                        "transcript:layout_cache:context_key_miss",
+                    ),
+                ] {
+                    if changed {
+                        smelt_perf::perf::record_value(label, 1);
+                    }
                 }
+            }
+            smelt_perf::perf::record_value(
+                if matches!(&node, RenderNode::Group(_)) {
+                    "transcript:layout_cache:group_miss"
+                } else {
+                    "transcript:layout_cache:block_miss"
+                },
+                1,
+            );
+            if self.promote_appended_content_key(id, display_key) {
+                continue;
             }
             let source = match node {
                 RenderNode::Block {
@@ -536,37 +840,38 @@ impl LayoutCache {
                         if let Some(layout) = live_layout {
                             CompileJobSource::Ready(layout)
                         } else {
-                            let Some(value) = block_snapshot_json(
-                                history,
-                                block_id,
-                                block_index,
-                                Some(key.view_state),
-                            ) else {
+                            let Some(node) = block_render_node(history, block_id, block_index)
+                            else {
                                 continue;
                             };
-                            CompileJobSource::Snapshot {
-                                value,
-                                cache_source_views: cache_source_views_for_block(block),
+                            CompileJobSource::Metadata {
+                                node,
+                                content_sources: block_content_sources(
+                                    block,
+                                    history.tool_state(block_id),
+                                ),
                             }
                         }
                     } else {
-                        let Some(value) = block_snapshot_json(
-                            history,
-                            block_id,
-                            block_index,
-                            Some(key.view_state),
-                        ) else {
+                        let Some(node) = block_render_node(history, block_id, block_index) else {
                             continue;
                         };
-                        CompileJobSource::Snapshot {
-                            value,
-                            cache_source_views: cache_source_views_for_block(block),
+                        CompileJobSource::Metadata {
+                            node,
+                            content_sources: block_content_sources(
+                                block,
+                                history.tool_state(block_id),
+                            ),
                         }
                     }
                 }
-                RenderNode::Group(_) => CompileJobSource::Snapshot {
-                    value: group_snapshot_json(history, policy, index, &node, key.view_state),
-                    cache_source_views: true,
+                RenderNode::Group(group) => CompileJobSource::Group {
+                    node: group_render_node(index, &group, key.view_state),
+                    children: if key.view_state == ViewState::Expanded {
+                        group_child_compile_sources(history, policy, &group)
+                    } else {
+                        Vec::new()
+                    },
                 },
             };
             jobs.push(CompileJob {
@@ -594,7 +899,7 @@ impl LayoutCache {
         {
             let _perf = smelt_perf::perf::begin("transcript:layout_cache:compile_layouts");
             for job in jobs {
-                layouts.push(job.compile(env.clone(), &mut self.source_views));
+                layouts.push(job.compile(env.clone(), &mut self.inline_syntax));
             }
         }
         self.insert_compiled_blocks(layouts);
@@ -621,6 +926,9 @@ impl LayoutCache {
                 CachedLayout {
                     key,
                     layout,
+                    syntax_theme_revision: smelt_core::theme::active().revision(),
+                    measurements: VecDeque::new(),
+                    rendered_ranges: VecDeque::new(),
                     weight,
                     refresh_at,
                     content_hash_pending: false,
@@ -674,6 +982,163 @@ impl LayoutCache {
         due
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_rendered_range<T>(
+        &mut self,
+        id: RenderNodeId,
+        key: NodeLayoutKey,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+        ctx: RenderCtx<'_>,
+        row_start: usize,
+        row_count: usize,
+        visit: impl FnOnce(&Buffer, usize) -> T,
+    ) -> Option<T> {
+        let display_key =
+            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        let range_key = RenderRangeKey {
+            width: ctx.width,
+            view_state: ctx.view_state,
+            theme_revision: ctx.theme.revision(),
+            row_start,
+            row_count,
+        };
+
+        let mut retained_delta = 0isize;
+        let result = {
+            let inline_syntax = &mut self.inline_syntax;
+            let entry = self
+                .blocks
+                .get_mut(&id)
+                .filter(|cached| cached.key == display_key)?;
+            retained_delta +=
+                ensure_cached_syntax_theme(entry, ctx.theme.revision(), inline_syntax);
+            retained_delta += ensure_cached_measurement(
+                entry,
+                MeasurementKey {
+                    width: ctx.width,
+                    inline_options: ctx.inline_options.clone(),
+                },
+            );
+            let position = entry
+                .rendered_ranges
+                .iter()
+                .position(|range| range.key == range_key);
+            if let Some(position) = position {
+                let range = entry
+                    .rendered_ranges
+                    .remove(position)
+                    .expect("cached render range position");
+                entry.rendered_ranges.push_back(range);
+            }
+
+            let needs_render = entry
+                .rendered_ranges
+                .back()
+                .is_none_or(|range| range.key != range_key || range.dirty);
+            if needs_render {
+                let reusable_position = entry
+                    .rendered_ranges
+                    .back()
+                    .filter(|range| range.key == range_key)
+                    .map(|_| entry.rendered_ranges.len().saturating_sub(1))
+                    .or_else(|| entry.rendered_ranges.iter().rposition(|range| range.dirty))
+                    .or_else(|| (entry.rendered_ranges.len() >= 2).then_some(0));
+                let buffer = if let Some(position) = reusable_position {
+                    let old = entry
+                        .rendered_ranges
+                        .remove(position)
+                        .expect("reusable cached render range");
+                    entry.weight = entry.weight.saturating_sub(old.retained_bytes);
+                    retained_delta -= old.retained_bytes as isize;
+                    old.buffer
+                } else {
+                    Buffer::new(BufId(0), BufCreateOpts::default())
+                };
+                let measured = &entry
+                    .measurements
+                    .back()
+                    .expect("measurement ensured above")
+                    .layout;
+                let (buffer, line_count) = render_layout_range_to_buffer(
+                    &entry.layout,
+                    measured,
+                    ctx,
+                    row_start,
+                    row_count,
+                    buffer,
+                );
+                let rendered = CachedRenderRange::new(range_key, buffer, line_count);
+                let new_bytes = rendered.retained_bytes;
+                entry.weight = entry.weight.saturating_add(new_bytes);
+                retained_delta += new_bytes as isize;
+                entry.rendered_ranges.push_back(rendered);
+                while entry.rendered_ranges.len() > 2 {
+                    if let Some(old) = entry.rendered_ranges.pop_front() {
+                        entry.weight = entry.weight.saturating_sub(old.retained_bytes);
+                        retained_delta -= old.retained_bytes as isize;
+                    }
+                }
+            }
+
+            let rendered = entry.rendered_ranges.back()?;
+            visit(&rendered.buffer, rendered.line_count)
+        };
+
+        if retained_delta >= 0 {
+            self.retained_bytes = self.retained_bytes.saturating_add(retained_delta as usize);
+        } else {
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(retained_delta.unsigned_abs());
+        }
+        self.touch(id);
+        self.enforce_budget();
+        Some(result)
+    }
+
+    pub(crate) fn measure_height(
+        &mut self,
+        id: RenderNodeId,
+        key: NodeLayoutKey,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+        ctx: MeasureCtx,
+    ) -> Option<u64> {
+        let display_key =
+            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        let (rows, retained_delta) = {
+            let entry = self
+                .blocks
+                .get_mut(&id)
+                .filter(|cached| cached.key == display_key)?;
+            let retained_delta = ensure_cached_measurement(
+                entry,
+                MeasurementKey {
+                    width: ctx.width,
+                    inline_options: ctx.inline_options,
+                },
+            );
+            let rows = entry
+                .measurements
+                .back()
+                .expect("measurement ensured above")
+                .layout
+                .rows() as u64;
+            (ctx.view_state.measured_height(rows), retained_delta)
+        };
+        if retained_delta >= 0 {
+            self.retained_bytes = self.retained_bytes.saturating_add(retained_delta as usize);
+        } else {
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(retained_delta.unsigned_abs());
+        }
+        self.touch(id);
+        self.enforce_budget();
+        Some(rows)
+    }
+
     pub(crate) fn get(
         &self,
         id: RenderNodeId,
@@ -693,17 +1158,22 @@ impl LayoutCache {
     }
 }
 
-fn cache_source_views_for_block(block: &Block) -> bool {
-    !matches!(
-        block,
-        Block::ToolDraft {
-            finished: false,
-            ..
-        }
-    )
+fn block_content_sources(
+    block: &Block,
+    state: Option<&smelt_core::transcript_model::ToolState>,
+) -> Vec<TranscriptContent> {
+    let mut sources = block
+        .registered_contents()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(state) = state {
+        sources.extend(state.registered_contents().cloned());
+    }
+    sources
 }
 
-pub(crate) fn live_streaming_markdown_content(block: &Block) -> Option<&str> {
+pub(crate) fn live_streaming_markdown_content(block: &Block) -> Option<&TranscriptContent> {
     match block {
         Block::Text { content } => Some(content),
         Block::Thinking {
@@ -719,10 +1189,10 @@ pub(crate) fn live_streaming_markdown_content(block: &Block) -> Option<&str> {
 fn expanded_live_streaming_layout(block: &Block) -> Option<LayoutIr> {
     let content = live_streaming_markdown_content(block)?;
     match block {
-        Block::Text { .. } => Some(markdown_layout(content.to_owned(), false, false)),
+        Block::Text { .. } => Some(markdown_content_layout(content.clone(), false, false)),
         Block::Thinking { .. } => Some(BlockLayout::Gutter {
             child: Box::new(BlockLayout::Style {
-                child: Box::new(markdown_layout(content.to_owned(), true, true)),
+                child: Box::new(markdown_content_layout(content.clone(), true, true)),
                 spec: StyleSpec {
                     dim: true,
                     italic: true,
@@ -738,136 +1208,126 @@ fn expanded_live_streaming_layout(block: &Block) -> Option<LayoutIr> {
     }
 }
 
-fn markdown_layout(content: String, dim: bool, italic: bool) -> LayoutIr {
-    BlockLayout::Leaf(IrLeaf::Markdown(MarkdownSpec {
+fn markdown_content_layout(content: TranscriptContent, dim: bool, italic: bool) -> LayoutIr {
+    BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
         content,
-        dim,
-        italic,
-        inline: false,
+        render: ContentRenderSpec::Markdown {
+            dim,
+            italic,
+            inline: false,
+        },
     }))
 }
 
-fn markdown_spec_count(layout: &LayoutIr) -> usize {
+fn retained_content_spec_mut(
+    layout: &mut LayoutIr,
+    content_id: smelt_core::transcript_content::ContentId,
+) -> Option<&mut RetainedContentSpec> {
     match layout {
-        BlockLayout::Empty => 0,
-        BlockLayout::Leaf(IrLeaf::Markdown(_)) => 1,
-        BlockLayout::Leaf(_) => 0,
-        BlockLayout::Vbox(items) => items.iter().map(markdown_spec_count).sum(),
-        BlockLayout::Hbox(items) => items
-            .iter()
-            .map(|item| markdown_spec_count(&item.layout))
-            .sum(),
-        BlockLayout::Gutter { child, .. }
-        | BlockLayout::RowPrefix { child, .. }
-        | BlockLayout::Panel { child, .. }
-        | BlockLayout::Style { child, .. }
-        | BlockLayout::Cap { child, .. }
-        | BlockLayout::Refresh { child, .. } => markdown_spec_count(child),
-    }
-}
-
-fn first_markdown_spec_mut(layout: &mut LayoutIr) -> Option<&mut MarkdownSpec> {
-    match layout {
-        BlockLayout::Leaf(IrLeaf::Markdown(spec)) => Some(spec),
-        BlockLayout::Vbox(items) => items.iter_mut().find_map(first_markdown_spec_mut),
+        BlockLayout::Leaf(IrLeaf::Content(spec)) if spec.content.id() == content_id => Some(spec),
+        BlockLayout::Vbox(items) => items
+            .iter_mut()
+            .find_map(|item| retained_content_spec_mut(item, content_id)),
         BlockLayout::Hbox(items) => items
             .iter_mut()
-            .find_map(|item| first_markdown_spec_mut(&mut item.layout)),
+            .find_map(|item| retained_content_spec_mut(&mut item.layout, content_id)),
         BlockLayout::Gutter { child, .. }
         | BlockLayout::RowPrefix { child, .. }
         | BlockLayout::Panel { child, .. }
         | BlockLayout::Style { child, .. }
         | BlockLayout::Cap { child, .. }
-        | BlockLayout::Refresh { child, .. } => first_markdown_spec_mut(child),
+        | BlockLayout::Refresh { child, .. } => retained_content_spec_mut(child, content_id),
         BlockLayout::Empty | BlockLayout::Leaf(_) => None,
     }
-}
-
-fn single_markdown_spec_mut(layout: &mut LayoutIr) -> Option<&mut MarkdownSpec> {
-    (markdown_spec_count(layout) == 1)
-        .then(|| first_markdown_spec_mut(layout))
-        .flatten()
 }
 
 #[cfg(test)]
 pub(crate) fn compile_block(block: &Block) -> LayoutIr {
     let lua = LuaRuntime::new();
-    let mut source_views = SourceViewCache::default();
+    let mut inline_syntax = InlineSyntaxCache::default();
+    let content_sources = block_content_sources(block, None);
     let mut cache = CompileLayoutCache {
-        source_views: &mut source_views,
-        source_views_enabled: true,
+        inline_syntax: &mut inline_syntax,
+        content_sources: &content_sources,
+        group_children: None,
         refresh_after_ms: None,
     };
-    let snapshot =
-        smelt_core::lua::runtime::transcript_block_snapshot_json(BlockId::new(0), 0, block, None)
-            .expect("block snapshot");
+    let node =
+        smelt_core::lua::runtime::transcript_block_render_node(BlockId::new(0), 0, block, None);
     compile_node_with_lua(
         TranscriptRenderEnv::new(&lua),
-        &snapshot,
+        &node,
         ViewState::Expanded,
         &mut cache,
     )
     .layout
 }
 
-fn group_snapshot_json(
-    history: &BlockHistory,
-    policy: &TranscriptDefaultViewPolicy,
+fn group_render_node(
     node_index: usize,
-    node: &RenderNode,
+    group: &RenderGroupNode,
     view_state: ViewState,
-) -> serde_json::Value {
-    let RenderNode::Group(group) = node else {
-        return serde_json::Value::Null;
-    };
-    let children: Vec<_> = group
-        .child_range
-        .clone()
-        .filter_map(|block_index| {
-            let id = *history.order.get(block_index)?;
-            let child_view_state =
-                policy.node_default_view_state(history, &RenderNode::Block { id, block_index });
-            block_snapshot_json(history, id, block_index, Some(child_view_state))
-        })
-        .collect();
-    serde_json::json!({
-        "kind": "group",
-        "id": group.id,
-        "index": node_index,
-        "group_kind": group.name,
-        "name": group.name,
-        "bucket": group.bucket,
-        "view_state": view_state_label(view_state),
-        "children": children,
-        "child_ids": group.child_ids,
-        "child_count": group.child_ids.len(),
-    })
+) -> TranscriptRenderNode {
+    TranscriptRenderNode::group(
+        group.id,
+        node_index,
+        group.name.clone(),
+        group.bucket.clone(),
+        view_state_label(view_state),
+        group
+            .children
+            .iter()
+            .map(|child| child.metadata.clone())
+            .collect(),
+        group.child_ids().collect(),
+    )
 }
 
-fn block_snapshot_json(
+fn group_child_compile_sources(
+    history: &BlockHistory,
+    policy: &TranscriptDefaultViewPolicy,
+    group: &RenderGroupNode,
+) -> Vec<GroupChildCompileSource> {
+    group
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, child)| {
+            let block_index = group.child_range.start.saturating_add(offset);
+            let block = history.block(child.id)?;
+            let view_state = policy.node_default_view_state(
+                history,
+                &RenderNode::Block {
+                    id: child.id,
+                    block_index,
+                },
+            );
+            Some(GroupChildCompileSource {
+                node: block_render_node(history, child.id, block_index)?,
+                view_state,
+                content_sources: block_content_sources(block, history.tool_state(child.id)),
+            })
+        })
+        .collect()
+}
+
+fn block_render_node(
     history: &BlockHistory,
     id: smelt_core::transcript_model::BlockId,
     block_index: usize,
-    view_state: Option<ViewState>,
-) -> Option<serde_json::Value> {
+) -> Option<TranscriptRenderNode> {
+    let _perf = smelt_perf::perf::begin("transcript:layout_cache:block_render_metadata");
     let block = history.block(id)?;
     let state = match block {
         Block::ToolCall { .. } => history.tool_state(id),
         _ => None,
     };
-    let serde_json::Value::Object(mut value) =
-        smelt_core::lua::runtime::transcript_block_snapshot_json(id, block_index, block, state)
-            .ok()?
-    else {
-        return None;
-    };
-    if let Some(view_state) = view_state {
-        value.insert(
-            "view_state".into(),
-            serde_json::json!(view_state_label(view_state)),
-        );
-    }
-    Some(serde_json::Value::Object(value))
+    Some(smelt_core::lua::runtime::transcript_block_render_node(
+        id,
+        block_index,
+        block,
+        state,
+    ))
 }
 
 fn view_state_label(view_state: ViewState) -> &'static str {
@@ -882,21 +1342,15 @@ fn view_state_label(view_state: ViewState) -> &'static str {
 
 fn compile_node_with_lua(
     env: TranscriptRenderEnv<'_>,
-    snapshot: &serde_json::Value,
+    node: &TranscriptRenderNode,
     view_state: ViewState,
     cache: &mut CompileLayoutCache<'_>,
 ) -> CompiledLayout {
-    let kind = snapshot
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    let index = snapshot
-        .get("index")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+    let kind = node.kind();
+    let index = node.index();
     let layout = env
         .lua
-        .render_transcript_layout(snapshot, view_state, env.now_ms);
+        .render_transcript_layout(node, view_state, env.now_ms);
     match compile_layout_ir_with_cache(&layout, cache) {
         Ok(layout) => CompiledLayout {
             layout,
@@ -919,10 +1373,11 @@ fn compile_node_with_lua(
 }
 
 pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
-    let mut source_views = SourceViewCache::default();
+    let mut inline_syntax = InlineSyntaxCache::default();
     let mut cache = CompileLayoutCache {
-        source_views: &mut source_views,
-        source_views_enabled: true,
+        inline_syntax: &mut inline_syntax,
+        content_sources: &[],
+        group_children: None,
         refresh_after_ms: None,
     };
     compile_layout_ir_with_cache(layout, &mut cache)
@@ -939,8 +1394,48 @@ fn compile_layout_ir_with_cache(
             hl_group: spec.hl_group.clone(),
             ansi: spec.ansi,
         }))),
-        BlockLayout::Leaf(LuaLeaf::Runs(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Runs(spec.clone()))),
-        BlockLayout::Leaf(LuaLeaf::Line(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Line(spec.clone()))),
+        BlockLayout::Leaf(LuaLeaf::Content(spec)) => {
+            let content = cache
+                .content_sources
+                .iter()
+                .find(|content| content.id() == spec.id)
+                .cloned()
+                .ok_or_else(|| format!("unknown transcript content id {}", spec.id.get()))?;
+            Ok(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content,
+                render: spec.render.clone(),
+            })))
+        }
+        BlockLayout::Leaf(LuaLeaf::ContentDiff(spec)) => {
+            let source = |id: smelt_core::transcript_content::ContentId| {
+                cache
+                    .content_sources
+                    .iter()
+                    .find(|content| content.id() == id)
+                    .ok_or_else(|| format!("unknown transcript content id {}", id.get()))
+            };
+            let old = source(spec.old_id)?;
+            let new = source(spec.new_id)?;
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext);
+            let ir =
+                smelt_core::content::highlight::build_retained_diff_ir(old, new, &spec.path, ext);
+            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+                ir,
+            ))))
+        }
+        BlockLayout::Leaf(LuaLeaf::GroupChildren) => cache
+            .group_children
+            .cloned()
+            .ok_or_else(|| "group child layouts are only available in group renderers".to_string()),
+        BlockLayout::Leaf(LuaLeaf::Runs(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Runs(
+            compile_runs_syntax(spec.clone(), cache.inline_syntax),
+        ))),
+        BlockLayout::Leaf(LuaLeaf::Line(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Line(
+            compile_line_syntax(spec.clone(), cache.inline_syntax),
+        ))),
         BlockLayout::Leaf(LuaLeaf::Markdown(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Markdown(spec.clone())))
         }
@@ -948,59 +1443,48 @@ fn compile_layout_ir_with_cache(
         BlockLayout::Leaf(LuaLeaf::Separator(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Separator(spec.clone())))
         }
-        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => cached_source_view(
-            cache.source_views,
-            cache.source_views_enabled,
-            smelt_core::utils::hash_serializable(&("diff", spec)),
-            || {
-                let ext = spec
-                    .lang
-                    .as_deref()
-                    .map(smelt_core::content::highlight::lang_to_ext);
-                let ir = if spec.full_file {
-                    smelt_core::content::highlight::build_diff_ir_ext_with_base(
-                        &spec.old,
-                        &spec.new,
-                        &spec.path,
-                        &spec.anchor,
-                        ext,
-                        Some(&spec.old),
-                    )
-                } else {
-                    smelt_core::content::highlight::build_diff_ir_ext_with_source(
-                        &spec.old,
-                        &spec.new,
-                        &spec.path,
-                        &spec.anchor,
-                        ext,
-                        &spec.base,
-                    )
-                };
-                SourceViewIr::Diff(ir)
-            },
-        ),
-        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => cached_source_view(
-            cache.source_views,
-            cache.source_views_enabled,
-            smelt_core::utils::hash_serializable(&("file_view", spec)),
-            || {
-                let ext = spec
-                    .lang
-                    .as_deref()
-                    .map(smelt_core::content::highlight::lang_to_ext)
-                    .or_else(|| {
-                        std::path::Path::new(&spec.path)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                    });
-                SourceViewIr::Diff(smelt_core::content::highlight::build_file_view_ir(
-                    &spec.content,
+        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext);
+            let ir = if spec.full_file {
+                smelt_core::content::highlight::build_diff_ir_ext_with_base(
+                    &spec.old,
+                    &spec.new,
+                    &spec.path,
+                    &spec.anchor,
                     ext,
-                ))
-            },
-        ),
-        BlockLayout::Leaf(LuaLeaf::SourceView(ir)) => {
-            Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())))
+                    Some(&spec.old),
+                )
+            } else {
+                smelt_core::content::highlight::build_diff_ir_ext_with_source(
+                    &spec.old,
+                    &spec.new,
+                    &spec.path,
+                    &spec.anchor,
+                    ext,
+                    &spec.base,
+                )
+            };
+            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+                ir,
+            ))))
+        }
+        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext)
+                .or_else(|| {
+                    std::path::Path::new(&spec.path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                });
+            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
+            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+                ir,
+            ))))
         }
         BlockLayout::Vbox(items) => items
             .iter()
@@ -1049,25 +1533,102 @@ fn compile_layout_ir_with_cache(
     }
 }
 
-fn cached_source_view(
-    source_views: &mut SourceViewCache,
-    enabled: bool,
-    key: u64,
-    build: impl FnOnce() -> SourceViewIr,
-) -> Result<LayoutIr, String> {
-    if enabled {
-        if let Some(ir) = source_views.get(key) {
-            return Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())));
+fn compile_layout_syntax(layout: &mut LayoutIr, inline_syntax: &mut InlineSyntaxCache) {
+    match layout {
+        BlockLayout::Empty
+        | BlockLayout::Leaf(IrLeaf::Text(_))
+        | BlockLayout::Leaf(IrLeaf::Content(_))
+        | BlockLayout::Leaf(IrLeaf::Markdown(_))
+        | BlockLayout::Leaf(IrLeaf::Code(_))
+        | BlockLayout::Leaf(IrLeaf::Separator(_))
+        | BlockLayout::Leaf(IrLeaf::SourceView(_)) => {}
+        BlockLayout::Leaf(IrLeaf::Runs(spec)) => {
+            spec.syntax_highlights = compile_styled_syntax(&spec.lines.0, inline_syntax);
         }
+        BlockLayout::Leaf(IrLeaf::Line(spec)) => {
+            spec.syntax_highlights = compile_span_syntax(&spec.spans, inline_syntax);
+        }
+        BlockLayout::Vbox(items) => {
+            for child in items {
+                compile_layout_syntax(child, inline_syntax);
+            }
+        }
+        BlockLayout::Hbox(items) => {
+            for item in items {
+                compile_layout_syntax(&mut item.layout, inline_syntax);
+            }
+        }
+        BlockLayout::Gutter { child, .. }
+        | BlockLayout::RowPrefix { child, .. }
+        | BlockLayout::Panel { child, .. }
+        | BlockLayout::Style { child, .. }
+        | BlockLayout::Cap { child, .. }
+        | BlockLayout::Refresh { child, .. } => compile_layout_syntax(child, inline_syntax),
     }
-
-    let ir = build();
-    if enabled {
-        source_views.insert(key, ir.clone());
-    }
-    Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir)))
 }
 
+fn compile_runs_syntax(mut spec: RunsSpec, inline_syntax: &mut InlineSyntaxCache) -> RunsSpec {
+    spec.syntax_highlights = compile_styled_syntax(&spec.lines.0, inline_syntax);
+    spec
+}
+
+fn compile_line_syntax(mut spec: LineSpec, inline_syntax: &mut InlineSyntaxCache) -> LineSpec {
+    spec.syntax_highlights = compile_span_syntax(&spec.spans, inline_syntax);
+    spec
+}
+
+fn compile_styled_syntax(
+    lines: &[Vec<protocol::StyledSpan>],
+    inline_syntax: &mut InlineSyntaxCache,
+) -> RetainedInlineSyntax {
+    if !lines.iter().flatten().any(has_inline_syntax) {
+        return RetainedInlineSyntax::default();
+    }
+    let source_span_count = lines.iter().map(Vec::len).sum();
+    let mut source_spans = Vec::with_capacity(source_span_count);
+    let mut line_offsets = Vec::with_capacity(lines.len().saturating_add(1));
+    line_offsets.push(0);
+    for spans in lines {
+        append_span_syntax(spans, inline_syntax, &mut source_spans);
+        line_offsets.push(source_spans.len());
+    }
+    RetainedInlineSyntax::new(source_spans, line_offsets)
+}
+
+fn compile_span_syntax(
+    spans: &[protocol::StyledSpan],
+    inline_syntax: &mut InlineSyntaxCache,
+) -> RetainedInlineSyntax {
+    if !spans.iter().any(has_inline_syntax) {
+        return RetainedInlineSyntax::default();
+    }
+    let mut source_spans = Vec::with_capacity(spans.len());
+    append_span_syntax(spans, inline_syntax, &mut source_spans);
+    let source_span_count = source_spans.len();
+    RetainedInlineSyntax::new(source_spans, vec![0, source_span_count])
+}
+
+fn append_span_syntax(
+    spans: &[protocol::StyledSpan],
+    inline_syntax: &mut InlineSyntaxCache,
+    out: &mut Vec<Arc<[smelt_core::content::highlight::InlineSyntaxSpan]>>,
+) {
+    let theme_revision = smelt_core::theme::active().revision();
+    out.extend(spans.iter().map(|span| {
+        span.syntax
+            .as_deref()
+            .filter(|_| span.selectable)
+            .map_or_else(Arc::default, |language| {
+                inline_syntax.get_or_compile(theme_revision, language, &span.text)
+            })
+    }));
+}
+
+fn has_inline_syntax(span: &protocol::StyledSpan) -> bool {
+    span.selectable && span.syntax.is_some()
+}
+
+#[cfg(test)]
 pub(crate) fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {
     let _perf = smelt_perf::perf::begin("transcript:measure_block:layout");
     let expanded_rows = crate::content::display_renderers::measure_layout_ir_with_options(
@@ -1083,8 +1644,21 @@ pub(crate) fn render_block_into(
     layout: &LayoutIr,
     ctx: RenderCtx<'_>,
 ) -> Outcome {
+    render_block_into_mode(buf, layout, ctx, false)
+}
+
+fn render_block_into_mode(
+    buf: &mut Buffer,
+    layout: &LayoutIr,
+    ctx: RenderCtx<'_>,
+    replacing: bool,
+) -> Outcome {
     let outcome = {
-        let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
+        let mut out = if replacing {
+            LineBuilder::replacing(buf, ctx.theme, ctx.width)
+        } else {
+            LineBuilder::new(buf, ctx.theme, ctx.width)
+        };
         render_expanded_block(
             &mut out,
             layout,
@@ -1097,40 +1671,150 @@ pub(crate) fn render_block_into(
     apply_view_state(buf, ctx.theme, ctx.width, ctx.view_state, outcome)
 }
 
-pub(crate) fn render_block_range_into(
-    buf: &mut Buffer,
+fn render_layout_range_to_buffer(
     layout: &LayoutIr,
+    measured: &crate::content::display_renderers::MeasuredLayout,
     ctx: RenderCtx<'_>,
     row_start: usize,
     row_count: usize,
+    mut buffer: Buffer,
+) -> (Buffer, usize) {
+    let outcome = {
+        let _perf = smelt_perf::perf::begin("transcript:layout_cache:render_range_to_buffer");
+        render_block_range_into_mode(
+            &mut buffer,
+            layout,
+            measured,
+            ctx,
+            row_start,
+            row_count,
+            true,
+        )
+    };
+    (buffer, outcome.line_count)
+}
+
+fn render_block_range_into_mode(
+    buf: &mut Buffer,
+    layout: &LayoutIr,
+    measured: &crate::content::display_renderers::MeasuredLayout,
+    ctx: RenderCtx<'_>,
+    row_start: usize,
+    row_count: usize,
+    replacing: bool,
 ) -> Outcome {
     if row_count == 0 {
         return Outcome::default();
     }
-    if ctx.view_state != ViewState::Expanded || row_start > u16::MAX as usize {
-        let outcome = render_block_into(buf, layout, ctx);
-        let start = row_start.min(outcome.line_count);
-        let end = start.saturating_add(row_count).min(outcome.line_count);
-        buf.set_lines(end, outcome.line_count, vec![]);
-        buf.set_lines(0, start, vec![]);
-        return Outcome {
-            line_count: end.saturating_sub(start),
-            ..outcome
-        };
+    if ctx.view_state != ViewState::Expanded {
+        return render_projected_view_range(
+            buf, layout, measured, ctx, row_start, row_count, replacing,
+        );
     }
-    let row_start = row_start.min(u16::MAX as usize) as u16;
-    let row_count = row_count.min(u16::MAX as usize) as u16;
-    let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
-    render_expanded_block_range(
-        &mut out,
-        layout,
-        ctx.width,
-        row_start,
-        row_count,
-        ctx.history,
-        &ctx.inline_options,
-    );
+    let mut out = if replacing {
+        LineBuilder::replacing(buf, ctx.theme, ctx.width)
+    } else {
+        LineBuilder::new(buf, ctx.theme, ctx.width)
+    };
+    render_expanded_block_range(&mut out, layout, measured, (row_start, row_count), &ctx);
     out.finish()
+}
+
+fn render_projected_view_range(
+    buf: &mut Buffer,
+    layout: &LayoutIr,
+    measured: &crate::content::display_renderers::MeasuredLayout,
+    ctx: RenderCtx<'_>,
+    row_start: usize,
+    row_count: usize,
+    replacing: bool,
+) -> Outcome {
+    let total = measured.rows();
+    let projected_total = ctx.view_state.measured_height(total as u64) as usize;
+    let start = row_start.min(projected_total);
+    let end = start.saturating_add(row_count).min(projected_total);
+    let mut out = if replacing {
+        LineBuilder::replacing(buf, ctx.theme, ctx.width)
+    } else {
+        LineBuilder::new(buf, ctx.theme, ctx.width)
+    };
+
+    match ctx.view_state {
+        ViewState::Expanded | ViewState::Peek => {
+            render_expanded_block_range(
+                &mut out,
+                layout,
+                measured,
+                (start, end.saturating_sub(start)),
+                &ctx,
+            );
+        }
+        ViewState::Collapsed if total > 1 => {
+            if start == 0 && end > 0 {
+                render_expanded_block_range(&mut out, layout, measured, (0, 1), &ctx);
+            }
+            if start <= 1 && end > 1 {
+                render_view_ellipsis(&mut out, &format!("… {} more lines", total - 1));
+            }
+        }
+        ViewState::TrimmedHead { keep } if total > usize::from(keep) => {
+            let keep = usize::from(keep);
+            let source_start = start.min(keep);
+            let source_end = end.min(keep);
+            if source_start < source_end {
+                render_expanded_block_range(
+                    &mut out,
+                    layout,
+                    measured,
+                    (source_start, source_end - source_start),
+                    &ctx,
+                );
+            }
+            if start <= keep && end > keep {
+                render_view_ellipsis(&mut out, &format!("… {} more lines", total - keep));
+            }
+        }
+        ViewState::TrimmedTail { keep } if total > usize::from(keep) => {
+            let keep = usize::from(keep);
+            if start == 0 && end > 0 {
+                render_view_ellipsis(&mut out, &format!("… {} more lines above", total - keep));
+            }
+            let source_start = start.max(1);
+            if source_start < end {
+                render_expanded_block_range(
+                    &mut out,
+                    layout,
+                    measured,
+                    (
+                        total
+                            .saturating_sub(keep)
+                            .saturating_add(source_start.saturating_sub(1)),
+                        end - source_start,
+                    ),
+                    &ctx,
+                );
+            }
+        }
+        ViewState::Collapsed | ViewState::TrimmedHead { .. } | ViewState::TrimmedTail { .. } => {
+            render_expanded_block_range(
+                &mut out,
+                layout,
+                measured,
+                (start, end.saturating_sub(start)),
+                &ctx,
+            );
+        }
+    }
+    out.finish()
+}
+
+fn render_view_ellipsis(out: &mut LineBuilder, text: &str) {
+    out.push_dim();
+    out.push_hl(intern("Comment"));
+    out.print(text);
+    out.pop_style();
+    out.pop_style();
+    out.newline();
 }
 
 fn render_expanded_block(
@@ -1157,33 +1841,22 @@ fn render_expanded_block(
 fn render_expanded_block_range(
     out: &mut LineBuilder,
     layout: &LayoutIr,
-    width: u16,
-    row_start: u16,
-    row_count: u16,
-    history: Option<&BlockHistory>,
-    inline_options: &InlineOptions,
+    measured: &crate::content::display_renderers::MeasuredLayout,
+    rows: (usize, usize),
+    ctx: &RenderCtx<'_>,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:layout:range");
-    if let Some(history) = history {
-        crate::content::display_renderers::render_layout_ir_range_into_with_history(
-            out,
-            layout,
-            width,
-            row_start,
-            row_count,
-            history,
-            inline_options,
-        )
-    } else {
-        crate::content::display_renderers::render_layout_ir_range_into(
-            out,
-            layout,
-            width,
-            row_start,
-            row_count,
-            inline_options,
-        )
-    }
+    let (row_start, row_count) = rows;
+    crate::content::display_renderers::render_layout_ir_range_into_measured(
+        out,
+        layout,
+        measured,
+        ctx.width,
+        row_start,
+        row_count,
+        ctx.history,
+        &ctx.inline_options,
+    )
 }
 
 fn apply_view_state(
@@ -1344,7 +2017,7 @@ mod tests {
         )
     }
 
-    fn rendered_rows(block: &LayoutIr, width: u16) -> u64 {
+    fn rendered_buffer(block: &LayoutIr, width: u16) -> Buffer {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         render_block_into(
@@ -1357,8 +2030,82 @@ mod tests {
                 history: None,
                 inline_options: Default::default(),
             },
-        )
-        .line_count as u64
+        );
+        buf
+    }
+
+    fn rendered_rows(block: &LayoutIr, width: u16) -> u64 {
+        rendered_buffer(block, width).line_count() as u64
+    }
+
+    #[test]
+    fn projected_view_ranges_render_only_requested_retained_rows() {
+        let content = TranscriptContent::from(
+            (0..100_000)
+                .map(|line| format!("line {line:06}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let layout = BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+            content: content.clone(),
+            render: ContentRenderSpec::Text {
+                hl_group: None,
+                ansi: false,
+            },
+        }));
+        let options = InlineOptions::default();
+        let measured =
+            crate::content::display_renderers::measure_layout_ir_plan(&layout, 80, &options);
+        let retained_before = content.retained_bytes();
+        let theme = Theme::default();
+        let cases = [
+            (
+                ViewState::Collapsed,
+                0,
+                2,
+                vec!["line 000000", "… 99999 more lines"],
+            ),
+            (
+                ViewState::TrimmedHead { keep: 2 },
+                1,
+                2,
+                vec!["line 000001", "… 99998 more lines"],
+            ),
+            (
+                ViewState::TrimmedTail { keep: 2 },
+                0,
+                2,
+                vec!["… 99998 more lines above", "line 099998"],
+            ),
+            (
+                ViewState::TrimmedTail { keep: 2 },
+                1,
+                2,
+                vec!["line 099998", "line 099999"],
+            ),
+        ];
+
+        for (view_state, row_start, row_count, expected) in cases {
+            let mut buffer = Buffer::new(BufId(0), BufCreateOpts::default());
+            let outcome = render_block_range_into_mode(
+                &mut buffer,
+                &layout,
+                &measured,
+                RenderCtx {
+                    width: 80,
+                    view_state,
+                    theme: &theme,
+                    history: None,
+                    inline_options: options.clone(),
+                },
+                row_start,
+                row_count,
+                true,
+            );
+            assert_eq!(outcome.line_count, expected.len());
+            assert_eq!(buffer.lines(), expected);
+        }
+        assert_eq!(content.retained_bytes(), retained_before);
     }
 
     fn measured_rows(block: &LayoutIr, width: u16) -> u64 {
@@ -1372,31 +2119,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn block_snapshot_json_exposes_process_status_event_fields() {
-        let mut transcript = Transcript::new();
-        transcript.push(Block::ProcessStatus {
-            text: "background process 42 exited with code 7".into(),
-            event: Some(protocol::ProcessStatusEvent::background_process_completed(
-                "42",
-                Some(7),
-            )),
-        });
-
-        let id = transcript.history.order[0];
-        let snapshot = block_snapshot_json(&transcript.history, id, 0, None).expect("snapshot");
-
-        assert_eq!(snapshot["kind"], "process_status");
-        assert_eq!(snapshot["event"], "background_process_completed");
-        assert_eq!(snapshot["event_type"], "background_process_completed");
-        assert_eq!(
-            snapshot["event_data"]["event"],
-            "background_process_completed"
-        );
-        assert_eq!(snapshot["event_data"]["process_id"], "42");
-        assert_eq!(snapshot["process_id"], "42");
-        assert_eq!(snapshot["exit_code"], 7);
-    }
     #[test]
     fn static_block_measurement_matches_rendered_rows() {
         let blocks = [
@@ -1455,6 +2177,7 @@ mod tests {
                 }]]),
                 hl_group: Some("SmeltToolPending".into()),
                 continuation_indent: 0,
+                syntax_highlights: Default::default(),
             })),
             BlockLayout::Leaf(IrLeaf::Text(TextSpec {
                 content: "output line that wraps at narrow widths".into(),
@@ -1464,6 +2187,94 @@ mod tests {
         ]);
 
         assert_eq!(measured_rows(&display, 24), rendered_rows(&display, 24));
+    }
+
+    #[test]
+    fn retained_content_diff_resolves_ids_without_lua_source_payloads() {
+        let old: TranscriptContent = "fn answer() -> i32 { 41 }\n".into();
+        let new: TranscriptContent = "fn answer() -> i32 { 42 }\n".into();
+        let input = BlockLayout::Leaf(LuaLeaf::ContentDiff(
+            smelt_core::content::block_layout::ContentDiffSpec {
+                old_id: old.id(),
+                new_id: new.id(),
+                anchor_id: None,
+                path: "src/lib.rs".into(),
+                lang: None,
+                full_file: true,
+            },
+        ));
+        let sources = [old, new];
+        let mut inline_syntax = InlineSyntaxCache::default();
+        let mut cache = CompileLayoutCache {
+            inline_syntax: &mut inline_syntax,
+            content_sources: &sources,
+            group_children: None,
+            refresh_after_ms: None,
+        };
+
+        let compiled = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
+        let rendered = rendered_buffer(&compiled, 80).lines().join("\n");
+        assert!(rendered.contains("41"), "{rendered}");
+        assert!(rendered.contains("42"), "{rendered}");
+        assert_eq!(measured_rows(&compiled, 80), rendered_rows(&compiled, 80));
+    }
+
+    #[test]
+    fn retained_inline_syntax_matches_live_wrapped_render_and_reuses_compilation() {
+        let spec = RunsSpec {
+            lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                text: "printf '%s\\n' alpha beta gamma delta".into(),
+                syntax: Some("bash".into()),
+                ..Default::default()
+            }]]),
+            hl_group: Some("SmeltToolPending".into()),
+            continuation_indent: 3,
+            syntax_highlights: Default::default(),
+        };
+        let fallback = BlockLayout::Leaf(IrLeaf::Runs(spec.clone()));
+        let input = BlockLayout::Leaf(LuaLeaf::Runs(spec));
+        let mut inline_syntax = InlineSyntaxCache::default();
+        let mut cache = CompileLayoutCache {
+            inline_syntax: &mut inline_syntax,
+            content_sources: &[],
+            group_children: None,
+            refresh_after_ms: None,
+        };
+        let compiled = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
+        let compiled_again = compile_layout_ir_with_cache(&input, &mut cache).unwrap();
+
+        let width = 14;
+        let fallback_buffer = rendered_buffer(&fallback, width);
+        let compiled_buffer = rendered_buffer(&compiled, width);
+        assert_eq!(compiled_buffer.lines(), fallback_buffer.lines());
+        assert!(compiled_buffer.line_count() > 1);
+        for row in 0..compiled_buffer.line_count() {
+            assert_eq!(
+                compiled_buffer.highlights_at(row),
+                fallback_buffer.highlights_at(row)
+            );
+            assert_eq!(
+                compiled_buffer.decoration_at(row),
+                fallback_buffer.decoration_at(row)
+            );
+        }
+
+        let BlockLayout::Leaf(IrLeaf::Runs(first)) = &compiled else {
+            panic!("compiled runs leaf changed shape");
+        };
+        let BlockLayout::Leaf(IrLeaf::Runs(second)) = &compiled_again else {
+            panic!("compiled runs leaf changed shape");
+        };
+        let first_spans = first
+            .syntax_highlights
+            .spans(0, 0)
+            .expect("first retained syntax ranges");
+        let second_spans = second
+            .syntax_highlights
+            .spans(0, 0)
+            .expect("second retained syntax ranges");
+        assert!(!first_spans.is_empty());
+        assert!(std::ptr::eq(first_spans.as_ptr(), second_spans.as_ptr()));
     }
 
     #[test]
@@ -1490,7 +2301,7 @@ mod tests {
         assert_eq!(model.retained_bytes, weight);
 
         let replacement = compile_block(&Block::Text {
-            content: "replacement ".repeat(128),
+            content: "replacement ".repeat(128).into(),
         });
         let replacement_weight = replacement.retained_bytes();
         model.set_budget(usize::MAX);
@@ -1544,6 +2355,56 @@ mod tests {
     }
 
     #[test]
+    fn dirty_shifted_render_range_reuses_its_row_allocations() {
+        let id = RenderNodeId::Block(BlockId::new(1));
+        let key = LayoutKey {
+            width: 80,
+            view_state: ViewState::Expanded,
+            content_hash: 1,
+            sidecar_hash: 0,
+        };
+        let layout = BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: format!("{}\n{}", "a".repeat(64), "b".repeat(32)),
+            hl_group: None,
+            ansi: false,
+        }));
+        let mut cache = LayoutCache::new();
+        cache.set_budget(usize::MAX);
+        cache.insert_compiled_blocks(vec![(
+            id,
+            DisplayCacheKey::from_node_key(key, 0, None),
+            layout,
+            None,
+        )]);
+        let theme = Theme::default();
+        let render_ctx = || RenderCtx {
+            width: key.width,
+            view_state: key.view_state,
+            theme: &theme,
+            history: None,
+            inline_options: Default::default(),
+        };
+
+        let first_ptr = cache
+            .with_rendered_range(id, key, 0, None, render_ctx(), 0, 1, |buf, _| {
+                buf.lines()[0].as_ptr()
+            })
+            .expect("first rendered range");
+        cache.blocks.get_mut(&id).unwrap().rendered_ranges[0].dirty = true;
+        let shifted_ptr = cache
+            .with_rendered_range(id, key, 0, None, render_ctx(), 1, 1, |buf, _| {
+                buf.lines()[0].as_ptr()
+            })
+            .expect("shifted rendered range");
+
+        assert_eq!(shifted_ptr, first_ptr);
+        let ranges = &cache.blocks.get(&id).unwrap().rendered_ranges;
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].key.row_start, 1);
+        assert!(!ranges[0].dirty);
+    }
+
+    #[test]
     fn refresh_compilation_is_visually_transparent_and_uses_earliest_delay() {
         let child = BlockLayout::Leaf(LuaLeaf::Runs(RunsSpec {
             lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
@@ -1553,6 +2414,7 @@ mod tests {
             }]]),
             hl_group: Some("SmeltAccent".into()),
             continuation_indent: 2,
+            syntax_highlights: Default::default(),
         }));
         let layout = BlockLayout::Refresh {
             child: Box::new(BlockLayout::Vbox(vec![
@@ -1567,10 +2429,11 @@ mod tests {
             ])),
             spec: smelt_core::content::block_layout::RefreshSpec { after_ms: 250 },
         };
-        let mut source_views = SourceViewCache::default();
+        let mut inline_syntax = InlineSyntaxCache::default();
         let mut cache = CompileLayoutCache {
-            source_views: &mut source_views,
-            source_views_enabled: true,
+            inline_syntax: &mut inline_syntax,
+            content_sources: &[],
+            group_children: None,
             refresh_after_ms: None,
         };
 

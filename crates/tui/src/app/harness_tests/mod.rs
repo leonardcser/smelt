@@ -205,7 +205,7 @@ fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {
     app.set_terminal_size(80, 16);
     for i in 0..rows {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("row {i:03} alpha beta"),
+            content: format!("row {i:03} alpha beta").into(),
         });
     }
     app.render_silent();

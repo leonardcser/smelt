@@ -350,9 +350,13 @@ shapes.
 
 ```lua
 smelt.keymap.set("n", "<C-y>", function()
-  local where = smelt.focus()
-  local text  = where == "transcript" and smelt.transcript.loaded_text_expensive() or smelt.prompt.text()
-  smelt.clipboard.write(text)
+  if smelt.focus() == "transcript" then
+    smelt.transcript.loaded_text_expensive(function(text)
+      smelt.clipboard.write(text)
+    end)
+  else
+    smelt.clipboard.write(smelt.prompt.text())
+  end
 end)
 
 smelt.keymap.set("", "<Esc><Esc>", function(ctx)
@@ -362,6 +366,13 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   -- returning `false` lets the chord fall through to the next binding
 end)
 ```
+
+Use the callback form of `loaded_text_expensive` and
+`loaded_blocks_expensive` when a sparse session may need payload hydration. The
+call returns immediately, retains the callback for one invocation on the UI
+thread, and releases the hydrated payload after the callback finishes. Without
+a callback, these functions only inspect currently materialized content and can
+return an empty string or table while hydration is pending.
 
 Per-window bindings (transcript-only, picker-only, etc.) go through
 `win:key(chord, handler)`, which returns a `Reg` whose `:remove()` undoes the

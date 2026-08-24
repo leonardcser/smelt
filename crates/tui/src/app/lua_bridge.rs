@@ -56,11 +56,14 @@ impl TuiApp {
         }
     }
 
-    /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
-    pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
+    /// Queue `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
+    /// The returned snapshot lets synchronous input dispatch preserve its cursor
+    /// across observational callbacks. Lua-originated edits are pumped after the
+    /// current Lua entry returns, when re-entering the runtime is safe.
+    pub(crate) fn queue_prompt_text_changed_if_dirty(&mut self) -> Option<(String, usize)> {
         let current_text = self.prompt_buf().source().to_string();
         if !self.prompt.publish_text_if_changed(&current_text) {
-            return;
+            return None;
         }
         let cursor_before = self.prompt_win().cpos();
         let lua = &self.lua;
@@ -77,19 +80,25 @@ impl TuiApp {
             },
             &mut lua_invoke,
         );
+        Some((current_text, cursor_before))
+    }
+
+    /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
+    pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
+        let Some((current_text, cursor_before)) = self.queue_prompt_text_changed_if_dirty() else {
+            return;
+        };
         self.flush_lua_callbacks();
 
         // `text_changed` is observational: filter/completer callbacks can edit
         // the prompt explicitly, but a callback that only moves the cursor must
         // not repark the insertion point after every typed character.
         if self.prompt_buf().source() == current_text && self.prompt_win().cpos() != cursor_before {
-            {
-                let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                pctx.win
-                    .set_cpos(smelt_buffer::text::snap(pctx.buf.source(), cursor_before));
-                pctx.win.clear_selection_anchor();
-                pctx.win.clamp_anchors_to_source(pctx.buf.source());
-            }
+            let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            pctx.win
+                .set_cpos(smelt_buffer::text::snap(pctx.buf.source(), cursor_before));
+            pctx.win.clear_selection_anchor();
+            pctx.win.clamp_anchors_to_source(pctx.buf.source());
         }
     }
 
@@ -199,8 +208,20 @@ impl TuiApp {
                     content,
                     is_error,
                     metadata,
+                    display_content,
+                    attachment,
                 } => {
-                    self.complete_lua_tool(invocation, call_id, content, is_error, metadata);
+                    self.complete_lua_tool(
+                        invocation,
+                        call_id,
+                        crate::app::agent::LuaToolCompletion {
+                            content,
+                            is_error,
+                            metadata,
+                            display_content,
+                            attachment,
+                        },
+                    );
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.notify_error(msg);

@@ -343,9 +343,18 @@ smelt.transcript.register_tool("web_fetch", {
       items[#items + 1] = smelt.layout.text(args.prompt)
     end
     local output = block.output or {}
-    items[#items + 1] = transcript_defaults.render_llm_markdown_tail(output.content, ctx, {
-      dim = true,
-    })
+    if output.content_id then
+      local limits = (ctx and ctx.limits) or {}
+      items[#items + 1] = smelt.layout.cap(
+        smelt.layout.content(output.content_id, { format = "markdown", dim = true }),
+        {
+          rows = limits.tool_output_rows or 20,
+          keep = "tail",
+          marker = "above",
+          total_rows = output.content_lines,
+        }
+      )
+    end
     return smelt.layout.vbox(items)
   end,
 })

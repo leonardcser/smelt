@@ -174,7 +174,7 @@ impl AppStoryCtx {
     pub fn exec_with_output(&mut self, command: &str, output: &str, exit_code: Option<i32>) {
         self.app.start_exec(command);
         for line in output.lines() {
-            self.app.append_exec_output(line);
+            self.app.append_exec_output(line.to_owned());
         }
         self.app.finish_exec(exit_code);
     }
@@ -193,7 +193,12 @@ impl AppStoryCtx {
         content: &str,
         elapsed_ms: Option<u64>,
     ) {
-        self.tool_call_full(tool_name, args, content, false, None, elapsed_ms);
+        self.tool_call_full(
+            tool_name,
+            args,
+            ToolOutcome::new(content.into(), false, None),
+            elapsed_ms,
+        );
     }
 
     /// Tool call lifecycle with an `is_error = true` result. Same shape
@@ -206,12 +211,15 @@ impl AppStoryCtx {
         content: &str,
         elapsed_ms: Option<u64>,
     ) {
-        self.tool_call_full(tool_name, args, content, true, None, elapsed_ms);
+        self.tool_call_full(
+            tool_name,
+            args,
+            ToolOutcome::new(content.into(), true, None),
+            elapsed_ms,
+        );
     }
 
-    /// Tool call lifecycle with structured `metadata`. Used by tools
-    /// whose `render` callback dispatches on metadata fields (e.g.
-    /// `notebook_edit` reads `edit_mode`, `old_source`, `new_source`).
+    /// Tool call lifecycle with bounded structured `metadata`.
     pub fn tool_call_with_metadata(
         &mut self,
         tool_name: &str,
@@ -220,7 +228,33 @@ impl AppStoryCtx {
         metadata: serde_json::Value,
         elapsed_ms: Option<u64>,
     ) {
-        self.tool_call_full(tool_name, args, content, false, Some(metadata), elapsed_ms);
+        self.tool_call_full(
+            tool_name,
+            args,
+            ToolOutcome::new(content.into(), false, Some(metadata)),
+            elapsed_ms,
+        );
+    }
+
+    /// Tool call lifecycle with bounded metadata and retained display content.
+    pub fn tool_call_with_display_content(
+        &mut self,
+        tool_name: &str,
+        args: &[(&str, serde_json::Value)],
+        content: &str,
+        metadata: serde_json::Value,
+        display_content: &[(&str, &str)],
+        elapsed_ms: Option<u64>,
+    ) {
+        let outcome = ToolOutcome::new(content.into(), false, Some(metadata)).with_display_content(
+            display_content
+                .iter()
+                .map(|(name, content)| {
+                    protocol::ToolDisplayContent::new(*name, (*content).to_owned())
+                })
+                .collect(),
+        );
+        self.tool_call_full(tool_name, args, outcome, elapsed_ms);
     }
 
     /// Emit only `ToolStarted` - the pending state. Use this when the
@@ -287,9 +321,7 @@ impl AppStoryCtx {
         &mut self,
         tool_name: &str,
         args: &[(&str, serde_json::Value)],
-        content: &str,
-        is_error: bool,
-        metadata: Option<serde_json::Value>,
+        outcome: ToolOutcome,
         elapsed_ms: Option<u64>,
     ) {
         let call_id = self.next_call_id(tool_name);
@@ -301,12 +333,8 @@ impl AppStoryCtx {
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
         );
-        self.app.tool_finished(
-            invocation_id,
-            call_id,
-            ToolOutcome::new(content.into(), is_error, metadata),
-            elapsed_ms,
-        );
+        self.app
+            .tool_finished(invocation_id, call_id, outcome, elapsed_ms);
     }
 
     pub fn tool_rejected(

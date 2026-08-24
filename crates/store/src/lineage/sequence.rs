@@ -516,6 +516,14 @@ pub(crate) fn put_payload(
     if matches!(kind, PayloadKind::History | PayloadKind::Transcript) {
         put_payload_nested_object_refs(conn, lineage, &expected.id, kind, bytes)?;
     }
+    if kind == PayloadKind::Transcript {
+        #[cfg(not(test))]
+        install_transcript_record_profile(conn, lineage, &expected.id, bytes)?;
+        #[cfg(test)]
+        if serde_json::from_slice::<StoredTranscriptBlock>(bytes).is_ok() {
+            install_transcript_record_profile(conn, lineage, &expected.id, bytes)?;
+        }
+    }
     Ok(expected)
 }
 
@@ -716,6 +724,22 @@ pub(crate) fn create_node(
             "sequence node {} conflicts with its content address",
             expected.id.as_str()
         )));
+    }
+    if kind == SequenceKind::Transcript {
+        #[cfg(not(test))]
+        install_transcript_node_profile(conn, lineage, &expected)?;
+        #[cfg(test)]
+        if let Err(error) = install_transcript_node_profile(conn, lineage, &expected) {
+            let missing_test_profile = matches!(
+                &error,
+                StoreError::MissingObject { reference }
+                    if reference.starts_with("transcript profile for payload ")
+                        || reference.starts_with("transcript extent node ")
+            );
+            if !missing_test_profile {
+                return Err(error);
+            }
+        }
     }
     Ok(expected)
 }

@@ -1002,6 +1002,24 @@ impl Ui {
             .map(|surface| surface.layout.clone().with_container(id))
     }
 
+    /// Return the buffer revisions that can affect a docked surface's natural size.
+    /// Root layout retention uses this payload-independent key to remeasure a fit
+    /// dialog only after one of its mounted leaves changes.
+    pub fn docked_surface_buffer_revisions(&self, id: ContainerId) -> Option<Vec<(BufId, u64)>> {
+        let surface = self.docked_surface(id)?;
+        let leaves = self.modal_leaves(surface.modal)?;
+        Some(
+            leaves
+                .iter()
+                .filter_map(|leaf| {
+                    let buf_id = self.win(*leaf)?.buf;
+                    let revision = self.buf(buf_id)?.changedtick();
+                    Some((buf_id, revision))
+                })
+                .collect(),
+        )
+    }
+
     /// Resolve the surface's current height policy against the terminal and its content.
     pub fn docked_surface_height(&mut self, id: ContainerId) -> Option<Constraint> {
         let surface = self.docked_surface(id)?.clone();

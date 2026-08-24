@@ -78,7 +78,8 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
             content: (0..18)
                 .map(|line| format!("assistant turn {turn} line {line:02}"))
                 .collect::<Vec<_>>()
-                .join("\n"),
+                .join("\n")
+                .into(),
         });
     }
     app.render_silent();
@@ -328,7 +329,7 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
     app.set_terminal_size(52, 16);
     for i in 0..40 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("filler row {i:02}"),
+            content: format!("filler row {i:02}").into(),
         });
     }
     let expected = "This paragraph includes **markdown** and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.";
@@ -338,7 +339,7 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
         });
     for i in 0..20 {
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("trailing row {i:02}"),
+            content: format!("trailing row {i:02}").into(),
         });
     }
     app.render_silent();

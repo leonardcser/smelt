@@ -490,6 +490,7 @@ impl LiveSession {
     }
 
     fn open_store(&self) -> Result<LiveStoreReader, String> {
+        let _perf = smelt_perf::perf::begin("session:live_store:open");
         let store = self
             .store_address
             .as_ref()

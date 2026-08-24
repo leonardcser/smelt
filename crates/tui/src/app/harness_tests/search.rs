@@ -142,7 +142,7 @@ fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTransc
     smelt_store::StoredTranscriptBlock {
         block_idx,
         history_idx: None,
-        kind: "text".to_string(),
+        kind: "assistant".to_string(),
         tool_call_id: None,
         tool_name: None,
         content_hash: "0".to_string(),
@@ -150,13 +150,14 @@ fn test_block_record(block_idx: u64, content: &str) -> smelt_store::StoredTransc
         preview_text: content.to_string(),
         indexed_text: content.to_string(),
         block_json: serde_json::to_string(&smelt_core::Block::Text {
-            content: content.to_string(),
+            content: content.to_string().into(),
         })
         .unwrap(),
         origin_json: Some(
             serde_json::to_string(&smelt_core::BlockOrigin::History(block_idx as usize)).unwrap(),
         ),
         tool_state_json: None,
+        tool_render_revision: 0,
     }
 }
 
@@ -528,6 +529,7 @@ fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
     let mut app = sparse_display_only_search_app();
     app.type_char('g');
     app.type_char('g');
+    app.render_silent();
 
     app.type_char('/');
     app.type_text("needle");
@@ -837,6 +839,7 @@ fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
             metadata: Some(serde_json::json!({
                 "display_count": { "value": 12, "unit": "file" }
             })),
+            content_fields: Vec::new(),
         })),
         None,
     );

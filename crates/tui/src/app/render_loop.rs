@@ -5,7 +5,7 @@
 use crate::app::TuiApp;
 use crate::content::{layout, prompt_buf};
 
-fn is_engine_stream_delta(event: &protocol::EngineEvent) -> bool {
+fn is_engine_continuation(event: &protocol::EngineEvent) -> bool {
     matches!(
         event,
         protocol::EngineEvent::ReasoningPartDelta { .. }
@@ -16,21 +16,11 @@ fn is_engine_stream_delta(event: &protocol::EngineEvent) -> bool {
     )
 }
 
-fn starts_or_updates_live_engine_output(event: &protocol::EngineEvent) -> bool {
-    is_engine_stream_delta(event)
-        || matches!(
-            event,
-            protocol::EngineEvent::ReasoningPartStarted { .. }
-                | protocol::EngineEvent::ToolCallDraftStarted { .. }
-                | protocol::EngineEvent::ToolStarted { .. }
-        )
-}
-
-const STREAMING_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+const CONTINUATION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameUrgency {
-    Streaming,
+    Continuation,
     Animation(std::time::Duration),
     Urgent,
 }
@@ -38,7 +28,7 @@ pub(crate) enum FrameUrgency {
 impl FrameUrgency {
     fn interval(self) -> std::time::Duration {
         match self {
-            Self::Streaming => STREAMING_FRAME_INTERVAL,
+            Self::Continuation => CONTINUATION_FRAME_INTERVAL,
             Self::Animation(interval) => interval,
             Self::Urgent => std::time::Duration::ZERO,
         }
@@ -47,11 +37,11 @@ impl FrameUrgency {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Urgent, _) | (_, Self::Urgent) => Self::Urgent,
-            (Self::Streaming, Self::Streaming) => Self::Streaming,
+            (Self::Continuation, Self::Continuation) => Self::Continuation,
             (Self::Animation(left), Self::Animation(right)) => Self::Animation(left.min(right)),
-            (Self::Streaming, Self::Animation(interval))
-            | (Self::Animation(interval), Self::Streaming) => {
-                Self::Animation(STREAMING_FRAME_INTERVAL.min(interval))
+            (Self::Continuation, Self::Animation(interval))
+            | (Self::Animation(interval), Self::Continuation) => {
+                Self::Animation(CONTINUATION_FRAME_INTERVAL.min(interval))
             }
         }
     }
@@ -165,6 +155,29 @@ fn record_transcript_projection_hydration_failure(
     );
 }
 
+fn sync_retained_transcript_window(
+    ui: &mut crate::smelt_edit::Ui,
+    request: crate::smelt_edit::MaterializeRequest,
+    render_now: std::time::Instant,
+) {
+    let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
+    let (Some(win), Some(buf)) = (win, buf) else {
+        return;
+    };
+    if win.has_materialized_rows() {
+        win.sync_yank_flash_layer(buf, request.rect.height, render_now);
+        if win.is_following_tail() {
+            win.reveal_row_cursor(buf, request.rect.height);
+        }
+    } else {
+        let text = buf.text();
+        win.clamp_anchors_to_source(&text);
+        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
+        win.sync_yank_flash_layer(buf, request.rect.height, render_now);
+    }
+    win.scroll_left = 0;
+}
+
 pub(super) fn prepare_transcript_window(
     transcript: &mut crate::app::transcript::TranscriptDocument,
     lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -180,11 +193,10 @@ pub(super) fn prepare_transcript_window(
         return;
     }
     let viewport_rows = request.rect.height;
-    let pending_restore = transcript.take_pending_projection_restore();
+    let pending_restore;
     let fallback_cursor_screen_row = ui
         .win(request.win)
         .and_then(|win| win.cursor_screen_row(viewport_rows));
-    let transcript_scroll_state;
     let transcript_cursor_range;
     let suppress_cursor_screen_row_restore;
     {
@@ -207,19 +219,24 @@ pub(super) fn prepare_transcript_window(
             },
             viewport_rows,
         );
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                record_transcript_projection_hydration_failure(error);
+                sync_retained_transcript_window(ui, request, render_now);
+                return;
+            }
+        };
+        pending_restore = transcript.take_pending_projection_restore();
         let Some(buf) = ui.buf_mut(request.buf) else {
             return;
         };
-        let mut applied = match plan {
-            Ok(plan) => transcript.project_applied_viewport(lua, buf, theme, plan),
-            Err(error) => {
-                record_transcript_projection_hydration_failure(error);
-                transcript.project_hydration_failure(buf, viewport_rows)
-            }
-        };
+        let mut applied = transcript.project_applied_viewport(lua, buf, theme, plan);
         let settled_search_range = if let Some(anchor) = search_anchor {
             let matched = transcript.resolve_search_range_anchor(lua, width, theme, anchor.clone());
-            let search_needs_projection = width_changed || applied.cursor_range.is_some();
+            let search_needs_projection = width_changed
+                || applied.cursor_range.is_some()
+                || matched.range != anchor.fallback_range();
             if search_needs_projection {
                 let target_screen_row = applied
                     .cursor_range
@@ -299,10 +316,7 @@ pub(super) fn prepare_transcript_window(
                 tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
             );
             win.apply_materialized_rows(tdata);
-            transcript_scroll_state =
-                win.apply_projected_scroll(tdata.clamped_scroll, desired_scroll_state);
-        } else {
-            transcript_scroll_state = desired_scroll_state;
+            win.apply_projected_scroll(tdata.clamped_scroll, desired_scroll_state);
         }
     }
     let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
@@ -316,34 +330,24 @@ pub(super) fn prepare_transcript_window(
             restore.cursor = None;
             restore.cursor_selection =
                 crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
-        } else if restore.cursor.is_none() {
+        } else if restore.cursor.is_none() && pending_restore.cursor_document_position.is_none() {
             restore.cursor = fallback_cursor_screen_row;
             restore.cursor_selection =
                 crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
         }
         win.restore_document_view_screen_rows(buf, restore);
+        if let Some(cursor) = pending_restore.cursor_document_position {
+            let mut state = win.document_view_state();
+            state.cursor = cursor;
+            win.set_document_view_state(state);
+        }
         if let Some(range) = transcript_cursor_range {
             if win.set_row_cursor(buf, range.start) {
                 *search_projection.range_after = Some(range);
             }
         }
-        if win.has_materialized_rows() {
-            win.sync_yank_flash_layer(buf, viewport_rows, render_now);
-            if matches!(
-                transcript_scroll_state,
-                crate::smelt_edit::VerticalScroll::Tail
-            ) {
-                win.reveal_row_cursor(buf, viewport_rows);
-            }
-            win.scroll_left = 0;
-        } else {
-            let text = buf.text();
-            win.clamp_anchors_to_source(&text);
-            buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
-            win.sync_yank_flash_layer(buf, viewport_rows, render_now);
-            win.scroll_left = 0;
-        }
     }
+    sync_retained_transcript_window(ui, request, render_now);
 }
 
 impl TuiApp {
@@ -351,6 +355,8 @@ impl TuiApp {
         &mut self,
         focused: bool,
     ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
+        self.complete_pending_transcript_rewind();
+        self.complete_pending_transcript_details();
         let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();
         let transcript_search_anchor = self
@@ -376,17 +382,51 @@ impl TuiApp {
             let ui = &mut self.ui;
             smelt_core::host::scope_core(core, || {
                 ui.prepare_split_window_with(crate::app::TRANSCRIPT_WIN, |ui, request| {
-                    conversation.prepare_transcript_window(
-                        &lua,
-                        &theme,
-                        ui,
-                        request,
-                        render_now,
-                        TranscriptSearchProjection {
-                            anchor: transcript_search_anchor.clone(),
-                            range_after: &mut transcript_search_range_after_projection,
-                        },
-                    );
+                    let projection_is_current = ui
+                        .win(request.win)
+                        .and_then(|win| {
+                            ui.buf(request.buf).map(|buf| {
+                                conversation.transcript().projected_view_is_current(
+                                    &lua,
+                                    buf,
+                                    request.content_width.max(1),
+                                    request.rect.height,
+                                    request.scroll_top,
+                                    win.materialized_rows(),
+                                )
+                            })
+                        })
+                        .unwrap_or(false);
+                    if projection_is_current {
+                        if !request.follow_tail {
+                            conversation.prime_transcript_local_scroll_base(
+                                &lua,
+                                request.content_width.max(1),
+                                request.rect.height,
+                                request.scroll_top,
+                            );
+                        }
+                        if !conversation.transcript_hydration_is_pending() {
+                            conversation.trace_retained_transcript_frame(
+                                &lua,
+                                request.content_width.max(1),
+                                request.rect.height,
+                            );
+                        }
+                        sync_retained_transcript_window(ui, request, render_now);
+                    } else {
+                        conversation.prepare_transcript_window(
+                            &lua,
+                            &theme,
+                            ui,
+                            request,
+                            render_now,
+                            TranscriptSearchProjection {
+                                anchor: transcript_search_anchor.clone(),
+                                range_after: &mut transcript_search_range_after_projection,
+                            },
+                        );
+                    }
                 })
             })
         };
@@ -394,9 +434,38 @@ impl TuiApp {
         if let Some(range) = transcript_search_range_after_projection {
             self.update_current_transcript_search_range(crate::app::TRANSCRIPT_WIN, range);
         }
-        self.capture_committed_transcript_view(focused && transcript_visible, transcript_visible);
-        self.dispatch_committed_transcript_view();
+        {
+            let _perf = smelt_perf::perf::begin("compositor:capture_committed_transcript_view");
+            self.capture_committed_transcript_view(
+                focused && transcript_visible,
+                transcript_visible,
+            );
+        }
+        {
+            let _perf = smelt_perf::perf::begin("compositor:dispatch_committed_transcript_view");
+            self.dispatch_committed_transcript_view();
+        }
+        self.dispatch_pending_transcript_hydration();
         prepared_transcript
+    }
+
+    fn dispatch_pending_transcript_hydration(&mut self) {
+        let context_id = self.conversation.transcript_hydration_context_id();
+        if let Some(worker) = self.transcript_hydration_worker.as_ref() {
+            worker.set_context(context_id);
+        }
+        let Some(request) = self
+            .conversation
+            .take_pending_transcript_hydration_request()
+        else {
+            return;
+        };
+        let worker = self.transcript_hydration_worker.get_or_insert_with(|| {
+            crate::app::transcript_hydration::TranscriptHydrationWorker::spawn(
+                self.platform.app_event_sender(),
+            )
+        });
+        worker.request(request);
     }
 
     fn capture_committed_transcript_view(&mut self, focused: bool, visible: bool) {
@@ -618,18 +687,19 @@ impl TuiApp {
         if self.render_transient_frame_before_engine_event_to(&ev, out) {
             on_transient_frame(self);
         }
-        let updates_live_output = starts_or_updates_live_engine_output(&ev);
-        let coalescible_continuation = matches!(
-            &ev,
-            protocol::EngineEvent::ReasoningPartDelta { .. }
-                | protocol::EngineEvent::TextDelta { .. }
-        ) && self.conversation.has_live_transcript_blocks();
-        let keep_streaming = self.dispatch_engine_event(ev);
-        if updates_live_output && coalescible_continuation {
-            self.request_streaming_render();
-        } else {
-            self.request_urgent_render();
+        let continuation_started = match &ev {
+            protocol::EngineEvent::EngineAskDelta { id, .. } => {
+                self.continuing_engine_ask_ids.contains(id)
+            }
+            _ => self.conversation.has_live_transcript_blocks(),
+        };
+        if is_engine_continuation(&ev) && continuation_started {
+            self.queue_engine_continuation(ev);
+            self.request_continuation_render();
+            return true;
         }
+        let keep_streaming = self.dispatch_engine_event(ev);
+        self.request_urgent_render();
         keep_streaming
     }
 
@@ -638,13 +708,19 @@ impl TuiApp {
         ev: &protocol::EngineEvent,
         out: &mut W,
     ) -> bool {
-        if is_engine_stream_delta(ev) {
+        if is_engine_continuation(ev) {
             return false;
         }
         self.render_pending_transient_frame_to(out)
     }
 
     pub(crate) fn refresh_main_layout(&mut self) -> (layout::Rect, u16) {
+        self.lua.shared().request_layout_refresh();
+        self.lua.shared().invalidate_win_renderers();
+        self.ensure_main_layout()
+    }
+
+    fn ensure_main_layout(&mut self) -> (layout::Rect, u16) {
         if smelt_core::host::host_access_active() {
             self.lua.shared().request_layout_refresh();
             return (self.layout.prompt, self.layout.viewport_rows());
@@ -657,11 +733,26 @@ impl TuiApp {
         // Auto-height keeps the transcript usable; a deliberate manual resize
         // can claim more room for prompt review without taking the full screen.
         let input_rows = self.prompt.resolve_height(wrapped_rows, term_h);
+        let dialog = self.active_docked_dialog();
+        let dialog_buffers = dialog
+            .and_then(|id| self.ui.docked_surface_buffer_revisions(id))
+            .unwrap_or_default();
+        let layout_inputs = crate::app::MainLayoutInputs {
+            terminal_width: term_w,
+            terminal_height: term_h,
+            prompt_input_rows: input_rows,
+            dialog,
+            dialog_buffers,
+        };
+        if !applying_deferred_layout && self.main_layout_inputs.as_ref() == Some(&layout_inputs) {
+            return (self.layout.prompt, self.layout.viewport_rows());
+        }
         let tree = self
             .invoke_lua_layout_composer(term_w, term_h, input_rows)
             .unwrap_or_else(|| self.fallback_main_layout(term_w, term_h, input_rows));
         self.ui.set_layout(tree);
         self.layout = layout::LayoutState::from_ui(&self.ui);
+        self.main_layout_inputs = Some(layout_inputs);
         // Prompt-docked pickers size themselves to the headroom above the
         // prompt chrome; recompute them whenever the main layout changes.
         crate::picker::sync_layouts(self);
@@ -696,7 +787,15 @@ impl TuiApp {
             .frame_scheduler
             .begin_frame(self.core.clock.instant_now());
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
+        self.apply_pending_transcript_work();
+        if !self.transcript_work.is_empty() && !self.transcript_work.front_waits_for_hydration() {
+            self.request_continuation_render();
+        }
         self.update_spinner();
+        // Signal subscribers drive retained window and layout invalidation. Drain
+        // them before querying dirty state so each frame observes one coherent
+        // semantic update rather than repainting a frame late.
+        self.drain_signals_pending();
 
         let show_queued = self.prompt_input_is_busy();
 
@@ -719,7 +818,7 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, _viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            self.refresh_main_layout()
+            self.ensure_main_layout()
         };
 
         // Freeze timer/spinner while a blocking dialog is up. Done before
@@ -730,9 +829,17 @@ impl TuiApp {
         self.conversation.sync_active_tool_elapsed(now);
         self.sync_transcript_renderer_generation();
 
-        // Commit transcript projection before Lua observers run. Plugins receive
-        // one coherent view snapshot and can update overlays for this same frame.
-        let prepared_transcript = self.prepare_committed_transcript_view(has_transcript_cursor);
+        // Commit the retained transcript view before Lua observers run. Stale
+        // content or viewport inputs project here; unchanged frames reuse the
+        // existing bounded row tape. Plugins receive one coherent snapshot and
+        // can update overlays for this same frame.
+        let prepared_transcript = {
+            let _perf = smelt_perf::perf::begin("compositor:prepare_committed_transcript_view");
+            self.prepare_committed_transcript_view(has_transcript_cursor)
+        };
+        // Frame preparation can publish animation and committed-view signals.
+        // Apply their retained renderer invalidations before repainting windows.
+        self.drain_signals_pending();
 
         {
             let _p = smelt_perf::perf::begin("compositor:lua_renderers");
@@ -1033,45 +1140,45 @@ impl TuiApp {
         }
     }
 
-    /// Invoke every Lua renderer registered via `Win:set_renderer(fn)`.
-    /// Each callback receives its `Win` userdata; the renderer is
-    /// expected to write the window's contents into the backing buffer
-    /// for the current frame. Renderers whose target window has been
-    /// closed are silently skipped (and not collected - `Win:close()`
-    /// is the right way to drop a renderer, and the registry entry
-    /// stays so a re-opened window keeps its renderer). Errors are
-    /// recorded so plugin bugs surface in `/log` without breaking the
-    /// frame.
+    /// Invoke dirty Lua renderers registered via `Win:set_renderer(fn)`.
+    /// Each callback owns retained backing-buffer content and runs once after
+    /// registration or `Win:invalidate_renderer()`. Closed windows stay dirty so
+    /// reopening them repaints before their retained content is shown.
     fn dispatch_lua_renderers(&mut self) {
         let lua = self.lua.lua();
         let shared = self.lua.shared();
-        // Snapshot (win_id, function) pairs so the registry mutex
-        // isn't held across Lua calls (renderers may legitimately
-        // re-register or remove themselves mid-frame).
+        // Snapshot dirty callbacks so the registry mutex is not held across Lua
+        // calls. Mark them clean first so a callback can invalidate itself for a
+        // later frame without that request being overwritten.
         let entries: Vec<(crate::smelt_edit::WinId, mlua::Function)> = {
-            let guard = match shared.win_renderers.lock() {
-                Ok(g) => g,
+            let mut guard = match shared.win_renderers.lock() {
+                Ok(guard) => guard,
                 Err(_) => return,
             };
             guard
-                .iter()
-                .filter_map(|(raw_id, handle)| {
-                    lua.registry_value::<mlua::Function>(&handle.key)
+                .iter_mut()
+                .filter_map(|(raw_id, renderer)| {
+                    let win_id = crate::smelt_edit::WinId(*raw_id);
+                    if !renderer.dirty
+                        || self
+                            .ui
+                            .paint_rect(crate::smelt_edit::PaintId::from(win_id))
+                            .is_none()
+                    {
+                        return None;
+                    }
+                    renderer.dirty = false;
+                    lua.registry_value::<mlua::Function>(&renderer.handle.key)
                         .ok()
-                        .map(|f| (crate::smelt_edit::WinId(*raw_id), f))
+                        .map(|function| (win_id, function))
                 })
                 .collect()
         };
-        for (win_id, func) in entries {
-            // Skip windows that no longer exist (e.g. closed overlay leaves
-            // whose renderer hasn't been cleared yet).
-            if self.ui.win(win_id).is_none() {
-                continue;
-            }
+        for (win_id, function) in entries {
             let win_ud = crate::lua::api::win::LuaWin { id: win_id };
-            let result = crate::lua::scope_app(self, move || func.call::<()>((win_ud,)));
-            if let Err(e) = result {
-                self.record_lua_error(format!("win renderer for {win_id:?}: {e}"));
+            let result = crate::lua::scope_app(self, move || function.call::<()>((win_ud,)));
+            if let Err(error) = result {
+                self.record_lua_error(format!("win renderer for {win_id:?}: {error}"));
             }
         }
     }
@@ -1119,26 +1226,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn streaming_requests_wait_for_frame_interval() {
+    fn continuation_requests_wait_for_frame_interval() {
         let start = std::time::Instant::now();
         let mut scheduler = FrameScheduler::default();
         scheduler.begin_frame(start);
-        scheduler.request(FrameUrgency::Streaming);
+        scheduler.request(FrameUrgency::Continuation);
 
         assert!(!scheduler.is_due(start + std::time::Duration::from_millis(15)));
         assert_eq!(
             scheduler.next_delay(start + std::time::Duration::from_millis(15)),
             Some(std::time::Duration::from_millis(1))
         );
-        assert!(scheduler.is_due(start + STREAMING_FRAME_INTERVAL));
+        assert!(scheduler.is_due(start + CONTINUATION_FRAME_INTERVAL));
     }
 
     #[test]
-    fn urgent_request_promotes_pending_streaming_frame() {
+    fn urgent_request_promotes_pending_continuation_frame() {
         let start = std::time::Instant::now();
         let mut scheduler = FrameScheduler::default();
         scheduler.begin_frame(start);
-        scheduler.request(FrameUrgency::Streaming);
+        scheduler.request(FrameUrgency::Continuation);
         scheduler.request(FrameUrgency::Urgent);
 
         assert!(scheduler.is_due(start + std::time::Duration::from_millis(2)));
@@ -1150,30 +1257,531 @@ mod tests {
     }
 
     #[test]
-    fn animation_and_streaming_share_earliest_deadline() {
+    fn animation_and_continuation_share_earliest_deadline() {
         let start = std::time::Instant::now();
         let mut scheduler = FrameScheduler::default();
         scheduler.begin_frame(start);
         scheduler.request(FrameUrgency::Animation(std::time::Duration::from_millis(
             40,
         )));
-        scheduler.request(FrameUrgency::Streaming);
+        scheduler.request(FrameUrgency::Continuation);
 
         assert!(!scheduler.is_due(start + std::time::Duration::from_millis(15)));
-        assert!(scheduler.is_due(start + STREAMING_FRAME_INTERVAL));
+        assert!(scheduler.is_due(start + CONTINUATION_FRAME_INTERVAL));
     }
 
     #[test]
-    fn repeated_streaming_requests_coalesce_into_one_trace() {
+    fn repeated_continuation_requests_coalesce_into_one_trace() {
         let start = std::time::Instant::now();
         let mut scheduler = FrameScheduler::default();
-        scheduler.request(FrameUrgency::Streaming);
+        scheduler.request(FrameUrgency::Continuation);
         for _ in 1..100 {
-            scheduler.request(FrameUrgency::Streaming);
+            scheduler.request(FrameUrgency::Continuation);
         }
 
         let trace = scheduler.begin_frame(start).expect("coalesced frame");
         assert_eq!(trace.id, 1);
         assert!(!scheduler.has_pending());
+    }
+
+    #[test]
+    fn continuation_mutations_apply_together_at_the_frame_boundary() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        let mut sink = std::io::sink();
+
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::TextDelta {
+                delta: "first".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.render_pending_transient_frame_to(&mut sink);
+
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::TextDelta {
+                delta: " second".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::TextDelta {
+                delta: " third".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+
+        fn streamed_text(app: &crate::app::test_harness::TestApp) -> String {
+            let id = app
+                .app
+                .conversation
+                .transcript()
+                .history()
+                .last_block_id()
+                .expect("streamed text block");
+            let smelt_core::transcript_model::Block::Text { content } = app
+                .app
+                .conversation
+                .transcript()
+                .history()
+                .block(id)
+                .expect("streamed text")
+            else {
+                panic!("last block is streamed text");
+            };
+            content.snapshot()
+        }
+        assert_eq!(streamed_text(&app), "first");
+
+        assert!(app.app.render_pending_transient_frame_to(&mut sink));
+        assert_eq!(streamed_text(&app), "first second third");
+    }
+
+    #[test]
+    fn every_engine_continuation_uses_the_shared_classification() {
+        let events = [
+            protocol::EngineEvent::ReasoningPartDelta {
+                id: "reasoning".into(),
+                kind: protocol::ReasoningKind::Raw,
+                delta: "delta".into(),
+                title: None,
+            },
+            protocol::EngineEvent::TextDelta {
+                delta: "delta".into(),
+            },
+            protocol::EngineEvent::ToolCallDraftDelta {
+                stream_id: "draft".into(),
+                call_id: None,
+                tool_name: Some("read_file".into()),
+                delta: "delta".into(),
+            },
+            protocol::EngineEvent::ToolOutput {
+                invocation_id: protocol::InvocationId::new(1),
+                call_id: "call".into(),
+                line: "delta".into(),
+            },
+            protocol::EngineEvent::EngineAskDelta {
+                id: 1,
+                delta: "delta".into(),
+            },
+        ];
+
+        assert!(events.iter().all(is_engine_continuation));
+        assert!(!is_engine_continuation(
+            &protocol::EngineEvent::ReasoningPartStarted {
+                id: "reasoning".into(),
+                kind: protocol::ReasoningKind::Raw,
+            }
+        ));
+    }
+
+    #[test]
+    fn engine_ask_keeps_only_its_first_delta_urgent() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut sink = std::io::sink();
+
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::EngineAskDelta {
+                id: 7,
+                delta: "first".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+        assert!(app.app.continuing_engine_ask_ids.contains(&7));
+        assert!(app.app.transcript_work.is_empty());
+        assert!(app.app.render_pending_transient_frame_to(&mut sink));
+
+        for delta in [" second", " third"] {
+            app.app.dispatch_engine_event_in_render_loop_to(
+                protocol::EngineEvent::EngineAskDelta {
+                    id: 7,
+                    delta: delta.into(),
+                },
+                &mut sink,
+                |_| {},
+            );
+        }
+        assert_eq!(app.app.transcript_work.len(), 2);
+
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::EngineAskResponse {
+                id: 7,
+                message: None,
+                error: None,
+            },
+            &mut sink,
+            |_| {},
+        );
+        assert!(app.app.transcript_work.is_empty());
+        assert!(!app.app.continuing_engine_ask_ids.contains(&7));
+    }
+
+    #[test]
+    fn cancellation_discards_queued_text_reasoning_and_draft_continuations() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        let mut sink = std::io::sink();
+
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::TextDelta {
+                delta: "visible before cancellation".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.render_pending_transient_frame_to(&mut sink);
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::ReasoningPartStarted {
+                id: "reasoning".into(),
+                kind: protocol::ReasoningKind::Raw,
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::ToolCallDraftStarted {
+                stream_id: "draft".into(),
+                call_id: None,
+                tool_name: Some("read_file".into()),
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::TextDelta {
+                delta: " queued text".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::ReasoningPartDelta {
+                id: "reasoning".into(),
+                kind: protocol::ReasoningKind::Raw,
+                delta: "queued reasoning".into(),
+                title: None,
+            },
+            &mut sink,
+            |_| {},
+        );
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::ToolCallDraftDelta {
+                stream_id: "draft".into(),
+                call_id: None,
+                tool_name: Some("read_file".into()),
+                delta: "queued draft".into(),
+            },
+            &mut sink,
+            |_| {},
+        );
+        assert_eq!(app.app.transcript_work.len(), 3);
+
+        app.app.cancel_agent();
+        assert!(app.app.transcript_work.is_empty());
+        let frame = app.render_to_frame();
+        assert!(frame.text().contains("visible before cancellation"));
+        assert!(!frame.text().contains("queued text"));
+        assert!(!frame.text().contains("queued reasoning"));
+        assert!(!frame.text().contains("queued draft"));
+    }
+
+    #[test]
+    fn exec_continuations_share_the_frame_boundary_queue() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.start_exec("printf test".into());
+        let block_id = app
+            .app
+            .conversation
+            .transcript()
+            .history()
+            .last_block_id()
+            .expect("exec block");
+
+        app.app.append_exec_output("first".into());
+        app.app.append_exec_output(" second".into());
+        let smelt_core::transcript_model::Block::Exec { output, .. } = app
+            .app
+            .conversation
+            .transcript()
+            .history()
+            .block(block_id)
+            .expect("exec block")
+        else {
+            panic!("last block is exec output");
+        };
+        assert!(output.is_empty());
+
+        app.app.finish_exec(Some(0));
+        app.app.finalize_exec();
+        assert!(app
+            .app
+            .render_pending_transient_frame_to(&mut std::io::sink()));
+
+        let history = app.app.conversation.transcript().history();
+        let smelt_core::transcript_model::Block::Exec { output, .. } =
+            history.block(block_id).expect("completed exec block")
+        else {
+            panic!("last block is exec output");
+        };
+        assert_eq!(output.snapshot(), "first\n second");
+        assert_eq!(
+            history.status(block_id),
+            Some(smelt_core::transcript_model::Status::Done)
+        );
+    }
+
+    #[test]
+    fn animation_only_frames_reuse_retained_transcript_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        app.dispatch_engine_event(protocol::EngineEvent::Text {
+            content: "retained transcript".into(),
+        });
+        app.run_lua_result(
+            r#"
+            local prompt_bar = require("smelt.prompt_bar")
+            _G.animation_renderer_calls = 0
+            prompt_bar.top_win:set_renderer(function(win)
+              _G.animation_renderer_calls = _G.animation_renderer_calls + 1
+              win:buf():lines({ tostring(smelt.signal.get("spinner_frame")) })
+            end)
+            "#,
+        )
+        .expect("install animation renderer probe");
+
+        app.render_frame_to(&mut std::io::sink());
+        let projection_count = app
+            .app
+            .conversation
+            .transcript()
+            .projection_count_for_harness();
+        assert_eq!(projection_count, 1, "initial frame must project once");
+        let initial_renderer_calls = app
+            .lua_int_global("animation_renderer_calls")
+            .expect("animation renderer call count");
+
+        for _ in 0..3 {
+            app.clock.advance(std::time::Duration::from_millis(160));
+            app.app
+                .request_animation_render(std::time::Duration::from_millis(16));
+            assert!(app
+                .app
+                .render_requested_transient_frame_to(&mut std::io::sink()));
+        }
+
+        assert_eq!(
+            app.app
+                .conversation
+                .transcript()
+                .projection_count_for_harness(),
+            projection_count,
+            "animation-only frames must not plan or project the transcript"
+        );
+        assert_eq!(
+            app.lua_int_global("animation_renderer_calls"),
+            Some(initial_renderer_calls + 3),
+            "spinner frames must still repaint the retained prompt bar"
+        );
+    }
+
+    #[test]
+    fn due_declarative_refresh_reprojects_retained_elapsed_header() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        app.tool_started(
+            "timer-call",
+            "read_file",
+            std::collections::HashMap::from([(
+                "file_path".to_string(),
+                serde_json::json!("timer.rs"),
+            )]),
+        );
+
+        app.clock.advance(std::time::Duration::from_millis(1_000));
+        let initial = app.render_to_frame();
+        assert!(initial.text().contains("1.0s"));
+        let initial_projection_count = app
+            .app
+            .conversation
+            .transcript()
+            .projection_count_for_harness();
+
+        app.clock.advance(std::time::Duration::from_millis(50));
+        let before_deadline = app.render_to_frame();
+        assert!(before_deadline.text().contains("1.0s"));
+        assert_eq!(
+            app.app
+                .conversation
+                .transcript()
+                .projection_count_for_harness(),
+            initial_projection_count,
+            "elapsed animation before the declared refresh deadline must reuse the row tape"
+        );
+
+        app.clock.advance(std::time::Duration::from_millis(50));
+        let at_deadline = app.render_to_frame();
+        assert!(at_deadline.text().contains("1.1s"));
+        assert_eq!(
+            app.app
+                .conversation
+                .transcript()
+                .projection_count_for_harness(),
+            initial_projection_count + 1,
+            "a due declarative refresh must rebuild the retained transcript projection"
+        );
+    }
+
+    #[test]
+    fn lua_window_renderers_run_only_after_invalidation() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.run_lua_result(
+            r#"
+            local buf = smelt.buf.new({ name = "retained-renderer-test" })
+            local win = smelt.win.new(buf, { name = "retained-renderer-test" })
+            _G.retained_renderer_calls = 0
+            win:set_renderer(function()
+              _G.retained_renderer_calls = _G.retained_renderer_calls + 1
+              buf:lines({ tostring(_G.retained_renderer_calls) })
+            end)
+            _G.retained_renderer_win = win
+            _G.retained_renderer_id = tonumber(tostring(win):match("(%d+)$"))
+            "#,
+        )
+        .expect("register retained window renderer");
+
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(0));
+        let win_id = app
+            .lua_int_global("retained_renderer_id")
+            .expect("retained renderer window id") as u64;
+        assert!(
+            app.app
+                .lua
+                .shared()
+                .win_renderers
+                .lock()
+                .expect("renderer registry")
+                .get(&win_id)
+                .expect("retained renderer")
+                .dirty,
+            "an unmounted renderer must remain dirty"
+        );
+
+        app.run_lua_result(
+            r#"
+            smelt.ui.layout.set(function()
+              return smelt.ui.layout.leaf(retained_renderer_win)
+            end)
+            "#,
+        )
+        .expect("mount retained renderer window");
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(1));
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(1));
+
+        app.run_lua_result("retained_renderer_win:invalidate_renderer()")
+            .expect("invalidate retained window renderer");
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(2));
+    }
+
+    #[test]
+    fn lua_prompt_text_replacement_invalidates_prompt_bar() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.run_lua_result(
+            r#"
+            local prompt_bar = require("smelt.prompt_bar")
+            _G.prompt_aux_renderer_calls = 0
+            prompt_bar.aux_win:set_renderer(function()
+              _G.prompt_aux_renderer_calls = _G.prompt_aux_renderer_calls + 1
+            end)
+            smelt.ui.layout.set(function()
+              return smelt.ui.layout.leaf(prompt_bar.aux_win)
+            end)
+            "#,
+        )
+        .expect("install retained prompt text probe");
+
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_aux_renderer_calls"), Some(1));
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_aux_renderer_calls"), Some(1));
+
+        app.run_lua_result(r#"smelt.prompt.set_text("changed")"#)
+            .expect("replace prompt text");
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_aux_renderer_calls"), Some(2));
+    }
+
+    #[test]
+    fn prompt_queue_revision_invalidates_top_bar_and_layout() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        app.run_lua_result(
+            r#"
+            local prompt_bar = require("smelt.prompt_bar")
+            _G.prompt_top_renderer_calls = 0
+            _G.prompt_queue_layout_calls = 0
+            prompt_bar.top_win:set_renderer(function()
+              _G.prompt_top_renderer_calls = _G.prompt_top_renderer_calls + 1
+            end)
+            smelt.ui.layout.set(function()
+              _G.prompt_queue_layout_calls = _G.prompt_queue_layout_calls + 1
+              return smelt.ui.layout.leaf(prompt_bar.top_win)
+            end)
+            "#,
+        )
+        .expect("install retained prompt queue probes");
+
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(1));
+        assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(1));
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(1));
+        assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(1));
+
+        assert!(app
+            .app
+            .prompt
+            .try_queue_turn(crate::app::QueuedInput::request_from_text(
+                "queued", "queued"
+            )));
+        app.app.publish_diff_signals();
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(2));
+        assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
+    }
+
+    #[test]
+    fn lua_main_layout_runs_only_after_dimension_change_or_invalidation() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.run_lua_result(
+            r#"
+            _G.retained_layout_calls = 0
+            smelt.ui.layout.set(function()
+              _G.retained_layout_calls = _G.retained_layout_calls + 1
+              return smelt.ui.layout.leaf(smelt.win.TRANSCRIPT)
+            end)
+            "#,
+        )
+        .expect("register retained main layout");
+
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_layout_calls"), Some(1));
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_layout_calls"), Some(1));
+
+        app.run_lua_result("smelt.ui.layout.invalidate()")
+            .expect("invalidate retained main layout");
+        app.render_silent();
+        assert_eq!(app.lua_int_global("retained_layout_calls"), Some(2));
+
+        app.app.handle_resize(120, 40);
+        assert_eq!(app.lua_int_global("retained_layout_calls"), Some(3));
     }
 }

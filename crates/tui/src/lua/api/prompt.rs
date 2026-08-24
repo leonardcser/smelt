@@ -59,7 +59,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "queued",
-        "Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
+        "Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. Queue changes invalidate the retained top bar so waiting messages appear above the input.",
         &[],
         |_, ()| -> LuaResult<Vec<String>> {
             Ok(crate::lua::try_with_conversation_host(|host| host.queued_prompt_texts())

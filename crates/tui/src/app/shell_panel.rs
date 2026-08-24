@@ -88,7 +88,7 @@ impl TuiApp {
 
     pub(crate) fn append_shell_output(&mut self, line: &str, sink: ShellSink) {
         match sink {
-            ShellSink::Transcript => self.append_exec_output(line),
+            ShellSink::Transcript => self.append_exec_output(line.to_owned()),
             ShellSink::Overlay => self.append_shell_panel_line(line),
         }
     }

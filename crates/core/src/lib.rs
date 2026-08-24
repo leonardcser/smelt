@@ -49,6 +49,7 @@ pub mod signals;
 pub mod state;
 pub mod timers;
 pub mod tools;
+pub mod transcript_content;
 pub mod transcript_model;
 pub mod trust;
 pub mod utils;

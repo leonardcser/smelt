@@ -433,7 +433,7 @@ async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() 
         for index in 0..40 {
             app.push_user_block(&format!("transcript row {index}: {}", "content ".repeat(8)));
             app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-                content: format!("assistant row {index}: {}", "response ".repeat(8)),
+                content: format!("assistant row {index}: {}", "response ".repeat(8)).into(),
             });
         }
         app.set_context_token_baseline_for_harness(Some(500));
@@ -535,7 +535,7 @@ fn wheel_scroll_moves_while_compaction_preview_streams() {
     for index in 0..40 {
         app.push_user_block(&format!("transcript row {index}: {}", "content ".repeat(8)));
         app.push_transcript_block(smelt_core::transcript_model::Block::Text {
-            content: format!("assistant row {index}: {}", "response ".repeat(8)),
+            content: format!("assistant row {index}: {}", "response ".repeat(8)).into(),
         });
     }
     app.set_context_token_baseline_for_harness(Some(500));
@@ -936,7 +936,9 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
                 None,
                 Vec::new(),
             )),
-            Some(smelt_core::transcript_model::Block::Text { content: assistant }),
+            Some(smelt_core::transcript_model::Block::Text {
+                content: assistant.into(),
+            }),
         );
     }
     app.set_context_token_baseline_for_harness(Some(20));

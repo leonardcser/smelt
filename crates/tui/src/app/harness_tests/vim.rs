@@ -7,7 +7,7 @@ fn user_blocks(app: &mut TestApp) -> Vec<(String, Vec<String>)> {
         .history()
         .order
         .clone();
-    app.with_pinned_transcript_blocks(&ids, |history| {
+    let inspect = |history: &smelt_core::transcript_model::BlockHistory| {
         history
             .order
             .iter()
@@ -19,8 +19,13 @@ fn user_blocks(app: &mut TestApp) -> Vec<(String, Vec<String>)> {
                 _ => None,
             })
             .collect()
-    })
-    .expect("test inspection should hydrate canonical transcript blocks")
+    };
+    if let Some(blocks) = app.with_pinned_transcript_blocks(&ids, inspect) {
+        return blocks;
+    }
+    app.render_silent();
+    app.with_pinned_transcript_blocks(&ids, inspect)
+        .expect("test inspection should hydrate canonical transcript blocks")
 }
 
 fn insert_image(app: &mut TestApp, label: &str, data_url: &str) {
@@ -75,6 +80,7 @@ fn vim_insert_double_esc_rewinds_active_user_turn_before_output() {
     assert_eq!(app.state().vim_mode, VimMode::Normal);
 
     app.press(KeyCode::Esc);
+    app.render_silent();
     let after_second = app.state();
     assert!(
         !after_second.agent_running,
@@ -99,6 +105,7 @@ fn empty_reasoning_does_not_count_as_assistant_output() {
 
     app.press(KeyCode::Esc);
     app.press(KeyCode::Esc);
+    app.render_silent();
 
     let after_second = app.state();
     assert!(!after_second.agent_running);

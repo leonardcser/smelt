@@ -65,6 +65,9 @@ pub(crate) enum TranscriptScrollIntent {
         row_offset: RowIndex,
         screen_padding_top: RowIndex,
     },
+    RevealFirstRecord {
+        screen_padding_top: RowIndex,
+    },
     ResizeReflow {
         previous_width: u16,
     },
@@ -93,6 +96,7 @@ impl TranscriptScrollIntent {
             | Self::ExactContentAnchor(_)
             | Self::SearchJump { .. }
             | Self::RevealBlock { .. }
+            | Self::RevealFirstRecord { .. }
             | Self::ResizeReflow { .. } => false,
         }
     }
@@ -217,6 +221,7 @@ pub(crate) fn compare_visible_content_movement(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptScrollTraceFrame {
+    pub(crate) retained: bool,
     pub(crate) input_event_or_tick: String,
     pub(crate) scroll_intent: TranscriptScrollIntent,
     pub(crate) window_scroll_before: RowIndex,
@@ -248,6 +253,7 @@ pub(crate) struct TranscriptScrollTraceRenderInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptScrollTraceFrameStart {
+    pub(crate) retained: bool,
     pub(crate) input: TranscriptScrollTraceRenderInput,
     pub(crate) viewport_anchor_before: Option<TranscriptTraceAnchor>,
     pub(crate) projection_target: TranscriptProjectionTargetTrace,
@@ -272,6 +278,7 @@ impl TranscriptScrollTraceFrameStart {
         render_or_projection_ms: Option<u64>,
     ) -> TranscriptScrollTraceFrame {
         TranscriptScrollTraceFrame {
+            retained: self.retained,
             input_event_or_tick: self.input.input_event_or_tick,
             scroll_intent: self.input.scroll_intent,
             window_scroll_before: self.input.window_scroll_before,
@@ -341,8 +348,13 @@ impl TranscriptScrollTrace {
         std::mem::take(&mut self.interaction_events)
     }
 
-    pub(crate) fn record_projection_frame_event(&mut self, frame: &TranscriptScrollTraceFrame) {
-        self.record_interaction("projection_frame", trace_frame_json(frame));
+    pub(crate) fn record_frame_event(&mut self, frame: &TranscriptScrollTraceFrame) {
+        let kind = if frame.retained {
+            "retained_frame"
+        } else {
+            "projection_frame"
+        };
+        self.record_interaction(kind, trace_frame_json(frame));
     }
 
     pub(crate) fn record_timings(&self) -> bool {
@@ -355,6 +367,16 @@ impl TranscriptScrollTrace {
 
     pub(crate) fn has_pending_input(&self) -> bool {
         self.pending_input.is_some()
+    }
+
+    pub(crate) fn clear_pending_input(&mut self) {
+        self.pending_input = None;
+    }
+
+    pub(crate) fn replace_pending_intent(&mut self, intent: TranscriptScrollIntent) {
+        if let Some(input) = self.pending_input.as_mut() {
+            input.scroll_intent = intent;
+        }
     }
 
     pub(crate) fn take_pending_input_or_default(
@@ -390,7 +412,7 @@ impl TranscriptScrollTrace {
 
     pub(crate) fn push(&mut self, frame: TranscriptScrollTraceFrame) {
         self.last_resolved_scroll_top = Some(frame.resolved_scroll_top);
-        self.record_projection_frame_event(&frame);
+        self.record_frame_event(&frame);
         self.frames.push(frame);
     }
 
@@ -411,6 +433,7 @@ impl TranscriptScrollTrace {
 
 fn trace_frame_json(frame: &TranscriptScrollTraceFrame) -> serde_json::Value {
     json!({
+        "retained": frame.retained,
         "input_event_or_tick": &frame.input_event_or_tick,
         "scroll_intent": format!("{:?}", frame.scroll_intent),
         "window_scroll_before": frame.window_scroll_before,

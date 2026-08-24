@@ -82,6 +82,11 @@ pub struct RegisteredKeymap {
     pub description: Option<String>,
 }
 
+pub struct RegisteredWinRenderer {
+    pub handle: LuaHandle,
+    pub dirty: bool,
+}
+
 pub struct ToolHandles {
     pub execute: LuaHandle,
     pub execution_mode: protocol::ToolExecutionMode,
@@ -162,18 +167,15 @@ pub struct LuaShared {
     /// Canonical single-token expansion for `<leader>` in keymap registrations.
     /// Matches nvim's default leader (`\\`) unless user config sets another token.
     pub keymap_leader: Mutex<String>,
-    /// Lua-registered composer for the main TUI layout. When `Some`, the
-    /// host invokes it once per frame to produce a `LuaUiLayout` tree
-    /// describing the split between transcript, prompt, and any
-    /// plugin-added windows. Falls back to the hardcoded tree on error
-    /// or `None`. The callback signature is `fun(state) -> Layout`.
+    /// Lua-registered composer for the retained main TUI layout. When `Some`,
+    /// the host invokes it after registration, dimension changes, or explicit
+    /// invalidation. Falls back to the hardcoded tree on error or `None`. The
+    /// callback signature is `fun(state) -> Layout`.
     pub main_layout_composer: Mutex<Option<LuaHandle>>,
-    /// Per-window render callbacks keyed by raw `WinId.0`. When a window
-    /// has a renderer registered, the host invokes it once per frame with
-    /// the backing `Buf` so Lua can repaint the window's contents. Used
-    /// by plugin-owned bars, statuslines, and any Lua-side window whose
-    /// content is computed rather than streamed.
-    pub win_renderers: Mutex<HashMap<u64, LuaHandle>>,
+    /// Retained per-window render callbacks keyed by raw `WinId.0`. A callback
+    /// runs after registration and after explicit invalidation, then its backing
+    /// buffer remains authoritative until the next invalidation.
+    pub win_renderers: Mutex<HashMap<u64, RegisteredWinRenderer>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub transcript_renderer: Mutex<Option<LuaHandle>>,
     pub transcript_renderer_generation: AtomicU64,

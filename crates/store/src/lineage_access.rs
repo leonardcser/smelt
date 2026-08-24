@@ -1013,12 +1013,16 @@ impl LineageSessionReader {
         )
     }
 
-    pub fn transcript_extent_chunks(&self) -> Result<Vec<crate::TranscriptExtentChunk>> {
+    pub fn transcript_extent_profile(
+        &self,
+        range: crate::TranscriptRecordRange,
+    ) -> Result<crate::TranscriptExtentProfile> {
         let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
-        lineage::lineage_transcript_extent_chunks(
+        lineage::lineage_transcript_extent_profile(
             &self.conn,
             &self.lineage,
             &snapshot.transcript_root,
+            range,
         )
     }
 
@@ -1027,6 +1031,7 @@ impl LineageSessionReader {
         range: crate::TranscriptRecordRange,
         width: u16,
     ) -> Result<u64> {
+        let _perf = smelt_perf::perf::begin("store:extent:reader_estimated_rows");
         let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_estimated_rows(
             &self.conn,
@@ -1034,6 +1039,101 @@ impl LineageSessionReader {
             &snapshot.transcript_root,
             range,
             width,
+        )
+    }
+
+    pub fn transcript_total_estimated_rows(&self, width: u16) -> Result<u64> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_total_estimated_rows(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            width,
+        )
+    }
+
+    pub fn transcript_record_for_row(
+        &self,
+        width: u16,
+        row: u64,
+    ) -> Result<Option<crate::TranscriptRowLocation>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_row_location(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            width,
+            row,
+        )
+    }
+
+    pub fn transcript_record_before_kind(
+        &self,
+        kind: &str,
+        before_or_at: usize,
+    ) -> Result<Option<crate::TranscriptNavigationRecord>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_record_before_kind(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            kind,
+            before_or_at,
+        )
+    }
+
+    pub fn transcript_record_after_kind(
+        &self,
+        kind: &str,
+        after_or_at: usize,
+    ) -> Result<Option<crate::TranscriptNavigationRecord>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_record_after_kind(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            kind,
+            after_or_at,
+        )
+    }
+
+    pub fn transcript_record_before_role(
+        &self,
+        role: &str,
+        before_or_at: usize,
+    ) -> Result<Option<crate::TranscriptNavigationRecord>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_record_before_role(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            role,
+            before_or_at,
+        )
+    }
+
+    pub fn transcript_record_after_role(
+        &self,
+        role: &str,
+        after_or_at: usize,
+    ) -> Result<Option<crate::TranscriptNavigationRecord>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_record_after_role(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            role,
+            after_or_at,
+        )
+    }
+
+    pub fn transcript_record_index_for_block_idx(&self, block_idx: u64) -> Result<Option<usize>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_record_index_for_block_idx(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            block_idx,
         )
     }
 
@@ -1455,6 +1555,7 @@ mod tests {
             indexed_text,
             origin_json: None,
             tool_state_json: None,
+            tool_render_revision: 0,
         }
     }
 
@@ -1728,97 +1829,170 @@ mod tests {
         let replaced = writer.commit_session(&split).unwrap();
 
         let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
-        let chunks = reader.transcript_extent_chunks().unwrap();
-        assert_eq!(
-            chunks
-                .iter()
-                .map(|chunk| chunk.record_count)
-                .collect::<Vec<_>>(),
-            vec![64, 19]
-        );
         let mut expected = records[..70].to_vec();
         expected.extend(replacement);
+        let expected_profile = crate::history::transcript_extent_profile(&expected);
         assert_eq!(
             reader
-                .transcript_estimated_rows(crate::TranscriptRecordRange::from(0..83), 37)
+                .transcript_extent_profile(crate::TranscriptRecordRange::from(0..83))
                 .unwrap(),
-            crate::history::transcript_extent_profile(&expected).estimated_rows(37)
+            expected_profile
+        );
+        assert_eq!(
+            reader.transcript_total_estimated_rows(37).unwrap(),
+            expected_profile.estimated_rows(37)
         );
 
         let fork_id = session_id('6');
         writer.fork_current(&fork_id, 20).unwrap();
         let fork = LineageSessionReader::open_existing(root.path(), &fork_id).unwrap();
-        assert_eq!(fork.transcript_extent_chunks().unwrap(), chunks);
+        assert_eq!(
+            fork.transcript_extent_profile(crate::TranscriptRecordRange::from(0..83))
+                .unwrap(),
+            expected_profile
+        );
         drop(fork);
-        let retained_extent_rows = row_count(&writer.conn, "lineage_transcript_extent_chunks");
+        let retained_node_profiles = row_count(&writer.conn, "lineage_transcript_extent_nodes");
+        let retained_record_profiles =
+            row_count(&writer.conn, "lineage_transcript_record_profiles");
         let lineage = LineageId::from_hex(writer.lineage_id().to_owned()).unwrap();
         let branch = BranchId::new(id.clone()).unwrap();
-        let prior_root = lineage::lineage_session_snapshot(&writer.conn, &lineage, &branch)
-            .unwrap()
-            .transcript_root;
 
         let source_only = transcript_record(83, "source-only suffix".into());
         split.expected = replaced.current;
         split.transcript_records = Some(crate::TranscriptRecordSuffix {
             start: crate::TranscriptRecordIndex::new(83),
-            records: vec![source_only.clone()],
+            records: vec![source_only],
         });
         writer.commit_session(&split).unwrap();
-        assert!(row_count(&writer.conn, "lineage_transcript_extent_chunks") > retained_extent_rows);
+        assert!(
+            row_count(&writer.conn, "lineage_transcript_extent_nodes") > retained_node_profiles
+        );
+        assert_eq!(
+            row_count(&writer.conn, "lineage_transcript_record_profiles"),
+            retained_record_profiles + 1
+        );
 
         let current_root = lineage::lineage_session_snapshot(&writer.conn, &lineage, &branch)
             .unwrap()
             .transcript_root;
-        writer
+        let error = writer
             .conn
             .execute(
-                "UPDATE lineage_transcript_extent_chunks
+                "UPDATE lineage_transcript_extent_nodes
                  SET rows_20 = rows_20 + 1
-                 WHERE lineage_id = ?1 AND transcript_root_id = ?2 AND chunk_index = 1",
+                 WHERE lineage_id = ?1 AND node_id = (
+                     SELECT node_id FROM lineage_sequence_roots
+                     WHERE lineage_id = ?1 AND root_id = ?2
+                 )",
                 (lineage.as_str(), current_root.id().as_str()),
             )
-            .unwrap();
-        let source_only = vec![serde_json::to_vec(&source_only).unwrap()];
-        assert!(matches!(
-            lineage::install_transcript_extent_chunks(
-                &writer.conn,
-                &lineage,
-                &prior_root,
-                &current_root,
-                83,
-                &source_only,
-            ),
-            Err(StoreError::Integrity(message)) if message.contains("conflicts with immutable root")
-        ));
-        writer
-            .conn
-            .execute(
-                "UPDATE lineage_transcript_extent_chunks
-                 SET rows_20 = rows_20 - 1
-                 WHERE lineage_id = ?1 AND transcript_root_id = ?2 AND chunk_index = 1",
-                (lineage.as_str(), current_root.id().as_str()),
-            )
-            .unwrap();
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("transcript extent nodes are immutable"));
 
         writer.delete_branch_by_id(&fork_id, 21).unwrap();
         writer.rewind_to_sequence(3, 22).unwrap();
-        let mut extent_rows = row_count(&writer.conn, "lineage_transcript_extent_chunks");
-        let mut reclaimed_extent = false;
+        let mut node_profiles = row_count(&writer.conn, "lineage_transcript_extent_nodes");
+        let mut record_profiles = row_count(&writer.conn, "lineage_transcript_record_profiles");
+        let mut reclaimed_profile = false;
         let mut complete = false;
         for _ in 0..512 {
             let reclamation = writer.reclaim_step(1).unwrap();
-            let remaining = row_count(&writer.conn, "lineage_transcript_extent_chunks");
-            assert!(extent_rows.saturating_sub(remaining) <= 1);
-            reclaimed_extent |= remaining < extent_rows;
-            extent_rows = remaining;
+            let remaining_nodes = row_count(&writer.conn, "lineage_transcript_extent_nodes");
+            let remaining_records = row_count(&writer.conn, "lineage_transcript_record_profiles");
+            assert!(node_profiles.saturating_sub(remaining_nodes) <= 1);
+            assert!(record_profiles.saturating_sub(remaining_records) <= 1);
+            reclaimed_profile |=
+                remaining_nodes < node_profiles || remaining_records < record_profiles;
+            node_profiles = remaining_nodes;
+            record_profiles = remaining_records;
             complete = reclamation.complete;
             if complete {
                 break;
             }
         }
         assert!(complete);
-        assert!(reclaimed_extent);
-        assert_eq!(extent_rows, retained_extent_rows);
+        assert!(reclaimed_profile);
+        assert!(node_profiles > 0 && node_profiles <= retained_node_profiles);
+        assert!(record_profiles > 0 && record_profiles <= retained_record_profiles);
+        assert!(
+            LineageSessionReader::open_existing(root.path(), &id)
+                .unwrap()
+                .transcript_total_estimated_rows(80)
+                .unwrap()
+                > 0
+        );
+    }
+
+    #[test]
+    fn sparse_extent_navigation_and_block_lookup_do_not_hydrate_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('7');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut records = (0..100)
+            .map(|index| transcript_record(index, format!("record {index}")))
+            .collect::<Vec<_>>();
+        records[0].kind = "user".into();
+        records[50].kind = "tool".into();
+        let mut command = initial_commit(&id);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records,
+        });
+        writer.commit_session(&command).unwrap();
+        writer
+            .conn
+            .execute(
+                "UPDATE objects SET bytes = zeroblob(stored_size)
+                 WHERE hash IN (
+                     SELECT object_hash FROM lineage_payload_object_refs
+                     WHERE payload_kind = 'transcript'
+                 )",
+                [],
+            )
+            .unwrap();
+
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        assert!(
+            reader
+                .transcript_extent_profile((10..90).into())
+                .unwrap()
+                .estimated_rows(80)
+                >= 80
+        );
+        assert!(reader.transcript_total_estimated_rows(80).unwrap() >= 100);
+        assert!(reader.transcript_record_for_row(80, 75).unwrap().is_some());
+        let tool = reader
+            .transcript_record_before_kind("tool", 99)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tool.record_index.get(), 50);
+        assert_eq!(tool.profile.first_line, "record 50");
+        assert_eq!(
+            reader
+                .transcript_record_after_kind("tool", 1)
+                .unwrap()
+                .unwrap()
+                .record_index
+                .get(),
+            50
+        );
+        assert_eq!(
+            reader
+                .transcript_record_after_role("user", 0)
+                .unwrap()
+                .unwrap()
+                .record_index
+                .get(),
+            0
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_block_idx(100).unwrap(),
+            Some(50)
+        );
+        assert!(reader.transcript_object_backed_range(50, 51).is_err());
     }
 
     #[test]
@@ -1827,6 +2001,7 @@ mod tests {
         let session_id = session_id('5');
         let mut writer = OwnedLineageWriter::open(root.path(), &session_id).unwrap();
         let mut record = transcript_record(0, "visible text".into());
+        record.tool_render_revision = 47;
         record.tool_state_json = Some(
             serde_json::json!({
                 "output": {
@@ -1855,6 +2030,7 @@ mod tests {
             sparse.hydration,
             crate::TranscriptRecordHydration::ObjectBacked
         );
+        assert_eq!(sparse.records[0].tool_render_revision, 47);
         let sparse_tool_state: serde_json::Value =
             serde_json::from_str(sparse.records[0].tool_state_json.as_ref().unwrap()).unwrap();
         assert!(sparse_tool_state
@@ -2017,9 +2193,12 @@ mod tests {
             transcript_record(1, "record-boundary-left".into()),
             transcript_record(2, "-right x :: café 漢字 ordinary ab".into()),
         ];
-        records.extend(
-            (3..43).map(|index| transcript_record(index, format!("abc false {index} bcd"))),
-        );
+        records.extend((3..43).map(|index| {
+            transcript_record(
+                index,
+                format!("abc {} false {index} bcd", "x".repeat(33 * 1024)),
+            )
+        }));
         records.push(transcript_record(43, "contains abcd exactly".into()));
         records.push(transcript_record(44, "case-sensitive Needle".into()));
 
@@ -2150,12 +2329,32 @@ mod tests {
                 "complete",
             ]
         );
-        assert!(
-            table_names
-                .iter()
-                .any(|name| name == "search_source_leaves"),
-            "{table_names:?}"
+        for expected in [
+            "search_root_manifests",
+            "search_root_sources",
+            "search_source_leaves",
+        ] {
+            assert!(
+                table_names.iter().any(|name| name == expected),
+                "missing {expected}: {table_names:?}"
+            );
+        }
+        let (manifest_count, manifest_sources, manifest_items): (i64, i64, i64) = search
+            .query_row(
+                "SELECT COUNT(*),
+                        (SELECT COUNT(*) FROM search_root_sources),
+                        COALESCE(SUM(item_count), 0)
+                 FROM search_root_manifests",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(manifest_count, 1);
+        assert_eq!(
+            manifest_sources,
+            i64::try_from(status.total_segments).unwrap()
         );
+        assert_eq!(manifest_items, i64::try_from(records.len()).unwrap());
         let fts_sql: String = search
             .query_row(
                 "SELECT sql FROM sqlite_schema WHERE name = 'search_fts'",
@@ -2422,7 +2621,7 @@ mod tests {
         let projector = writer.spawn_search_projector().unwrap();
         projector.request();
         let source = LineageSessionReader::open_existing(root.path(), &source_id).unwrap();
-        assert_eq!(source.transcript_extent_chunks().unwrap().len(), 16);
+        assert!(source.transcript_total_estimated_rows(80).unwrap() >= 1024);
         let source_status = wait_for_search_projection(&source);
         assert_eq!(source_status.total_segments, 1);
         assert_eq!(source_status.ready_segments, 1);
@@ -2566,16 +2765,18 @@ mod tests {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .unwrap();
-        let (docs, obsolete_fts_hits): (i64, i64) = search
+        let (docs, obsolete_fts_hits, root_manifests): (i64, i64, i64) = search
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM search_docs),
-                        (SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH 'tar')",
+                        (SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH 'tar'),
+                        (SELECT COUNT(*) FROM search_root_manifests)",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert!(docs > 0);
         assert_eq!(obsolete_fts_hits, 0);
+        assert_eq!(root_manifests, 1);
         assert_eq!(writer.reclaim_step(1).unwrap().work_rows(), 0);
         assert_eq!(
             source
@@ -2747,15 +2948,14 @@ mod tests {
 
         let corrupt = Connection::open(database_path).unwrap();
         corrupt
-            .execute("DELETE FROM lineage_transcript_extent_chunks", [])
+            .execute("DELETE FROM lineage_transcript_extent_nodes", [])
             .unwrap();
         drop(corrupt);
         let report = reader.doctor_report().unwrap();
         assert!(!report.healthy);
         assert!(
             report.issues.iter().any(|issue| {
-                issue.contains("canonical branch")
-                    && issue.contains("extent profiles cover 0 of 1 records")
+                issue.contains("canonical branch") && issue.contains("transcript extent node")
             }),
             "{:?}",
             report.issues

@@ -28,6 +28,26 @@ Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Syntax-highlighted code layout leaf. `opts.lang` supplies the language name.
 
+## `smelt.layout.content`
+
+```lua
+fun(content_id: integer, opts: table?): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Opaque transcript content leaf. `content_id` comes from renderer metadata and is resolved by Rust without exposing the complete payload to Lua. `opts.format` is `text` (default), `markdown`, `code`, or `file`; text accepts `hl_group` / `hl` and `ansi`, Markdown accepts `dim`, `italic`, and `inline`, code accepts `lang`, and file accepts `path` plus an optional `lang` override.
+
+## `smelt.layout.content_diff`
+
+```lua
+fun(old_content_id: integer, new_content_id: integer, opts: table?): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Retained diff leaf. `old_content_id` and `new_content_id` come from transcript renderer metadata and are resolved by Rust without exposing source payloads to Lua. `opts.anchor_content_id` optionally identifies the edited source fragment, `opts.path` selects syntax, `opts.lang` overrides path-based syntax, and `opts.full_file` marks complete before/after files.
+
 ## `smelt.layout.diff`
 
 ```lua
@@ -57,6 +77,16 @@ fun(opts: table): smelt.layout.Node
 Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Syntax-highlighted file-view render directive. Uses a single line-number column and no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
+
+## `smelt.layout.group_children`
+
+```lua
+fun(): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Opaque retained child-layout placeholder for transcript group renderers. Rust resolves each child independently, so updating one child does not serialize or recompile its siblings.
 
 ## `smelt.layout.gutter`
 

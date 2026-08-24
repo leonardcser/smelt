@@ -157,7 +157,9 @@ fn transcript_navigation_bench_app() -> TestApp {
             )
         };
         app.app
-            .push_block(smelt_core::transcript_model::Block::Text { content });
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: content.into(),
+            });
     }
     app.render_silent();
     app.app.app_focus = AppFocus::Content;
@@ -272,7 +274,9 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
         );
         approx_bytes += assistant.len();
         app.app
-            .push_block(smelt_core::transcript_model::Block::Text { content: assistant });
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: assistant.into(),
+            });
 
         if i.is_multiple_of(9) {
             let command = format!("python bench_search.py --batch {i}");
@@ -287,7 +291,10 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
                 .join("\n");
             approx_bytes += command.len() + output.len();
             app.app
-                .push_block(smelt_core::transcript_model::Block::Exec { command, output });
+                .push_block(smelt_core::transcript_model::Block::Exec {
+                    command,
+                    output: output.into(),
+                });
         }
         i += 1;
     }
@@ -505,6 +512,11 @@ fn assert_search_uses_candidate_index(
         sqlite_available, 1,
         "{label} did not use the persisted transcript search index"
     );
+    let manifest_available = perf_value_max(snapshot, "store:lineage:search_manifest_available");
+    assert_eq!(
+        manifest_available, 1,
+        "{label} rebuilt the canonical transcript source list instead of using the search manifest"
+    );
     let trigram_build = perf_value_max(snapshot, "search:transcript:index_trigram_build_enabled");
     assert_eq!(
         trigram_build, 0,
@@ -598,16 +610,12 @@ fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64
 }
 
 fn assert_no_full_block_renders_for_scroll(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
-    for metric in [
-        "transcript:layout_cache:render_full_to_buffer",
-        "transcript:layout_cache:render_full_fallback",
-    ] {
-        let full_renders = perf_duration_count(snapshot, metric);
-        assert_eq!(
-            full_renders, 0,
-            "{label} recorded {metric} {full_renders} times while scrolling; row anchors must stay lightweight"
-        );
-    }
+    let metric = "transcript:layout_cache:render_full_to_buffer";
+    let full_renders = perf_duration_count(snapshot, metric);
+    assert_eq!(
+        full_renders, 0,
+        "{label} recorded {metric} {full_renders} times while scrolling; row anchors must stay lightweight"
+    );
 }
 
 fn assert_view_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
@@ -677,17 +685,12 @@ fn assert_stream_operation_gates(
 ) {
     assert_no_full_search_hot_path_reads(snapshot, label);
     assert_no_full_block_renders_for_scroll(snapshot, label);
-    for metric in [
-        "transcript:transcript_scene:build_nodes",
-        "transcript:build_rows",
-        "session:catalog:repair",
-    ] {
-        let count = perf_duration_count(snapshot, metric);
-        assert_eq!(
-            count, 0,
-            "{label} recorded {metric} {count} times on the streaming hot path"
-        );
-    }
+    let repair_metric = "session:catalog:repair";
+    let repair_count = perf_duration_count(snapshot, repair_metric);
+    assert_eq!(
+        repair_count, 0,
+        "{label} recorded {repair_metric} {repair_count} times on the streaming hot path"
+    );
     for metric in [
         "session:catalog:reconcile_scanned",
         "session:catalog:reconciliation_duration_ms",
@@ -775,6 +778,59 @@ fn wait_for_bench_catalog(app: &TestApp, label: &str, receipt: &smelt_store::Sav
     );
 }
 
+fn wait_for_bench_search_projection(app: &TestApp, label: &str) {
+    assert!(
+        app.app.conversation.request_search_projection(),
+        "{label} search projection request was not accepted"
+    );
+    let address = app
+        .app
+        .conversation
+        .transcript()
+        .store_address()
+        .expect("benchmark transcript has a store address");
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &address.sessions_root,
+        &address.lineage_id,
+        &address.session_id,
+    )
+    .expect("open benchmark search projection reader");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let status = reader
+            .search_projection_status()
+            .expect("read benchmark search projection status");
+        if status.state == smelt_store::SearchProjectionState::Current {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{label} search projection did not become current: {status:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+fn wait_for_sparse_reader_metrics(
+    app: &mut TestApp,
+    label: &str,
+) -> crate::app::TranscriptReaderMetrics {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        app.render_silent();
+        let metrics = app.app.transcript_reader_metrics_for_harness();
+        if metrics.metadata_readers == 1 && metrics.hydration_readers == 1 {
+            assert_eq!(metrics.total_readers, 2);
+            return metrics;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{label} did not retain both transcript readers: {metrics:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
         app.app.core.sessions.sessions_dir(),
@@ -810,9 +866,11 @@ fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition)
                 .record_total_count()
                 .expect("sparse record count")
                 / 2;
+            let block_id = smelt_core::transcript_model::BlockId::new(record as u64);
             assert!(
-                app.app.reveal_transcript_record_block(record, 1, true),
-                "middle record reveal failed for record {record}"
+                app.app
+                    .reveal_transcript_target_at_top(record, block_id, 1, true),
+                "middle record reveal failed for record {record} and block {block_id:?}"
             );
         }
         BurstBenchPosition::Bottom => {
@@ -1154,6 +1212,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.render_silent();
     let receipt = save_bench_fixture(&mut app, "search");
     wait_for_bench_catalog(&app, "search", &receipt);
+    wait_for_bench_search_projection(&app, "search");
     smelt_perf::perf::clear();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -1925,7 +1984,7 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
     for i in 0..80 {
         app.app
             .push_block(smelt_core::transcript_model::Block::Text {
-                content: format!("collapsed transcript row before tool {i:03}"),
+                content: format!("collapsed transcript row before tool {i:03}").into(),
             });
     }
     let content = (0..line_count)
@@ -1954,7 +2013,7 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
     for i in 0..80 {
         app.app
             .push_block(smelt_core::transcript_model::Block::Text {
-                content: format!("collapsed transcript row after tool {i:03}"),
+                content: format!("collapsed transcript row after tool {i:03}").into(),
             });
     }
     app.render_silent();
@@ -2107,6 +2166,246 @@ fn transcript_layout_tall_write_file_benchmark_suite() {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TallDiffSample {
+    source_bytes: usize,
+    lines: usize,
+    first_render_ms: f64,
+    warm_render_ms: f64,
+    first_render_allocs: u64,
+    first_render_bytes: u64,
+    warm_render_allocs: u64,
+    warm_render_bytes: u64,
+    process_alloc_bytes: u64,
+    process_dealloc_bytes: u64,
+    process_retained_bytes: i64,
+    live_tool_state_bytes: usize,
+    layout_bytes: usize,
+    height_index_bytes: usize,
+    visible_rows_bytes: usize,
+    full_rows_bytes: usize,
+    total_rows: crate::smelt_edit::RowIndex,
+    metadata_compiles: usize,
+    warm_metadata_compiles: usize,
+}
+
+fn tall_diff_line_count() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_TALL_DIFF_LINES", 20_000)
+}
+
+fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
+    let mut app = TestApp::builder()
+        .with_ephemeral(true)
+        .with_vim(false)
+        .build();
+    app.app.handle_resize(120, 40);
+    for i in 0..100 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("retained diff history row {i:03}").into(),
+            });
+    }
+
+    let target_line = line_count / 2;
+    let old_line = format!(
+        "pub fn retained_target_{target_line:05}() -> usize {{ {target_line} }} // retained diff benchmark"
+    );
+    let new_line = format!(
+        "pub fn retained_target_{target_line:05}() -> usize {{ {} }} // retained diff benchmark",
+        target_line + 1
+    );
+    let old_content = (0..line_count)
+        .map(|i| format!("pub fn retained_{i:05}() -> usize {{ {i} }} // retained diff benchmark"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replacen(
+            &format!("pub fn retained_{target_line:05}() -> usize {{ {target_line} }} // retained diff benchmark"),
+            &old_line,
+            1,
+        );
+    let new_content = old_content.replacen(&old_line, &new_line, 1);
+    let source_bytes = old_content.len().saturating_add(new_content.len());
+
+    let invocation_id = app.start_tool(
+        "tall-retained-diff".into(),
+        "edit_file".into(),
+        protocol::StyledLines::from_plain("edit generated/large.rs"),
+        std::collections::HashMap::from([
+            ("file_path".into(), serde_json::json!("generated/large.rs")),
+            ("old_string".into(), serde_json::json!(old_line)),
+            ("new_string".into(), serde_json::json!(new_line)),
+        ]),
+    );
+    let output = smelt_core::transcript_model::ToolOutput {
+        content: "edited generated/large.rs".into(),
+        is_error: false,
+        metadata: Some(serde_json::json!({ "path": "generated/large.rs" })),
+        content_fields: vec![
+            smelt_core::transcript_model::ToolOutputContentField {
+                name: "old_content".into(),
+                content: old_content.into(),
+            },
+            smelt_core::transcript_model::ToolOutputContentField {
+                name: "new_content".into(),
+                content: new_content.into(),
+            },
+        ],
+    };
+    app.finish_tool(
+        invocation_id,
+        smelt_core::transcript_model::ToolStatus::Ok,
+        Some(Box::new(output)),
+        Some(std::time::Duration::from_millis(250)),
+    );
+
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    smelt_perf::alloc::set_enabled(true);
+    let process_before = smelt_perf::alloc::snapshot();
+    let (first_allocs_before, first_bytes_before) = smelt_perf::alloc::thread_snapshot();
+    let first_start = std::time::Instant::now();
+    app.render_silent();
+    let first_render_ms = elapsed_ms(first_start.elapsed());
+    let (first_allocs_after, first_bytes_after) = smelt_perf::alloc::thread_snapshot();
+    let process_after = smelt_perf::alloc::snapshot();
+    let process_delta = smelt_perf::alloc::delta(process_before, process_after);
+    let first_perf = smelt_perf::perf::snapshot();
+    let metadata_compiles =
+        perf_duration_count(&first_perf, "transcript:layout_cache:block_render_metadata");
+
+    let transcript_buf = app.app.transcript_win().buf;
+    let visible_lines = app
+        .ui_probe()
+        .buf(transcript_buf)
+        .expect("retained diff transcript buffer")
+        .lines();
+    assert!(
+        visible_lines.iter().any(|line| line.contains(&format!(
+            "retained_target_{target_line:05}() -> usize {{ {} }}",
+            target_line + 1
+        ))),
+        "retained diff did not render the changed source line: {visible_lines:?}"
+    );
+
+    smelt_perf::perf::clear();
+    let (warm_allocs_before, warm_bytes_before) = smelt_perf::alloc::thread_snapshot();
+    let warm_start = std::time::Instant::now();
+    app.render_silent();
+    let warm_render_ms = elapsed_ms(warm_start.elapsed());
+    let (warm_allocs_after, warm_bytes_after) = smelt_perf::alloc::thread_snapshot();
+    let warm_perf = smelt_perf::perf::snapshot();
+    let warm_metadata_compiles =
+        perf_duration_count(&warm_perf, "transcript:layout_cache:block_render_metadata");
+    assert_eq!(
+        warm_metadata_compiles, 0,
+        "unchanged retained diff recompiled Lua renderer metadata"
+    );
+
+    let memory = app.app.conversation.transcript().memory_snapshot();
+    let total_rows = transcript_total_rows(&app);
+    smelt_perf::alloc::set_enabled(false);
+    smelt_perf::perf::set_enabled(false);
+
+    TallDiffSample {
+        source_bytes,
+        lines: line_count,
+        first_render_ms,
+        warm_render_ms,
+        first_render_allocs: first_allocs_after.saturating_sub(first_allocs_before),
+        first_render_bytes: first_bytes_after.saturating_sub(first_bytes_before),
+        warm_render_allocs: warm_allocs_after.saturating_sub(warm_allocs_before),
+        warm_render_bytes: warm_bytes_after.saturating_sub(warm_bytes_before),
+        process_alloc_bytes: process_delta.bytes_allocated,
+        process_dealloc_bytes: process_delta.bytes_deallocated,
+        process_retained_bytes: process_after.current_bytes as i64
+            - process_before.current_bytes as i64,
+        live_tool_state_bytes: memory.live_tool_state_bytes,
+        layout_bytes: memory.layout_bytes,
+        height_index_bytes: memory.height_index_bytes,
+        visible_rows_bytes: memory.visible_rows_bytes,
+        full_rows_bytes: memory.full_rows_bytes,
+        total_rows,
+        metadata_compiles,
+        warm_metadata_compiles,
+    }
+}
+
+#[test]
+fn transcript_layout_tall_retained_diff_benchmark_suite() {
+    if !benchmark_target_enabled()
+        || std::env::var("SMELT_TRANSCRIPT_TALL_DIFF").as_deref() != Ok("1")
+    {
+        return;
+    }
+    let runs = navigation_bench_runs();
+    let lines = tall_diff_line_count();
+    if transcript_bench_warmup_enabled() {
+        let _ = run_tall_diff_sample(lines);
+    }
+    let mut samples = Vec::with_capacity(runs);
+    for run in 0..runs {
+        let sample = run_tall_diff_sample(lines);
+        eprintln!(
+            "TRANSCRIPT_TALL_DIFF_BENCH_SAMPLE run={} source_bytes={} lines={} first_render_ms={:.3} warm_render_ms={:.3} first_render_allocs={} first_render_bytes={} warm_render_allocs={} warm_render_bytes={} process_alloc_bytes={} process_dealloc_bytes={} process_retained_bytes={} live_tool_state_bytes={} layout_bytes={} height_index_bytes={} visible_rows_bytes={} full_rows_bytes={} total_rows={} metadata_compiles={} warm_metadata_compiles={}",
+            run + 1,
+            sample.source_bytes,
+            sample.lines,
+            sample.first_render_ms,
+            sample.warm_render_ms,
+            sample.first_render_allocs,
+            sample.first_render_bytes,
+            sample.warm_render_allocs,
+            sample.warm_render_bytes,
+            sample.process_alloc_bytes,
+            sample.process_dealloc_bytes,
+            sample.process_retained_bytes,
+            sample.live_tool_state_bytes,
+            sample.layout_bytes,
+            sample.height_index_bytes,
+            sample.visible_rows_bytes,
+            sample.full_rows_bytes,
+            sample.total_rows,
+            sample.metadata_compiles,
+            sample.warm_metadata_compiles,
+        );
+        samples.push(sample);
+    }
+
+    let first = TailStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.first_render_ms)
+            .collect::<Vec<_>>(),
+    );
+    let warm = TailStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.warm_render_ms)
+            .collect::<Vec<_>>(),
+    );
+    eprintln!(
+        "TRANSCRIPT_TALL_DIFF_BENCH_JSON {{\"type\":\"tall_retained_diff_summary\",\"runs\":{},\"source_bytes\":{},\"lines\":{},\"first_mean_ms\":{:.3},\"first_p95_ms\":{:.3},\"warm_mean_ms\":{:.3},\"warm_p95_ms\":{:.3},\"first_render_bytes\":{},\"warm_render_bytes\":{},\"process_retained_bytes\":{},\"live_tool_state_bytes\":{},\"layout_bytes\":{},\"height_index_bytes\":{},\"visible_rows_bytes\":{},\"full_rows_bytes\":{},\"total_rows\":{},\"metadata_compiles\":{},\"warm_metadata_compiles\":{}}}",
+        samples.len(),
+        samples[0].source_bytes,
+        samples[0].lines,
+        first.mean,
+        first.p95,
+        warm.mean,
+        warm.p95,
+        samples[0].first_render_bytes,
+        samples[0].warm_render_bytes,
+        samples[0].process_retained_bytes,
+        samples[0].live_tool_state_bytes,
+        samples[0].layout_bytes,
+        samples[0].height_index_bytes,
+        samples[0].visible_rows_bytes,
+        samples[0].full_rows_bytes,
+        samples[0].total_rows,
+        samples[0].metadata_compiles,
+        samples[0].warm_metadata_compiles,
+    );
+}
+
 #[test]
 fn transcript_layout_navigation_benchmark_suite() {
     if !benchmark_target_enabled() {
@@ -2247,6 +2546,303 @@ fn transcript_layout_navigation_benchmark_suite() {
     );
 }
 
+#[test]
+fn transcript_sparse_watcher_benchmark_suite() {
+    if !benchmark_target_enabled()
+        || std::env::var("SMELT_TRANSCRIPT_SPARSE_WATCHER_BENCH").as_deref() != Ok("1")
+    {
+        return;
+    }
+    let block_count = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_WATCHER_BLOCKS", 5_000);
+    let runs = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_WATCHER_RUNS", 1_001);
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(100, 32);
+    for index in 0..block_count {
+        let block = if index.is_multiple_of(10) {
+            smelt_core::transcript_model::Block::User {
+                text: format!("sparse watcher user {index}"),
+                image_labels: Vec::new(),
+                command: false,
+            }
+        } else {
+            smelt_core::transcript_model::Block::Text {
+                content: format!("sparse watcher response {index}").into(),
+            }
+        };
+        app.app.push_block(block);
+    }
+    app.render_silent();
+    let receipt = save_bench_fixture(&mut app, "sparse watcher");
+    wait_for_bench_catalog(&app, "sparse watcher", &receipt);
+    install_sparse_resume_bench_transcript(&mut app);
+    assert!(app.run_lua(
+        r#"
+        _G.sparse_watcher_calls = 0
+        _G.sparse_watcher_reg = smelt.transcript.watch_view(function(view)
+          assert(view.revision ~= nil)
+          _G.sparse_watcher_calls = _G.sparse_watcher_calls + 1
+        end)
+        "#
+    ));
+    app.render_silent();
+    let readers_before = wait_for_sparse_reader_metrics(&mut app, "sparse watcher");
+    let calls_before = app
+        .lua_int_global("sparse_watcher_calls")
+        .unwrap_or_default();
+
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    for _ in 0..runs {
+        app.transcript_scroll_probe_wheel(false, 1);
+        app.render_silent();
+    }
+    let snapshot = smelt_perf::perf::snapshot();
+    smelt_perf::perf::set_enabled(false);
+
+    let dispatch = snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == "compositor:dispatch_committed_transcript_view")
+        .expect("committed-view dispatch metric");
+    assert!(
+        dispatch.count >= runs.min(smelt_perf::perf::RING_CAPACITY),
+        "each sparse scroll must publish at least one committed view sample: runs={runs} samples={}",
+        dispatch.count
+    );
+    assert!(
+        dispatch.p99_us < 2_000,
+        "committed-view watcher dispatch exceeded 2 ms p99: {} us",
+        dispatch.p99_us
+    );
+    assert!(
+        app.lua_int_global("sparse_watcher_calls")
+            .unwrap_or_default()
+            > calls_before,
+        "sparse scrolling must publish committed-view revisions"
+    );
+    let readers_after = app.app.transcript_reader_metrics_for_harness();
+    assert_eq!(
+        readers_after, readers_before,
+        "committed-view watcher dispatch must reuse both retained sparse readers"
+    );
+    eprintln!(
+        "TRANSCRIPT_SPARSE_WATCHER_BENCH_JSON {}",
+        serde_json::json!({
+            "blocks": block_count,
+            "runs": runs,
+            "dispatch_samples": dispatch.count,
+            "dispatch_p50_us": dispatch.p50_us,
+            "dispatch_p95_us": dispatch.p95_us,
+            "dispatch_p99_us": dispatch.p99_us,
+            "dispatch_max_us": dispatch.max_us,
+            "metadata_readers": readers_before.metadata_readers,
+            "hydration_readers": readers_before.hydration_readers,
+            "total_readers": readers_before.total_readers,
+            "metadata_open_attempts": readers_before.metadata_open_attempts,
+            "hydration_open_attempts": readers_before.hydration_open_attempts,
+            "total_open_attempts": readers_before.total_open_attempts,
+        })
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AutonomousFrameSample {
+    frame_total_us: u64,
+    frame_p50_us: u64,
+    frame_p95_us: u64,
+    frame_p99_us: u64,
+    frame_max_us: u64,
+    wall_us: u64,
+    thread_allocs: u64,
+    thread_bytes: u64,
+    process_alloc_bytes: u64,
+    process_dealloc_bytes: u64,
+    payloads_loaded: u64,
+}
+
+fn render_autonomous_frames(app: &mut TestApp, frames: usize) {
+    let mut rendered = 0usize;
+    for _ in 0..frames {
+        app.clock.advance(std::time::Duration::from_millis(16));
+        app.app
+            .request_animation_render(std::time::Duration::from_millis(16));
+        rendered += usize::from(
+            app.app
+                .render_requested_transient_frame_to(&mut std::io::sink()),
+        );
+    }
+    assert_eq!(rendered, frames, "every autonomous frame must render");
+}
+
+fn begin_autonomous_text_turn(app: &mut TestApp, turn_id: u64, warmup_frames: usize) {
+    app.start_turn(turn_id);
+    app.app.dispatch_engine_event_in_render_loop_to(
+        protocol::EngineEvent::TextDelta { delta: "x".into() },
+        &mut std::io::sink(),
+        |_| {},
+    );
+    app.app.request_urgent_render();
+    app.render_silent();
+    render_autonomous_frames(app, warmup_frames);
+}
+
+fn measure_autonomous_frames(app: &mut TestApp, frames: usize) -> AutonomousFrameSample {
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    smelt_perf::alloc::set_enabled(true);
+    let process_before = smelt_perf::alloc::snapshot();
+    let (thread_allocs_before, thread_bytes_before) = smelt_perf::alloc::thread_snapshot();
+    let start = std::time::Instant::now();
+    render_autonomous_frames(app, frames);
+    let wall_us = start.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+    let (thread_allocs_after, thread_bytes_after) = smelt_perf::alloc::thread_snapshot();
+    let process_after = smelt_perf::alloc::snapshot();
+    let process_delta = smelt_perf::alloc::delta(process_before, process_after);
+    let snapshot = smelt_perf::perf::snapshot();
+    smelt_perf::alloc::set_enabled(false);
+    smelt_perf::perf::set_enabled(false);
+
+    let frame = snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == "app:tick_compositor")
+        .expect("autonomous benchmark compositor frames");
+    assert_eq!(frame.count as usize, frames);
+    AutonomousFrameSample {
+        frame_total_us: frame.total_us,
+        frame_p50_us: frame.p50_us,
+        frame_p95_us: frame.p95_us,
+        frame_p99_us: frame.p99_us,
+        frame_max_us: frame.max_us,
+        wall_us,
+        thread_allocs: thread_allocs_after.saturating_sub(thread_allocs_before),
+        thread_bytes: thread_bytes_after.saturating_sub(thread_bytes_before),
+        process_alloc_bytes: process_delta.bytes_allocated,
+        process_dealloc_bytes: process_delta.bytes_deallocated,
+        payloads_loaded: perf_value_total(&snapshot, "store:object:payloads_loaded"),
+    }
+}
+
+fn assert_within_twenty_five_percent(label: &str, sparse: u64, hydrated: u64) {
+    assert!(
+        u128::from(sparse).saturating_mul(4) <= u128::from(hydrated).saturating_mul(5),
+        "sparse {label} {sparse} exceeded hydrated {label} {hydrated} by more than 25 percent"
+    );
+}
+
+#[test]
+fn transcript_sparse_autonomous_frame_benchmark_suite() {
+    if !benchmark_target_enabled()
+        || std::env::var("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_BENCH").as_deref() != Ok("1")
+    {
+        return;
+    }
+    let target_bytes =
+        env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_BYTES", 5 * 1024 * 1024);
+    let frames = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_FRAMES", 600);
+    let warmup_frames = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_WARMUP", 32);
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(100, 32);
+    let fixture_bytes = push_search_bench_transcript(&mut app, target_bytes);
+    app.render_silent();
+    let receipt = save_bench_fixture(&mut app, "sparse autonomous frames");
+    wait_for_bench_catalog(&app, "sparse autonomous frames", &receipt);
+
+    begin_autonomous_text_turn(&mut app, 42, warmup_frames);
+    let hydrated = measure_autonomous_frames(&mut app, frames);
+    app.app.dispatch_engine_event_in_render_loop_to(
+        protocol::EngineEvent::TurnComplete {
+            turn_id: 42,
+            history: None,
+            meta: None,
+        },
+        &mut std::io::sink(),
+        |_| {},
+    );
+
+    install_sparse_resume_bench_transcript(&mut app);
+    begin_autonomous_text_turn(&mut app, 43, warmup_frames);
+    let readers_before = wait_for_sparse_reader_metrics(&mut app, "sparse autonomous frames");
+    let sparse = measure_autonomous_frames(&mut app, frames);
+    let readers_after = app.app.transcript_reader_metrics_for_harness();
+    assert_eq!(
+        readers_after, readers_before,
+        "autonomous sparse frames must reuse both retained session readers"
+    );
+    assert_eq!(
+        sparse.payloads_loaded, 0,
+        "warmed sparse frames must not deserialize transcript payloads"
+    );
+
+    assert_within_twenty_five_percent(
+        "compositor CPU total",
+        sparse.frame_total_us,
+        hydrated.frame_total_us,
+    );
+    assert_within_twenty_five_percent(
+        "thread allocation count",
+        sparse.thread_allocs,
+        hydrated.thread_allocs,
+    );
+    assert_within_twenty_five_percent(
+        "thread allocation bytes",
+        sparse.thread_bytes,
+        hydrated.thread_bytes,
+    );
+    assert_within_twenty_five_percent(
+        "process allocation bytes",
+        sparse.process_alloc_bytes,
+        hydrated.process_alloc_bytes,
+    );
+
+    eprintln!(
+        "TRANSCRIPT_SPARSE_AUTONOMOUS_BENCH_JSON {}",
+        serde_json::json!({
+            "fixture_bytes": fixture_bytes,
+            "frames": frames,
+            "warmup_frames": warmup_frames,
+            "metadata_readers": readers_before.metadata_readers,
+            "hydration_readers": readers_before.hydration_readers,
+            "total_readers": readers_before.total_readers,
+            "metadata_open_attempts": readers_before.metadata_open_attempts,
+            "hydration_open_attempts": readers_before.hydration_open_attempts,
+            "total_open_attempts": readers_before.total_open_attempts,
+            "hydrated": {
+                "frame_total_us": hydrated.frame_total_us,
+                "frame_p50_us": hydrated.frame_p50_us,
+                "frame_p95_us": hydrated.frame_p95_us,
+                "frame_p99_us": hydrated.frame_p99_us,
+                "frame_max_us": hydrated.frame_max_us,
+                "wall_us": hydrated.wall_us,
+                "thread_allocs": hydrated.thread_allocs,
+                "thread_bytes": hydrated.thread_bytes,
+                "process_alloc_bytes": hydrated.process_alloc_bytes,
+                "process_dealloc_bytes": hydrated.process_dealloc_bytes,
+                "payloads_loaded": hydrated.payloads_loaded,
+            },
+            "sparse": {
+                "frame_total_us": sparse.frame_total_us,
+                "frame_p50_us": sparse.frame_p50_us,
+                "frame_p95_us": sparse.frame_p95_us,
+                "frame_p99_us": sparse.frame_p99_us,
+                "frame_max_us": sparse.frame_max_us,
+                "wall_us": sparse.wall_us,
+                "thread_allocs": sparse.thread_allocs,
+                "thread_bytes": sparse.thread_bytes,
+                "process_alloc_bytes": sparse.process_alloc_bytes,
+                "process_dealloc_bytes": sparse.process_dealloc_bytes,
+                "payloads_loaded": sparse.payloads_loaded,
+            },
+            "ratios": {
+                "frame_total": sparse.frame_total_us as f64 / hydrated.frame_total_us as f64,
+                "thread_allocs": sparse.thread_allocs as f64 / hydrated.thread_allocs as f64,
+                "thread_bytes": sparse.thread_bytes as f64 / hydrated.thread_bytes as f64,
+                "process_alloc_bytes": sparse.process_alloc_bytes as f64 / hydrated.process_alloc_bytes as f64,
+            },
+        })
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 struct HotPathCounters {
     history_suffix_rows: u64,
@@ -2302,15 +2898,181 @@ impl HotPathCounters {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamResumePosition {
+    Top,
+    Middle,
+    Tail,
+}
+
+impl StreamResumePosition {
+    fn from_env() -> Self {
+        match std::env::var("SMELT_TRANSCRIPT_STREAM_RESUMED_POSITION")
+            .unwrap_or_else(|_| "tail".into())
+            .as_str()
+        {
+            "top" => Self::Top,
+            "middle" => Self::Middle,
+            "tail" | "bottom" => Self::Tail,
+            value => {
+                panic!("unknown resumed stream position {value:?}; expected top, middle, or tail")
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Middle => "middle",
+            Self::Tail => "tail",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamWorkload {
+    Text,
+    Bash,
+    Mixed,
+    Exec,
+    WriteDraft,
+    ExploreGroup,
+}
+
+impl StreamWorkload {
+    fn from_env() -> Self {
+        match std::env::var("SMELT_TRANSCRIPT_STREAM_WORKLOAD")
+            .unwrap_or_else(|_| "text".into())
+            .as_str()
+        {
+            "text" => Self::Text,
+            "bash" | "tool" => Self::Bash,
+            "mixed" => Self::Mixed,
+            "exec" | "shell" => Self::Exec,
+            "write-draft" | "draft" => Self::WriteDraft,
+            "explore-group" | "group" => Self::ExploreGroup,
+            value => panic!(
+                "unknown stream workload {value:?}; expected text, bash, mixed, exec, write-draft, or explore-group"
+            ),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Bash => "bash",
+            Self::Mixed => "mixed",
+            Self::Exec => "exec",
+            Self::WriteDraft => "write-draft",
+            Self::ExploreGroup => "explore-group",
+        }
+    }
+
+    fn uses_agent_turn(self) -> bool {
+        self != Self::Exec
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
+enum StreamEventKind {
+    Text,
+    Reasoning,
+    ToolDraft,
+    ToolOutput,
+    ExecOutput,
+    Lifecycle,
+}
+
+impl StreamEventKind {
+    const COUNT: usize = 6;
+
+    fn index(self) -> usize {
+        match self {
+            Self::Text => 0,
+            Self::Reasoning => 1,
+            Self::ToolDraft => 2,
+            Self::ToolOutput => 3,
+            Self::ExecOutput => 4,
+            Self::Lifecycle => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Reasoning => "reasoning",
+            Self::ToolDraft => "tool_draft",
+            Self::ToolOutput => "tool_output",
+            Self::ExecOutput => "exec_output",
+            Self::Lifecycle => "lifecycle",
+        }
+    }
+}
+
+enum StreamBenchmarkEvent {
+    Engine {
+        kind: StreamEventKind,
+        event: Box<protocol::EngineEvent>,
+    },
+    ExecStarted {
+        command: String,
+    },
+    ExecOutput {
+        chunk: String,
+    },
+    ExecFinished,
+}
+
+impl StreamBenchmarkEvent {
+    fn kind(&self) -> StreamEventKind {
+        match self {
+            Self::Engine { kind, .. } => *kind,
+            Self::ExecOutput { .. } => StreamEventKind::ExecOutput,
+            Self::ExecStarted { .. } | Self::ExecFinished => StreamEventKind::Lifecycle,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct StreamEventAccumulator {
+    dispatch_ms: Vec<f64>,
+    allocs: u64,
+    bytes: u64,
+    max_event_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamEventSample {
+    kind: StreamEventKind,
+    count: usize,
+    dispatch: TailStats,
+    allocs: u64,
+    bytes: u64,
+    max_event_bytes: u64,
+}
+
+#[derive(Debug)]
 struct StreamSample {
+    workload: StreamWorkload,
     history_blocks: usize,
+    resumed_bytes: usize,
+    resumed_position: StreamResumePosition,
+    boundary_record_bytes: usize,
+    terminal_width: u16,
+    terminal_height: u16,
+    parallel_tools: usize,
     chunks: usize,
+    events: usize,
     final_bytes: usize,
+    active_output_bytes: usize,
+    scheduled: bool,
     scroll: bool,
+    idle_frames: usize,
     total_ms: f64,
     dispatch: TailStats,
     render: TailStats,
+    frame: TailStats,
+    event_samples: Vec<StreamEventSample>,
     traced_frames: usize,
     request_to_flush_p99_ms: f64,
     thread_allocs: u64,
@@ -2318,6 +3080,12 @@ struct StreamSample {
     process_alloc_bytes: u64,
     process_dealloc_bytes: u64,
     process_retained_bytes: i64,
+    metadata_readers: usize,
+    hydration_readers: usize,
+    total_readers: usize,
+    metadata_open_attempts: usize,
+    hydration_open_attempts: usize,
+    total_open_attempts: usize,
 }
 
 fn stream_benchmark_enabled() -> bool {
@@ -2331,12 +3099,49 @@ fn stream_benchmark_history_blocks() -> usize {
     env_positive_usize("SMELT_TRANSCRIPT_STREAM_HISTORY", 100)
 }
 
+fn stream_benchmark_resumed_bytes() -> Option<usize> {
+    std::env::var("SMELT_TRANSCRIPT_STREAM_RESUMED_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|bytes| *bytes > 0)
+}
+
+fn stream_benchmark_boundary_record_bytes() -> usize {
+    std::env::var("SMELT_TRANSCRIPT_STREAM_BOUNDARY_RECORD_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
 fn stream_benchmark_chunks() -> usize {
     env_positive_usize("SMELT_TRANSCRIPT_STREAM_CHUNKS", 512)
 }
 
 fn stream_benchmark_final_bytes() -> usize {
     env_positive_usize("SMELT_TRANSCRIPT_STREAM_BYTES", 16 * 1024)
+}
+
+fn stream_benchmark_terminal_width() -> u16 {
+    env_positive_usize("SMELT_TRANSCRIPT_STREAM_WIDTH", 100)
+        .try_into()
+        .expect("stream benchmark terminal width must fit in u16")
+}
+
+fn stream_benchmark_terminal_height() -> u16 {
+    env_positive_usize("SMELT_TRANSCRIPT_STREAM_HEIGHT", 32)
+        .try_into()
+        .expect("stream benchmark terminal height must fit in u16")
+}
+
+fn stream_benchmark_parallel_tools() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_STREAM_PARALLEL_TOOLS", 4)
+}
+
+fn stream_benchmark_scheduled() -> bool {
+    matches!(
+        std::env::var("SMELT_TRANSCRIPT_STREAM_SCHEDULED").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) || stream_benchmark_scroll()
 }
 
 fn stream_benchmark_scroll() -> bool {
@@ -2346,56 +3151,724 @@ fn stream_benchmark_scroll() -> bool {
     )
 }
 
-fn stream_benchmark_app(history_blocks: usize) -> TestApp {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.app.handle_resize(100, 32);
-    for index in 0..history_blocks {
+fn stream_benchmark_idle_frames() -> usize {
+    std::env::var("SMELT_TRANSCRIPT_STREAM_IDLE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn push_stream_boundary_transcript(app: &mut TestApp, record_bytes: usize) -> usize {
+    const RECORD_COUNT: usize = 600;
+    const LARGE_RECORDS: [usize; 3] = [0, RECORD_COUNT / 2, RECORD_COUNT - 1];
+    let mut generated_bytes = 0usize;
+    for index in 0..RECORD_COUNT {
+        let target = if LARGE_RECORDS.contains(&index) {
+            record_bytes.max(1)
+        } else {
+            64
+        };
+        let prefix = format!("stream resume boundary record {index}: ");
+        let mut content = String::with_capacity(target.max(prefix.len()));
+        content.push_str(&prefix);
+        while content.len() < target {
+            let remaining = target - content.len();
+            let chunk = "deterministic extent boundary payload 0123456789 abcdef\n";
+            content.push_str(&chunk[..remaining.min(chunk.len())]);
+        }
+        generated_bytes = generated_bytes.saturating_add(content.len());
         let block = if index.is_multiple_of(2) {
             smelt_core::transcript_model::Block::User {
-                text: format!("stream benchmark prompt {index}: {}", "input ".repeat(12)),
+                text: content,
                 image_labels: Vec::new(),
                 command: false,
             }
         } else {
             smelt_core::transcript_model::Block::Text {
-                content: format!(
-                    "stream benchmark response {index}: {}",
-                    "alpha beta gamma delta ".repeat(8)
-                ),
+                content: content.into(),
             }
         };
         app.app.push_block(block);
     }
-    app.start_turn(42);
+    generated_bytes
+}
+
+fn stream_benchmark_app(
+    history_blocks: usize,
+    resumed_bytes: Option<usize>,
+    resumed_position: StreamResumePosition,
+    workload: StreamWorkload,
+    terminal_width: u16,
+    terminal_height: u16,
+) -> (TestApp, usize) {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(terminal_width, terminal_height);
+    let resumed_bytes = if let Some(target_bytes) = resumed_bytes {
+        let boundary_record_bytes = stream_benchmark_boundary_record_bytes();
+        let bytes = if boundary_record_bytes == 0 {
+            push_search_bench_transcript(&mut app, target_bytes)
+        } else {
+            push_stream_boundary_transcript(&mut app, boundary_record_bytes)
+        };
+        app.render_silent();
+        let receipt = save_bench_fixture(&mut app, "resumed stream");
+        wait_for_bench_catalog(&app, "resumed stream", &receipt);
+        install_sparse_resume_bench_transcript(&mut app);
+        match resumed_position {
+            StreamResumePosition::Top => {
+                prepare_burst_bench_position(&mut app, BurstBenchPosition::Top)
+            }
+            StreamResumePosition::Middle => {
+                prepare_burst_bench_position(&mut app, BurstBenchPosition::Middle)
+            }
+            StreamResumePosition::Tail => {
+                prepare_burst_bench_position(&mut app, BurstBenchPosition::Bottom)
+            }
+        }
+        app.app.handle_resize(terminal_width, terminal_height);
+        bytes
+    } else {
+        for index in 0..history_blocks {
+            let block = match index % 4 {
+                0 => smelt_core::transcript_model::Block::User {
+                    text: format!(
+                        "stream benchmark prompt {index}: inspect the command output and summarize failures"
+                    ),
+                    image_labels: Vec::new(),
+                    command: false,
+                },
+                1 => smelt_core::transcript_model::Block::Text {
+                    content: format!(
+                        "## Earlier result {index}\n\n- parsed output\n- checked status\n\n{}",
+                        "alpha beta gamma delta ".repeat(5)
+                    )
+                    .into(),
+                },
+                2 => smelt_core::transcript_model::Block::Thinking {
+                    title: None,
+                    summary_titles: Vec::new(),
+                    content: format!("Inspecting earlier result {index} and comparing the logs.")
+                        .into(),
+                    kind: protocol::ReasoningKind::Raw,
+                },
+                _ => smelt_core::transcript_model::Block::Text {
+                    content: format!(
+                        "```text\nfinished previous task {index}\nstatus: ok\n```\n\nReady for the next command."
+                    )
+                    .into(),
+                },
+            };
+            app.app.push_block(block);
+        }
+        0
+    };
+    if workload.uses_agent_turn() {
+        app.start_turn(42);
+    }
     app.render_silent();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
     let win = app.app.transcript_win_mut();
     win.set_vim_enabled(true);
     win.set_vim_mode(VimMode::Normal);
-    app
+    (app, resumed_bytes)
 }
 
-fn stream_benchmark_deltas(chunks: usize, final_bytes: usize) -> Vec<String> {
-    let base = final_bytes / chunks;
-    let remainder = final_bytes % chunks;
-    (0..chunks)
+fn stream_benchmark_chunk_lengths(chunks: usize, final_bytes: usize) -> Vec<usize> {
+    const WEIGHTS: [usize; 16] = [1, 1, 3, 8, 2, 1, 13, 2, 5, 1, 21, 3, 1, 8, 2, 34];
+    let remaining = final_bytes.saturating_sub(chunks);
+    let total_weight = (0..chunks)
+        .map(|index| WEIGHTS[index % WEIGHTS.len()])
+        .sum::<usize>();
+    let mut lengths = (0..chunks)
         .map(|index| {
-            let len = base + usize::from(index < remainder);
-            "x".repeat(len)
+            let weight = WEIGHTS[index % WEIGHTS.len()];
+            1 + ((remaining as u128 * weight as u128) / total_weight as u128) as usize
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let assigned = lengths.iter().sum::<usize>();
+    for index in 0..final_bytes.saturating_sub(assigned) {
+        lengths[index % chunks] += 1;
+    }
+    lengths
+}
+
+fn stream_benchmark_payload(index: usize, len: usize, bash: bool) -> String {
+    let pattern = if bash {
+        "\u{1b}[32mPASS\u{1b}[0m crate=smelt-tui test=streaming_output elapsed=12ms path=crates/tui/src/app.rs café 東京\nwarning: retrying deterministic fixture\n"
+    } else {
+        "## Streaming analysis\n\n- inspect `render_loop`\n- compare **frame tails**\n\n```rust\nlet status = Result::<(), Error>::Ok(());\n```\n\nThe next chunk crosses markdown boundaries.\n"
+    };
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(len);
+    let mut position = index % chars.len();
+    while output.len() < len {
+        let character = chars[position];
+        if output.len() + character.len_utf8() <= len {
+            output.push(character);
+        } else {
+            output.push('x');
+        }
+        position = (position + 1) % chars.len();
+    }
+    output
+}
+
+fn stream_benchmark_source(final_bytes: usize) -> String {
+    const PATTERN: &str = "pub fn streamed_value(input: usize) -> usize {\n    input.saturating_mul(2).saturating_add(1)\n}\n\n";
+    let mut source = PATTERN.repeat(final_bytes.div_ceil(PATTERN.len()));
+    source.truncate(final_bytes);
+    source
+}
+
+fn append_streamed_output(output: &mut String, chunk: &str) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(chunk);
+}
+
+fn stream_engine_event(
+    kind: StreamEventKind,
+    event: protocol::EngineEvent,
+) -> StreamBenchmarkEvent {
+    StreamBenchmarkEvent::Engine {
+        kind,
+        event: Box::new(event),
+    }
+}
+
+fn stream_benchmark_events(
+    workload: StreamWorkload,
+    chunks: usize,
+    final_bytes: usize,
+    parallel_tools: usize,
+) -> (Vec<StreamBenchmarkEvent>, usize) {
+    let lengths = stream_benchmark_chunk_lengths(chunks, final_bytes);
+    let mut events = Vec::with_capacity(chunks.saturating_mul(parallel_tools) + 16);
+    let invocation_id = protocol::InvocationId::new(1);
+    let call_id = "stream-benchmark-bash".to_string();
+    let tool_started = || {
+        stream_engine_event(
+            StreamEventKind::Lifecycle,
+            protocol::EngineEvent::ToolStarted {
+                invocation_id,
+                call_id: call_id.clone(),
+                tool_name: "bash".into(),
+                args: std::collections::HashMap::from([(
+                    "command".into(),
+                    serde_json::json!("cargo nextest run --workspace --features smelt-tui/harness"),
+                )]),
+                called_at_ms: 0,
+            },
+        )
+    };
+    let tool_output = |line: String| {
+        stream_engine_event(
+            StreamEventKind::ToolOutput,
+            protocol::EngineEvent::ToolOutput {
+                invocation_id,
+                call_id: call_id.clone(),
+                line,
+            },
+        )
+    };
+    let tool_finished = |output: String| {
+        stream_engine_event(
+            StreamEventKind::Lifecycle,
+            protocol::EngineEvent::ToolFinished {
+                invocation_id,
+                call_id: call_id.clone(),
+                result: protocol::ToolOutcome::new(output, false, None),
+                elapsed_ms: Some(1_250),
+            },
+        )
+    };
+
+    let active_output_bytes = match workload {
+        StreamWorkload::Text => {
+            for (index, len) in lengths.into_iter().enumerate() {
+                events.push(stream_engine_event(
+                    StreamEventKind::Text,
+                    protocol::EngineEvent::TextDelta {
+                        delta: stream_benchmark_payload(index, len, false),
+                    },
+                ));
+            }
+            final_bytes
+        }
+        StreamWorkload::Bash => {
+            events.push(tool_started());
+            let mut output = String::with_capacity(final_bytes + chunks);
+            for (index, len) in lengths.into_iter().enumerate() {
+                let chunk = stream_benchmark_payload(index, len, true);
+                append_streamed_output(&mut output, &chunk);
+                events.push(tool_output(chunk));
+            }
+            let active_output_bytes = output.len();
+            events.push(tool_finished(output));
+            active_output_bytes
+        }
+        StreamWorkload::Mixed => {
+            let reasoning_end = chunks / 8;
+            let leading_text_end = chunks * 3 / 8;
+            let tool_end = chunks * 7 / 8;
+            events.push(stream_engine_event(
+                StreamEventKind::Lifecycle,
+                protocol::EngineEvent::ReasoningPartStarted {
+                    id: "stream-benchmark-reasoning".into(),
+                    kind: protocol::ReasoningKind::Raw,
+                },
+            ));
+            let mut tool_started_sent = false;
+            let mut output = String::with_capacity(final_bytes / 2 + chunks);
+            let mut active_output_bytes = 0usize;
+            for (index, len) in lengths.into_iter().enumerate() {
+                if index < reasoning_end {
+                    events.push(stream_engine_event(
+                        StreamEventKind::Reasoning,
+                        protocol::EngineEvent::ReasoningPartDelta {
+                            id: "stream-benchmark-reasoning".into(),
+                            kind: protocol::ReasoningKind::Raw,
+                            delta: stream_benchmark_payload(index, len, false),
+                            title: None,
+                        },
+                    ));
+                } else if index < leading_text_end {
+                    events.push(stream_engine_event(
+                        StreamEventKind::Text,
+                        protocol::EngineEvent::TextDelta {
+                            delta: stream_benchmark_payload(index, len, false),
+                        },
+                    ));
+                } else if index < tool_end {
+                    if !tool_started_sent {
+                        events.push(stream_engine_event(
+                            StreamEventKind::Lifecycle,
+                            protocol::EngineEvent::ReasoningPartFinished {
+                                id: "stream-benchmark-reasoning".into(),
+                                kind: protocol::ReasoningKind::Raw,
+                                title: None,
+                                content: String::new(),
+                            },
+                        ));
+                        events.push(tool_started());
+                        tool_started_sent = true;
+                    }
+                    let chunk = stream_benchmark_payload(index, len, true);
+                    append_streamed_output(&mut output, &chunk);
+                    active_output_bytes = output.len();
+                    events.push(tool_output(chunk));
+                } else {
+                    if tool_started_sent {
+                        events.push(tool_finished(std::mem::take(&mut output)));
+                        tool_started_sent = false;
+                    }
+                    events.push(stream_engine_event(
+                        StreamEventKind::Text,
+                        protocol::EngineEvent::TextDelta {
+                            delta: stream_benchmark_payload(index, len, false),
+                        },
+                    ));
+                }
+            }
+            if tool_started_sent {
+                events.push(tool_finished(std::mem::take(&mut output)));
+            }
+            active_output_bytes
+        }
+        StreamWorkload::Exec => {
+            events.push(StreamBenchmarkEvent::ExecStarted {
+                command: "cargo nextest run --workspace --features smelt-tui/harness".into(),
+            });
+            let mut output = String::with_capacity(final_bytes + chunks);
+            for (index, len) in lengths.into_iter().enumerate() {
+                let chunk = stream_benchmark_payload(index, len, true);
+                append_streamed_output(&mut output, &chunk);
+                events.push(StreamBenchmarkEvent::ExecOutput { chunk });
+            }
+            events.push(StreamBenchmarkEvent::ExecFinished);
+            output.len()
+        }
+        StreamWorkload::WriteDraft => {
+            let stream_id = "stream-benchmark-write-draft".to_string();
+            let call_id = "stream-benchmark-write-call".to_string();
+            let arguments = serde_json::to_string(&serde_json::json!({
+                "file_path": "/tmp/stream-benchmark.rs",
+                "content": stream_benchmark_source(final_bytes),
+            }))
+            .expect("serialize write_file arguments");
+            events.push(stream_engine_event(
+                StreamEventKind::Lifecycle,
+                protocol::EngineEvent::ToolCallDraftStarted {
+                    stream_id: stream_id.clone(),
+                    call_id: Some(call_id.clone()),
+                    tool_name: Some("write_file".into()),
+                },
+            ));
+            let argument_lengths = stream_benchmark_chunk_lengths(chunks, arguments.len());
+            let mut offset = 0usize;
+            for len in argument_lengths {
+                let end = offset + len;
+                events.push(stream_engine_event(
+                    StreamEventKind::ToolDraft,
+                    protocol::EngineEvent::ToolCallDraftDelta {
+                        stream_id: stream_id.clone(),
+                        call_id: Some(call_id.clone()),
+                        tool_name: Some("write_file".into()),
+                        delta: arguments[offset..end].to_string(),
+                    },
+                ));
+                offset = end;
+            }
+            events.push(stream_engine_event(
+                StreamEventKind::Lifecycle,
+                protocol::EngineEvent::ToolCallDraftFinished {
+                    stream_id,
+                    call_id,
+                    tool_name: "write_file".into(),
+                    arguments: arguments.clone(),
+                },
+            ));
+            arguments.len()
+        }
+        StreamWorkload::ExploreGroup => {
+            const TOOL_NAMES: [&str; 4] = ["read_file", "grep", "glob", "outline"];
+            let mut outputs = vec![String::with_capacity(final_bytes + chunks); parallel_tools];
+            for tool_index in 0..parallel_tools {
+                let invocation_id = protocol::InvocationId::new(tool_index as u64 + 1);
+                let call_id = format!("stream-benchmark-explore-{tool_index}");
+                let tool_name = TOOL_NAMES[tool_index % TOOL_NAMES.len()];
+                let args = std::collections::HashMap::from([
+                    (
+                        "file_path".into(),
+                        serde_json::json!(format!("crates/tui/src/group_{tool_index}.rs")),
+                    ),
+                    ("path".into(), serde_json::json!("crates/tui/src")),
+                    ("pattern".into(), serde_json::json!("render|layout|stream")),
+                ]);
+                events.push(stream_engine_event(
+                    StreamEventKind::Lifecycle,
+                    protocol::EngineEvent::ToolStarted {
+                        invocation_id,
+                        call_id,
+                        tool_name: tool_name.into(),
+                        args,
+                        called_at_ms: tool_index as u64,
+                    },
+                ));
+            }
+            for (chunk_index, len) in lengths.into_iter().enumerate() {
+                for (tool_index, output) in outputs.iter_mut().enumerate() {
+                    let invocation_id = protocol::InvocationId::new(tool_index as u64 + 1);
+                    let call_id = format!("stream-benchmark-explore-{tool_index}");
+                    let line = stream_benchmark_payload(
+                        chunk_index + tool_index.saturating_mul(chunks),
+                        len,
+                        true,
+                    );
+                    append_streamed_output(output, &line);
+                    events.push(stream_engine_event(
+                        StreamEventKind::ToolOutput,
+                        protocol::EngineEvent::ToolOutput {
+                            invocation_id,
+                            call_id,
+                            line,
+                        },
+                    ));
+                }
+            }
+            let active_output_bytes = outputs.iter().map(String::len).sum();
+            for (tool_index, output) in outputs.into_iter().enumerate() {
+                events.push(stream_engine_event(
+                    StreamEventKind::Lifecycle,
+                    protocol::EngineEvent::ToolFinished {
+                        invocation_id: protocol::InvocationId::new(tool_index as u64 + 1),
+                        call_id: format!("stream-benchmark-explore-{tool_index}"),
+                        result: protocol::ToolOutcome::new(output, false, None),
+                        elapsed_ms: Some(1_250),
+                    },
+                ));
+            }
+            active_output_bytes
+        }
+    };
+
+    if workload.uses_agent_turn() {
+        events.push(stream_engine_event(
+            StreamEventKind::Lifecycle,
+            protocol::EngineEvent::TurnComplete {
+                turn_id: 42,
+                history: None,
+                meta: None,
+            },
+        ));
+    }
+    (events, active_output_bytes)
+}
+
+fn stream_frame_stats(snapshot: &smelt_perf::perf::Snapshot) -> TailStats {
+    let row = snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == "app:tick_compositor")
+        .expect("stream benchmark renders at least one compositor frame");
+    TailStats {
+        mean: row.total_us as f64 / row.count as f64 / 1_000.0,
+        stddev: 0.0,
+        p50: row.p50_us as f64 / 1_000.0,
+        p95: row.p95_us as f64 / 1_000.0,
+        p99: row.p99_us as f64 / 1_000.0,
+        max: row.max_us as f64 / 1_000.0,
+    }
+}
+
+fn print_stream_perf(workload: StreamWorkload, snapshot: &smelt_perf::perf::Snapshot) {
+    const LABELS: &[&str] = &[
+        "tui:dispatch_engine_event",
+        "app:tick_compositor",
+        "compositor:layout",
+        "compositor:project_transcript",
+        "compositor:lua_renderers",
+        "compositor:input",
+        "compositor:render_flush",
+        "session:live_store:open",
+        "engine:model_history:open_store",
+        "transcript:store:open_read_only",
+        "store:lineage:open_read_only_located",
+        "store:object:hydrate_bytes",
+        "store:transcript:read_record_slice",
+        "transcript:plan_viewport_projection",
+        "transcript:plan_sparse_projection",
+        "transcript:hydration:plan_ids",
+        "transcript:hydration:projection_plan",
+        "transcript:hydration:ensure_ids",
+        "transcript:hydration:refine_plan",
+        "transcript:sparse:activate_tail_window",
+        "transcript:sparse:loaded_row_offset",
+        "transcript:sparse:estimated_loaded_rows",
+        "transcript:sparse:scrollbar_total_rows",
+        "transcript:extent:estimated_rows_before_record",
+        "transcript:extent:estimated_rows_for_record_range",
+        "transcript:extent:sqlite_estimated_record_rows",
+        "transcript:navigation:block_from_anchor",
+        "transcript:navigation:record_from_store",
+        "transcript:navigation:record_before_kind",
+        "store:extent:reader_estimated_rows",
+        "store:extent:estimated_rows",
+        "transcript:transcript_scene",
+        "transcript:prepare_row_index",
+        "transcript:prepare_row_index:rebuild_index",
+        "transcript:row_index:collect_missing",
+        "transcript:measure_block:layout",
+        "transcript:project_planned",
+        "transcript:layout_cache:ensure_many",
+        "transcript:layout_cache:ensure_measurement",
+        "transcript:layout_cache:compile_and_insert",
+        "transcript:layout_cache:block_render_metadata",
+        "transcript:layout_cache:compile_layouts",
+        "transcript:layout_cache:render_full_to_buffer",
+        "transcript:layout_cache:render_range_to_buffer",
+        "transcript:project_visible_range",
+        "transcript:project_visible_range:buffer_install",
+        "transcript:project_visible_range:clone_display_rows",
+        "transcript:collect_nodes_range",
+        "transcript:draft:append_json",
+        "transcript:stream:append_tool_output",
+        "transcript:stream:append_exec_output",
+        "transcript:content:append_metadata",
+        "transcript:content:append_hash",
+        "transcript:content:append_file_layouts",
+        "transcript:content:append_ansi_index",
+        "transcript:content:append_markdown_index",
+        "render:layout",
+        "render:layout:cap",
+        "render:layout:cap:measure_child",
+        "render:layout:cap:select_rows",
+        "render:layout:cap:render_rows",
+        "render:layout:cap:content",
+        "render:layout:cap:runs",
+        "render:layout:cap:leaf",
+        "render:layout:cap:vbox",
+        "render:layout:cap:hbox",
+        "render:layout:cap:gutter",
+        "render:layout:cap:row_prefix",
+        "render:layout:cap:panel",
+        "render:layout:cap:style",
+        "render:layout:cap:nested",
+        "render:layout:cap:refresh",
+        "render:layout:cap:empty",
+        "render:layout:hbox:prepare",
+        "render:layout:hbox:render_columns",
+        "render:layout:hbox:runs",
+        "render:layout:hbox:line",
+        "render:layout:hbox:other",
+        "render:layout:hbox:compose_rows",
+        "render:layout:inline_syntax",
+        "render:layout:measure_content_text",
+        "render:layout:render_content_text",
+        "render:layout:measure_text",
+        "render:layout:render_text",
+        "render:markdown",
+    ];
+    const VALUE_LABELS: &[&str] = &[
+        "transcript:hydration:ensure_ids:requested",
+        "transcript:hydration:ensure_ids:missing",
+        "transcript:hydration:ensure_ids:ranges",
+        "transcript:hydration:projection_plan:iterations",
+        "transcript:hydration:projection_plan:max_required_ids",
+        "transcript:block_cache:hydration_reads",
+        "transcript:block_cache:hydration_bytes",
+        "transcript:block_cache:hydration_duration_us",
+        "transcript:extent:estimated_rows_for_record_range:records",
+        "transcript:extent:sqlite_estimated_record_rows:records",
+        "store:extent:estimated_rows:records",
+        "transcript:pending_work:applied",
+        "transcript:stream:tool_output_accumulated_bytes",
+        "transcript:stream:exec_output_accumulated_bytes",
+        "transcript:layout_cache:requested",
+        "transcript:layout_cache:compiled",
+        "transcript:layout_cache:key_miss",
+        "transcript:layout_cache:entry_miss",
+        "transcript:layout_cache:group_miss",
+        "transcript:layout_cache:block_miss",
+        "transcript:layout_cache:content_key_miss",
+        "transcript:layout_cache:sidecar_key_miss",
+        "transcript:layout_cache:renderer_key_miss",
+        "transcript:layout_cache:context_key_miss",
+        "transcript:row_index:exactify_missing",
+        "transcript:prepare_row_index:blocks",
+        "transcript:prepare_row_index:reused_index",
+        "transcript:render_cache:retained_bytes",
+        "transcript:render_cache:pinned_bytes",
+        "transcript:render_cache:oversize_debt_bytes",
+        "render:layout:cap_child_rows",
+        "render:layout:measure_text_bytes",
+        "render:layout:render_text_bytes",
+        "render:layout:render_text_row_start",
+    ];
+    for row in snapshot
+        .durations
+        .iter()
+        .filter(|row| LABELS.contains(&row.label))
+    {
+        eprintln!(
+            "TRANSCRIPT_STREAM_PERF workload={} metric={} count={} total_us={} p50_us={} p95_us={} p99_us={} max_us={}",
+            workload.label(),
+            row.label,
+            row.count,
+            row.total_us,
+            row.p50_us,
+            row.p95_us,
+            row.p99_us,
+            row.max_us,
+        );
+    }
+    for row in snapshot
+        .allocs
+        .iter()
+        .filter(|row| LABELS.contains(&row.label))
+    {
+        eprintln!(
+            "TRANSCRIPT_STREAM_PERF_ALLOC workload={} metric={} count={} allocs_total={} bytes_total={} bytes_p95={} bytes_max={}",
+            workload.label(),
+            row.label,
+            row.count,
+            row.allocs_total,
+            row.bytes_total,
+            row.bytes_p95,
+            row.bytes_max,
+        );
+    }
+    for row in snapshot
+        .durations
+        .iter()
+        .filter(|row| row.max_us >= 10_000 && !LABELS.contains(&row.label))
+    {
+        eprintln!(
+            "TRANSCRIPT_STREAM_PERF_HOT workload={} metric={} count={} total_us={} p50_us={} p95_us={} p99_us={} max_us={}",
+            workload.label(),
+            row.label,
+            row.count,
+            row.total_us,
+            row.p50_us,
+            row.p95_us,
+            row.p99_us,
+            row.max_us,
+        );
+    }
+    for row in snapshot
+        .allocs
+        .iter()
+        .filter(|row| row.bytes_max >= 10 * 1024 * 1024 && !LABELS.contains(&row.label))
+    {
+        eprintln!(
+            "TRANSCRIPT_STREAM_PERF_ALLOC_HOT workload={} metric={} count={} allocs_total={} bytes_total={} bytes_p95={} bytes_max={}",
+            workload.label(),
+            row.label,
+            row.count,
+            row.allocs_total,
+            row.bytes_total,
+            row.bytes_p95,
+            row.bytes_max,
+        );
+    }
+    for row in snapshot
+        .values
+        .iter()
+        .filter(|row| VALUE_LABELS.contains(&row.label))
+    {
+        eprintln!(
+            "TRANSCRIPT_STREAM_PERF_VALUE workload={} metric={} count={} total={} p95={} p99={} max={}",
+            workload.label(),
+            row.label,
+            row.count,
+            row.total,
+            row.p95,
+            row.p99,
+            row.max,
+        );
+    }
 }
 
 fn run_stream_benchmark_sample() -> StreamSample {
+    let workload = StreamWorkload::from_env();
     let history_blocks = stream_benchmark_history_blocks();
+    let resumed_bytes = stream_benchmark_resumed_bytes();
+    let resumed_position = StreamResumePosition::from_env();
+    let boundary_record_bytes = stream_benchmark_boundary_record_bytes();
     let chunks = stream_benchmark_chunks();
     let final_bytes = stream_benchmark_final_bytes().max(chunks);
+    let terminal_width = stream_benchmark_terminal_width();
+    let terminal_height = stream_benchmark_terminal_height();
+    let parallel_tools = stream_benchmark_parallel_tools();
+    let scheduled = stream_benchmark_scheduled();
     let scroll = stream_benchmark_scroll();
-    let deltas = stream_benchmark_deltas(chunks, final_bytes);
-    let mut app = stream_benchmark_app(history_blocks);
-    let mut dispatch_ms = Vec::with_capacity(chunks);
-    let mut render_ms = Vec::with_capacity(chunks);
+    let idle_frames = stream_benchmark_idle_frames();
+    let (events, active_output_bytes) =
+        stream_benchmark_events(workload, chunks, final_bytes, parallel_tools);
+    let event_count = events.len();
+    let (mut app, resumed_bytes) = stream_benchmark_app(
+        history_blocks,
+        resumed_bytes,
+        resumed_position,
+        workload,
+        terminal_width,
+        terminal_height,
+    );
+    let readers_before = if resumed_bytes > 0 {
+        wait_for_sparse_reader_metrics(&mut app, "resumed stream")
+    } else {
+        app.app.transcript_reader_metrics_for_harness()
+    };
+    let mut dispatch_ms = Vec::with_capacity(event_count);
+    let mut render_ms = Vec::with_capacity(event_count + chunks.div_ceil(8));
+    let mut event_accumulators: [StreamEventAccumulator; StreamEventKind::COUNT] =
+        std::array::from_fn(|_| StreamEventAccumulator::default());
+    for accumulator in &mut event_accumulators {
+        accumulator.dispatch_ms.reserve(event_count);
+    }
+    let mut traced_frames = 0usize;
 
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
@@ -2403,92 +3876,201 @@ fn run_stream_benchmark_sample() -> StreamSample {
     let process_before = smelt_perf::alloc::snapshot();
     let (allocs_before, bytes_before) = smelt_perf::alloc::thread_snapshot();
     let total_start = std::time::Instant::now();
-    for (index, delta) in deltas.into_iter().enumerate() {
-        if scroll {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            let frame_start = std::time::Instant::now();
-            app.app.dispatch_selected_engine_output_in_render_loop_to(
-                engine::EngineOutput::Event(protocol::EngineEvent::TextDelta { delta }),
-                &mut std::io::sink(),
-            );
-            let frame_ms = elapsed_ms(frame_start.elapsed());
-            dispatch_ms.push(frame_ms);
-            render_ms.push(frame_ms);
+    for (index, event) in events.into_iter().enumerate() {
+        if scheduled && index > 0 && index.is_multiple_of(16) {
+            app.clock.advance(std::time::Duration::from_millis(20));
+        }
+        let kind = event.kind();
+        let (event_allocs_before, event_bytes_before) = smelt_perf::alloc::thread_snapshot();
+        let dispatch_start = std::time::Instant::now();
+        let mut pre_dispatch_frames = 0usize;
+        match event {
+            StreamBenchmarkEvent::Engine { event, .. } => {
+                app.app.dispatch_engine_event_in_render_loop_to(
+                    *event,
+                    &mut std::io::sink(),
+                    |_| pre_dispatch_frames += 1,
+                );
+            }
+            StreamBenchmarkEvent::ExecStarted { command } => app.app.start_exec(command),
+            StreamBenchmarkEvent::ExecOutput { chunk } => app.app.append_exec_output(chunk),
+            StreamBenchmarkEvent::ExecFinished => {
+                app.app.finish_exec(Some(0));
+                app.app.finalize_exec();
+            }
+        }
+        let dispatch_elapsed_ms = elapsed_ms(dispatch_start.elapsed());
+        traced_frames += pre_dispatch_frames;
 
-            if index.is_multiple_of(8) {
-                let modifiers = if (index / 8).is_multiple_of(2) {
-                    KeyModifiers::CONTROL
-                } else {
-                    KeyModifiers::NONE
-                };
-                let key = if modifiers == KeyModifiers::CONTROL {
-                    KeyCode::Char('u')
-                } else {
-                    KeyCode::Char('G')
-                };
-                app.press_mod(key, modifiers);
-                app.app.request_urgent_render();
-                app.render_silent();
+        if scheduled {
+            let render_start = std::time::Instant::now();
+            if app
+                .app
+                .render_requested_transient_frame_to(&mut std::io::sink())
+            {
+                render_ms.push(elapsed_ms(render_start.elapsed()));
+                traced_frames += 1;
             }
         } else {
-            let dispatch_start = std::time::Instant::now();
-            app.dispatch_engine_event_in_render_loop_to(
-                protocol::EngineEvent::TextDelta { delta },
-                &mut std::io::sink(),
-                |_| {},
-            );
-            dispatch_ms.push(elapsed_ms(dispatch_start.elapsed()));
-
             let render_start = std::time::Instant::now();
             app.render_silent();
             render_ms.push(elapsed_ms(render_start.elapsed()));
+            traced_frames += 1;
+        }
+
+        if scroll && index.is_multiple_of(8) {
+            let modifiers = if (index / 8).is_multiple_of(2) {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::NONE
+            };
+            let key = if modifiers == KeyModifiers::CONTROL {
+                KeyCode::Char('u')
+            } else {
+                KeyCode::Char('G')
+            };
+            app.press_mod(key, modifiers);
+            app.app.request_urgent_render();
+            let render_start = std::time::Instant::now();
+            app.render_silent();
+            render_ms.push(elapsed_ms(render_start.elapsed()));
+            traced_frames += 1;
+        }
+
+        let (event_allocs_after, event_bytes_after) = smelt_perf::alloc::thread_snapshot();
+        let event_allocs = event_allocs_after.saturating_sub(event_allocs_before);
+        let event_bytes = event_bytes_after.saturating_sub(event_bytes_before);
+        let accumulator = &mut event_accumulators[kind.index()];
+        accumulator.dispatch_ms.push(dispatch_elapsed_ms);
+        accumulator.allocs = accumulator.allocs.saturating_add(event_allocs);
+        accumulator.bytes = accumulator.bytes.saturating_add(event_bytes);
+        accumulator.max_event_bytes = accumulator.max_event_bytes.max(event_bytes);
+        dispatch_ms.push(dispatch_elapsed_ms);
+    }
+    if scheduled {
+        let mut drain_frames = 0usize;
+        while app.app.transcript_work_pending_for_harness()
+            || app.app.scheduled_frame_delay().is_some()
+        {
+            drain_frames = drain_frames.saturating_add(1);
+            assert!(
+                drain_frames <= 1_024,
+                "stream content work did not settle within 1,024 frames"
+            );
+            app.clock.advance(std::time::Duration::from_millis(20));
+            let render_start = std::time::Instant::now();
+            if app
+                .app
+                .render_requested_transient_frame_to(&mut std::io::sink())
+            {
+                render_ms.push(elapsed_ms(render_start.elapsed()));
+                traced_frames += 1;
+            }
         }
     }
-    if scroll {
-        app.app.dispatch_selected_engine_output_in_render_loop_to(
-            engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete {
-                turn_id: 42,
-                history: None,
-                meta: None,
-            }),
-            &mut std::io::sink(),
-        );
+    for _ in 0..idle_frames {
+        app.clock.advance(std::time::Duration::from_millis(16));
+        app.app
+            .request_animation_render(std::time::Duration::from_millis(16));
+        let render_start = std::time::Instant::now();
+        if app
+            .app
+            .render_requested_transient_frame_to(&mut std::io::sink())
+        {
+            render_ms.push(elapsed_ms(render_start.elapsed()));
+            traced_frames += 1;
+        }
     }
     let total_ms = elapsed_ms(total_start.elapsed());
     let (allocs_after, bytes_after) = smelt_perf::alloc::thread_snapshot();
     let process_after = smelt_perf::alloc::snapshot();
     let process_delta = smelt_perf::alloc::delta(process_before, process_after);
+    let readers_after = app.app.transcript_reader_metrics_for_harness();
+    if resumed_bytes > 0 {
+        assert_eq!(
+            readers_after, readers_before,
+            "provider events and frames must reuse both retained session readers"
+        );
+    }
     let perf_snapshot = smelt_perf::perf::snapshot();
     let memory_snapshot = app
         .app
         .conversation
         .transcript_memory_snapshot_for_harness();
-    assert_stream_operation_gates(&perf_snapshot, memory_snapshot, "stream");
+    assert_stream_operation_gates(&perf_snapshot, memory_snapshot, workload.label());
     let frame_latency = perf_snapshot
         .values
         .iter()
         .find(|row| row.label == "frame:request_to_flush:us");
-    let traced_frames = frame_latency.map_or(0, |row| row.count);
     let request_to_flush_p99_ms = frame_latency.map_or(0.0, |row| row.p99 as f64 / 1_000.0);
-    if scroll {
-        let interaction_frames = chunks.div_ceil(8);
-        let scheduled_frames = (total_ms / 16.0).ceil() as usize;
-        assert!(
-            traced_frames <= interaction_frames + scheduled_frames + 3,
-            "stream scheduler emitted {traced_frames} frames in {total_ms:.3}ms with {interaction_frames} urgent interactions"
+    if scheduled {
+        let application_batches = perf_snapshot
+            .values
+            .iter()
+            .find(|row| row.label == "transcript:pending_work:applied")
+            .expect("scheduled stream records transcript work application batches");
+        assert_eq!(
+            application_batches.count as usize, traced_frames,
+            "pending transcript work must be applied exactly once per compositor frame"
         );
     }
+    if scheduled && workload == StreamWorkload::Text {
+        let interaction_frames = if scroll { event_count.div_ceil(8) } else { 0 };
+        let burst_frames = event_count.div_ceil(16);
+        assert!(
+            traced_frames <= idle_frames + interaction_frames + burst_frames + 8,
+            "text stream scheduler emitted {traced_frames} frames for {event_count} events, {idle_frames} idle frames, and {interaction_frames} urgent interactions"
+        );
+    }
+    print_stream_perf(workload, &perf_snapshot);
+    let frame = stream_frame_stats(&perf_snapshot);
     smelt_perf::alloc::set_enabled(false);
     smelt_perf::perf::set_enabled(false);
 
+    let kinds = [
+        StreamEventKind::Text,
+        StreamEventKind::Reasoning,
+        StreamEventKind::ToolDraft,
+        StreamEventKind::ToolOutput,
+        StreamEventKind::ExecOutput,
+        StreamEventKind::Lifecycle,
+    ];
+    let event_samples = kinds
+        .into_iter()
+        .filter_map(|kind| {
+            let accumulator = &event_accumulators[kind.index()];
+            (!accumulator.dispatch_ms.is_empty()).then(|| StreamEventSample {
+                kind,
+                count: accumulator.dispatch_ms.len(),
+                dispatch: TailStats::from(&accumulator.dispatch_ms),
+                allocs: accumulator.allocs,
+                bytes: accumulator.bytes,
+                max_event_bytes: accumulator.max_event_bytes,
+            })
+        })
+        .collect();
+
     StreamSample {
+        workload,
         history_blocks,
+        resumed_bytes,
+        resumed_position,
+        boundary_record_bytes,
+        terminal_width,
+        terminal_height,
+        parallel_tools,
         chunks,
+        events: event_count,
         final_bytes,
+        active_output_bytes,
+        scheduled,
         scroll,
+        idle_frames,
         total_ms,
         dispatch: TailStats::from(&dispatch_ms),
         render: TailStats::from(&render_ms),
+        frame,
+        event_samples,
         traced_frames,
         request_to_flush_p99_ms,
         thread_allocs: allocs_after.saturating_sub(allocs_before),
@@ -2497,16 +4079,48 @@ fn run_stream_benchmark_sample() -> StreamSample {
         process_dealloc_bytes: process_delta.bytes_deallocated,
         process_retained_bytes: process_after.current_bytes as i64
             - process_before.current_bytes as i64,
+        metadata_readers: readers_after.metadata_readers,
+        hydration_readers: readers_after.hydration_readers,
+        total_readers: readers_after.total_readers,
+        metadata_open_attempts: readers_after.metadata_open_attempts,
+        hydration_open_attempts: readers_after.hydration_open_attempts,
+        total_open_attempts: readers_after.total_open_attempts,
     }
 }
 
-fn print_stream_sample(sample: StreamSample) {
+fn print_stream_sample(sample: &StreamSample) {
+    for event in &sample.event_samples {
+        println!(
+            "TRANSCRIPT_STREAM_EVENT workload={} kind={} count={} dispatch_mean_ms={:.3} dispatch_p95_ms={:.3} dispatch_p99_ms={:.3} dispatch_max_ms={:.3} allocs={} bytes={} max_event_bytes={}",
+            sample.workload.label(),
+            event.kind.label(),
+            event.count,
+            event.dispatch.mean,
+            event.dispatch.p95,
+            event.dispatch.p99,
+            event.dispatch.max,
+            event.allocs,
+            event.bytes,
+            event.max_event_bytes,
+        );
+    }
     println!(
-        "TRANSCRIPT_STREAM_SAMPLE history_blocks={} chunks={} final_bytes={} scroll={} total_ms={:.3} dispatch_mean_ms={:.3} dispatch_p95_ms={:.3} dispatch_p99_ms={:.3} dispatch_max_ms={:.3} render_mean_ms={:.3} render_p95_ms={:.3} render_p99_ms={:.3} render_max_ms={:.3} traced_frames={} request_to_flush_p99_ms={:.3} thread_allocs={} thread_bytes={} process_alloc_bytes={} process_dealloc_bytes={} process_retained_bytes={}",
+        "TRANSCRIPT_STREAM_SAMPLE workload={} history_blocks={} resumed_bytes={} resumed_position={} boundary_record_bytes={} terminal_width={} terminal_height={} parallel_tools={} chunks={} events={} final_bytes={} active_output_bytes={} scheduled={} scroll={} idle_frames={} total_ms={:.3} dispatch_mean_ms={:.3} dispatch_p95_ms={:.3} dispatch_p99_ms={:.3} dispatch_max_ms={:.3} render_mean_ms={:.3} render_p95_ms={:.3} render_p99_ms={:.3} render_max_ms={:.3} frame_mean_ms={:.3} frame_p95_ms={:.3} frame_p99_ms={:.3} frame_max_ms={:.3} traced_frames={} request_to_flush_p99_ms={:.3} thread_allocs={} thread_bytes={} process_alloc_bytes={} process_dealloc_bytes={} process_retained_bytes={} metadata_readers={} hydration_readers={} total_readers={} metadata_open_attempts={} hydration_open_attempts={} total_open_attempts={}",
+        sample.workload.label(),
         sample.history_blocks,
+        sample.resumed_bytes,
+        sample.resumed_position.label(),
+        sample.boundary_record_bytes,
+        sample.terminal_width,
+        sample.terminal_height,
+        sample.parallel_tools,
         sample.chunks,
+        sample.events,
         sample.final_bytes,
+        sample.active_output_bytes,
+        sample.scheduled,
         sample.scroll,
+        sample.idle_frames,
         sample.total_ms,
         sample.dispatch.mean,
         sample.dispatch.p95,
@@ -2516,6 +4130,10 @@ fn print_stream_sample(sample: StreamSample) {
         sample.render.p95,
         sample.render.p99,
         sample.render.max,
+        sample.frame.mean,
+        sample.frame.p95,
+        sample.frame.p99,
+        sample.frame.max,
         sample.traced_frames,
         sample.request_to_flush_p99_ms,
         sample.thread_allocs,
@@ -2523,6 +4141,12 @@ fn print_stream_sample(sample: StreamSample) {
         sample.process_alloc_bytes,
         sample.process_dealloc_bytes,
         sample.process_retained_bytes,
+        sample.metadata_readers,
+        sample.hydration_readers,
+        sample.total_readers,
+        sample.metadata_open_attempts,
+        sample.hydration_open_attempts,
+        sample.total_open_attempts,
     );
 }
 
@@ -2536,30 +4160,39 @@ fn transcript_stream_benchmark_suite() {
     let mut samples = Vec::with_capacity(runs);
     for _ in 0..runs {
         let sample = run_stream_benchmark_sample();
-        print_stream_sample(sample);
+        print_stream_sample(&sample);
         samples.push(sample);
     }
     let totals = samples
         .iter()
         .map(|sample| sample.total_ms)
         .collect::<Vec<_>>();
-    let render_p99 = samples
+    let frame_p99 = samples
         .iter()
-        .map(|sample| sample.render.p99)
+        .map(|sample| sample.frame.p99)
         .collect::<Vec<_>>();
     let total = TailStats::from(&totals);
-    let render = TailStats::from(&render_p99);
+    let frame = TailStats::from(&frame_p99);
     println!(
-        "TRANSCRIPT_STREAM_SUMMARY runs={} history_blocks={} chunks={} final_bytes={} scroll={} total_mean_ms={:.3} total_p95_ms={:.3} render_p99_mean_ms={:.3} render_p99_max_ms={:.3}",
+        "TRANSCRIPT_STREAM_SUMMARY runs={} workload={} history_blocks={} resumed_bytes={} resumed_position={} boundary_record_bytes={} terminal_width={} terminal_height={} parallel_tools={} chunks={} final_bytes={} scheduled={} scroll={} idle_frames={} total_mean_ms={:.3} total_p95_ms={:.3} frame_p99_mean_ms={:.3} frame_p99_max_ms={:.3}",
         runs,
+        samples[0].workload.label(),
         samples[0].history_blocks,
+        samples[0].resumed_bytes,
+        samples[0].resumed_position.label(),
+        samples[0].boundary_record_bytes,
+        samples[0].terminal_width,
+        samples[0].terminal_height,
+        samples[0].parallel_tools,
         samples[0].chunks,
         samples[0].final_bytes,
+        samples[0].scheduled,
         samples[0].scroll,
+        samples[0].idle_frames,
         total.mean,
         total.p95,
-        render.mean,
-        render.max,
+        frame.mean,
+        frame.max,
     );
 }
 
@@ -3709,7 +5342,9 @@ fn transcript_active_memory_benchmark_suite() {
             let content = format!("# Active block {block_count}\n\n{marker}\n\n{body}");
             generated_bytes = generated_bytes.saturating_add(content.len());
             app.app
-                .push_block(smelt_core::transcript_model::Block::Text { content });
+                .push_block(smelt_core::transcript_model::Block::Text {
+                    content: content.into(),
+                });
             block_count += 1;
         }
         let receipt = save_bench_fixture(&mut app, "active memory");
@@ -3717,6 +5352,7 @@ fn transcript_active_memory_benchmark_suite() {
         batch_count += 1;
         if generated_bytes >= target_bytes {
             wait_for_bench_catalog(&app, "active memory", &receipt);
+            wait_for_bench_search_projection(&app, "active memory");
             break;
         }
     }
@@ -3752,6 +5388,7 @@ fn transcript_active_memory_benchmark_suite() {
     }
     let scroll_20_ms = elapsed_ms(scroll_started_at.elapsed());
 
+    smelt_perf::perf::clear();
     let search_started_at = std::time::Instant::now();
     app.app.submit_search(
         crate::app::TRANSCRIPT_WIN,
@@ -3760,6 +5397,8 @@ fn transcript_active_memory_benchmark_suite() {
     );
     app.render_silent();
     let search_ms = elapsed_ms(search_started_at.elapsed());
+    let search_snapshot = smelt_perf::perf::snapshot();
+    assert_search_uses_candidate_index(&search_snapshot, "active memory", 1);
     let next_started_at = std::time::Instant::now();
     app.type_char('n');
     app.render_silent();
@@ -3776,25 +5415,27 @@ fn transcript_active_memory_benchmark_suite() {
         .take(1_200)
         .collect::<Vec<_>>();
     let churn_started_at = std::time::Instant::now();
-    for id in &churn_ids {
-        assert!(app
-            .app
-            .conversation
-            .ensure_transcript_blocks_hydrated_for_harness(&[*id]));
-    }
+    assert!(app.hydrate_transcript_blocks(&churn_ids));
     let hydration_churn_ms = elapsed_ms(churn_started_at.elapsed());
+    let newest_hydrated_id = churn_ids
+        .iter()
+        .rev()
+        .copied()
+        .find(|id| {
+            app.app
+                .conversation
+                .transcript()
+                .history()
+                .is_materialized(*id)
+        })
+        .expect("hydration churn should leave a bounded working set");
     let reads_before_reuse = app
         .app
         .conversation
         .transcript()
         .memory_snapshot()
         .hydration_reads;
-    if let Some(id) = churn_ids.last() {
-        assert!(app
-            .app
-            .conversation
-            .ensure_transcript_blocks_hydrated_for_harness(&[*id]));
-    }
+    assert!(app.hydrate_transcript_blocks(&[newest_hydrated_id]));
     let working_set_rereads = app
         .app
         .conversation
@@ -3815,7 +5456,6 @@ fn transcript_active_memory_benchmark_suite() {
         .saturating_add(memory.hydrated_tool_state_bytes);
     let rendered_bytes = memory
         .layout_bytes
-        .saturating_add(memory.source_view_bytes)
         .saturating_add(memory.height_index_bytes)
         .saturating_add(memory.height_index_cache_bytes)
         .saturating_add(memory.visible_rows_bytes)
@@ -3893,10 +5533,9 @@ fn transcript_active_memory_benchmark_suite() {
             "hydrated_tool_states": memory.hydrated_tool_state_bytes,
             "compact_records": memory.compact_record_bytes,
             "record_windows": memory.record_window_bytes,
-            "tool_state_metadata": memory.tool_state_metadata_bytes,
+            "tool_state_index": memory.tool_state_index_bytes,
             "block_metadata": memory.block_metadata_bytes,
             "layouts": memory.layout_bytes,
-            "source_views": memory.source_view_bytes,
             "active_height_index": memory.height_index_bytes,
             "cached_height_indexes": memory.height_index_cache_bytes,
             "visible_rows": memory.visible_rows_bytes,

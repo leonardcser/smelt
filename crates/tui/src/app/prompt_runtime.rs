@@ -14,6 +14,7 @@ pub(crate) struct PromptRuntime {
     history: History,
     input: PromptState,
     queues: InputQueues,
+    queue_revision: u64,
     last_published_text: String,
     height: PromptHeightState,
     placeholders: PlaceholderState,
@@ -44,6 +45,7 @@ impl PromptRuntime {
             history,
             input,
             queues: InputQueues::default(),
+            queue_revision: 0,
             last_published_text: String::new(),
             height: PromptHeightState::default(),
             placeholders,
@@ -165,26 +167,45 @@ impl PromptRuntime {
     }
 
     pub(crate) fn try_queue_turn(&mut self, queued: QueuedInput) -> bool {
-        self.queues.try_push_turn(queued)
+        let queued = self.queues.try_push_turn(queued);
+        if queued {
+            self.bump_queue_revision();
+        }
+        queued
     }
 
     pub(crate) fn try_queue_request(&mut self, queued: QueuedInput) -> bool {
-        self.queues.try_push_request(queued)
+        let queued = self.queues.try_push_request(queued);
+        if queued {
+            self.bump_queue_revision();
+        }
+        queued
     }
 
     pub(crate) fn queue_front(&mut self, stage: QueueStage, queued: QueuedInput) {
         self.queues.push_front(stage, queued);
+        self.bump_queue_revision();
     }
 
     pub(crate) fn pop_next_for_turn(&mut self) -> Option<(QueueStage, QueuedInput)> {
-        self.queues.pop_next_for_turn_with_stage()
+        let queued = self.queues.pop_next_for_turn_with_stage();
+        if queued.is_some() {
+            self.bump_queue_revision();
+        }
+        queued
     }
 
     pub(crate) fn promote_turn_to_request(&mut self) -> Option<&QueuedInput> {
+        if self.queues.front_turn_is_request() {
+            self.bump_queue_revision();
+        }
         self.queues.promote_turn_to_request()
     }
 
     pub(super) fn suspend_for_interrupt(&mut self) -> InterruptedQueues {
+        if !self.queues.is_empty() {
+            self.bump_queue_revision();
+        }
         let (unsteer_count, next, remaining) = self.queues.take_for_interrupt();
         InterruptedQueues {
             unsteer_count,
@@ -197,20 +218,42 @@ impl PromptRuntime {
         &mut self,
         interrupted: InterruptedQueues,
     ) -> Option<QueuedInput> {
+        let queue_changed = !self.queues.is_empty() || !interrupted.remaining.is_empty();
         self.queues = interrupted.remaining;
+        if queue_changed {
+            self.bump_queue_revision();
+        }
         interrupted.next
     }
 
     pub(crate) fn drain_for_prompt(&mut self) -> (usize, Vec<QueuedInput>) {
+        if !self.queues.is_empty() {
+            self.bump_queue_revision();
+        }
         self.queues.drain_for_prompt()
     }
 
     pub(crate) fn acknowledge_requests(&mut self, count: usize) -> Vec<QueuedInput> {
-        self.queues.drain_request_ack(count)
+        let acknowledged = self.queues.drain_request_ack(count);
+        if !acknowledged.is_empty() {
+            self.bump_queue_revision();
+        }
+        acknowledged
     }
 
     pub(crate) fn clear_queue(&mut self) {
-        self.queues.clear();
+        if !self.queues.is_empty() {
+            self.queues.clear();
+            self.bump_queue_revision();
+        }
+    }
+
+    pub(crate) fn queue_revision(&self) -> u64 {
+        self.queue_revision
+    }
+
+    fn bump_queue_revision(&mut self) {
+        self.queue_revision = self.queue_revision.wrapping_add(1);
     }
 
     pub(crate) fn queue_is_empty(&self) -> bool {

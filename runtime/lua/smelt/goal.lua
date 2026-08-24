@@ -19,7 +19,9 @@ if type(state.next_id) ~= "number" then state.next_id = 0 end
 
 local observed_context_sessions = {}
 local auto_continue = require("smelt.auto_continue")
+local headerline = nil
 local setup_done = false
+local subscriptions = {}
 
 local function trim(s)
   return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -127,6 +129,7 @@ local function store_goal(goal)
   sessions()[session_id()] = normalize_goal(goal)
   state.save()
   auto_continue.bump_generation()
+  if headerline then headerline.invalidate() end
 end
 
 local function is_active(goal)
@@ -391,7 +394,7 @@ local function banner_row(goal, width)
 end
 
 local function register_headerline()
-  local headerline = require("smelt.headerline")
+  headerline = require("smelt.headerline")
   headerline.add("goal", {
     visible = function()
       return is_visible(session_goal())
@@ -690,7 +693,8 @@ function M.setup()
   register_headerline()
   sync_context_note()
 
-  smelt.signal.subscribe("session_epoch", sync_context_note)
+  subscriptions[#subscriptions + 1] = smelt.signal.subscribe(
+    "session_epoch", sync_context_note)
   auto_continue.set_provider(function()
     return M.auto_continue_request()
   end)

@@ -67,11 +67,22 @@ pub fn run(args: Vec<String>) {
     let mut stream = false;
     let mut stream_only = false;
     let mut stream_history: Option<String> = None;
+    let mut stream_resumed_bytes: Option<String> = None;
+    let mut stream_resumed_position: Option<String> = None;
+    let mut stream_boundary_record_bytes: Option<String> = None;
     let mut stream_chunks: Option<String> = None;
     let mut stream_bytes: Option<String> = None;
+    let mut stream_width: Option<String> = None;
+    let mut stream_height: Option<String> = None;
+    let mut stream_parallel_tools: Option<String> = None;
+    let mut stream_workload: Option<String> = None;
+    let mut stream_scheduled = false;
     let mut stream_scroll = false;
+    let mut stream_idle_frames: Option<String> = None;
     let mut tall_write_only = false;
     let mut tall_write_lines: Option<String> = None;
+    let mut tall_diff_only = false;
+    let mut tall_diff_lines: Option<String> = None;
     let mut no_warmup = false;
 
     let mut iter = args.into_iter();
@@ -117,6 +128,29 @@ pub fn run(args: Vec<String>) {
                 stream = true;
                 stream_history = Some(take_positive_usize_arg(&mut iter, "--stream-history"));
             }
+            "--stream-resumed-bytes" => {
+                stream = true;
+                stream_resumed_bytes =
+                    Some(take_positive_usize_arg(&mut iter, "--stream-resumed-bytes"));
+            }
+            "--stream-resumed-position" => {
+                stream = true;
+                let position = take_required_arg(&mut iter, "--stream-resumed-position");
+                if !matches!(position.as_str(), "top" | "middle" | "tail") {
+                    eprintln!(
+                        "bench-transcript-layout: --stream-resumed-position must be top, middle, or tail"
+                    );
+                    std::process::exit(2);
+                }
+                stream_resumed_position = Some(position);
+            }
+            "--stream-boundary-record-bytes" => {
+                stream = true;
+                stream_boundary_record_bytes = Some(take_positive_usize_arg(
+                    &mut iter,
+                    "--stream-boundary-record-bytes",
+                ));
+            }
             "--stream-chunks" => {
                 stream = true;
                 stream_chunks = Some(take_positive_usize_arg(&mut iter, "--stream-chunks"));
@@ -125,9 +159,48 @@ pub fn run(args: Vec<String>) {
                 stream = true;
                 stream_bytes = Some(take_positive_usize_arg(&mut iter, "--stream-bytes"));
             }
+            "--stream-width" => {
+                stream = true;
+                stream_width = Some(take_positive_usize_arg(&mut iter, "--stream-width"));
+            }
+            "--stream-height" => {
+                stream = true;
+                stream_height = Some(take_positive_usize_arg(&mut iter, "--stream-height"));
+            }
+            "--stream-parallel-tools" => {
+                stream = true;
+                stream_parallel_tools = Some(take_positive_usize_arg(
+                    &mut iter,
+                    "--stream-parallel-tools",
+                ));
+            }
+            "--stream-workload" => {
+                stream = true;
+                let workload = take_required_arg(&mut iter, "--stream-workload");
+                if !matches!(
+                    workload.as_str(),
+                    "text" | "bash" | "mixed" | "exec" | "write-draft" | "explore-group"
+                ) {
+                    eprintln!(
+                        "bench-transcript-layout: --stream-workload must be text, bash, mixed, exec, write-draft, or explore-group"
+                    );
+                    std::process::exit(2);
+                }
+                stream_workload = Some(workload);
+            }
+            "--stream-scheduled" => {
+                stream = true;
+                stream_scheduled = true;
+            }
             "--stream-scroll" => {
                 stream = true;
                 stream_scroll = true;
+            }
+            "--stream-idle-frames" => {
+                stream = true;
+                stream_scheduled = true;
+                stream_idle_frames =
+                    Some(take_positive_usize_arg(&mut iter, "--stream-idle-frames"));
             }
             "--save-request-operations" => {
                 hot_path = true;
@@ -158,6 +231,11 @@ pub fn run(args: Vec<String>) {
             "--tall-write-only" => tall_write_only = true,
             "--tall-write-lines" => {
                 tall_write_lines = Some(take_positive_usize_arg(&mut iter, "--tall-write-lines"));
+            }
+            "--tall-diff-only" => tall_diff_only = true,
+            "--tall-diff-lines" => {
+                tall_diff_only = true;
+                tall_diff_lines = Some(take_positive_usize_arg(&mut iter, "--tall-diff-lines"));
             }
             "--scale-500mb" => {
                 resumed_wheel = true;
@@ -217,6 +295,12 @@ pub fn run(args: Vec<String>) {
         );
         std::process::exit(2);
     }
+    if tall_write_only && tall_diff_only {
+        eprintln!(
+            "bench-transcript-layout: --tall-write-only and --tall-diff-only are mutually exclusive"
+        );
+        std::process::exit(2);
+    }
 
     let mut env = vec![("SMELT_TRANSCRIPT_BENCH_RUNS", runs.clone())];
     if let Some(workloads) = workloads {
@@ -236,6 +320,12 @@ pub fn run(args: Vec<String>) {
     }
     if let Some(lines) = tall_write_lines {
         env.push(("SMELT_TRANSCRIPT_TALL_WRITE_LINES", lines));
+    }
+    if tall_diff_only {
+        env.push(("SMELT_TRANSCRIPT_TALL_DIFF", "1".into()));
+    }
+    if let Some(lines) = tall_diff_lines {
+        env.push(("SMELT_TRANSCRIPT_TALL_DIFF_LINES", lines));
     }
     if hot_path {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH", "1".to_string()));
@@ -264,14 +354,41 @@ pub fn run(args: Vec<String>) {
     if let Some(history) = stream_history {
         env.push(("SMELT_TRANSCRIPT_STREAM_HISTORY", history));
     }
+    if let Some(bytes) = stream_resumed_bytes {
+        env.push(("SMELT_TRANSCRIPT_STREAM_RESUMED_BYTES", bytes));
+    }
+    if let Some(position) = stream_resumed_position {
+        env.push(("SMELT_TRANSCRIPT_STREAM_RESUMED_POSITION", position));
+    }
+    if let Some(bytes) = stream_boundary_record_bytes {
+        env.push(("SMELT_TRANSCRIPT_STREAM_BOUNDARY_RECORD_BYTES", bytes));
+    }
     if let Some(chunks) = stream_chunks {
         env.push(("SMELT_TRANSCRIPT_STREAM_CHUNKS", chunks));
     }
     if let Some(bytes) = stream_bytes {
         env.push(("SMELT_TRANSCRIPT_STREAM_BYTES", bytes));
     }
+    if let Some(width) = stream_width {
+        env.push(("SMELT_TRANSCRIPT_STREAM_WIDTH", width));
+    }
+    if let Some(height) = stream_height {
+        env.push(("SMELT_TRANSCRIPT_STREAM_HEIGHT", height));
+    }
+    if let Some(parallel_tools) = stream_parallel_tools {
+        env.push(("SMELT_TRANSCRIPT_STREAM_PARALLEL_TOOLS", parallel_tools));
+    }
+    if let Some(workload) = stream_workload {
+        env.push(("SMELT_TRANSCRIPT_STREAM_WORKLOAD", workload));
+    }
+    if stream_scheduled {
+        env.push(("SMELT_TRANSCRIPT_STREAM_SCHEDULED", "1".into()));
+    }
     if stream_scroll {
         env.push(("SMELT_TRANSCRIPT_STREAM_SCROLL", "1".into()));
+    }
+    if let Some(frames) = stream_idle_frames {
+        env.push(("SMELT_TRANSCRIPT_STREAM_IDLE_FRAMES", frames));
     }
 
     eprintln!(
@@ -287,6 +404,8 @@ pub fn run(args: Vec<String>) {
             "transcript_stream_benchmark_suite"
         } else if tall_write_only {
             "transcript_layout_tall_write_file_benchmark_suite"
+        } else if tall_diff_only {
+            "transcript_layout_tall_retained_diff_benchmark_suite"
         } else {
             "transcript_layout_"
         },
@@ -352,7 +471,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-chunks N] [--stream-bytes N] [--stream-scroll] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--tall-diff-only] [--tall-diff-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-resumed-bytes N] [--stream-resumed-position top|middle|tail] [--stream-boundary-record-bytes N] [--stream-chunks N] [--stream-bytes N] [--stream-width N] [--stream-height N] [--stream-parallel-tools N] [--stream-workload text|bash|mixed|exec|write-draft|explore-group] [--stream-scheduled] [--stream-scroll] [--stream-idle-frames N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -361,6 +480,8 @@ fn print_usage() {
     eprintln!("--skip-nav omits the app-level navigation/search suite for projection-only runs.");
     eprintln!("--tall-write-only runs only the expanded write_file interaction benchmark.");
     eprintln!("--tall-write-lines N sets generated source lines; default is 20000.");
+    eprintln!("--tall-diff-only runs only the retained edit diff rendering benchmark.");
+    eprintln!("--tall-diff-lines N sets generated before/after source lines; default is 20000.");
     eprintln!("--search enables the large app-level transcript search benchmark.");
     eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
     eprintln!("--resume runs the true session resume benchmark after layout/search.");
@@ -377,9 +498,28 @@ fn print_usage() {
     eprintln!("--stream enables real engine-delta plus full-render streaming samples.");
     eprintln!("--stream-only skips unrelated transcript benchmark suites.");
     eprintln!("--stream-history N sets prior transcript blocks; default is 100.");
-    eprintln!("--stream-chunks N sets provider deltas; default is 512.");
-    eprintln!("--stream-bytes N sets final streamed response bytes; default is 16384.");
-    eprintln!("--stream-scroll interleaves transcript navigation with provider deltas.");
+    eprintln!(
+        "--stream-resumed-bytes N persists and sparsely resumes a heterogeneous transcript before streaming."
+    );
+    eprintln!("--stream-resumed-position selects top, middle, or tail; default is tail.");
+    eprintln!(
+        "--stream-boundary-record-bytes N creates large persisted records at an extent boundary."
+    );
+    eprintln!("--stream-chunks N sets streamed delta count; default is 512.");
+    eprintln!("--stream-bytes N sets total streamed payload bytes; default is 16384.");
+    eprintln!("--stream-width N sets terminal columns; default is 100.");
+    eprintln!("--stream-height N sets terminal rows; default is 32.");
+    eprintln!("--stream-parallel-tools N sets explore-group child count; default is 4.");
+    eprintln!(
+        "--stream-workload selects text, provider bash, mixed, local shell-escape, streamed write_file draft, or grouped explore tools."
+    );
+    eprintln!(
+        "--stream-scheduled uses deterministic production frame coalescing without navigation."
+    );
+    eprintln!("--stream-scroll adds transcript navigation to the scheduled workload.");
+    eprintln!(
+        "--stream-idle-frames N renders animation frames after events stop while the turn remains active."
+    );
     eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
     eprintln!("--save-request-only skips unrelated transcript layout and navigation suites.");
     eprintln!("--save-request-operations CSV runs only named hot-path operations.");

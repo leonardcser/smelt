@@ -79,9 +79,12 @@ pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
 
 pub use diff::{
     build_diff_ir_ext, build_diff_ir_ext_with_base, build_diff_ir_ext_with_source,
-    build_file_view_ir, compute_split_diff, measure_diff_ir, print_diff_ir,
-    print_diff_ir_with_width, print_inline_diff, print_inline_diff_ext, print_split_diff,
-    print_split_diff_side, DiffIr, SplitDiffPlan, SplitSide,
+    build_file_view_ir, build_retained_diff_ir, compute_split_diff, measure_diff_ir,
+    measure_retained_code_block, measure_retained_code_block_edge, measure_retained_file_view,
+    measure_retained_file_view_edge, print_diff_ir, print_diff_ir_with_width, print_inline_diff,
+    print_inline_diff_ext, print_retained_code_block, print_retained_code_block_edge,
+    print_retained_file_view, print_retained_file_view_edge, print_split_diff,
+    print_split_diff_side, DiffIr, RetainedFileViewCache, SplitDiffPlan, SplitSide,
 };
 pub use inline::{
     emit_inline_spans, inline_spans_width, lower_inline_event_lines,
@@ -92,5 +95,5 @@ pub use inline::{
 };
 pub use syntax::{
     lang_to_ext, print_code_lines, print_syntax_file, print_syntax_file_ext, render_code_block,
-    syntax_for_lang, InlineSyntax,
+    syntax_for_lang, InlineSyntax, InlineSyntaxSpan,
 };

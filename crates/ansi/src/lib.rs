@@ -15,12 +15,76 @@ pub struct AnsiSpan {
     pub style: Style,
 }
 
+/// ANSI style state at a resumable logical-line boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnsiState {
+    style: Style,
+}
+
 /// Parse `text` into styled spans, stripping all non-SGR ANSI escapes and
 /// control characters except tab.
 pub fn parse_ansi(text: &str) -> Vec<AnsiSpan> {
-    let mut parser = Parser::default();
+    let mut state = AnsiState::default();
+    parse_ansi_with_state(text, &mut state)
+}
+
+/// Parse one complete logical line, preserving SGR state for the next line.
+pub fn parse_ansi_with_state(text: &str, state: &mut AnsiState) -> Vec<AnsiSpan> {
+    let mut parser = Parser {
+        style: state.style,
+        ..Parser::default()
+    };
     parser.parse(text, false, |_| {});
+    state.style = parser.style;
     parser.finish()
+}
+
+/// Advance only the resumable SGR state without constructing rendered spans.
+///
+/// This is the indexing path for completed transcript lines. It deliberately
+/// ignores text and non-SGR control sequences, matching [`parse_ansi_with_state`]
+/// while performing no allocation.
+pub fn advance_ansi_state(text: &str, state: &mut AnsiState) {
+    let bytes = text.as_bytes();
+    let mut offset = 0usize;
+    while let Some(relative) = bytes[offset..].iter().position(|byte| *byte == b'\x1b') {
+        let escape = offset + relative;
+        let Some(kind) = bytes.get(escape + 1).copied() else {
+            break;
+        };
+        match kind {
+            b'[' => {
+                let params_start = escape + 2;
+                let mut end = params_start;
+                while let Some(byte) = bytes.get(end).copied() {
+                    if (b'@'..=b'~').contains(&byte) {
+                        if byte == b'm' {
+                            state.style = apply_sgr(&text[params_start..end], state.style);
+                        }
+                        end += 1;
+                        break;
+                    }
+                    end += 1;
+                }
+                offset = end;
+            }
+            b']' => {
+                let mut end = escape + 2;
+                while let Some(byte) = bytes.get(end).copied() {
+                    end += 1;
+                    if byte == b'\x07' {
+                        break;
+                    }
+                    if byte == b'\x1b' && bytes.get(end) == Some(&b'\\') {
+                        end += 1;
+                        break;
+                    }
+                }
+                offset = end;
+            }
+            _ => offset = escape + 2,
+        }
+    }
 }
 
 /// Parse newline-delimited ANSI transcript text into styled lines.
@@ -153,17 +217,19 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
         return Style::default();
     }
     let colon_params = params.contains(':');
-    let codes = parse_sgr_params(params);
-    let mut i = 0;
-    while i < codes.len() {
-        match sgr_code(&codes, i) {
+    let mut codes = SgrParams::new(params);
+    while let Some(code) = codes.next() {
+        match sgr_code(code) {
             0 => style = Style::default(),
             1 => style.bold = true,
             2 => style.dim = true,
             3 => style.italic = true,
-            4 if colon_params && i + 1 < codes.len() => {
-                style.underline = sgr_code(&codes, i + 1) != 0;
-                i += 1;
+            4 if colon_params => {
+                if let Some(mode) = codes.next() {
+                    style.underline = sgr_code(mode) != 0;
+                } else {
+                    style.underline = true;
+                }
             }
             4 => style.underline = true,
             7 => style.reverse = true,
@@ -185,18 +251,7 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
             35 => style.fg = Some(Color::DarkMagenta),
             36 => style.fg = Some(Color::DarkCyan),
             37 => style.fg = Some(Color::Grey),
-            38 if sgr_code(&codes, i + 1) == 5 => {
-                if let Some(n) = sgr_value(&codes, i + 2) {
-                    style.fg = Some(Color::AnsiValue(n));
-                    i += 2;
-                }
-            }
-            38 if sgr_code(&codes, i + 1) == 2 => {
-                if let Some((r, g, b, advance)) = sgr_rgb(&codes, i, colon_params) {
-                    style.fg = Some(Color::Rgb { r, g, b });
-                    i += advance;
-                }
-            }
+            38 => apply_extended_color(&mut codes, colon_params, |color| style.fg = Some(color)),
             39 => style.fg = None,
             40 => style.bg = Some(Color::Black),
             41 => style.bg = Some(Color::DarkRed),
@@ -206,18 +261,7 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
             45 => style.bg = Some(Color::DarkMagenta),
             46 => style.bg = Some(Color::DarkCyan),
             47 => style.bg = Some(Color::Grey),
-            48 if sgr_code(&codes, i + 1) == 5 => {
-                if let Some(n) = sgr_value(&codes, i + 2) {
-                    style.bg = Some(Color::AnsiValue(n));
-                    i += 2;
-                }
-            }
-            48 if sgr_code(&codes, i + 1) == 2 => {
-                if let Some((r, g, b, advance)) = sgr_rgb(&codes, i, colon_params) {
-                    style.bg = Some(Color::Rgb { r, g, b });
-                    i += advance;
-                }
-            }
+            48 => apply_extended_color(&mut codes, colon_params, |color| style.bg = Some(color)),
             49 => style.bg = None,
             90 => style.fg = Some(Color::DarkGrey),
             91 => style.fg = Some(Color::Red),
@@ -237,50 +281,97 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
             107 => style.bg = Some(Color::White),
             _ => {}
         }
-        i += 1;
     }
     style
 }
 
-fn parse_sgr_params(params: &str) -> Vec<Option<u16>> {
-    params
-        .split([';', ':'])
-        .map(|s| if s.is_empty() { None } else { s.parse().ok() })
-        .collect()
+#[derive(Clone, Copy)]
+struct SgrParams<'a> {
+    params: &'a str,
+    offset: usize,
+    finished: bool,
 }
 
-fn sgr_code(codes: &[Option<u16>], idx: usize) -> u16 {
-    codes.get(idx).and_then(|c| *c).unwrap_or(0)
-}
-
-fn sgr_value(codes: &[Option<u16>], idx: usize) -> Option<u8> {
-    codes.get(idx).and_then(|c| *c).map(|n| n as u8)
-}
-
-fn sgr_rgb(codes: &[Option<u16>], idx: usize, colon_params: bool) -> Option<(u8, u8, u8, usize)> {
-    let direct = || {
-        Some((
-            sgr_value(codes, idx + 2)?,
-            sgr_value(codes, idx + 3)?,
-            sgr_value(codes, idx + 4)?,
-            4,
-        ))
-    };
-
-    if colon_params {
-        if let Some(rgb) = (|| {
-            Some((
-                sgr_value(codes, idx + 3)?,
-                sgr_value(codes, idx + 4)?,
-                sgr_value(codes, idx + 5)?,
-                5,
-            ))
-        })() {
-            return Some(rgb);
+impl<'a> SgrParams<'a> {
+    fn new(params: &'a str) -> Self {
+        Self {
+            params,
+            offset: 0,
+            finished: false,
         }
     }
+}
 
-    direct()
+impl Iterator for SgrParams<'_> {
+    type Item = Option<u16>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let remaining = &self.params[self.offset..];
+        let separator = remaining.find([';', ':']);
+        let end = separator.map_or(self.params.len(), |index| self.offset + index);
+        let token = &self.params[self.offset..end];
+        self.finished = separator.is_none();
+        self.offset = end.saturating_add(usize::from(separator.is_some()));
+        Some(if token.is_empty() {
+            None
+        } else {
+            token.parse().ok()
+        })
+    }
+}
+
+fn sgr_code(code: Option<u16>) -> u16 {
+    code.unwrap_or(0)
+}
+
+fn sgr_value(code: Option<u16>) -> Option<u8> {
+    code.map(|value| value as u8)
+}
+
+fn apply_extended_color(
+    codes: &mut SgrParams<'_>,
+    colon_params: bool,
+    mut apply: impl FnMut(Color),
+) {
+    let mut candidate = *codes;
+    match sgr_code(candidate.next().flatten()) {
+        5 => {
+            let Some(value) = sgr_value(candidate.next().flatten()) else {
+                return;
+            };
+            apply(Color::AnsiValue(value));
+            *codes = candidate;
+        }
+        2 => {
+            let direct = candidate;
+            if colon_params {
+                let mut colon = candidate;
+                colon.next();
+                if let Some((r, g, b)) = take_rgb(&mut colon) {
+                    apply(Color::Rgb { r, g, b });
+                    *codes = colon;
+                    return;
+                }
+            }
+            let mut direct = direct;
+            if let Some((r, g, b)) = take_rgb(&mut direct) {
+                apply(Color::Rgb { r, g, b });
+                *codes = direct;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn take_rgb(codes: &mut SgrParams<'_>) -> Option<(u8, u8, u8)> {
+    Some((
+        sgr_value(codes.next().flatten())?,
+        sgr_value(codes.next().flatten())?,
+        sgr_value(codes.next().flatten())?,
+    ))
 }
 
 #[cfg(test)]
@@ -310,6 +401,35 @@ mod tests {
         assert_eq!(spans[1].style, Style::new().fg(Color::DarkRed));
         assert_eq!(spans[2].text, "c");
         assert_eq!(spans[2].style, Style::default());
+    }
+
+    #[test]
+    fn resumable_state_preserves_sgr_across_lines() {
+        let mut state = AnsiState::default();
+        let first = parse_ansi_with_state("plain\x1b[31mred", &mut state);
+        let second = parse_ansi_with_state("still red\x1b[0mplain", &mut state);
+
+        assert_eq!(first.last().unwrap().style.fg, Some(Color::DarkRed));
+        assert_eq!(second[0].style.fg, Some(Color::DarkRed));
+        assert_eq!(second[1].style, Style::default());
+    }
+
+    #[test]
+    fn state_only_scan_matches_render_parser_across_lines() {
+        let lines = [
+            "plain\x1b[1;31mbold red",
+            "\x1b]0;ignored title\x07still red\x1b[38;5;208mindexed",
+            "\x1b[48:2::10:20:30mtruecolor background",
+            "\x1b[4:2munderline\x1b[0mplain",
+        ];
+        let mut rendered = AnsiState::default();
+        let mut indexed = AnsiState::default();
+
+        for line in lines {
+            parse_ansi_with_state(line, &mut rendered);
+            advance_ansi_state(line, &mut indexed);
+            assert_eq!(indexed, rendered, "state mismatch after {line:?}");
+        }
     }
 
     #[test]

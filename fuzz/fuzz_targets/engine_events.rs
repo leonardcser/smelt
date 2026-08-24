@@ -450,7 +450,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                 EngineEvent::ToolOutput {
                     invocation_id,
                     call_id: call_id.clone(),
-                    chunk: small_text(output.clone()),
+                    line: small_text(output.clone()),
                 },
             );
             feed(

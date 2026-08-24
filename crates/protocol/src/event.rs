@@ -408,11 +408,12 @@ pub enum EngineEvent {
         called_at_ms: u64,
     },
 
-    /// Incremental output from a running tool (stdout/stderr lines).
+    /// One newline-stripped stdout or stderr line from a running tool.
+    /// Consumers insert a single `\n` between consecutive events.
     ToolOutput {
         invocation_id: InvocationId,
         call_id: String,
-        chunk: String,
+        line: String,
     },
 
     /// A tool call has finished.
@@ -872,6 +873,10 @@ pub enum UiCommand {
         is_error: bool,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         metadata: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        display_content: Vec<crate::message::ToolDisplayContent>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        attachment: Option<crate::message::ToolAttachment>,
     },
 
     /// Result of evaluating tool metadata and central permission policy

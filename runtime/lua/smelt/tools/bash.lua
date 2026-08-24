@@ -110,10 +110,9 @@ end
 smelt.transcript.register_tool("bash", {
   cache_key = "smelt.tool-presentation.bash:v1",
   body = function(block, ctx)
-    local output = block.output or { content = "", is_error = false }
-    local content = (output.content or ""):gsub("%s+$", "")
-    if not content:match("%S") then return nil end
-    return transcript_defaults.render_tool_output({ content = content, is_error = output.is_error }, ctx)
+    local output = block.output
+    if not output or (tonumber(output.content_bytes) or 0) == 0 then return nil end
+    return transcript_defaults.render_tool_output(output, ctx)
   end,
 })
 

@@ -466,6 +466,7 @@ fn transcript_records(history: &[HistoryItem]) -> Vec<StoredTranscriptBlock> {
                 .to_string(),
                 origin_json: Some(serde_json::json!({"History": index}).to_string()),
                 tool_state_json: None,
+                tool_render_revision: 0,
             }
         })
         .collect()

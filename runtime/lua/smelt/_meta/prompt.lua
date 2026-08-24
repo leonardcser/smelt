@@ -47,7 +47,7 @@ prompt.is_modal = nil
 ---@type fun(opts: smelt.prompt.PickerOpts): table?
 prompt.open_picker = nil
 
---- Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
+--- Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. Queue changes invalidate the retained top bar so waiting messages appear above the input.
 ---@type fun(): string[]
 prompt.queued = nil
 

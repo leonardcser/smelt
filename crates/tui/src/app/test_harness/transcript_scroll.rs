@@ -186,14 +186,47 @@ impl TestApp {
         self.app.transcript_win_mut().set_document_view_state(state);
     }
 
+    #[cfg(feature = "transcript-bench")]
+    pub(crate) fn hydrate_transcript_blocks(
+        &mut self,
+        ids: &[smelt_core::transcript_model::BlockId],
+    ) -> bool {
+        if ids.is_empty() {
+            return true;
+        }
+        if !self
+            .app
+            .conversation
+            .ensure_transcript_blocks_hydrated_for_harness(ids)
+        {
+            self.render_silent();
+        }
+        !self
+            .app
+            .conversation
+            .transcript()
+            .deferred_operation_blocks_failed(ids)
+    }
+
     pub(crate) fn reveal_transcript_record_block(
         &mut self,
         record_index: usize,
         top_padding: crate::smelt_edit::RowIndex,
         move_cursor: bool,
     ) -> bool {
-        self.app
-            .reveal_transcript_record_block(record_index, top_padding, move_cursor)
+        for _ in 0..16 {
+            if self
+                .app
+                .reveal_transcript_record_block(record_index, top_padding, move_cursor)
+            {
+                return true;
+            }
+            if !self.app.conversation.transcript_hydration_is_pending() {
+                return false;
+            }
+            self.render_silent();
+        }
+        false
     }
 
     pub(crate) fn tick_drag_autoscroll_with_transcript_intent(&mut self) -> bool {
@@ -793,7 +826,9 @@ impl TestApp {
             2 => format!("{marker} markdown paragraph {}", "wrap ".repeat(32)),
             _ => format!("{marker} compact-ish summary {}", "summary ".repeat(12)),
         };
-        self.app.push_block(Block::Text { content });
+        self.app.push_block(Block::Text {
+            content: content.into(),
+        });
     }
 
     pub fn transcript_scroll_probe_follow_tail(&mut self) {
@@ -989,7 +1024,8 @@ fn assert_transcript_scroll_probe_frames(
                 assert_user_delta_direction(state, *rows, frame);
             }
             TranscriptScrollIntent::SearchJump { .. }
-            | TranscriptScrollIntent::RevealBlock { .. } => {
+            | TranscriptScrollIntent::RevealBlock { .. }
+            | TranscriptScrollIntent::RevealFirstRecord { .. } => {
                 assert!(
                     !frame.placeholder_rows_visible,
                     "semantic transcript reveal exposed sparse placeholders: {frame:?}"
@@ -1214,12 +1250,13 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
                 content: format!(
                     "{marker} assistant paragraph\n\n```diff\n- old {idx}\n+ new {idx}\n```\n{}",
                     "markdown wrap ".repeat(20)
-                ),
+                )
+                .into(),
             }),
             2 => source.push(Block::Thinking {
                 title: None,
                 summary_titles: Vec::new(),
-                content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)),
+                content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)).into(),
                 kind: protocol::ReasoningKind::Raw,
             }),
             3 => source.push(Block::CodeLine {
@@ -1228,7 +1265,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
             }),
             4 => source.push(Block::Exec {
                 command: format!("echo {marker}"),
-                output: format!("{marker} stdout line\n{}", "exec output ".repeat(18)),
+                output: format!("{marker} stdout line\n{}", "exec output ".repeat(18)).into(),
             }),
             5 => source.push(Block::Compacted {
                 summary: format!("{marker} compacted summary {}", "summary ".repeat(10)),
@@ -1245,7 +1282,8 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
                 args: std::collections::HashMap::from([(
                     "file_path".to_string(),
                     serde_json::json!(format!("src/{idx}.rs")),
-                )]),
+                )])
+                .into(),
             }),
             8 => source.push(Block::ToolCall {
                 call_id: format!("grep-{idx}"),
@@ -1254,7 +1292,8 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
                 args: std::collections::HashMap::from([(
                     "pattern".to_string(),
                     serde_json::json!(marker),
-                )]),
+                )])
+                .into(),
             }),
             _ => source.push(Block::ProcessStatus {
                 text: format!("{marker} background process finished"),
@@ -1380,7 +1419,7 @@ mod tests {
             .viewport
             .map(|viewport| viewport.rect.height)
             .unwrap_or(1);
-        assert!(app
+        assert!(!app
             .app
             .conversation
             .activate_transcript_search_record_window(

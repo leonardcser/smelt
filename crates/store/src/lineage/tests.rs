@@ -465,6 +465,57 @@ fn publication_row_counts(conn: &Connection) -> [i64; 5] {
     })
 }
 
+fn reclamation_work_units(conn: &Connection, lineage: &LineageId) -> usize {
+    let canonical_rows = [
+        "lineage_turn_transitions",
+        "lineage_session_receipts",
+        "lineage_commit_receipts",
+        "lineage_branch_revisions",
+        "lineage_turns",
+        "lineage_revisions",
+        "lineage_sequence_roots",
+        "lineage_transcript_extent_nodes",
+        "lineage_sequence_entries",
+        "lineage_sequence_nodes",
+        "lineage_transcript_record_profiles",
+        "lineage_payload_nested_object_refs",
+        "lineage_payload_object_refs",
+    ]
+    .into_iter()
+    .map(|table| {
+        usize::try_from(
+            conn.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE lineage_id = ?1"),
+                [lineage.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    })
+    .sum::<usize>();
+    let uncleared_deleted_branch_heads = usize::try_from(
+        conn.query_row(
+            "SELECT count(*) FROM lineage_branches
+             WHERE lineage_id = ?1 AND deleted_at IS NOT NULL AND head_revision_id IS NOT NULL",
+            [lineage.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let objects = usize::try_from(
+        conn.query_row("SELECT count(*) FROM objects", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    canonical_rows
+        .saturating_add(uncleared_deleted_branch_heads)
+        .saturating_add(objects)
+}
+
 fn install_publication_abort(conn: &Connection, table: &str) {
     conn.execute_batch(&format!(
         "CREATE TEMP TRIGGER abort_lineage_publication
@@ -941,9 +992,12 @@ fn bounded_reclamation_preserves_shared_and_retained_roots() {
     )
     .unwrap();
 
+    let work_before = reclamation_work_units(&conn, &lineage);
     let retained = reclaim_step(&mut conn, &lineage, 1).unwrap();
+    let work_after = reclamation_work_units(&conn, &lineage);
     assert!(retained.complete);
     assert_eq!(retained.work_rows(), 0);
+    assert_eq!(work_before.saturating_sub(work_after), retained.work_rows());
     assert_eq!(
         load_revision(&conn, &lineage, abandoned.id()).unwrap(),
         abandoned
@@ -957,8 +1011,15 @@ fn bounded_reclamation_preserves_shared_and_retained_roots() {
     .unwrap();
     let mut reclaimed_rows = 0usize;
     for _ in 0..10_000 {
+        let work_before = reclamation_work_units(&conn, &lineage);
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
+        let work_after = reclamation_work_units(&conn, &lineage);
         assert!(step.work_rows() <= 1);
+        assert_eq!(
+            work_before.saturating_sub(work_after),
+            step.work_rows(),
+            "reclamation accounting must include every cascaded profile and extent row"
+        );
         reclaimed_rows = reclaimed_rows.saturating_add(step.work_rows());
         if step.complete {
             break;
@@ -1173,8 +1234,15 @@ fn bounded_reclamation_removes_receipts_and_continuation_turns_bottom_up() {
 
     let mut reclaimed_rows = 0usize;
     for _ in 0..10_000 {
+        let work_before = reclamation_work_units(&conn, &lineage);
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
+        let work_after = reclamation_work_units(&conn, &lineage);
         assert!(step.work_rows() <= 1);
+        assert_eq!(
+            work_before.saturating_sub(work_after),
+            step.work_rows(),
+            "reclamation accounting must include every cascaded profile and extent row"
+        );
         reclaimed_rows = reclaimed_rows.saturating_add(step.work_rows());
         if step.complete {
             break;

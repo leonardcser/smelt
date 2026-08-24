@@ -3,7 +3,7 @@
 //! against the supplied [`Theme`] and writes lines + highlights + decorations into a [`Buffer`].
 //! On [`LineBuilder::finish`] the trailing incomplete line is flushed and an [`Outcome`] returned.
 
-use crate::buffer::{Buffer, LineDecoration, SourceLine, SpanMeta};
+use crate::buffer::{Buffer, LineDecoration, RenderedBufferRebuild, SourceLine, SpanMeta};
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
 use smelt_buffer::{cell_width, text};
@@ -124,6 +124,7 @@ pub struct LineBuilder<'a> {
 
     // Per-line accumulator
     cur_text: String,
+    replacement: Option<RenderedBufferRebuild>,
     cur_highlights: Vec<(u16, u16, HlGroup, SpanMeta)>,
     cur_decoration: LineDecoration,
     cur_visible_cols: u16,
@@ -165,6 +166,7 @@ impl<'a> LineBuilder<'a> {
             theme,
             layout_width,
             cur_text: String::new(),
+            replacement: None,
             cur_highlights: Vec::new(),
             cur_decoration: LineDecoration::default(),
             cur_visible_cols: 0,
@@ -180,6 +182,36 @@ impl<'a> LineBuilder<'a> {
             was_wrapped: false,
             max_line_width: 0,
         }
+    }
+
+    /// Replace the buffer's rendered rows while reusing their text allocations.
+    /// This is the retained-rendering constructor for buffers that are wholly
+    /// owned by one layout node.
+    pub fn replacing(buf: &'a mut Buffer, theme: &'a Theme, layout_width: u16) -> Self {
+        let replacement = buf.begin_rendered_lines_rebuild();
+        let mut builder = Self::new(buf, theme, layout_width);
+        builder.replacement = Some(replacement);
+        builder.cur_text = builder.take_replacement_line(0);
+        builder
+    }
+
+    fn take_replacement_line(&mut self, row: usize) -> String {
+        let mut line = self
+            .replacement
+            .as_mut()
+            .and_then(|replacement| replacement.lines.get_mut(row))
+            .map(std::mem::take)
+            .unwrap_or_default();
+        line.clear();
+        line
+    }
+
+    fn install_replacement(&mut self) {
+        let Some(mut replacement) = self.replacement.take() else {
+            return;
+        };
+        replacement.lines.truncate(self.lines_committed);
+        self.buf.finish_rendered_lines_rebuild(replacement);
     }
 
     pub fn theme(&self) -> &Theme {
@@ -198,6 +230,7 @@ impl<'a> LineBuilder<'a> {
         if self.has_pending_content || self.cur_decoration_present() || self.cur_visible_cols > 0 {
             self.commit_line();
         }
+        self.install_replacement();
         Outcome {
             line_count: self.lines_committed,
             layout_width: self.layout_width,
@@ -582,9 +615,6 @@ impl<'a> LineBuilder<'a> {
 
     fn commit_line(&mut self) {
         let target_row = self.starting_line + self.lines_committed;
-        let buf_len = self.buf.line_count();
-        let text = std::mem::take(&mut self.cur_text);
-        let highlights = std::mem::take(&mut self.cur_highlights);
         let mut decoration = std::mem::take(&mut self.cur_decoration);
         // LineBuilder output is intrinsically pre-formatted: callers (parsers,
         // markdown, code, diff) have already laid this row out at the chosen
@@ -592,22 +622,46 @@ impl<'a> LineBuilder<'a> {
         // re-wrap parser-produced rows.
         decoration.pre_formatted = true;
 
-        if target_row < buf_len {
-            self.buf.set_lines(target_row, target_row + 1, vec![text]);
-            if target_row == self.starting_line && !self.overwrote_blank_seed {
-                self.overwrote_blank_seed = true;
+        if self.replacement.is_some() {
+            let text = std::mem::take(&mut self.cur_text);
+            let replacement = self
+                .replacement
+                .as_mut()
+                .expect("replacement checked above");
+            if target_row < replacement.lines.len() {
+                replacement.lines[target_row] = text;
+            } else {
+                debug_assert_eq!(target_row, replacement.lines.len());
+                replacement.lines.push(text);
             }
+            for (col_start, col_end, hl, meta) in self.cur_highlights.drain(..) {
+                replacement
+                    .metadata
+                    .push_highlight(target_row, col_start, col_end, hl, meta);
+            }
+            replacement.metadata.push_decoration(target_row, decoration);
+            self.lines_committed += 1;
+            self.cur_text = self.take_replacement_line(self.lines_committed);
         } else {
-            self.buf.set_lines(buf_len, buf_len, vec![text]);
+            let text = std::mem::take(&mut self.cur_text);
+            let buf_len = self.buf.line_count();
+            if target_row < buf_len {
+                self.buf.set_lines(target_row, target_row + 1, vec![text]);
+                if target_row == self.starting_line && !self.overwrote_blank_seed {
+                    self.overwrote_blank_seed = true;
+                }
+            } else {
+                self.buf.set_lines(buf_len, buf_len, vec![text]);
+            }
+
+            for (col_start, col_end, hl, meta) in self.cur_highlights.drain(..) {
+                self.buf
+                    .add_highlight_group_with_meta(target_row, col_start, col_end, hl, meta);
+            }
+            self.buf.set_decoration(target_row, decoration);
+            self.lines_committed += 1;
         }
 
-        for (col_start, col_end, hl, meta) in highlights {
-            self.buf
-                .add_highlight_group_with_meta(target_row, col_start, col_end, hl, meta);
-        }
-        self.buf.set_decoration(target_row, decoration);
-
-        self.lines_committed += 1;
         self.has_pending_content = false;
         self.cur_visible_cols = 0;
     }
@@ -923,6 +977,88 @@ mod tests {
         let mut lb = LineBuilder::new(&mut buf, &theme, 80);
         lb.fill_line_bg(Color::Red);
         assert_eq!(lb.line_count(), 1);
+    }
+
+    #[test]
+    fn replacing_reuses_line_text_allocations() {
+        let theme = Theme::default();
+        let mut buf = fresh_buf();
+        let mut line = String::with_capacity(128);
+        line.push_str("old retained row");
+        buf.set_all_lines(vec![line]);
+        let old_ptr = buf.lines()[0].as_ptr();
+        let old_capacity = buf.lines()[0].capacity();
+
+        let mut out = LineBuilder::replacing(&mut buf, &theme, 80);
+        out.print("new row");
+        let outcome = out.finish();
+
+        assert_eq!(outcome.line_count, 1);
+        assert_eq!(buf.lines(), &["new row"]);
+        assert_eq!(buf.lines()[0].as_ptr(), old_ptr);
+        assert_eq!(buf.lines()[0].capacity(), old_capacity);
+    }
+
+    #[test]
+    fn replacing_removes_surplus_rows() {
+        let theme = Theme::default();
+        let mut buf = fresh_buf();
+        buf.set_all_lines(vec!["one".into(), "two".into(), "three".into()]);
+
+        let mut out = LineBuilder::replacing(&mut buf, &theme, 80);
+        out.print("only");
+        let outcome = out.finish();
+
+        assert_eq!(outcome.line_count, 1);
+        assert_eq!(buf.lines(), &["only"]);
+    }
+
+    #[test]
+    fn replacing_clears_old_highlights_and_decorations() {
+        let mut theme = Theme::default();
+        theme.set(
+            "ReplaceBuilderHighlight",
+            Style {
+                fg: Some(Color::Red),
+                ..Style::default()
+            },
+        );
+        let group = theme.id_for("ReplaceBuilderHighlight");
+        let mut buf = fresh_buf();
+        let mut initial = LineBuilder::new(&mut buf, &theme, 80);
+        initial.set_hl(group);
+        initial.set_source_text("old source");
+        initial.print("old row");
+        initial.newline();
+        initial.finish();
+        assert!(!buf.highlights_at(0).is_empty());
+        assert_eq!(
+            buf.decoration_at(0).source_text.as_deref(),
+            Some("old source")
+        );
+
+        let mut replacement = LineBuilder::replacing(&mut buf, &theme, 80);
+        replacement.print("plain row");
+        replacement.finish();
+
+        assert!(buf.highlights_at(0).is_empty());
+        assert_eq!(buf.decoration_at(0).source_text, None);
+        assert!(!buf.decoration_at(0).soft_wrapped);
+        assert_eq!(buf.get_line(0), Some("plain row"));
+    }
+
+    #[test]
+    fn empty_replacement_keeps_buffer_seed_line() {
+        let theme = Theme::default();
+        let mut buf = fresh_buf();
+        buf.set_all_lines(vec!["old".into(), "rows".into()]);
+
+        let outcome = LineBuilder::replacing(&mut buf, &theme, 80).finish();
+
+        assert_eq!(outcome.line_count, 0);
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.get_line(0), Some(""));
+        assert!(buf.highlights_at(0).is_empty());
     }
 
     #[test]

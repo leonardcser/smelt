@@ -65,7 +65,6 @@ impl From<Range<usize>> for TranscriptRecordRange {
 }
 
 pub const TRANSCRIPT_EXTENT_PROFILE_WIDTHS: [u16; 6] = [20, 40, 80, 120, 160, 240];
-pub const TRANSCRIPT_EXTENT_CHUNK_RECORDS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TranscriptExtentProfile {
@@ -117,17 +116,33 @@ impl TranscriptExtentProfile {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TranscriptExtentChunk {
-    pub start: TranscriptRecordOffset,
-    pub record_count: usize,
-    pub profile: TranscriptExtentProfile,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptRecordProfile {
+    pub block_idx: u64,
+    pub history_idx: Option<u64>,
+    pub kind: String,
+    pub role: String,
+    pub first_line: String,
+    pub estimated_text_bytes: u64,
+    pub extent: TranscriptExtentProfile,
 }
 
-impl TranscriptExtentChunk {
-    pub fn end(self) -> TranscriptRecordOffset {
-        TranscriptRecordOffset::new(self.start.get().saturating_add(self.record_count))
+impl TranscriptRecordProfile {
+    pub fn estimated_rows(&self, width: u16) -> u64 {
+        self.extent.estimated_rows(width)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptNavigationRecord {
+    pub record_index: TranscriptRecordOffset,
+    pub profile: TranscriptRecordProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TranscriptRowLocation {
+    pub record_index: TranscriptRecordOffset,
+    pub row_offset: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -144,6 +159,8 @@ pub struct StoredTranscriptBlock {
     pub block_json: String,
     pub origin_json: Option<String>,
     pub tool_state_json: Option<String>,
+    #[serde(default)]
+    pub tool_render_revision: u64,
 }
 
 fn estimated_text_row_profile(text: &str) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] {
@@ -546,5 +563,26 @@ mod tests {
         let profile = TranscriptExtentProfile::new([120, 80, 40, 30, 20, 10]);
         let estimates = [20, 30, 40, 60, 80, 120, 240].map(|width| profile.estimated_rows(width));
         assert!(estimates.windows(2).all(|pair| pair[0] >= pair[1]));
+    }
+
+    #[test]
+    fn stored_transcript_block_defaults_legacy_render_revision() {
+        let record: StoredTranscriptBlock = serde_json::from_value(json!({
+            "block_idx": 1,
+            "history_idx": null,
+            "kind": "tool",
+            "tool_call_id": "call-1",
+            "tool_name": "bash",
+            "content_hash": "1",
+            "estimated_text_bytes": 0,
+            "preview_text": "",
+            "indexed_text": "",
+            "block_json": "{}",
+            "origin_json": null,
+            "tool_state_json": null
+        }))
+        .unwrap();
+
+        assert_eq!(record.tool_render_revision, 0);
     }
 }

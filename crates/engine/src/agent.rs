@@ -307,19 +307,23 @@ fn load_model_history(
             );
             let mut history = prefix;
             if end_index > first_live_index {
-                let mut rows = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                    sessions_root,
-                    lineage_id,
-                    session_id,
-                )
-                .map_err(|err| format!("open model history lineage: {err}"))?
-                .history_range(
-                    u64::try_from(first_live_index)
-                        .map_err(|_| "model history start index exceeds u64".to_string())?,
-                    u64::try_from(end_index)
-                        .map_err(|_| "model history end index exceeds u64".to_string())?,
-                )
-                .map_err(|err| format!("read lineage model history rows: {err}"))?;
+                let reader = {
+                    let _perf = smelt_perf::perf::begin("engine:model_history:open_store");
+                    smelt_store::LineageSessionReader::open_existing_in_lineage(
+                        sessions_root,
+                        lineage_id,
+                        session_id,
+                    )
+                    .map_err(|err| format!("open model history lineage: {err}"))?
+                };
+                let mut rows = reader
+                    .history_range(
+                        u64::try_from(first_live_index)
+                            .map_err(|_| "model history start index exceeds u64".to_string())?,
+                        u64::try_from(end_index)
+                            .map_err(|_| "model history end index exceeds u64".to_string())?,
+                    )
+                    .map_err(|err| format!("read lineage model history rows: {err}"))?;
                 smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
                 history.append(&mut rows);
             }
@@ -2362,6 +2366,8 @@ impl<'a> Turn<'a> {
                         content,
                         is_error,
                         metadata,
+                        display_content,
+                        attachment,
                     } => {
                         if let Some(pos) = plan
                             .pending_tools
@@ -2371,7 +2377,13 @@ impl<'a> Turn<'a> {
                             let (_, call_index) = plan.pending_tools.swap_remove(pos);
                             let call = &plan.calls[call_index];
                             let elapsed_ms = Some(elapsed_ms_since(call.start));
-                            let outcome = ToolOutcome::new(content, is_error, metadata);
+                            let outcome = ToolOutcome::from_parts(
+                                content,
+                                is_error,
+                                metadata,
+                                display_content,
+                                attachment,
+                            );
                             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                 invocation_id: call.invocation_id,
                                 call_id: call.tc.id.clone(),
@@ -2528,8 +2540,8 @@ impl<'a> Turn<'a> {
         let mut cancelled = self.cancel.is_cancelled();
         for &call_index in &plan.sequential_tools {
             let call = &plan.calls[call_index];
-            let (content, is_error, metadata) = if cancelled {
-                ("cancelled".to_string(), true, None)
+            let (content, is_error, metadata, display_content, attachment) = if cancelled {
+                ("cancelled".to_string(), true, None, Vec::new(), None)
             } else {
                 let request_id = next_request_id();
                 Self::send_tool_dispatch_for_call(self.event_tx, request_id, call);
@@ -2537,15 +2549,18 @@ impl<'a> Turn<'a> {
                     .wait_for_tool_result(request_id, deferred_turn_cmds)
                     .await
                 {
-                    Some((content, is_error, metadata)) => (content, is_error, metadata),
+                    Some((content, is_error, metadata, display_content, attachment)) => {
+                        (content, is_error, metadata, display_content, attachment)
+                    }
                     None => {
                         cancelled = true;
-                        ("cancelled".to_string(), true, None)
+                        ("cancelled".to_string(), true, None, Vec::new(), None)
                     }
                 }
             };
             let elapsed_ms = Some(self.elapsed_ms_since(call.start));
-            let outcome = ToolOutcome::new(content, is_error, metadata);
+            let outcome =
+                ToolOutcome::from_parts(content, is_error, metadata, display_content, attachment);
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                 invocation_id: call.invocation_id,
                 call_id: call.tc.id.clone(),
@@ -2766,7 +2781,13 @@ impl<'a> Turn<'a> {
         &mut self,
         request_id: u64,
         deferred_turn_cmds: &mut Vec<UiCommand>,
-    ) -> Option<(String, bool, Option<serde_json::Value>)> {
+    ) -> Option<(
+        String,
+        bool,
+        Option<serde_json::Value>,
+        Vec<protocol::ToolDisplayContent>,
+        Option<protocol::ToolAttachment>,
+    )> {
         loop {
             match self.cmd_rx.recv().await {
                 Some(UiCommand::ToolResult {
@@ -2776,7 +2797,11 @@ impl<'a> Turn<'a> {
                     content,
                     is_error,
                     metadata,
-                }) if id == request_id => return Some((content, is_error, metadata)),
+                    display_content,
+                    attachment,
+                }) if id == request_id => {
+                    return Some((content, is_error, metadata, display_content, attachment));
+                }
                 Some(cmd) => match ActiveTurnCommand::classify(cmd) {
                     ActiveTurnCommand::Cancel => {
                         self.cancel.cancel();
@@ -3913,13 +3938,18 @@ mod tests {
                 content: "cwd: /target".into(),
                 is_error: false,
                 metadata: None,
+                display_content: Vec::new(),
+                attachment: None,
             })
             .unwrap();
 
         let mut deferred_turn_cmds = Vec::new();
         let result = turn.wait_for_tool_result(7, &mut deferred_turn_cmds).await;
 
-        assert_eq!(result, Some(("cwd: /target".into(), false, None)));
+        assert_eq!(
+            result,
+            Some(("cwd: /target".into(), false, None, Vec::new(), None))
+        );
         assert!(deferred_turn_cmds.is_empty());
         assert_eq!(turn.config.cwd, std::path::PathBuf::from("/target"));
         assert_eq!(

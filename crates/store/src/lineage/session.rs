@@ -327,6 +327,18 @@ pub(crate) fn collect_transcript_search_leaves(
     Ok(())
 }
 
+pub(crate) fn lineage_transcript_root_identity(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+) -> Result<(String, u64)> {
+    let snapshot = lineage_session_snapshot(conn, lineage, branch)?;
+    Ok((
+        snapshot.transcript_root.id.as_str().to_owned(),
+        snapshot.transcript_root.item_count,
+    ))
+}
+
 pub(crate) fn lineage_transcript_search_leaves(
     conn: &Connection,
     lineage: &LineageId,
@@ -595,11 +607,7 @@ pub(crate) fn replace_sequence_suffix_in(
     compression: ObjectCompression,
 ) -> Result<SequenceRoot> {
     let ((prefix, _), _) = split_sequence_in(conn, lineage, root, start)?;
-    let (new_root, _) = append_sequence_in(conn, lineage, &prefix, items, compression)?;
-    if root.kind == SequenceKind::Transcript {
-        install_transcript_extent_chunks(conn, lineage, root, &new_root, start, items)?;
-    }
-    Ok(new_root)
+    append_sequence_in(conn, lineage, &prefix, items, compression).map(|(new_root, _)| new_root)
 }
 
 pub(crate) fn branch_revision_at_sequence(

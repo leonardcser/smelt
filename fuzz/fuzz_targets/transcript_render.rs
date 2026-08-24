@@ -102,7 +102,7 @@ fn run_with_app(input: Input) {
                 app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
                     invocation_id: protocol::InvocationId::new(u64::from(id)),
                     call_id: call_id(id),
-                    chunk: text,
+                    line: text,
                 }))
             }
             Op::ToolFinish { id, is_error, text } => {
@@ -167,11 +167,13 @@ fn known_tool_round_trip(app: &mut TestApp, id: u8, kind: u8, is_error: bool) {
         args,
         called_at_ms: u64::from(id),
     }));
-    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
-        invocation_id,
-        call_id: call_id.clone(),
-        chunk: content.clone(),
-    }));
+    for line in content.lines() {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+            invocation_id,
+            call_id: call_id.clone(),
+            line: line.to_string(),
+        }));
+    }
     app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         invocation_id,
         call_id,

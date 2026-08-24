@@ -200,12 +200,9 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             Some(records) => {
                 let items = serialize_transcript_items(&tx, &records.records, compression)
                     .map_err(store_failure)?;
-                let (root, _) =
-                    append_sequence_in(&tx, lineage, &empty_transcript, &items, compression)
-                        .map_err(store_failure)?;
-                install_transcript_extent_chunks(&tx, lineage, &empty_transcript, &root, 0, &items)
-                    .map_err(store_failure)?;
-                root
+                append_sequence_in(&tx, lineage, &empty_transcript, &items, compression)
+                    .map(|(root, _)| root)
+                    .map_err(store_failure)?
             }
             None => empty_transcript,
         };

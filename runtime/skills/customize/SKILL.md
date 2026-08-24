@@ -195,9 +195,10 @@ leader value they were created with. The default leader is a single backslash
 ```lua
 -- In ~/.config/smelt/init.lua
 smelt.keymap.set("n", "<C-y>", function()
-  local text = smelt.transcript.loaded_text_expensive()
-  smelt.clipboard.write(text)
-  smelt.notify.info("copied transcript")
+  smelt.transcript.loaded_text_expensive(function(text)
+    smelt.clipboard.write(text)
+    smelt.notify.info("copied transcript")
+  end)
 end)
 ```
 
@@ -305,7 +306,8 @@ persist; always make the change in `init.lua` so it survives a restart.
 ### Customize the status line
 
 The status line is a pure-Lua module that ships as `smelt.statusline`. Register
-a named source via `M.add(name, handler)` and the renderer calls it each frame:
+a named source via `M.add(name, handler)`. The retained renderer calls sources
+when status signals or explicit plugin invalidation make their output dirty:
 
 ```lua
 local sl = require("smelt.statusline")
@@ -316,7 +318,9 @@ end)
 
 The handler returns a segment table or a list of them. Each segment is
 `{ text, hl_group?, style?, priority?, align_right?, truncatable?, separated? }`.
-Remove a source with `sl.remove(name)`. The canonical worked example lives at
+`sl.add` and `sl.remove` invalidate automatically. If a source closes over
+plugin-owned state that changes independently of a built-in signal, call
+`sl.invalidate()` after changing it. The canonical worked example lives at
 `$XDG_DATA_HOME/smelt/builtins/lua/smelt/statusline.lua`; its `core` source is
 what draws the built-in segments (vim mode, agent mode, tps, task label, etc.).
 
@@ -808,12 +812,18 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Cap a child by rendered rows.
 - `smelt.layout.code` :: `fun(content: string, opts: table?): smelt.layout.Node`
   Syntax-highlighted code layout leaf.
+- `smelt.layout.content` :: `fun(content_id: integer, opts: table?): smelt.layout.Node`
+  Opaque transcript content leaf.
+- `smelt.layout.content_diff` :: `fun(old_content_id: integer, new_content_id: integer, opts: table?): smelt.layout.Node`
+  Retained diff leaf.
 - `smelt.layout.diff` :: `fun(opts: table): smelt.layout.Node`
   Inline-diff render directive.
 - `smelt.layout.empty` :: `fun(): smelt.layout.Node`
   Explicit zero-row layout node.
 - `smelt.layout.file_view` :: `fun(opts: table): smelt.layout.Node`
   Syntax-highlighted file-view render directive.
+- `smelt.layout.group_children` :: `fun(): smelt.layout.Node`
+  Opaque retained child-layout placeholder for transcript group renderers.
 - `smelt.layout.gutter` :: `fun(child: any, opts: table?): smelt.layout.Node`
   Render `child` with an explicit non-selectable gutter prefix on each emitted row.
 - `smelt.layout.hbox` :: `fun(items: table): smelt.layout.Node`
@@ -1172,12 +1182,12 @@ Register, unregister, and resolve plugin tools for the engine.
 
 Bundled default transcript renderers.
 
-- `smelt.transcript.defaults.child_failed` :: `fun(child: smelt.transcript.Block): boolean`
+- `smelt.transcript.defaults.child_failed` :: `fun(child: smelt.transcript.GroupChild): boolean`
   True when a grouped child represents a failed or denied tool result.
-- `smelt.transcript.defaults.group_children` :: `fun(group: smelt.transcript.Group): smelt.transcript.Block[]`
-  Return child snapshots for a transcript group snapshot.
+- `smelt.transcript.defaults.group_children` :: `fun(group: smelt.transcript.Group): smelt.transcript.GroupChild[]`
+  Return bounded child presentation metadata for a transcript group.
 - `smelt.transcript.defaults.group_failure_counts` :: `fun(group: smelt.transcript.Group): integer, integer`
-  Count failed and denied tool children in a transcript group snapshot.
+  Count failed and denied tool children in a transcript group.
 - `smelt.transcript.defaults.render` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render any semantic transcript block with the bundled default policy.
 - `smelt.transcript.defaults.render_assistant` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
@@ -1193,7 +1203,7 @@ Bundled default transcript renderers.
 - `smelt.transcript.defaults.render_group_child_list` :: `fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node`
   Render a compact ordered child list for collapsed group nodes.
 - `smelt.transcript.defaults.render_group_children` :: `fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node`
-  Render all group children through the configured root renderer and middleware.
+  Compose independently retained child layouts for an expanded group.
 - `smelt.transcript.defaults.render_llm_markdown` :: `fun(content: string?, opts: table?): smelt.layout.Node`
   Render LLM-authored Markdown with the shared transcript Markdown path.
 - `smelt.transcript.defaults.render_llm_markdown_tail` :: `fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
@@ -1717,16 +1727,18 @@ Screen-composition primitives: main layout composer and per-window renderer regi
 
 #### `smelt.ui.layout`
 
-Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout.
+Composable layout-tree primitives for the retained main TUI layout.
 
 - `smelt.ui.layout.hbox` :: `fun(items: table, opts: table?): smelt.ui.layout`
   Horizontal container.
+- `smelt.ui.layout.invalidate` :: `fun(): nil`
+  Invalidate the retained main layout so its composer runs during the next frame.
 - `smelt.ui.layout.leaf` :: `fun(win_or_paint: any, opts: table?): smelt.ui.layout`
   Wrap a Win handle or paint id into a leaf node.
 - `smelt.ui.layout.measure` :: `fun(w: integer?, h: integer?): smelt.ui.layout.Measure`
   Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opts.measure = ...)`.
 - `smelt.ui.layout.set` :: `fun(composer: function?): nil`
-  Register the main layout composer.
+  Register the retained main layout composer.
 - `smelt.ui.layout.vbox` :: `fun(items: table, opts: table?): smelt.ui.layout`
   Vertical container.
 
@@ -1880,10 +1892,10 @@ Transcript display policy and rendered transcript inspection.
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
 - `smelt.transcript.loaded_block_at_row` (UiHost) :: `fun(row: integer): table?`
   Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block.
-- `smelt.transcript.loaded_blocks_expensive` (UiHost) :: `fun(): table`
+- `smelt.transcript.loaded_blocks_expensive` (UiHost) :: `fun(callback: fun(value: table)?): table`
   Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`.
-- `smelt.transcript.loaded_text_expensive` (UiHost) :: `fun(): string`
-  Return the currently loaded transcript display text as a single newline-joined string.
+- `smelt.transcript.loaded_text_expensive` (UiHost) :: `fun(callback: fun(value: string)?): string`
+  Return the currently materialized transcript display text as a single newline-joined string.
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
   Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
 - `smelt.transcript.register_tool` (Host) :: `fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg`
@@ -1891,7 +1903,7 @@ Transcript display policy and rendered transcript inspection.
 - `smelt.transcript.reveal` (UiHost) :: `fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean`
   Reveal a semantic transcript `target` returned by a committed view.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
-  Return rendered transcript display rows in `[start, start + count)`.
+  Return rendered transcript display rows in `[start, start + count)`, materializing only the bounded range needed for the query.
 - `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`
   Replace the base transcript renderer used when the host asks Lua for a transcript block layout.
 - `smelt.transcript.stream` (UiHost) :: `fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream`

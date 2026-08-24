@@ -1,10 +1,9 @@
 //! `smelt.ui.layout` - composable layout-tree primitives for the main TUI.
 //!
 //! Plugins register a composer with `smelt.ui.layout.set(fn)`. The host
-//! invokes it once per frame with a state table describing the current
-//! prompt height, terminal size, and other inputs; the composer returns
-//! a layout tree built from `vbox` / `hbox` / `leaf` that the host
-//! resolves to per-window rectangles for that frame.
+//! retains its layout tree until terminal or prompt dimensions change or Lua
+//! calls `smelt.ui.layout.invalidate()`. The composer receives a state table
+//! and returns a tree built from `vbox` / `hbox` / `leaf`.
 //!
 //! The same constructors also produce the layout userdata accepted by
 //! `smelt.overlay.new` via `opts.layout` - there's one namespace for both
@@ -79,11 +78,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     let m = ui.sub(
         "layout",
-        "Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. \
-`smelt.ui.layout.set(fn)` registers a composer invoked once per frame; the \
-composer returns a tree built from these constructors describing how the \
-transcript, prompt, statusline, and any plugin-added windows split the \
-screen.",
+        "Composable layout-tree primitives for the retained main TUI layout. \
+`smelt.ui.layout.set(fn)` registers a composer; call `invalidate()` when \
+closed-over state changes the resulting tree.",
     )?;
 
     super::overlay_layout::register_layout_constructors(&m)?;
@@ -92,15 +89,14 @@ screen.",
         let s = shared.clone();
         m.fn_(
             "set",
-            "Register the main layout composer. The callback receives a state \
+            "Register the retained main layout composer. The callback receives a state \
 table (`term_w`, `term_h`, `prompt_input_rows`, plus `dialog` while a root dialog is active) and \
 returns a layout userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. `state.dialog` is an \
 opaque transcript-dialog stage with host-owned sizing and expansion behavior. While a root dialog \
 is active, the returned tree must include the current stage exactly once and no retained dialog \
 stages from earlier calls; otherwise the host uses the safe transcript-dialog-statusline fallback. \
-Passing `nil` clears the composer and \
-reverts to the engine's hardcoded layout. Only the most recent registration is active; later calls \
-replace earlier ones.",
+Passing `nil` clears the composer and reverts to the engine's hardcoded layout. The tree is retained \
+until dimensions change or `smelt.ui.layout.invalidate()` is called.",
             &["composer"],
             move |lua, composer: Option<mlua::Function>| -> LuaResult<()> {
                 let handle = match composer {
@@ -111,6 +107,21 @@ replace earlier ones.",
                     *slot = handle;
                 }
                 s.request_layout_refresh();
+                s.invalidate_win_renderers();
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let shared = shared.clone();
+        m.fn_(
+            "invalidate",
+            "Invalidate the retained main layout so its composer runs during the next frame. Use this after changing closed-over state that affects layout structure or constraints.",
+            &[],
+            move |_, ()| -> LuaResult<()> {
+                shared.request_layout_refresh();
+                shared.invalidate_win_renderers();
                 Ok(())
             },
         )?;
