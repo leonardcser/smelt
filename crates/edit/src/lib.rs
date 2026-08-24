@@ -4349,6 +4349,46 @@ mod tests {
     }
 
     #[test]
+    fn replacing_buffer_lines_detaches_stale_materialized_windows() {
+        let mut ui = make_ui();
+        let first = WinId(42);
+        let second = WinId(43);
+        make_split(&mut ui, first);
+        let buffer = ui.win(first).unwrap().buf;
+        assert!(ui.win_open_split_at(
+            second,
+            buffer,
+            SplitConfig {
+                region: "test:43".into(),
+                gutters: layout::Gutters::default(),
+            },
+        ));
+        let lines_tick = ui.buf(buffer).unwrap().lines_tick();
+        for window in [first, second] {
+            ui.win_mut(window).unwrap().apply_materialized_rows_at_tick(
+                MaterializedRows {
+                    clamped_scroll: 10,
+                    row_base: 8,
+                    total_rows: 100,
+                    materialized_rows: 20,
+                },
+                lines_tick,
+            );
+        }
+
+        ui.buf_mut(buffer)
+            .unwrap()
+            .set_all_lines(vec!["ordinary buffer".into()]);
+        for window in [first, second] {
+            let (window, buffer) = ui.win_and_buf_mut(window, buffer);
+            window.unwrap().ensure_layout(buffer.unwrap(), 40);
+        }
+
+        assert!(!ui.win(first).unwrap().has_materialized_rows());
+        assert!(!ui.win(second).unwrap().has_materialized_rows());
+    }
+
+    #[test]
     fn render_prepare_hook_materializes_before_window_layout() {
         let mut ui = make_ui();
         let win = WinId(42);

@@ -8361,9 +8361,22 @@ pub(crate) mod tests {
         let mut tail_buf = Buffer::new(crate::smelt_edit::BufId(94), Default::default());
         let tail_render_start = std::time::Instant::now();
         let tail_plan = tail_document
-            .plan_projection_measured(&lua, 100, &theme, ScrollTarget::visible_tail(), 40)
+            .plan_viewport_projection_measured(
+                &lua,
+                100,
+                &theme,
+                crate::app::transcript::TranscriptViewportProjectionInput {
+                    fallback_scroll_top: 0,
+                    follow_tail: true,
+                    width_changed: false,
+                    previous_width: None,
+                },
+                40,
+            )
             .expect("resume benchmark projection hydration");
-        let tail_rows = tail_document.project_planned(&lua, &mut tail_buf, &theme, tail_plan);
+        let tail_rows = tail_document
+            .project_applied_viewport(&lua, &mut tail_buf, &theme, tail_plan)
+            .materialized_rows;
         let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
         let tail_alloc_after = smelt_perf::alloc::snapshot();
         let tail_alloc = smelt_perf::alloc::delta(tail_alloc_before, tail_alloc_after);

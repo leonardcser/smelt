@@ -249,10 +249,7 @@ smelt.cmd.register("resume", function()
       })
     end
 
-    local active_preview_key = nil
     local preview_timer = nil
-    local rendering_preview = false
-    local ignore_preview_scroll_top = nil
 
     local list = smelt.list.new({
       leaf       = list_leaf,
@@ -279,7 +276,7 @@ smelt.cmd.register("resume", function()
       return width, height
     end
 
-    local function render_preview(scroll_top)
+    local function render_preview()
       if preview_timer then
         preview_timer:remove()
         preview_timer = nil
@@ -287,12 +284,11 @@ smelt.cmd.register("resume", function()
       if not show_preview then return end
       local e = list:selected()
       if not e then
-        active_preview_key = nil
         preview_buf:lines({ "  (no session selected)" })
+        preview_leaf:scroll(0)
         return
       end
       if e.available == false then
-        active_preview_key = nil
         preview_buf:lines({
           "  Session unavailable: " .. unavailable_reason(e),
           "",
@@ -304,54 +300,22 @@ smelt.cmd.register("resume", function()
         return
       end
       local width, height = preview_size()
-      local key = table.concat({
-        e.id,
-        tostring(e.updated_at_ms or ""),
-        tostring(width),
-        tostring(height),
-        tostring(scroll_top or "tail"),
-      }, ":")
-      active_preview_key = key
-      rendering_preview = true
-      local info = smelt.session.render_preview_into(e.id, {
+      smelt.session.render_preview_into(e.id, {
         buf = preview_buf,
         win = preview_leaf,
         width = width,
         height = height,
-        scroll_top = scroll_top,
         updated_at_ms = e.updated_at_ms,
       })
-      rendering_preview = false
-      if active_preview_key == key then
-        if info and info.status == "ready" then
-          ignore_preview_scroll_top = info.scroll_top
-        elseif info and info.status == "pending" then
-          preview_buf:lines({ "  Loading session preview..." })
-          ignore_preview_scroll_top = 0
-          preview_leaf:scroll(0)
-        elseif info and info.status == "unavailable" then
-          preview_buf:lines({
-            "  (session preview unavailable)",
-            "",
-            "  " .. (info.reason or "Persisted content could not be hydrated."),
-          })
-          ignore_preview_scroll_top = 0
-          preview_leaf:scroll(0)
-        else
-          preview_buf:lines({ "  (session missing)" })
-          ignore_preview_scroll_top = 0
-          preview_leaf:scroll(0)
-        end
-      end
     end
 
-    local function schedule_preview(scroll_top)
+    local function schedule_preview()
       if not show_preview then return end
       if preview_timer then preview_timer:remove() end
       preview_timer = smelt.timer.set(40, function()
         preview_timer = nil
         if resolved then return end
-        render_preview(scroll_top)
+        render_preview()
       end)
     end
 
@@ -393,15 +357,6 @@ smelt.cmd.register("resume", function()
     list_leaf:on("resized", function() select_bottom() end)
     if show_preview then
       preview_leaf:on("resized", function() schedule_preview() end)
-      preview_leaf:on("scrolled", function(raw)
-        local top = (raw and raw.top) or 0
-        if rendering_preview then return end
-        if ignore_preview_scroll_top == top then
-          ignore_preview_scroll_top = nil
-          return
-        end
-        render_preview(top)
-      end)
     end
     input_leaf:on("submit", function() submit() end)
     list_leaf:on("submit", function() submit() end)

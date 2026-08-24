@@ -15,19 +15,27 @@ impl TestApp {
         &self,
         needle: &str,
     ) -> Option<MaterializedWindowSnapshot> {
-        self.app.ui.iter_wins().find_map(|(_, win)| {
-            let rows = win.materialized_rows()?;
-            let buf = self.app.ui.buf(win.buf)?;
-            buf.lines()
+        self.app.ui.iter_wins().find_map(|(id, _)| {
+            let snapshot = self.materialized_window(id)?;
+            snapshot
+                .lines
                 .iter()
                 .any(|line| line.contains(needle))
-                .then(|| MaterializedWindowSnapshot {
-                    lines: buf.lines().to_vec(),
-                    rows,
-                    viewport_rows: win
-                        .viewport
-                        .map_or(1, |viewport| viewport.rect.height.max(1)),
-                })
+                .then_some(snapshot)
+        })
+    }
+
+    pub fn materialized_window(&self, id: WinId) -> Option<MaterializedWindowSnapshot> {
+        let win = self.app.ui.win(id)?;
+        let rows = win.materialized_rows()?;
+        let viewport = win.viewport?;
+        let buf = self.app.ui.buf(win.buf)?;
+        Some(MaterializedWindowSnapshot {
+            win: id,
+            lines: buf.lines().to_vec(),
+            rows,
+            viewport,
+            scroll_top: win.scroll_top(),
         })
     }
 

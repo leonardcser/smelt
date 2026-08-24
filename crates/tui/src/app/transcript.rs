@@ -1826,7 +1826,6 @@ impl TranscriptDocument {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn set_pending_scroll_intent(&mut self, intent: TranscriptScrollIntent) {
         self.set_pending_projection_with_hint(
             intent,
@@ -5132,6 +5131,7 @@ impl TranscriptDocument {
         Ok(plan)
     }
 
+    #[cfg(test)]
     pub(crate) fn plan_projection_measured(
         &mut self,
         lua: &LuaRuntime,
@@ -5615,6 +5615,7 @@ impl TranscriptDocument {
         self.applied_viewport(rows, viewport_rows, false, scroll_state, cursor_range)
     }
 
+    #[cfg(test)]
     pub(crate) fn project_planned(
         &mut self,
         lua: &LuaRuntime,

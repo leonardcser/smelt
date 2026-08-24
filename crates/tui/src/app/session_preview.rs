@@ -12,7 +12,6 @@ pub(crate) struct SessionPreviewRender {
     pub(crate) cache_key: String,
     pub(crate) width: u16,
     pub(crate) height: u16,
-    pub(crate) scroll_top: Option<u64>,
     pub(crate) buffer: crate::smelt_edit::BufId,
     pub(crate) window: Option<crate::smelt_edit::WinId>,
 }
@@ -27,6 +26,7 @@ pub(crate) enum SessionPreviewRenderOutcome {
 struct ActiveSessionPreview {
     generation: u64,
     render: SessionPreviewRender,
+    follow_tail: bool,
 }
 
 enum SessionPreviewWorkerOperation {
@@ -161,10 +161,25 @@ impl Drop for SessionPreviewWorker {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionPreviewBindingState {
+    Loading,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Clone)]
+struct SessionPreviewBinding {
+    render: SessionPreviewRender,
+    projected_width: Option<u16>,
+    state: SessionPreviewBindingState,
+}
+
 #[derive(Default)]
 pub(super) struct SessionPreviewRuntime {
     worker: Option<SessionPreviewWorker>,
     active: Option<ActiveSessionPreview>,
+    binding: Option<SessionPreviewBinding>,
     next_generation: u64,
 }
 
@@ -173,16 +188,82 @@ impl SessionPreviewRuntime {
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel();
         }
+        let binding_changed = self.binding.as_ref().is_none_or(|binding| {
+            binding.render.cache_key != render.cache_key
+                || binding.render.buffer != render.buffer
+                || binding.render.window != render.window
+        });
+        let (projected_width, state) = self
+            .binding
+            .as_ref()
+            .filter(|_| !binding_changed)
+            .map_or((None, SessionPreviewBindingState::Loading), |binding| {
+                (binding.projected_width, binding.state)
+            });
+        self.binding = Some(SessionPreviewBinding {
+            render: render.clone(),
+            projected_width,
+            state,
+        });
         self.next_generation = self
             .next_generation
             .checked_add(1)
             .expect("session preview generation overflow");
+        let follow_tail = binding_changed || render.window.is_none();
         let active = ActiveSessionPreview {
             generation: self.next_generation,
             render,
+            follow_tail,
         };
         self.active = Some(active.clone());
         active
+    }
+
+    fn is_ready_for(&self, window: crate::smelt_edit::WinId) -> bool {
+        self.binding.as_ref().is_some_and(|binding| {
+            binding.render.window == Some(window)
+                && binding.state == SessionPreviewBindingState::Ready
+        })
+    }
+
+    fn set_binding_state(&mut self, cache_key: &str, state: SessionPreviewBindingState) {
+        if let Some(binding) = self
+            .binding
+            .as_mut()
+            .filter(|binding| binding.render.cache_key == cache_key)
+        {
+            binding.state = state;
+        }
+    }
+
+    fn render_for_window(&self, window: crate::smelt_edit::WinId) -> Option<SessionPreviewRender> {
+        self.binding
+            .as_ref()
+            .filter(|binding| binding.render.window == Some(window))
+            .map(|binding| binding.render.clone())
+    }
+
+    fn projected_width(&self, cache_key: &str) -> Option<u16> {
+        self.binding
+            .as_ref()
+            .filter(|binding| binding.render.cache_key == cache_key)
+            .and_then(|binding| binding.projected_width)
+    }
+
+    fn set_projected_width(&mut self, cache_key: &str, width: u16) {
+        if let Some(binding) = self
+            .binding
+            .as_mut()
+            .filter(|binding| binding.render.cache_key == cache_key)
+        {
+            binding.projected_width = Some(width);
+        }
+    }
+
+    fn active_for(&self, cache_key: &str) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.render.cache_key == cache_key)
     }
 
     fn request(
@@ -391,9 +472,19 @@ impl super::TuiApp {
             u64::from(cached.is_some()),
         );
         if let Some(view) = cached {
-            return self.continue_session_preview(active, view);
+            let outcome = self.continue_session_preview(active.clone(), view);
+            if matches!(outcome, SessionPreviewRenderOutcome::Unavailable(_)) {
+                self.install_unavailable_session_preview(&active);
+            }
+            return outcome;
         }
 
+        if active.follow_tail {
+            self.install_session_preview_message(
+                &active,
+                vec!["  Loading session preview...".into()],
+            );
+        }
         self.request_session_preview_worker(
             active.generation,
             SessionPreviewWorkerOperation::Load {
@@ -415,16 +506,30 @@ impl super::TuiApp {
         let theme = self.ui.theme().clone();
         let execution = self.lua.execution();
         view.set_inline_options(inline_options);
-        let scroll_target = active
+        if active.follow_tail {
+            view.set_pending_scroll_intent(
+                crate::app::transcript_scroll_trace::TranscriptScrollIntent::Tail,
+            );
+        }
+        let fallback_scroll_top = active
             .render
-            .scroll_top
-            .map(crate::content::transcript_buf::ScrollTarget::visible_row)
-            .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
-        let plan = match view.plan_projection_measured(
+            .window
+            .and_then(|window| self.ui.win(window))
+            .map(|window| window.scroll_top())
+            .unwrap_or_default();
+        let previous_width = self
+            .session_preview
+            .projected_width(&active.render.cache_key);
+        let plan = match view.plan_viewport_projection_measured(
             &execution,
             active.render.width,
             &theme,
-            scroll_target,
+            crate::app::transcript::TranscriptViewportProjectionInput {
+                fallback_scroll_top,
+                follow_tail: active.follow_tail,
+                width_changed: previous_width.is_some_and(|width| width != active.render.width),
+                previous_width,
+            },
             active.render.height,
         ) {
             Ok(plan) => plan,
@@ -444,27 +549,79 @@ impl super::TuiApp {
                 return SessionPreviewRenderOutcome::Unavailable(error);
             }
         };
-        let output = {
+        let (applied, backing_lines_tick) = {
             let Some(target) = self.ui.buf_mut(active.render.buffer) else {
                 self.session_preview.finish(active.generation);
                 self.conversation
                     .store_resume_preview(active.render.cache_key, view);
                 return SessionPreviewRenderOutcome::Pending;
             };
-            view.project_planned(&execution, target, &theme, plan)
+            view.take_pending_projection_restore();
+            let applied = view.project_applied_viewport(&execution, target, &theme, plan);
+            (applied, target.lines_tick())
         };
+        let output = applied.materialized_rows;
         if let Some(window) = active
             .render
             .window
             .and_then(|window| self.ui.win_mut(window))
         {
-            window.apply_materialized_rows(output);
-            window.pin_scroll(output.clamped_scroll);
+            window.apply_materialized_rows_at_tick(output, backing_lines_tick);
+            window.apply_projected_scroll(output.clamped_scroll, applied.scroll_state);
         }
+        self.session_preview
+            .set_projected_width(&active.render.cache_key, active.render.width);
+        self.session_preview
+            .set_binding_state(&active.render.cache_key, SessionPreviewBindingState::Ready);
         self.conversation
             .store_resume_preview(active.render.cache_key, view);
         self.session_preview.finish(active.generation);
         SessionPreviewRenderOutcome::Ready(output)
+    }
+
+    pub(crate) fn session_preview_is_attached_to(&self, window: crate::smelt_edit::WinId) -> bool {
+        self.session_preview.is_ready_for(window)
+            && self.ui.win(window).is_some_and(|window| {
+                self.ui
+                    .buf(window.buf)
+                    .is_some_and(|buffer| window.has_current_materialized_rows(buffer))
+            })
+    }
+
+    pub(crate) fn navigate_session_preview(
+        &mut self,
+        window: crate::smelt_edit::WinId,
+        intent: crate::app::transcript_scroll_trace::TranscriptScrollIntent,
+    ) -> bool {
+        if !self.session_preview_is_attached_to(window) {
+            return false;
+        }
+        let Some(render) = self.session_preview.render_for_window(window) else {
+            return false;
+        };
+        let Some(mut view) = self.conversation.take_resume_preview(&render.cache_key) else {
+            return self.session_preview.active_for(&render.cache_key);
+        };
+        view.set_pending_scroll_intent(intent);
+        self.conversation
+            .store_resume_preview(render.cache_key.clone(), view);
+        if self.session_preview.active_for(&render.cache_key) {
+            return true;
+        }
+
+        let active = self.session_preview.begin(render);
+        let Some(view) = self
+            .conversation
+            .take_resume_preview(&active.render.cache_key)
+        else {
+            self.session_preview.finish(active.generation);
+            return true;
+        };
+        let outcome = self.continue_session_preview(active.clone(), view);
+        if matches!(outcome, SessionPreviewRenderOutcome::Unavailable(_)) {
+            self.install_unavailable_session_preview(&active);
+        }
+        true
     }
 
     fn request_session_preview_worker(
@@ -503,6 +660,10 @@ impl super::TuiApp {
             ),
             SessionPreviewWorkerOutcome::Loaded(None) => {
                 self.session_preview.finish(active.generation);
+                self.session_preview.set_binding_state(
+                    &active.render.cache_key,
+                    SessionPreviewBindingState::Unavailable,
+                );
                 self.install_session_preview_message(&active, vec!["  (session missing)".into()]);
                 self.request_session_preview_redraw();
                 return;
@@ -541,6 +702,10 @@ impl super::TuiApp {
     }
 
     fn install_unavailable_session_preview(&mut self, active: &ActiveSessionPreview) {
+        self.session_preview.set_binding_state(
+            &active.render.cache_key,
+            SessionPreviewBindingState::Unavailable,
+        );
         self.install_session_preview_message(
             active,
             vec![
@@ -556,7 +721,6 @@ impl super::TuiApp {
         active: &ActiveSessionPreview,
         lines: Vec<String>,
     ) {
-        let total_rows = lines.len() as crate::smelt_edit::RowIndex;
         if let Some(buffer) = self.ui.buf_mut(active.render.buffer) {
             buffer.set_all_lines(lines);
         }
@@ -565,12 +729,7 @@ impl super::TuiApp {
             .window
             .and_then(|window| self.ui.win_mut(window))
         {
-            window.apply_materialized_rows(crate::smelt_edit::MaterializedRows {
-                clamped_scroll: 0,
-                row_base: 0,
-                total_rows,
-                materialized_rows: total_rows,
-            });
+            window.clear_materialized_rows();
             window.pin_scroll(0);
         }
     }
@@ -589,6 +748,36 @@ impl super::TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_binding(cache_key: &str, width: u16) -> SessionPreviewRender {
+        SessionPreviewRender {
+            id: cache_key.into(),
+            cache_key: cache_key.into(),
+            width,
+            height: 20,
+            buffer: crate::smelt_edit::BufId(1),
+            window: Some(crate::smelt_edit::WinId(2)),
+        }
+    }
+
+    #[test]
+    fn binding_state_controls_readiness_and_initial_tail() {
+        let mut runtime = SessionPreviewRuntime::default();
+
+        let initial = runtime.begin(render_binding("first", 80));
+        assert!(initial.follow_tail);
+        assert!(!runtime.is_ready_for(crate::smelt_edit::WinId(2)));
+
+        runtime.set_binding_state("first", SessionPreviewBindingState::Ready);
+        assert!(runtime.is_ready_for(crate::smelt_edit::WinId(2)));
+        let resized = runtime.begin(render_binding("first", 120));
+        assert!(!resized.follow_tail);
+        assert!(runtime.is_ready_for(crate::smelt_edit::WinId(2)));
+
+        let replacement = runtime.begin(render_binding("second", 120));
+        assert!(replacement.follow_tail);
+        assert!(!runtime.is_ready_for(crate::smelt_edit::WinId(2)));
+    }
 
     fn seed_session(
         state_root: &std::path::Path,

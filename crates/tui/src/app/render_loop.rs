@@ -301,6 +301,7 @@ pub(super) fn prepare_transcript_window(
         suppress_cursor_screen_row_restore = settled_search_range.is_some();
         transcript_cursor_range = settled_search_range.or(applied.cursor_range);
         let tdata = applied.materialized_rows;
+        let backing_lines_tick = buf.lines_tick();
         debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
         debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
         debug_assert!(
@@ -315,7 +316,7 @@ pub(super) fn prepare_transcript_window(
             debug_assert!(
                 tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
             );
-            win.apply_materialized_rows(tdata);
+            win.apply_materialized_rows_at_tick(tdata, backing_lines_tick);
             win.apply_projected_scroll(tdata.clamped_scroll, desired_scroll_state);
         }
     }

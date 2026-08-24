@@ -1011,8 +1011,39 @@ fn display_only_resume_sets_resume_hint_state() {
     assert!(state.has_messages);
 }
 
+fn assert_resume_preview_is_visible(
+    preview: &MaterializedWindowSnapshot,
+    stage: impl std::fmt::Display,
+) {
+    let materialized = preview.rows.materialized_range();
+    let visible_end = preview
+        .scroll_top
+        .saturating_add(u64::from(preview.viewport.rect.height))
+        .min(preview.rows.total_rows);
+    assert!(
+        materialized.start <= preview.scroll_top && materialized.end >= visible_end,
+        "resume preview lost viewport coverage at {stage}: materialized={materialized:?}, viewport={}..{visible_end}, lines={:?}",
+        preview.scroll_top,
+        preview.lines,
+    );
+    assert!(
+        preview.rows.materialized_rows
+            <= u64::from(preview.viewport.rect.height.max(1)).saturating_mul(2),
+        "resume preview materialized an unbounded row range at {stage}: {:?}",
+        preview.rows,
+    );
+    assert!(
+        preview
+            .lines
+            .iter()
+            .any(|line| !line.trim().is_empty() && !line.contains("Loading session preview")),
+        "resume preview became blank at {stage}: {:?}",
+        preview.lines,
+    );
+}
+
 #[test]
-fn resume_overlay_materializes_tail_after_collapsed_estimates_move_viewport() {
+fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
     let guard = test_home_guard();
     {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -1068,17 +1099,110 @@ fn resume_overlay_materializes_tail_after_collapsed_estimates_move_viewport() {
             .all(|line| !line.contains("session preview unavailable")),
         "resume preview rendered the hydration failure placeholder"
     );
-    let viewport_end = preview
-        .rows
-        .clamped_scroll
-        .saturating_add(u64::from(preview.viewport_rows))
-        .min(preview.rows.total_rows);
-    let materialized = preview.rows.materialized_range();
+    assert_resume_preview_is_visible(&preview, "initial tail");
+
+    let preview_win = preview.win;
+    let pointer_column = preview.viewport.rect.left.saturating_add(2);
+    let pointer_row = preview.viewport.rect.top.saturating_add(2);
+    let initial_scroll_top = preview.scroll_top;
     assert!(
-        materialized.start <= preview.rows.clamped_scroll && materialized.end >= viewport_end,
-        "resume preview materialized range {materialized:?} does not cover viewport {}..{viewport_end}",
-        preview.rows.clamped_scroll,
+        app.scroll_at_with_transcript_intent(
+            pointer_row,
+            pointer_column,
+            -3,
+            "coalesced_resume_preview_wheel",
+        ),
+        "coalesced wheel input should be handled by the preview transcript",
     );
+    app.render_silent();
+    for step in 0..39 {
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollUp,
+                column: pointer_column,
+                row: pointer_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        )));
+        app.settle_lua();
+
+        let scrolling = app
+            .materialized_window(preview_win)
+            .expect("resume preview window should remain materialized while scrolling");
+        assert_resume_preview_is_visible(&scrolling, format_args!("wheel-up step {step}"));
+
+        app.render_silent();
+    }
+
+    let scrolled = app
+        .materialized_window(preview_win)
+        .expect("resume preview should remain materialized after scrolling");
+    assert!(
+        scrolled.scroll_top < initial_scroll_top,
+        "resume preview did not move upward: initial={initial_scroll_top}, final={}",
+        scrolled.scroll_top,
+    );
+
+    for step in 0..60 {
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollDown,
+                column: pointer_column,
+                row: pointer_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        )));
+        app.settle_lua();
+        let scrolling = app
+            .materialized_window(preview_win)
+            .expect("resume preview window should remain materialized while returning to tail");
+        assert_resume_preview_is_visible(&scrolling, format_args!("wheel-down step {step}"));
+        app.render_silent();
+    }
+    let returned_to_tail = app
+        .materialized_window(preview_win)
+        .expect("resume preview should remain materialized at the tail");
+    assert!(
+        returned_to_tail
+            .scroll_top
+            .saturating_add(u64::from(returned_to_tail.viewport.rect.height))
+            >= returned_to_tail.rows.total_rows,
+        "resume preview did not return to its tail: scroll={}, height={}, total={}",
+        returned_to_tail.scroll_top,
+        returned_to_tail.viewport.rect.height,
+        returned_to_tail.rows.total_rows,
+    );
+
+    let scrollbar_column = returned_to_tail
+        .viewport
+        .rect
+        .left
+        .saturating_add(returned_to_tail.viewport.rect.width.saturating_sub(1));
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column: scrollbar_column,
+                row: returned_to_tail.viewport.rect.top,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        )));
+        app.settle_lua();
+    }
+    app.render_silent();
+    let sought_to_top = app
+        .materialized_window(preview_win)
+        .expect("resume preview should materialize after a scrollbar seek");
+    assert!(
+        sought_to_top.scroll_top < scrolled.scroll_top,
+        "resume preview scrollbar did not seek upward: wheel={}, scrollbar={}",
+        scrolled.scroll_top,
+        sought_to_top.scroll_top,
+    );
+    assert_resume_preview_is_visible(&sought_to_top, "scrollbar seek");
 }
 
 #[test]
@@ -1168,6 +1292,11 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
     assert!(
         preview.iter().all(|line| !line.contains("session missing")),
         "hydration failure was misreported as a missing session: {preview:?}"
+    );
+    assert!(
+        app.materialized_window_containing("session preview unavailable")
+            .is_none(),
+        "an unavailable placeholder must not remain attached as a virtual transcript",
     );
     assert!(app.state().active_modal.is_some());
     app.press(KeyCode::Esc);

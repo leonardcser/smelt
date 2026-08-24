@@ -1612,7 +1612,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.model_messages` :: `fun(): table`
   Return the model-visible message list for the next request.
 - `smelt.session.render_preview_into` :: `fun(id: string, opts: table): table?`
-  Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI.
+  Bind persisted session `id` to `opts.buf` and `opts.win` as a virtualized transcript preview.
 - `smelt.session.reset` :: `fun(): nil`
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.retry_persistence` :: `fun(): boolean`

@@ -1056,6 +1056,7 @@ impl Window {
     /// whose decoration sets `pre_formatted = true` (parser output, markdown
     /// tables, diff hunks) stay as identity chunks regardless of `self.wrap`.
     pub fn ensure_layout(&mut self, buf: &Buffer, width: u16) {
+        self.clear_stale_materialized_rows(buf);
         let key = (
             buf.changedtick(),
             width,

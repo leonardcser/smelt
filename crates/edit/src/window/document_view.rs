@@ -230,6 +230,7 @@ pub struct RowYankFlash {
 pub struct DocumentViewState {
     pub active: bool,
     pub materialized: MaterializedRows,
+    pub(crate) backing_lines_tick: Option<u64>,
     /// Authoritative row-document cursor position. `byte_col` is a byte column in
     /// the materialized/document row text, not a terminal cell column.
     pub cursor: DocPosition,
@@ -264,6 +265,18 @@ impl Window {
     }
 
     pub fn apply_materialized_rows(&mut self, rows: MaterializedRows) {
+        self.apply_materialized_rows_for_lines_tick(rows, None);
+    }
+
+    pub fn apply_materialized_rows_at_tick(&mut self, rows: MaterializedRows, lines_tick: u64) {
+        self.apply_materialized_rows_for_lines_tick(rows, Some(lines_tick));
+    }
+
+    fn apply_materialized_rows_for_lines_tick(
+        &mut self,
+        rows: MaterializedRows,
+        lines_tick: Option<u64>,
+    ) {
         if rows.row_base == 0
             && rows.materialized_rows >= rows.total_rows
             && !self.document_view_state_ref().active
@@ -271,6 +284,7 @@ impl Window {
             self.clear_materialized_rows();
         } else {
             self.set_row_materialization(rows);
+            self.document_view_state_mut().backing_lines_tick = lines_tick;
         }
     }
 
@@ -294,6 +308,16 @@ impl Window {
 
     pub fn clear_materialized_rows(&mut self) {
         *self.document_view_state_mut() = DocumentViewState::default();
+    }
+
+    pub(crate) fn clear_stale_materialized_rows(&mut self, buf: &Buffer) {
+        if self
+            .document_view_state_ref()
+            .backing_lines_tick
+            .is_some_and(|tick| tick != buf.lines_tick())
+        {
+            self.clear_materialized_rows();
+        }
     }
 
     pub fn refresh_document_view_position_from_buffer(&mut self, buf: &Buffer) -> bool {
@@ -333,6 +357,14 @@ impl Window {
 
     pub fn has_materialized_rows(&self) -> bool {
         self.document_view_state_ref().active
+    }
+
+    pub fn has_current_materialized_rows(&self, buf: &Buffer) -> bool {
+        let state = self.document_view_state_ref();
+        state.active
+            && state
+                .backing_lines_tick
+                .is_none_or(|tick| tick == buf.lines_tick())
     }
 
     pub fn materialized_rows(&self) -> Option<MaterializedRows> {

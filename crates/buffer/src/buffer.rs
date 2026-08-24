@@ -716,8 +716,10 @@ pub struct Buffer {
     lines: Arc<Vec<String>>,
     rendered_rows: Arc<RenderedRowMetadata>,
     extmarks: ExtmarkStore,
-    /// Bumped on every lines mutation.
+    /// Bumped on every mutation that affects rendered output.
     changedtick: u64,
+    /// Bumped only when the backing line text changes.
+    lines_tick: u64,
     last_line_edit: Option<LineEdit>,
     /// Interned at construction so convenience methods skip a hashmap lookup.
     ns_highlights: NsId,
@@ -755,6 +757,7 @@ impl Buffer {
             rendered_rows: Arc::new(RenderedRowMetadata::default()),
             extmarks,
             changedtick: 0,
+            lines_tick: 0,
             last_line_edit: None,
             ns_highlights,
             ns_decorations,
@@ -986,6 +989,7 @@ impl Buffer {
             layer.retain(|r| r.line < start || r.line >= end);
         }
         self.changedtick += 1;
+        self.lines_tick += 1;
         self.last_line_edit = Some(LineEdit {
             before_tick,
             after_tick: self.changedtick,
@@ -1056,6 +1060,7 @@ impl Buffer {
         };
         self.lines = Arc::new(new_lines);
         self.changedtick += 1;
+        self.lines_tick += 1;
         self.last_line_edit = None;
     }
 
@@ -1270,6 +1275,12 @@ impl Buffer {
     /// cache invalidation tied to displayed output.
     pub fn changedtick(&self) -> u64 {
         self.changedtick
+    }
+
+    /// Monotonic counter for backing line-text replacements. Unlike
+    /// [`Self::changedtick`], decoration-only changes do not bump this value.
+    pub fn lines_tick(&self) -> u64 {
+        self.lines_tick
     }
 
     pub fn last_line_edit(&self) -> Option<LineEdit> {
@@ -1666,14 +1677,19 @@ mod tests {
     }
 
     #[test]
-    fn changedtick_increments() {
+    fn changedtick_and_lines_tick_increment_for_line_replacements() {
         let mut buf = make_buf();
-        let t0 = buf.changedtick();
+        let changedtick = buf.changedtick();
+        let lines_tick = buf.lines_tick();
         buf.set_all_lines(vec!["a".into()]);
-        assert!(buf.changedtick() > t0);
-        let t1 = buf.changedtick();
-        buf.set_all_lines(vec!["b".into()]);
-        assert!(buf.changedtick() > t1);
+        assert!(buf.changedtick() > changedtick);
+        assert!(buf.lines_tick() > lines_tick);
+
+        let changedtick = buf.changedtick();
+        let lines_tick = buf.lines_tick();
+        buf.set_lines(0, 1, vec!["b".into()]);
+        assert!(buf.changedtick() > changedtick);
+        assert!(buf.lines_tick() > lines_tick);
     }
 
     #[test]
