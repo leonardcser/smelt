@@ -788,6 +788,7 @@ impl TuiApp {
             .begin_frame(self.core.clock.instant_now());
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.apply_pending_transcript_work();
+        self.refresh_pending_tool_draft_summaries();
         if !self.transcript_work.is_empty() && !self.transcript_work.front_waits_for_hydration() {
             self.request_continuation_render();
         }

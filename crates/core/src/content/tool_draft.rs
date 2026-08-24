@@ -260,7 +260,7 @@ impl ToolDraft {
             append.presentation_changed = true;
             append
         };
-        self.parser.finish(&mut self.arguments);
+        append.presentation_changed |= self.parser.finish(&mut self.arguments);
         if !self.finished {
             self.finished = true;
             append.presentation_changed = true;
@@ -441,12 +441,14 @@ impl DraftJsonParser {
         result
     }
 
-    fn finish(&mut self, arguments: &mut ToolArguments) {
-        if self.state == PreviewState::InBare {
-            self.commit_raw_value(arguments);
-            self.active_field = None;
-            self.state = PreviewState::Done;
+    fn finish(&mut self, arguments: &mut ToolArguments) -> bool {
+        if self.state != PreviewState::InBare {
+            return false;
         }
+        let presentation_changed = self.commit_raw_value(arguments);
+        self.active_field = None;
+        self.state = PreviewState::Done;
+        presentation_changed
     }
 
     fn push_char(
@@ -516,7 +518,7 @@ impl DraftJsonParser {
                 }
             }
             PreviewState::InString => {
-                if self.push_value_char(arguments, ch, buffers) {
+                if self.push_value_char(arguments, ch, buffers, result) {
                     if let Some(field) = self
                         .active_field
                         .and_then(|index| arguments.string_fields.get_mut(index))
@@ -529,7 +531,7 @@ impl DraftJsonParser {
             }
             PreviewState::InBare => {
                 if ch == ',' || ch == '}' {
-                    self.commit_raw_value(arguments);
+                    result.presentation_changed |= self.commit_raw_value(arguments);
                     self.active_field = None;
                     self.state = if ch == '}' {
                         PreviewState::Done
@@ -542,7 +544,7 @@ impl DraftJsonParser {
             }
             PreviewState::InNested => {
                 self.push_raw_value_char(arguments, ch, buffers);
-                self.advance_nested(ch, arguments);
+                self.advance_nested(ch, arguments, result);
             }
             PreviewState::AfterValue => {
                 if ch.is_whitespace() {
@@ -649,16 +651,17 @@ impl DraftJsonParser {
         arguments: &mut ToolArguments,
         ch: char,
         buffers: &mut Vec<(ContentId, String)>,
+        result: &mut ParseAppend,
     ) -> bool {
         if self.unicode_digits > 0 {
             match self.push_unicode_digit(ch) {
                 UnicodeCompletion::Pending => {}
                 UnicodeCompletion::One(ch) => {
-                    self.push_decoded_value(arguments, ch, buffers);
+                    self.push_decoded_value(arguments, ch, buffers, result);
                 }
                 UnicodeCompletion::Two(first, second) => {
-                    self.push_decoded_value(arguments, first, buffers);
-                    self.push_decoded_value(arguments, second, buffers);
+                    self.push_decoded_value(arguments, first, buffers, result);
+                    self.push_decoded_value(arguments, second, buffers, result);
                 }
             }
             return false;
@@ -669,9 +672,14 @@ impl DraftJsonParser {
                 self.begin_unicode_escape();
             } else {
                 if self.pending_high_surrogate.take().is_some() {
-                    self.push_decoded_value(arguments, char::REPLACEMENT_CHARACTER, buffers);
+                    self.push_decoded_value(
+                        arguments,
+                        char::REPLACEMENT_CHARACTER,
+                        buffers,
+                        result,
+                    );
                 }
-                self.push_decoded_value(arguments, decode_escape(ch), buffers);
+                self.push_decoded_value(arguments, decode_escape(ch), buffers, result);
             }
             return false;
         }
@@ -682,15 +690,25 @@ impl DraftJsonParser {
             }
             '"' => {
                 if self.pending_high_surrogate.take().is_some() {
-                    self.push_decoded_value(arguments, char::REPLACEMENT_CHARACTER, buffers);
+                    self.push_decoded_value(
+                        arguments,
+                        char::REPLACEMENT_CHARACTER,
+                        buffers,
+                        result,
+                    );
                 }
                 true
             }
             other => {
                 if self.pending_high_surrogate.take().is_some() {
-                    self.push_decoded_value(arguments, char::REPLACEMENT_CHARACTER, buffers);
+                    self.push_decoded_value(
+                        arguments,
+                        char::REPLACEMENT_CHARACTER,
+                        buffers,
+                        result,
+                    );
                 }
-                self.push_decoded_value(arguments, other, buffers);
+                self.push_decoded_value(arguments, other, buffers, result);
                 false
             }
         }
@@ -744,6 +762,7 @@ impl DraftJsonParser {
         arguments: &mut ToolArguments,
         ch: char,
         buffers: &mut Vec<(ContentId, String)>,
+        result: &mut ParseAppend,
     ) {
         let Some(field_index) = self.active_field else {
             return;
@@ -753,6 +772,7 @@ impl DraftJsonParser {
         }
         if let Some(serde_json::Value::String(preview)) = arguments.preview.get_mut(&self.key) {
             if preview.len() < LUA_ARGUMENT_PREVIEW_BYTES {
+                let previous_len = preview.len();
                 preview.push(ch);
                 if preview.len() > LUA_ARGUMENT_PREVIEW_BYTES {
                     preview.truncate(smelt_buffer::text::snap(
@@ -760,6 +780,7 @@ impl DraftJsonParser {
                         LUA_ARGUMENT_PREVIEW_BYTES,
                     ));
                 }
+                result.presentation_changed |= preview.len() != previous_len;
             }
         }
     }
@@ -787,22 +808,32 @@ impl DraftJsonParser {
         }
     }
 
-    fn commit_raw_value(&mut self, arguments: &mut ToolArguments) {
+    fn commit_raw_value(&mut self, arguments: &mut ToolArguments) -> bool {
         let raw = self.raw_value.trim();
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        let presentation_changed = if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+        {
             arguments
                 .preview
                 .insert(self.key.clone(), structured_preview(&value));
-        }
+            true
+        } else {
+            false
+        };
         if let Some(field) = self
             .active_field
             .and_then(|index| arguments.string_fields.get_mut(index))
         {
             field.complete = true;
         }
+        presentation_changed
     }
 
-    fn advance_nested(&mut self, ch: char, arguments: &mut ToolArguments) {
+    fn advance_nested(
+        &mut self,
+        ch: char,
+        arguments: &mut ToolArguments,
+        result: &mut ParseAppend,
+    ) {
         if self.nested_in_string {
             if self.nested_escaped {
                 self.nested_escaped = false;
@@ -819,7 +850,7 @@ impl DraftJsonParser {
             '}' | ']' => {
                 self.nested_depth = self.nested_depth.saturating_sub(1);
                 if self.nested_depth == 0 {
-                    self.commit_raw_value(arguments);
+                    result.presentation_changed |= self.commit_raw_value(arguments);
                     self.active_field = None;
                     self.state = PreviewState::AfterValue;
                 }
@@ -953,7 +984,38 @@ mod tests {
         let field = draft.string_field("content").unwrap();
         assert_eq!(field.content.id(), content_id);
         assert_eq!(field.content.snapshot(), "hello\nworld");
-        assert!(!second.presentation_changed);
+        assert!(second.presentation_changed);
+    }
+
+    #[test]
+    fn presentation_changes_follow_bounded_argument_previews() {
+        let mut draft = ToolDraft::new("stream".into(), Some("call".into()), "grep".into());
+        let expected_preview = "a".repeat(LUA_ARGUMENT_PREVIEW_BYTES);
+        let first = draft.append(format!(r#"{{"pattern":"match","path":"{expected_preview}"#));
+        assert!(first.presentation_changed);
+        assert_eq!(
+            draft
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_preview.as_str())
+        );
+
+        let beyond_preview = draft.append("b".into());
+        assert!(!beyond_preview.presentation_changed);
+        assert_eq!(
+            draft.string_field("path").unwrap().content.len(),
+            LUA_ARGUMENT_PREVIEW_BYTES + 1
+        );
+
+        let mut structured = ToolDraft::new("structured".into(), None, "grep".into());
+        structured.append(r#"{"head_limit":"#.into());
+        let completed = structured.append("25,".into());
+        assert!(completed.presentation_changed);
+        assert_eq!(
+            structured.arguments.get("head_limit"),
+            Some(&serde_json::json!(25))
+        );
     }
 
     #[test]

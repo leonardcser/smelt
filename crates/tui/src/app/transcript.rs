@@ -10140,6 +10140,7 @@ impl TuiApp {
         &mut self,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+        self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         self.conversation
@@ -10152,6 +10153,7 @@ impl TuiApp {
         action: crate::content::transcript_buf::FoldAction,
         activation: crate::content::transcript_buf::FoldActivation,
     ) -> bool {
+        self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
@@ -10169,6 +10171,7 @@ impl TuiApp {
         id: crate::content::transcript_scene::RenderNodeId,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
+        self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
@@ -10185,6 +10188,7 @@ impl TuiApp {
         &mut self,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
+        self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
@@ -10202,6 +10206,7 @@ impl TuiApp {
         kind: &str,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
+        self.apply_pending_transcript_work();
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);

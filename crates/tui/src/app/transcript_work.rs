@@ -73,6 +73,7 @@ impl TranscriptWork {
 pub(super) struct TranscriptWorkQueue {
     items: VecDeque<TranscriptWork>,
     pending_tool_outputs: HashMap<InvocationId, usize>,
+    pending_tool_draft_summaries: Vec<smelt_core::transcript_model::BlockId>,
     main_turn_work_count: usize,
 }
 
@@ -137,12 +138,35 @@ impl TranscriptWorkQueue {
             .is_some_and(|count| *count > 0)
     }
 
+    pub(super) fn request_tool_draft_summary(
+        &mut self,
+        block_id: smelt_core::transcript_model::BlockId,
+    ) {
+        if !self.pending_tool_draft_summaries.contains(&block_id) {
+            self.pending_tool_draft_summaries.push(block_id);
+        }
+    }
+
+    pub(super) fn cancel_tool_draft_summary(
+        &mut self,
+        block_id: smelt_core::transcript_model::BlockId,
+    ) {
+        self.pending_tool_draft_summaries
+            .retain(|pending| *pending != block_id);
+    }
+
+    pub(super) fn take_tool_draft_summaries(
+        &mut self,
+    ) -> Vec<smelt_core::transcript_model::BlockId> {
+        std::mem::take(&mut self.pending_tool_draft_summaries)
+    }
+
     pub(super) fn has_main_turn_work(&self) -> bool {
         self.main_turn_work_count > 0
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.pending_tool_draft_summaries.is_empty()
     }
 
     pub(super) fn front_is_tool_output_append(&self) -> bool {
@@ -167,6 +191,7 @@ impl TranscriptWorkQueue {
     pub(super) fn discard_main_turn_work(&mut self) {
         self.items.retain(|work| !work.is_main_turn_work());
         self.pending_tool_outputs.clear();
+        self.pending_tool_draft_summaries.clear();
         self.main_turn_work_count = 0;
     }
 
@@ -210,5 +235,25 @@ pub(super) fn stream_content_slice_end(source: &str, start: usize, budget: usize
         end
     } else {
         smelt_buffer::text::next_char_boundary(source, start)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_draft_summary_requests_coalesce_in_order() {
+        let mut work = TranscriptWorkQueue::default();
+        let first = smelt_core::transcript_model::BlockId::new(1);
+        let second = smelt_core::transcript_model::BlockId::new(2);
+
+        work.request_tool_draft_summary(first);
+        work.request_tool_draft_summary(first);
+        work.request_tool_draft_summary(second);
+
+        assert!(!work.has_main_turn_work());
+        assert_eq!(work.take_tool_draft_summaries(), vec![first, second]);
+        assert!(work.is_empty());
     }
 }

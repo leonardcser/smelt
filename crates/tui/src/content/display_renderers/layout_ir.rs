@@ -2096,7 +2096,7 @@ fn measure_row_prefix_special(
             let BlockLayout::Leaf(IrLeaf::Runs(runs)) = child.as_ref() else {
                 return None;
             };
-            if !transient_layout_fits_budget(child, &mut TransientLayoutBudget::default()) {
+            if !layout_fits_exact_measure_budget(child, &mut ExactLayoutBudget::default()) {
                 return None;
             }
             let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
@@ -2275,7 +2275,7 @@ fn render_ir_row_prefix(
     } = child
     {
         if let BlockLayout::Leaf(IrLeaf::Runs(runs)) = cap_child.as_ref() {
-            if transient_layout_fits_budget(cap_child, &mut TransientLayoutBudget::default()) {
+            if layout_fits_exact_measure_budget(cap_child, &mut ExactLayoutBudget::default()) {
                 return render_row_prefix_runs_cap(
                     out, runs, cap_spec, spec, width, row_start, row_count, gutter,
                 );
@@ -2624,9 +2624,9 @@ fn render_retained_markdown_edge(
     window
 }
 
-const MAX_BOUNDED_EDGE_TRANSIENT_BYTES: usize = 64 * 1024;
-const MAX_BOUNDED_EDGE_TRANSIENT_NODES: usize = 4 * 1024;
-const MAX_BOUNDED_EDGE_TRANSIENT_SPANS: usize = 4 * 1024;
+const MAX_BOUNDED_EDGE_EXACT_BYTES: usize = 64 * 1024;
+const MAX_BOUNDED_EDGE_EXACT_NODES: usize = 4 * 1024;
+const MAX_BOUNDED_EDGE_EXACT_SPANS: usize = 4 * 1024;
 const MAX_BOUNDED_EDGE_DEPTH: usize = 32;
 const BOUNDED_TRANSIENT_OMITTED: &str = "[large transient layout omitted]";
 
@@ -2689,27 +2689,27 @@ fn measure_retained_content_edge(
 }
 
 #[derive(Default)]
-struct TransientLayoutBudget {
+struct ExactLayoutBudget {
     bytes: usize,
     nodes: usize,
     spans: usize,
 }
 
-impl TransientLayoutBudget {
+impl ExactLayoutBudget {
     fn add_node(&mut self) -> bool {
         self.nodes = self.nodes.saturating_add(1);
-        self.nodes <= MAX_BOUNDED_EDGE_TRANSIENT_NODES
+        self.nodes <= MAX_BOUNDED_EDGE_EXACT_NODES
     }
 
     fn add_bytes(&mut self, bytes: usize) -> bool {
         self.bytes = self.bytes.saturating_add(bytes);
-        self.bytes <= MAX_BOUNDED_EDGE_TRANSIENT_BYTES
+        self.bytes <= MAX_BOUNDED_EDGE_EXACT_BYTES
     }
 
     fn add_spans<'a>(&mut self, spans: impl Iterator<Item = &'a protocol::StyledSpan>) -> bool {
         for span in spans {
             self.spans = self.spans.saturating_add(1);
-            if self.spans > MAX_BOUNDED_EDGE_TRANSIENT_SPANS || !self.add_bytes(span.text.len()) {
+            if self.spans > MAX_BOUNDED_EDGE_EXACT_SPANS || !self.add_bytes(span.text.len()) {
                 return false;
             }
         }
@@ -2717,7 +2717,7 @@ impl TransientLayoutBudget {
     }
 }
 
-fn transient_leaf_fits_budget(leaf: &IrLeaf, budget: &mut TransientLayoutBudget) -> bool {
+fn include_leaf_in_exact_measure_budget(leaf: &IrLeaf, budget: &mut ExactLayoutBudget) -> bool {
     match leaf {
         IrLeaf::Text(spec) => budget.add_bytes(spec.content.len()),
         IrLeaf::Runs(spec) => budget.add_spans(spec.lines.0.iter().flatten()),
@@ -2725,17 +2725,21 @@ fn transient_leaf_fits_budget(leaf: &IrLeaf, budget: &mut TransientLayoutBudget)
         IrLeaf::Markdown(spec) => budget.add_bytes(spec.content.len()),
         IrLeaf::Code(spec) => budget.add_bytes(spec.content.len()),
         IrLeaf::Separator(spec) => budget.add_spans(spec.label.iter()),
-        IrLeaf::Content(_) | IrLeaf::SourceView(_) => false,
+        IrLeaf::Content(spec) => match &spec.render {
+            ContentRenderSpec::Markdown { .. } => budget.add_bytes(spec.content.len()),
+            _ => false,
+        },
+        IrLeaf::SourceView(_) => false,
     }
 }
 
-fn transient_layout_fits_budget(layout: &LayoutIr, budget: &mut TransientLayoutBudget) -> bool {
-    transient_layout_fits_budget_inner(layout, budget, 0)
+fn layout_fits_exact_measure_budget(layout: &LayoutIr, budget: &mut ExactLayoutBudget) -> bool {
+    layout_fits_exact_measure_budget_inner(layout, budget, 0)
 }
 
-fn transient_layout_fits_budget_inner(
+fn layout_fits_exact_measure_budget_inner(
     layout: &LayoutIr,
-    budget: &mut TransientLayoutBudget,
+    budget: &mut ExactLayoutBudget,
     depth: usize,
 ) -> bool {
     if depth > MAX_BOUNDED_EDGE_DEPTH || !budget.add_node() {
@@ -2743,12 +2747,12 @@ fn transient_layout_fits_budget_inner(
     }
     match layout {
         BlockLayout::Empty => true,
-        BlockLayout::Leaf(leaf) => transient_leaf_fits_budget(leaf, budget),
+        BlockLayout::Leaf(leaf) => include_leaf_in_exact_measure_budget(leaf, budget),
         BlockLayout::Vbox(items) => items.iter().all(|child| {
-            transient_layout_fits_budget_inner(child, budget, depth.saturating_add(1))
+            layout_fits_exact_measure_budget_inner(child, budget, depth.saturating_add(1))
         }),
         BlockLayout::Hbox(items) => items.iter().all(|item| {
-            transient_layout_fits_budget_inner(&item.layout, budget, depth.saturating_add(1))
+            layout_fits_exact_measure_budget_inner(&item.layout, budget, depth.saturating_add(1))
         }),
         BlockLayout::Gutter { child, .. }
         | BlockLayout::RowPrefix { child, .. }
@@ -2756,21 +2760,21 @@ fn transient_layout_fits_budget_inner(
         | BlockLayout::Style { child, .. }
         | BlockLayout::Cap { child, .. }
         | BlockLayout::Refresh { child, .. } => {
-            transient_layout_fits_budget_inner(child, budget, depth.saturating_add(1))
+            layout_fits_exact_measure_budget_inner(child, budget, depth.saturating_add(1))
         }
     }
 }
 
-fn transient_leaf_is_bounded(leaf: &IrLeaf) -> bool {
-    transient_leaf_fits_budget(leaf, &mut TransientLayoutBudget::default())
+fn leaf_fits_exact_measure_budget(leaf: &IrLeaf) -> bool {
+    include_leaf_in_exact_measure_budget(leaf, &mut ExactLayoutBudget::default())
 }
 
-fn bounded_transient_layout_rows(
+fn bounded_exact_layout_rows(
     layout: &LayoutIr,
     width: u16,
     inline_options: &InlineOptions,
 ) -> Option<usize> {
-    transient_layout_fits_budget(layout, &mut TransientLayoutBudget::default())
+    layout_fits_exact_measure_budget(layout, &mut ExactLayoutBudget::default())
         .then(|| measure_layout_ir_full(layout, width, inline_options))
 }
 
@@ -2802,7 +2806,7 @@ fn measure_bounded_layout_edge_inner(
             inline_options,
         )),
         BlockLayout::Leaf(leaf) => {
-            if !transient_leaf_is_bounded(leaf) {
+            if !leaf_fits_exact_measure_budget(leaf) {
                 return Some(ContentTextWindow {
                     row_count: max_rows.min(1),
                     truncated: true,
@@ -2973,7 +2977,7 @@ fn measure_bounded_cap_rows_inner(
     use smelt_core::content::block_layout::CapKeep;
 
     if depth <= MAX_BOUNDED_EDGE_DEPTH {
-        if let Some(child_rows) = bounded_transient_layout_rows(child, width, inline_options) {
+        if let Some(child_rows) = bounded_exact_layout_rows(child, width, inline_options) {
             return Some(
                 cap_rows_for_child(child_rows, spec, child, width, None, inline_options, None)
                     .row_count(),
@@ -3504,7 +3508,7 @@ fn render_bounded_layout_edge_inner(
             );
         }
         BlockLayout::Leaf(leaf) => {
-            if !transient_leaf_is_bounded(leaf) {
+            if !leaf_fits_exact_measure_budget(leaf) {
                 if window.row_count > 0 {
                     out.print_with_meta(BOUNDED_TRANSIENT_OMITTED, SpanMeta::unselectable());
                     out.newline();
@@ -3875,7 +3879,7 @@ fn render_bounded_layout_cap_inner(
 
     let cap = usize::from(spec.rows);
     let exact_child_rows = (depth <= MAX_BOUNDED_EDGE_DEPTH)
-        .then(|| bounded_transient_layout_rows(child, width, inline_options))
+        .then(|| bounded_exact_layout_rows(child, width, inline_options))
         .flatten();
     let probe = measure_bounded_layout_edge_inner(
         child,
@@ -5179,7 +5183,7 @@ mod tests {
     fn oversized_transient_caps_never_measure_or_render_the_payload() {
         let layout = BlockLayout::Cap {
             child: Box::new(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-                content: "x".repeat(MAX_BOUNDED_EDGE_TRANSIENT_BYTES + 1),
+                content: "x".repeat(MAX_BOUNDED_EDGE_EXACT_BYTES + 1),
                 hl_group: None,
                 ansi: false,
             }))),
@@ -5219,7 +5223,7 @@ mod tests {
 
     #[test]
     fn transient_span_budget_bounds_zero_width_layouts() {
-        let spans = (0..=MAX_BOUNDED_EDGE_TRANSIENT_SPANS)
+        let spans = (0..=MAX_BOUNDED_EDGE_EXACT_SPANS)
             .map(|_| protocol::StyledSpan::default())
             .collect();
         let leaf = IrLeaf::Line(LineSpec {
@@ -5227,10 +5231,10 @@ mod tests {
             hl_group: None,
             syntax_highlights: Default::default(),
         });
-        assert!(!transient_leaf_is_bounded(&leaf));
+        assert!(!leaf_fits_exact_measure_budget(&leaf));
 
         let runs = RunsSpec {
-            lines: protocol::StyledLines(vec![(0..=MAX_BOUNDED_EDGE_TRANSIENT_SPANS)
+            lines: protocol::StyledLines(vec![(0..=MAX_BOUNDED_EDGE_EXACT_SPANS)
                 .map(|_| protocol::StyledSpan::default())
                 .collect()]),
             hl_group: None,
@@ -5276,9 +5280,9 @@ mod tests {
                 spec: StyleSpec::default(),
             };
         }
-        assert!(!transient_layout_fits_budget(
+        assert!(!layout_fits_exact_measure_budget(
             &child,
-            &mut TransientLayoutBudget::default()
+            &mut ExactLayoutBudget::default()
         ));
 
         let layout = BlockLayout::Cap {
@@ -5604,6 +5608,42 @@ mod tests {
             vec!["head", "… 3 lines omitted …", "tail"]
         );
         assert_eq!(measure_layout_ir(&layout, 80), 3);
+    }
+
+    #[test]
+    fn retained_markdown_cap_suppresses_marker_for_blank_omitted_row() {
+        let content = smelt_core::transcript_content::TranscriptContent::from(
+            "first paragraph\n\nsecond paragraph\nthird paragraph\nfourth paragraph".to_string(),
+        );
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content,
+                render: ContentRenderSpec::Markdown {
+                    dim: true,
+                    italic: true,
+                    inline: false,
+                },
+            }))),
+            spec: CapSpec {
+                rows: 4,
+                keep: CapKeep::HeadTail {
+                    head: 1,
+                    marker: true,
+                },
+                total_rows: Some(5),
+            },
+        };
+
+        assert_eq!(
+            render_lines(&layout, 80),
+            vec![
+                "first paragraph",
+                "second paragraph",
+                "third paragraph",
+                "fourth paragraph",
+            ]
+        );
+        assert_eq!(measure_layout_ir(&layout, 80), 4);
     }
 
     #[test]

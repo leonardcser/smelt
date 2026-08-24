@@ -41,7 +41,7 @@ impl TuiApp {
             .append_tool_draft(stream_id, call_id, tool_name, delta)
         {
             if presentation_changed {
-                self.refresh_tool_draft_summary(block_id);
+                self.transcript_work.request_tool_draft_summary(block_id);
             }
         }
     }
@@ -96,7 +96,14 @@ impl TuiApp {
         self.conversation.clear_stream_tool_drafts();
     }
 
+    pub(crate) fn refresh_pending_tool_draft_summaries(&mut self) {
+        for block_id in self.transcript_work.take_tool_draft_summaries() {
+            self.refresh_tool_draft_summary(block_id);
+        }
+    }
+
     fn refresh_tool_draft_summary(&mut self, block_id: BlockId) {
+        self.transcript_work.cancel_tool_draft_summary(block_id);
         let Some((name, args, finished)) = self.conversation.tool_draft_preview(block_id) else {
             return;
         };
