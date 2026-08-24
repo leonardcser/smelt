@@ -666,26 +666,15 @@ impl TuiApp {
         // prompt chrome; recompute them whenever the main layout changes.
         crate::picker::sync_layouts(self);
         if applying_deferred_layout {
-            let requested_focus = self.lua.shared().take_focus_after_layout();
-            let focused_as_requested =
-                requested_focus.is_some_and(|focus| self.ui.set_focus(focus));
-            if !focused_as_requested {
-                if let Some(modal) = self.ui.active_modal() {
-                    let focus = self.ui.focus();
-                    let focused_in_modal = self
-                        .ui
-                        .modal_leaves(modal)
-                        .is_some_and(|leaves| focus.is_some_and(|focus| leaves.contains(&focus)));
-                    if !focused_in_modal {
-                        self.ui.focus_active_modal();
-                    }
-                } else if self.ui.focus().is_none() {
-                    let focus = match self.app_focus {
-                        crate::app::AppFocus::Prompt => crate::app::PROMPT_WIN,
-                        crate::app::AppFocus::Content => crate::app::TRANSCRIPT_WIN,
-                    };
-                    self.ui.set_focus(focus);
-                }
+            if let Some(focus) = self.lua.shared().take_focus_after_layout() {
+                self.focus_window(focus);
+            }
+            if self.ui.focus().is_none() && self.ui.active_modal().is_none() {
+                let focus = match self.app_focus {
+                    crate::app::AppFocus::Prompt => crate::app::PROMPT_WIN,
+                    crate::app::AppFocus::Content => crate::app::TRANSCRIPT_WIN,
+                };
+                self.focus_window(focus);
             }
         }
         let prompt_rect = if self.has_docked_dialog() {

@@ -8,6 +8,20 @@ use std::time::Duration;
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
 
 impl TuiApp {
+    /// Focus a window and keep the logical app pane in sync when the target is
+    /// one of the two primary panes.
+    pub(crate) fn focus_window(&mut self, win: crate::smelt_edit::WinId) -> bool {
+        if !self.ui.set_focus(win) {
+            return false;
+        }
+        match win {
+            crate::app::PROMPT_WIN => self.app_focus = crate::app::AppFocus::Prompt,
+            crate::app::TRANSCRIPT_WIN => self.app_focus = crate::app::AppFocus::Content,
+            _ => {}
+        }
+        true
+    }
+
     pub(crate) fn handle_pane_chord(&mut self, ev: &Event) -> Option<EventOutcome> {
         use crossterm::event::KeyModifiers as M;
         let Event::Key(k) = ev else { return None };

@@ -124,6 +124,127 @@ fn dialogs_dismiss_from_the_keyboard_without_mouse_focus() {
 }
 
 #[test]
+fn usage_dialog_opened_during_active_turn_stays_dismissible() {
+    for (code, modifiers, label) in [
+        (KeyCode::Char('q'), KeyModifiers::NONE, "q"),
+        (KeyCode::Esc, KeyModifiers::NONE, "Esc"),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL, "Ctrl-C"),
+    ] {
+        let mut app = TestApp::builder().build();
+        app.type_text("start working");
+        app.press(KeyCode::Enter);
+        assert!(
+            app.agent_running(),
+            "submitting a prompt should start a turn"
+        );
+
+        app.type_text("/usage");
+        assert!(
+            app.state().picker_count > 0,
+            "slash completer should be open"
+        );
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            app.state().picker_count,
+            0,
+            "accepting /usage should close the completer"
+        );
+        assert!(
+            app.state().active_modal.is_some(),
+            "/usage should open a dialog"
+        );
+        assert!(
+            app.ui_probe().focused_modal().is_some(),
+            "/usage should own keyboard focus after prompt submission"
+        );
+        assert!(app.run_lua(
+            r#"
+            smelt.spawn(function()
+              smelt.sleep(10)
+              _G.__usage_focus_callback_ran = true
+              smelt.win.TRANSCRIPT:focus()
+            end)
+            "#,
+        ));
+        app.settle_lua();
+
+        app.engine_event(protocol::EngineEvent::TextDelta {
+            delta: "working".into(),
+        });
+        app.feed_one(SourceEvent::Tick(10));
+        app.tick_timers();
+        app.settle_lua();
+        app.render_silent();
+        assert!(
+            app.eval_lua::<bool>("return __usage_focus_callback_ran == true")
+                .unwrap(),
+            "background callback should run"
+        );
+        assert!(
+            app.ui_probe().focused_modal().is_some(),
+            "background callbacks must not move focus outside /usage"
+        );
+        assert_eq!(
+            app.state().app_focus,
+            AppFocus::Prompt,
+            "a rejected focus request must not change the active app pane"
+        );
+
+        app.press_mod(code, modifiers);
+        assert!(
+            app.state().active_modal.is_none(),
+            "{label} should close /usage while the active turn continues"
+        );
+        app.render_silent();
+        assert_eq!(app.state().app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
+        assert!(app.agent_running());
+    }
+}
+
+#[test]
+fn deferred_lua_focus_commits_app_pane_only_after_layout_accepts_it() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        smelt.ui.layout.set(function()
+          return smelt.ui.layout.leaf(smelt.win.PROMPT)
+        end)
+        "#,
+    ));
+    app.render_silent();
+    assert!(app
+        .ui_probe()
+        .split_rect(crate::app::TRANSCRIPT_WIN)
+        .is_none());
+    assert_eq!(app.state().app_focus, AppFocus::Prompt);
+
+    assert!(app
+        .exec_lua_entry(
+            r#"
+            smelt.ui.layout.set(function()
+              return smelt.ui.layout.leaf(smelt.win.TRANSCRIPT)
+            end)
+            smelt.win.TRANSCRIPT:focus()
+            "#,
+        )
+        .is_ok());
+    assert_eq!(
+        app.state().app_focus,
+        AppFocus::Prompt,
+        "deferred focus must not commit before its target is mounted"
+    );
+
+    app.render_silent();
+    assert!(app
+        .ui_probe()
+        .split_rect(crate::app::TRANSCRIPT_WIN)
+        .is_some());
+    assert_eq!(app.ui_probe().focus(), Some(crate::app::TRANSCRIPT_WIN));
+    assert_eq!(app.state().app_focus, AppFocus::Content);
+}
+
+#[test]
 fn failed_root_dialog_open_does_not_pollute_dialog_stack() {
     let mut app = TestApp::builder().build();
 

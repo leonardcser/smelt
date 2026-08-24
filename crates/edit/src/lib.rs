@@ -641,7 +641,7 @@ impl Ui {
     }
 
     /// Replace the splits layout. Clears focus and capture if their targets
-    /// are no longer reachable.
+    /// are no longer reachable, then restores focus to the active modal.
     pub fn set_layout(&mut self, tree: LayoutTree) {
         self.surface.set_layout(tree);
         self.refresh_docked_surface_rects();
@@ -652,6 +652,10 @@ impl Ui {
             {
                 self.focus = None;
             }
+        }
+        let active_modal = self.active_modal();
+        if active_modal.is_some() && self.focused_modal() != active_modal {
+            self.focus_active_modal();
         }
         if let Some(cap) = self.capture {
             if !self.capture_target_alive(cap) {
@@ -2004,10 +2008,18 @@ impl Ui {
         false
     }
 
-    /// Focus `win`. Returns `false` unless it is a focusable split or decoration
-    /// leaf, an overlay leaf, or the keyboard owner of an active modal.
-    /// Re-focusing the current window is a no-op (no history push).
+    /// Focus `win`. Returns `false` unless it belongs to the active modal, when
+    /// one exists, or is otherwise a focusable split, decoration, or overlay
+    /// leaf. Re-focusing the current window is a no-op (no history push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
+        let active_modal = self.active_modal();
+        let is_active_modal_leaf = active_modal
+            .and_then(|modal| self.modal(modal))
+            .is_some_and(|modal| modal.contains(win));
+        if active_modal.is_some() && !is_active_modal_leaf {
+            return false;
+        }
+
         let prior = self.focus;
         if prior == Some(win) {
             return true;
@@ -2017,14 +2029,9 @@ impl Ui {
         let is_overlay_leaf = self.overlay_for_leaf(win).is_some();
         let is_decoration_leaf = self.decoration_for_leaf(win).is_some()
             && self.wins.get(&win).is_some_and(|w| w.accepts_focus());
-        if !is_split_leaf && !is_overlay_leaf && !is_decoration_leaf {
-            let is_active_modal_leaf = self
-                .active_modal()
-                .and_then(|modal| self.modal(modal))
-                .is_some_and(|modal| modal.contains(win) && self.wins.contains_key(&win));
-            if !is_active_modal_leaf {
-                return false;
-            }
+        let is_active_modal_window = is_active_modal_leaf && self.wins.contains_key(&win);
+        if !is_split_leaf && !is_overlay_leaf && !is_decoration_leaf && !is_active_modal_window {
+            return false;
         }
         if let Some(p) = prior {
             self.focus_history.push(p);
@@ -4844,7 +4851,7 @@ mod tests {
     }
 
     #[test]
-    fn docked_modal_focuses_a_non_focusable_leaf_for_keyboard_routing() {
+    fn docked_modal_focuses_its_leaf_and_contains_programmatic_focus() {
         let mut ui = make_ui();
         let background = WinId(7);
         let dialog = WinId(100);
@@ -4871,15 +4878,47 @@ mod tests {
         assert_eq!(ui.active_modal(), Some(modal));
         assert_eq!(ui.focused_modal(), Some(modal));
         assert_eq!(ui.focus(), Some(dialog));
+        assert!(!ui.set_focus(background));
+        assert_eq!(ui.focus(), Some(dialog));
+
+        let _ = ui.modal_close(modal);
+        assert!(ui.set_focus(background));
+        assert_eq!(ui.focus(), Some(background));
+    }
+
+    #[test]
+    fn active_modal_overlay_contains_focus_but_allows_owned_leaves() {
+        let mut ui = make_ui();
+        let background = WinId(7);
+        let first = WinId(100);
+        let second = WinId(101);
+        let third = WinId(102);
+        make_split(&mut ui, background);
+        for win in [first, second, third] {
+            register_window(&mut ui, win);
+        }
+        assert!(ui.set_focus(background));
+
+        let overlay = ui.overlay_open(modal_overlay_with_leaves(first, second, third));
+
+        assert_eq!(ui.focus(), Some(first));
+        assert!(!ui.set_focus(background));
+        assert!(ui.set_focus(second));
+        assert_eq!(ui.focus(), Some(second));
+
+        ui.overlay_close(overlay);
+        assert_eq!(ui.focus(), Some(background));
     }
 
     #[test]
     fn modal_overlay_stays_active_above_later_docked_modal() {
         let mut ui = make_ui();
+        let docked_leaf = WinId(100);
+        register_window(&mut ui, docked_leaf);
         let overlay = ui.overlay_open(stub_overlay().modal(true));
         let (_, docked) = ui.docked_surface_open(
-            LayoutTree::leaf(WinId(100)),
-            vec![WinId(100)],
+            LayoutTree::leaf(docked_leaf),
+            vec![docked_leaf],
             DockedSurfaceConfig {
                 height: Constraint::Length(1),
                 min_height: None,
@@ -4891,12 +4930,43 @@ mod tests {
         );
 
         assert_eq!(ui.active_modal_overlay(), Some(overlay));
+        assert_eq!(ui.focus(), Some(WinId(99)));
+        assert!(!ui.set_focus(docked_leaf));
+        assert_eq!(ui.focus(), Some(WinId(99)));
+
         ui.overlay_close(overlay);
         assert_eq!(ui.active_modal(), Some(docked));
+        assert_eq!(ui.focus(), Some(docked_leaf));
         assert_eq!(
             ui.active_modal_owner(),
             Some(ModalOwner::Docked(ContainerId(1)))
         );
+    }
+
+    #[test]
+    fn set_layout_restores_focus_to_active_modal() {
+        let mut ui = make_ui();
+        let background = WinId(7);
+        let dialog = WinId(100);
+        make_split(&mut ui, background);
+        register_window(&mut ui, dialog);
+        let (_, modal) = ui.docked_surface_open(
+            LayoutTree::leaf(dialog),
+            vec![dialog],
+            DockedSurfaceConfig {
+                height: Constraint::Length(1),
+                min_height: None,
+                max_height: None,
+                resize: ResizeConfig::none(),
+                fit_reserved_rows: 0,
+                blocks_agent: false,
+            },
+        );
+
+        ui.set_layout(LayoutTree::leaf(background));
+
+        assert_eq!(ui.active_modal(), Some(modal));
+        assert_eq!(ui.focus(), Some(dialog));
     }
 
     #[test]
@@ -6075,19 +6145,17 @@ mod tests {
 
     #[test]
     fn dispatch_overlay_key_ignored_when_focus_outside_overlay() {
-        // Overlay keymap stays inert if the focused leaf is in a different
-        // overlay (or none): the cascade routes through `overlay_for_leaf`.
+        // A non-modal overlay keymap stays inert if the focused leaf is in a
+        // different overlay (or none): the cascade routes through
+        // `overlay_for_leaf`.
         let mut ui = make_ui();
         let outside = WinId(80);
         make_split(&mut ui, outside);
         ui.set_focus(outside);
         let overlay_only_leaf = WinId(81);
-        let id = ui.overlay_open(modal_overlay_with_leaves(
-            overlay_only_leaf,
-            WinId(82),
-            WinId(83),
-        ));
-        // Re-set focus outside the overlay (modal open auto-focused leaf).
+        let id = ui.overlay_open(
+            modal_overlay_with_leaves(overlay_only_leaf, WinId(82), WinId(83)).modal(false),
+        );
         ui.set_focus(outside);
 
         let fired = std::sync::Arc::new(std::sync::Mutex::new(false));

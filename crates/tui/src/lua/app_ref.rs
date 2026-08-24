@@ -1010,14 +1010,12 @@ impl UiLuaHost<'_> {
     }
 
     pub(crate) fn focus_window(&mut self, id: crate::smelt_edit::WinId) {
-        let focused = self.app.ui.set_focus(id);
-        if !focused && self.app.lua.shared().layout_refresh_pending() {
+        let focused = self.app.focus_window(id);
+        if !focused
+            && self.app.ui.active_modal().is_none()
+            && self.app.lua.shared().layout_refresh_pending()
+        {
             self.app.lua.shared().request_focus_after_layout(id);
-        }
-        match id {
-            crate::app::PROMPT_WIN => self.app.app_focus = crate::app::AppFocus::Prompt,
-            crate::app::TRANSCRIPT_WIN => self.app.app_focus = crate::app::AppFocus::Content,
-            _ => {}
         }
     }
 
