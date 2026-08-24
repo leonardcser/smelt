@@ -1495,9 +1495,9 @@ List, sync, and extend permission policy state.
 - `smelt.permissions.grant_session` :: `fun(grant: smelt.permissions.SessionPathGrant): nil`
   Add one session-scoped grant.
 - `smelt.permissions.list` :: `fun(): smelt.permissions.ListResult`
-  Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`.
+  Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } }, repository = { { tool, patterns } } }`.
 - `smelt.permissions.sync` :: `fun(spec: smelt.permissions.SyncSpec): nil`
-  Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`.
+  Replace runtime and persisted permission entries with `spec.session`, `spec.path_grants`, `spec.workspace`, and `spec.repository`.
 
 #### `smelt.picker`
 

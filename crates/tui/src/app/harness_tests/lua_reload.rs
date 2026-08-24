@@ -2731,6 +2731,7 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
             local perms = smelt.permissions.list()
             assert(type(perms.session) == "table", "permission session list")
             assert(type(perms.workspace) == "table", "permission workspace list")
+            assert(type(perms.repository) == "table", "permission repository list")
             local tool_decision = smelt.permissions.check_tool("default", "bash")
             local subcommand_decision = smelt.permissions.check("default", "bash", "git status")
             assert(type(tool_decision) == "string" and #tool_decision > 0, "permission tool decision")

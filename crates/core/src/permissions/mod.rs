@@ -491,13 +491,13 @@ pub fn resolve_permissions(
     mode_behaviors: HashMap<String, ModeBehavior>,
     settings: &crate::config::ResolvedSettings,
     runtime_paths: PermissionRuntimePaths<'_>,
-    workspace_store: &store::WorkspacePermissionStore,
+    permission_store: &store::PermissionStore,
     paths_fn: Option<Arc<PathsFn>>,
 ) -> PermissionResolution {
     let PermissionRuntimePaths { cwd, home } = runtime_paths;
     let context =
         crate::worktree::project_context(cwd, Some(std::path::Path::new(&settings.worktree_root)));
-    let roots = context.allowed_roots.clone();
+    let repository_key = context.repository_key.clone();
     let mut policy = Permissions::from_raw_with_mode_behaviors(raw, tool_defaults, mode_behaviors);
     policy.set_allowed_roots(context.active_root, context.allowed_roots);
     policy.set_home(home.to_path_buf());
@@ -505,7 +505,7 @@ pub fn resolve_permissions(
     if let Some(paths_fn) = paths_fn {
         policy.set_paths_fn(paths_fn);
     }
-    let rules = workspace_store.load_for_roots(&cwd.to_string_lossy(), &roots);
+    let rules = permission_store.load_for_scopes(cwd, repository_key.as_deref());
     let (workspace_tools, workspace_dirs) = store::into_approvals(&rules);
     PermissionResolution {
         policy,

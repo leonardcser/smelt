@@ -91,7 +91,7 @@ pub use signals::Signals;
 pub use timers::Timers;
 
 pub use crate::transcript_model::{
-    ApprovalScope, Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, PermissionEntry,
+    ApprovalTarget, Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, PermissionEntry,
     ToolOutput, ToolState, ToolStatus, TranscriptBlockRecord, TranscriptBlockRecordWithId,
     ViewState,
 };

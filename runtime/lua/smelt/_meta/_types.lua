@@ -394,6 +394,7 @@
 ---@field session smelt.permissions.SessionEntry[] Session-scoped tool/pattern approvals for this run.
 ---@field path_grants smelt.permissions.SessionPathGrant[] Session-scoped path grants for this run.
 ---@field workspace smelt.permissions.WorkspaceRule[] Workspace rules loaded from the on-disk store rooted at the current cwd.
+---@field repository smelt.permissions.WorkspaceRule[] Repository rules shared by all worktrees. Empty outside a Git repository.
 
 --- Permission slots that apply within a single agent mode.
 ---@class smelt.permissions.ModePerms
@@ -430,6 +431,7 @@
 ---@field session? smelt.permissions.SessionEntry[] Session entries; applied for this run only.
 ---@field path_grants? smelt.permissions.SessionPathGrant[] Tool-specific session path grants; applied for this run only.
 ---@field workspace? smelt.permissions.WorkspaceRule[] Workspace rules; persisted to disk under the current cwd.
+---@field repository? smelt.permissions.WorkspaceRule[] Repository rules; persisted under the repository root and shared by its worktrees.
 
 --- A workspace permission rule (one tool with N patterns, persisted to disk).
 ---@class smelt.permissions.WorkspaceRule

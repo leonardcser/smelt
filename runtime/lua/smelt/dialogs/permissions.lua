@@ -1,4 +1,4 @@
--- Built-in /permissions command. Lists and deletes session/workspace rules;
+-- Built-in /permissions command. Lists and deletes session/workspace/repository rules;
 -- syncs on close so edits persist.
 
 local function build_items(perms)
@@ -6,21 +6,26 @@ local function build_items(perms)
   local mapping = {}
 
   for i, e in ipairs(perms.session or {}) do
-    table.insert(items, { label = string.format("%s: %s", e.tool, e.pattern) })
+    table.insert(items, { label = string.format("[session] %s: %s", e.tool, e.pattern) })
     table.insert(mapping, { kind = "session", session_idx = i })
   end
 
-  for ri, rule in ipairs(perms.workspace or {}) do
-    if #(rule.patterns or {}) == 0 then
-      table.insert(items, { label = string.format("%s: *", rule.tool) })
-      table.insert(mapping, { kind = "workspace", rule_idx = ri, pattern_idx = 0 })
-    else
-      for pi, p in ipairs(rule.patterns) do
-        table.insert(items, { label = string.format("%s: %s", rule.tool, p) })
-        table.insert(mapping, { kind = "workspace", rule_idx = ri, pattern_idx = pi })
+  local function append_persisted(scope)
+    for ri, rule in ipairs(perms[scope] or {}) do
+      if #(rule.patterns or {}) == 0 then
+        table.insert(items, { label = string.format("[%s] %s: *", scope, rule.tool) })
+        table.insert(mapping, { kind = scope, rule_idx = ri, pattern_idx = 0 })
+      else
+        for pi, p in ipairs(rule.patterns) do
+          table.insert(items, { label = string.format("[%s] %s: %s", scope, rule.tool, p) })
+          table.insert(mapping, { kind = scope, rule_idx = ri, pattern_idx = pi })
+        end
       end
     end
   end
+
+  append_persisted("workspace")
+  append_persisted("repository")
 
   return items, mapping
 end
@@ -29,9 +34,10 @@ local function delete_entry(perms, m)
   if m.kind == "session" then
     table.remove(perms.session, m.session_idx)
   else
-    local rule = perms.workspace[m.rule_idx]
+    local rules = perms[m.kind]
+    local rule = rules[m.rule_idx]
     if #(rule.patterns or {}) <= 1 then
-      table.remove(perms.workspace, m.rule_idx)
+      table.remove(rules, m.rule_idx)
     else
       table.remove(rule.patterns, m.pattern_idx)
     end
@@ -41,7 +47,9 @@ end
 smelt.cmd.register("permissions", function()
   smelt.spawn(function()
     local perms = smelt.permissions.list()
-    if #(perms.session or {}) == 0 and #(perms.workspace or {}) == 0 then
+    if #(perms.session or {}) == 0
+        and #(perms.workspace or {}) == 0
+        and #(perms.repository or {}) == 0 then
       smelt.notify.error("no permissions")
       return
     end

@@ -388,10 +388,18 @@ pub(crate) fn thinking_markdown_source(
     sections.join("\n")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum ApprovalScope {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "scope")]
+pub enum ApprovalTarget {
     Session,
-    Workspace,
+    Workspace {
+        #[serde(skip)]
+        root: std::path::PathBuf,
+    },
+    Repository {
+        #[serde(skip)]
+        key: std::path::PathBuf,
+    },
 }
 
 #[derive(Clone)]
@@ -404,7 +412,8 @@ pub struct PermissionEntry {
 pub struct ConfirmApprovalOption {
     pub id: String,
     pub label: String,
-    pub scope: ApprovalScope,
+    #[serde(flatten)]
+    pub target: ApprovalTarget,
     #[serde(skip)]
     pub grants: Vec<PermissionGrant>,
 }

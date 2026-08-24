@@ -4199,11 +4199,12 @@ fn permissions_handle_snapshots_policy_and_shares_session_approvals() {
 #[test]
 fn permission_resolution_reloads_workspace_grants_without_losing_session_grants() {
     let state = tempfile::tempdir().unwrap();
-    let workspace_store = store::WorkspacePermissionStore::new(state.path().to_path_buf());
+    let workspace_store = store::PermissionStore::new(state.path().to_path_buf());
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     workspace_store.save(
         &first.path().to_string_lossy(),
+        store::PersistenceScope::Workspace,
         &[store::Rule {
             tool: "bash".into(),
             patterns: vec!["git *".into()],

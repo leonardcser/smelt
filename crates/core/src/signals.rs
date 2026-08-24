@@ -1411,7 +1411,7 @@ mod tests {
                 grant_options: vec![crate::transcript_model::ConfirmApprovalOption {
                     id: "grant_0_session".into(),
                     label: "allow bash for this session".into(),
-                    scope: crate::transcript_model::ApprovalScope::Session,
+                    target: crate::transcript_model::ApprovalTarget::Session,
                     grants: Vec::new(),
                 }],
             }),

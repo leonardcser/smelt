@@ -47,7 +47,7 @@ pub struct Core {
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub processes: ProcessRegistry,
     pub permissions: crate::permissions::PermissionsHandle,
-    pub workspace_permissions: crate::permissions::store::WorkspacePermissionStore,
+    pub permission_store: crate::permissions::store::PermissionStore,
     /// MCP server registry. Shared `Arc` with the engine's
     /// `McpDispatcher`; `None` when the user declared no MCP servers.
     /// Lua introspection reads through this handle without locking out
@@ -91,8 +91,8 @@ impl Core {
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
         let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.state_dir().clone());
-        let workspace_permissions =
-            crate::permissions::store::WorkspacePermissionStore::new(env.state_dir().clone());
+        let permission_store =
+            crate::permissions::store::PermissionStore::new(env.state_dir().clone());
         let recent = crate::state::RecentStore::from_env(&env);
         let sessions = crate::session::SessionStorage::from_env(&env);
         // Read before the struct literal moves `config` into the field below.
@@ -113,7 +113,7 @@ impl Core {
             workspace_files,
             processes: ProcessRegistry::new(),
             permissions,
-            workspace_permissions,
+            permission_store,
             mcp: None,
             clock,
             recent,

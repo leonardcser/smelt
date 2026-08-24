@@ -46,6 +46,7 @@ pub struct ProjectContext {
     pub managed_worktree: bool,
     pub worktree_name: Option<String>,
     pub base_path: Option<PathBuf>,
+    pub repository_key: Option<PathBuf>,
     pub allowed_roots: Vec<PathBuf>,
 }
 
@@ -266,8 +267,9 @@ pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
     let branch = current_branch(&active_root).unwrap_or_default();
     let base = default_base_ref(&active_root);
     let worktrees = git_worktrees(&active_root).unwrap_or_default();
+    let repository_key = git_common_dir(&active_root);
     let base_path = find_branch_worktree(&worktrees, &base)
-        .or_else(|| common_dir_repo_root(&active_root))
+        .or_else(|| repository_key.as_deref().and_then(common_dir_repo_root))
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let managed_worktree = is_managed_worktree_path(&active_root, root);
     let project_root = base_path.as_deref().unwrap_or(active_root.as_path());
@@ -293,6 +295,7 @@ pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
             .then(|| branch.clone())
             .filter(|name| !name.is_empty()),
         base_path,
+        repository_key,
         allowed_roots,
     }
 }
@@ -494,17 +497,18 @@ fn git_worktrees(cwd: &Path) -> Result<Vec<GitWorktree>, String> {
     Ok(worktrees)
 }
 
-fn common_dir_repo_root(cwd: &Path) -> Option<PathBuf> {
+fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
     let raw = git_stdout(cwd, ["rev-parse", "--git-common-dir"]).ok()?;
-    let common = {
-        let path = PathBuf::from(raw);
-        if path.is_absolute() {
-            path
-        } else {
-            cwd.join(path)
-        }
+    let path = PathBuf::from(raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
     };
-    let common = std::fs::canonicalize(&common).unwrap_or(common);
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+fn common_dir_repo_root(common: &Path) -> Option<PathBuf> {
     if common.file_name().and_then(|name| name.to_str()) == Some(".git") {
         common.parent().map(Path::to_path_buf)
     } else {
@@ -817,7 +821,18 @@ mod tests {
         );
 
         let ctx = project_context(&worktree_path, None);
+        let main_ctx = project_context(repo.path(), None);
 
+        assert_eq!(ctx.repository_key, main_ctx.repository_key);
+        assert_eq!(
+            ctx.repository_key.as_deref(),
+            Some(
+                std::fs::canonicalize(repo.path().join(".git"))
+                    .unwrap()
+                    .as_path()
+            )
+        );
+        assert_ne!(ctx.repository_key, ctx.base_path);
         assert_eq!(
             ctx.project_name,
             repo.path().file_name().unwrap().to_string_lossy().as_ref()

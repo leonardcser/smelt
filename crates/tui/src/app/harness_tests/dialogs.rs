@@ -1032,6 +1032,211 @@ fn request_bash_permission(
     ));
 }
 
+struct GitWorktreeFixture {
+    repo: tempfile::TempDir,
+    worktrees: tempfile::TempDir,
+    feature: std::path::PathBuf,
+}
+
+impl GitWorktreeFixture {
+    fn new() -> Self {
+        let repo = tempfile::tempdir().unwrap();
+        let worktrees = tempfile::tempdir().unwrap();
+        Self::run_git(repo.path(), &["init", "-b", "main"]);
+        std::fs::write(repo.path().join("README.md"), "test\n").unwrap();
+        Self::run_git(repo.path(), &["add", "README.md"]);
+        Self::run_git(repo.path(), &["commit", "-m", "initial"]);
+        let feature = worktrees.path().join("feature");
+        Self::add_worktree(repo.path(), &feature, "feature");
+        Self {
+            repo,
+            worktrees,
+            feature,
+        }
+    }
+
+    fn repository_root(&self) -> std::path::PathBuf {
+        std::fs::canonicalize(self.repo.path()).unwrap()
+    }
+
+    fn repository_key(&self) -> std::path::PathBuf {
+        std::fs::canonicalize(self.repo.path().join(".git")).unwrap()
+    }
+
+    fn add_sibling(&self) -> std::path::PathBuf {
+        let sibling = self.worktrees.path().join("sibling");
+        Self::add_worktree(self.repo.path(), &sibling, "sibling");
+        sibling
+    }
+
+    fn add_worktree(repo: &std::path::Path, path: &std::path::Path, branch: &str) {
+        Self::run_git(
+            repo,
+            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+        );
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "smelt test")
+            .env("GIT_AUTHOR_EMAIL", "smelt-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "smelt test")
+            .env("GIT_COMMITTER_EMAIL", "smelt-test@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn open_repository_permission_dialog(fixture: &GitWorktreeFixture) -> TestApp {
+    let mut app = TestApp::builder().with_cwd(&fixture.feature).build();
+    app.start_submitted_turn("run tests");
+    request_bash_permission(&mut app, 9, "cargo test", vec!["cargo test *"]);
+    app
+}
+
+fn is_cargo_test_grant(grants: &[smelt_core::permissions::PermissionGrant]) -> bool {
+    matches!(
+        grants,
+        [smelt_core::permissions::PermissionGrant::Command { tool, pattern }]
+            if tool == "bash" && pattern == "cargo test *"
+    )
+}
+
+#[test]
+fn worktree_permission_dialog_offers_repository_scope_with_main_checkout_label() {
+    let fixture = GitWorktreeFixture::new();
+    let mut app = open_repository_permission_dialog(&fixture);
+    let handle_id = app.first_pending_confirm().expect("permission dialog");
+    let options = &app
+        .core_probe()
+        .confirms
+        .get(handle_id)
+        .expect("confirm request")
+        .req
+        .grant_options;
+    let repository = options
+        .iter()
+        .find(|option| matches!(option.target, smelt_core::ApprovalTarget::Repository { .. }))
+        .expect("repository approval option");
+
+    assert_eq!(
+        repository.target,
+        smelt_core::ApprovalTarget::Repository {
+            key: fixture.repository_key(),
+        }
+    );
+    assert_eq!(
+        repository.label,
+        format!(
+            "allow cargo test * in repo {}",
+            fixture.repository_root().display()
+        )
+    );
+    assert!(app.render_to_frame().text().contains("in repo"));
+}
+
+#[test]
+fn repository_approval_persists_under_git_common_directory_key() {
+    let fixture = GitWorktreeFixture::new();
+    let mut app = open_repository_permission_dialog(&fixture);
+
+    assert!(app.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
+        is_cargo_test_grant,
+    ));
+    let store = &app.core_probe().permission_store;
+    assert!(store
+        .load(
+            &fixture.feature.to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Workspace,
+        )
+        .is_empty());
+    assert_eq!(
+        store
+            .load(
+                &fixture.repository_key().to_string_lossy(),
+                smelt_core::permissions::store::PersistenceScope::Repository,
+            )
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn permissions_lua_lists_and_deletes_repository_rules() {
+    let fixture = GitWorktreeFixture::new();
+    let mut app = open_repository_permission_dialog(&fixture);
+    assert!(app.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
+        is_cargo_test_grant,
+    ));
+
+    assert!(app.run_lua(
+        r#"
+        local permissions = smelt.permissions.list()
+        assert(#permissions.repository == 1)
+        permissions.repository = {}
+        smelt.permissions.sync(permissions)
+        "#
+    ));
+    assert!(app
+        .core_probe()
+        .permission_store
+        .load(
+            &fixture.repository_key().to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Repository,
+        )
+        .is_empty());
+}
+
+#[test]
+fn external_sibling_worktree_inherits_repository_but_not_workspace_rules() {
+    let fixture = GitWorktreeFixture::new();
+    let app = TestApp::builder().with_cwd(&fixture.feature).build();
+    let store = &app.core_probe().permission_store;
+    store.add_grant(
+        &fixture.repository_key().to_string_lossy(),
+        smelt_core::permissions::store::PersistenceScope::Repository,
+        smelt_core::permissions::PermissionGrant::Command {
+            tool: "bash".into(),
+            pattern: "cargo test *".into(),
+        },
+    );
+    store.add_tool(
+        &fixture.feature.to_string_lossy(),
+        smelt_core::permissions::store::PersistenceScope::Workspace,
+        "bash",
+        vec!["worktree-only *".into()],
+    );
+    let sibling = fixture.add_sibling();
+
+    let resolution = smelt_core::permissions::resolve_permissions(
+        &smelt_core::permissions::rules::RawPerms::default(),
+        &smelt_core::permissions::rules::ToolDefaults::default(),
+        std::collections::HashMap::new(),
+        &smelt_core::config::ResolvedSettings::default(),
+        smelt_core::permissions::PermissionRuntimePaths {
+            cwd: &sibling,
+            home: app.runtime_home(),
+        },
+        store,
+        None,
+    );
+    let permissions = smelt_core::permissions::PermissionsHandle::from_resolution(resolution);
+    let approvals = permissions.approvals();
+    let approvals = approvals.read().unwrap();
+    assert!(approvals.has_pattern("bash", "cargo test *"));
+    assert!(!approvals.has_pattern("bash", "worktree-only *"));
+}
+
 #[test]
 fn request_permission_auto_allows_when_applied_turn_mode_allows() {
     let mut app = TestApp::builder().build();

@@ -1529,6 +1529,7 @@ impl TuiApp {
         session_entries: Vec<PermissionEntry>,
         session_path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
         workspace_rules: Vec<smelt_core::permissions::store::Rule>,
+        repository_rules: Vec<smelt_core::permissions::store::Rule>,
     ) {
         let mut session_tools = Vec::new();
         let mut session_dirs: Vec<PathBuf> = Vec::new();
@@ -1543,9 +1544,18 @@ impl TuiApp {
             }
         }
 
-        self.core
-            .workspace_permissions
-            .save(self.workspace.cwd(), &workspace_rules);
+        self.core.permission_store.save(
+            self.workspace.cwd(),
+            smelt_core::permissions::store::PersistenceScope::Workspace,
+            &workspace_rules,
+        );
+        if let Some((repository_key, _)) = self.workspace.repository_permission_context() {
+            self.core.permission_store.save(
+                &repository_key.to_string_lossy(),
+                smelt_core::permissions::store::PersistenceScope::Repository,
+                &repository_rules,
+            );
+        }
         {
             let approval_store = self.core.permissions.approvals();
             approval_store.write().unwrap().set_session(
@@ -1557,7 +1567,7 @@ impl TuiApp {
         self.reconcile_permissions();
     }
 
-    fn reload_workspace_permissions(&mut self) {
+    fn reload_permission_store(&mut self) {
         self.reconcile_permissions();
     }
 
@@ -1593,23 +1603,31 @@ impl TuiApp {
                 false
             }
             ConfirmChoice::Grant(option) => {
-                match option.scope {
-                    ApprovalScope::Session => {
+                match option.target {
+                    ApprovalTarget::Session => {
                         let approval_store = self.core.permissions.approvals();
                         let mut approvals = approval_store.write().unwrap();
                         for grant in option.grants {
                             approvals.add_session_grant(grant);
                         }
                     }
-                    ApprovalScope::Workspace => {
-                        for grant in option.grants {
-                            add_workspace_grant(
-                                &self.core.workspace_permissions,
-                                self.workspace.cwd(),
-                                grant,
-                            );
-                        }
-                        self.reload_workspace_permissions();
+                    ApprovalTarget::Workspace { root } => {
+                        add_persisted_grants(
+                            &self.core.permission_store,
+                            &root,
+                            smelt_core::permissions::store::PersistenceScope::Workspace,
+                            option.grants,
+                        );
+                        self.reload_permission_store();
+                    }
+                    ApprovalTarget::Repository { key } => {
+                        add_persisted_grants(
+                            &self.core.permission_store,
+                            &key,
+                            smelt_core::permissions::store::PersistenceScope::Repository,
+                            option.grants,
+                        );
+                        self.reload_permission_store();
                     }
                 }
                 self.set_active_status(invocation_id, ToolStatus::Pending);
@@ -1775,6 +1793,7 @@ impl TuiApp {
                 req.grant_options = confirm_grant_options(
                     options.grant_sets,
                     self.workspace.cwd(),
+                    self.workspace.repository_permission_context(),
                     self.core.env.home(),
                 );
 
@@ -1807,49 +1826,61 @@ impl TuiApp {
 fn confirm_grant_options(
     grant_sets: Vec<Vec<smelt_core::permissions::PermissionGrant>>,
     cwd: &str,
+    repository: Option<(&std::path::Path, &std::path::Path)>,
     home: &std::path::Path,
 ) -> Vec<smelt_core::transcript_model::ConfirmApprovalOption> {
     let mut out = Vec::new();
-    for grants in grant_sets {
+    for (idx, grants) in grant_sets.into_iter().enumerate() {
         let subject = smelt_core::permissions::PermissionGrant::display_subjects(&grants, home);
-        let idx = out.len();
         out.push(smelt_core::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_session"),
             label: format!("allow {subject} for this session"),
-            scope: ApprovalScope::Session,
+            target: ApprovalTarget::Session,
             grants: grants.clone(),
         });
         out.push(smelt_core::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_workspace"),
             label: format!("allow {subject} in {}", pretty_cwd(cwd, home)),
-            scope: ApprovalScope::Workspace,
-            grants,
+            target: ApprovalTarget::Workspace {
+                root: std::path::PathBuf::from(cwd),
+            },
+            grants: grants.clone(),
         });
+        if let Some((repository_key, display_root)) = repository {
+            out.push(smelt_core::transcript_model::ConfirmApprovalOption {
+                id: format!("grant_{idx}_repository"),
+                label: format!(
+                    "allow {subject} in repo {}",
+                    pretty_path(display_root, home)
+                ),
+                target: ApprovalTarget::Repository {
+                    key: repository_key.to_path_buf(),
+                },
+                grants,
+            });
+        }
     }
     out
 }
 
 fn pretty_cwd(cwd: &str, home: &std::path::Path) -> String {
-    engine::paths::collapse_tilde_from(std::path::Path::new(cwd), home)
+    pretty_path(std::path::Path::new(cwd), home)
+}
+
+fn pretty_path(path: &std::path::Path, home: &std::path::Path) -> String {
+    engine::paths::collapse_tilde_from(path, home)
         .to_string_lossy()
         .into_owned()
 }
 
-fn add_workspace_grant(
-    store: &smelt_core::permissions::store::WorkspacePermissionStore,
-    cwd: &str,
-    grant: smelt_core::permissions::PermissionGrant,
+fn add_persisted_grants(
+    store: &smelt_core::permissions::store::PermissionStore,
+    root: &std::path::Path,
+    scope: smelt_core::permissions::store::PersistenceScope,
+    grants: Vec<smelt_core::permissions::PermissionGrant>,
 ) {
-    match grant {
-        smelt_core::permissions::PermissionGrant::Tool { tool } => {
-            store.add_tool(cwd, &tool, Vec::new());
-        }
-        smelt_core::permissions::PermissionGrant::Command { tool, pattern } => {
-            store.add_tool(cwd, &tool, vec![pattern]);
-        }
-        smelt_core::permissions::PermissionGrant::PathPrefix { dir } => {
-            store.add_dir(cwd, &dir.to_string_lossy());
-        }
+    for grant in grants {
+        store.add_grant(&root.to_string_lossy(), scope, grant);
     }
 }
 

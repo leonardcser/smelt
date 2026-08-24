@@ -172,39 +172,42 @@ too.
 When a call is gated, a confirm dialog appears with the tool summary, a preview
 (when available, for example a diff for `edit_file`), and these options:
 
-| Option                       | Effect                                                   |
-| ---------------------------- | -------------------------------------------------------- |
-| **yes**                      | Approve this call only                                   |
-| **no**                       | Deny this call (and `Esc` does the same)                 |
-| **allow `<pattern>`**        | Auto-approve calls matching `<pattern>` for this session |
-| **allow `<pattern>` in cwd** | Same, persisted to this workspace                        |
-| **always allow**             | Auto-approve any call to this tool for this session      |
-| **always allow in cwd**      | Same, persisted to this workspace                        |
+| Option                                   | Effect                                               |
+| ---------------------------------------- | ---------------------------------------------------- |
+| **allow once**                           | Approve this call only                               |
+| **deny**                                 | Deny this call (and `Esc` does the same)             |
+| **allow `<pattern>` for this session**   | Auto-approve matching calls for this session         |
+| **allow `<pattern>` in cwd**             | Same, persisted to this exact workspace              |
+| **allow `<pattern>` in repo `<path>`**   | Same, shared by every worktree for the repository    |
 
 `<pattern>` is the tool-specific approval pattern (e.g. a shell command stem
 like `git status` for `bash`, or a URL host for `web_fetch`). When the call
-touches a path outside the workspace, the dir-based options (**allow `<dir>`** /
-**allow `<dir>` in cwd**) appear instead.
+touches a path outside the workspace, the same scopes are offered for a directory
+prefix instead. The repository option appears whenever smelt can identify a Git
+repository root.
 
-Press `e` to add a freeform reason that the model will see along with your
+Press `Tab` to add a freeform reason that the model will see along with your
 decision.
 
 ## Approval Scopes
 
-The "always allow" options above approve future calls at one of two scopes:
+Approval options can apply at one of three scopes:
 
-| Scope         | Lifetime                        | Storage                                                   |
-| ------------- | ------------------------------- | --------------------------------------------------------- |
-| **Session**   | Until `/clear`, `/new`, or exit | Memory                                                    |
-| **Workspace** | All future sessions in this CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](configuration.md#storage-paths) |
+| Scope          | Lifetime                              | Storage                                                   |
+| -------------- | ------------------------------------- | --------------------------------------------------------- |
+| **Session**    | Until `/clear`, `/new`, or exit       | Memory                                                    |
+| **Workspace**  | All future sessions in this exact CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](configuration.md#storage-paths) |
+| **Repository** | Every current and future Git worktree | `repository-permissions.json` under the Git common-directory state entry |
 
-Workspace approvals stay narrow: approving a command pattern only approves calls
-matching that pattern, and approving an outside directory only approves access
-under that directory.
+Workspace rules do not leak into sibling worktrees. Repository rules are loaded
+alongside the exact CWD's rules in every worktree. Both stay narrow: approving a
+command pattern only approves matching calls, and approving an outside directory
+only approves access under that directory.
 
 ## Managing Saved Approvals
 
-Use `/permissions` to view and remove session/workspace approvals:
+Use `/permissions` to view and remove session, workspace, and repository approvals.
+Each entry is labeled with its scope.
 
 - `j`/`k` to navigate
 - `dd` or `Backspace` to delete the highlighted entry

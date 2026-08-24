@@ -121,6 +121,19 @@ impl WorkspaceState {
         self.context.managed_worktree
     }
 
+    pub(crate) fn repository_permission_context(
+        &self,
+    ) -> Option<(&std::path::Path, &std::path::Path)> {
+        self.context.repository_key.as_deref().map(|key| {
+            let display_root = self
+                .context
+                .base_path
+                .as_deref()
+                .unwrap_or(&self.context.active_root);
+            (key, display_root)
+        })
+    }
+
     pub(crate) fn install_cwd(&mut self, cwd: std::path::PathBuf, worktree_root: &std::path::Path) {
         self.cwd = cwd.to_string_lossy().into_owned();
         self.refresh(worktree_root);
@@ -393,6 +406,7 @@ mod tests {
             managed_worktree: true,
             worktree_name: Some("test".into()),
             base_path: Some(std::path::PathBuf::from("/home/dev/dev/smelt")),
+            repository_key: Some(std::path::PathBuf::from("/home/dev/dev/smelt/.git")),
             allowed_roots: Vec::new(),
         };
 

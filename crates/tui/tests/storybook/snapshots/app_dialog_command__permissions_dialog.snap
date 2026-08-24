@@ -9,11 +9,11 @@ expression: frame.text()
 
 
 ─ permissions ────────────────────────────────────────────────────────
-  1. bash: ls/*
-  2. web_fetch: https://example.com/*
-  3. bash: cat/*
-  4. bash: cat/* /etc/*
-  5. write_file: src/**/*.rs
+  1. [session] bash: ls/*
+  2. [session] web_fetch: https://example.com/*
+  3. [workspace] bash: cat/*
+  4. [workspace] bash: cat/* /etc/*
+  5. [workspace] write_file: src/**/*.rs
 
 
 

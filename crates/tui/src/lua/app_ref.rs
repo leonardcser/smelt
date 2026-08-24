@@ -11,6 +11,7 @@ pub(crate) struct PermissionSnapshot {
     pub(crate) session_entries: Vec<(String, String)>,
     pub(crate) path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
     pub(crate) workspace_rules: Vec<smelt_core::permissions::store::Rule>,
+    pub(crate) repository_rules: Vec<smelt_core::permissions::store::Rule>,
 }
 
 pub(crate) struct SessionStatusSnapshot {
@@ -935,11 +936,21 @@ impl PlatformLuaHost<'_> {
                 .map(|entry| (entry.tool, entry.pattern))
                 .collect(),
             path_grants: self.app.session_path_grants(),
-            workspace_rules: self
+            workspace_rules: self.app.core.permission_store.load(
+                self.app.workspace.cwd(),
+                smelt_core::permissions::store::PersistenceScope::Workspace,
+            ),
+            repository_rules: self
                 .app
-                .core
-                .workspace_permissions
-                .load(self.app.workspace.cwd()),
+                .workspace
+                .repository_permission_context()
+                .map(|(key, _)| {
+                    self.app.core.permission_store.load(
+                        &key.to_string_lossy(),
+                        smelt_core::permissions::store::PersistenceScope::Repository,
+                    )
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -948,9 +959,14 @@ impl PlatformLuaHost<'_> {
         session_entries: Vec<smelt_core::PermissionEntry>,
         path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
         workspace_rules: Vec<crate::permissions::store::Rule>,
+        repository_rules: Vec<crate::permissions::store::Rule>,
     ) {
-        self.app
-            .sync_permissions(session_entries, path_grants, workspace_rules);
+        self.app.sync_permissions(
+            session_entries,
+            path_grants,
+            workspace_rules,
+            repository_rules,
+        );
     }
 
     pub(crate) fn grant_session_path(&mut self, grant: smelt_core::permissions::SessionPathGrant) {

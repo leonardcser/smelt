@@ -1,5 +1,5 @@
 //! `smelt.permissions` bindings - list, sync, and extend permission policy state.
-//! Session/workspace entries sit over `RuntimeApprovals` + [`crate::permissions::store`];
+//! Session/workspace/repository entries sit over `RuntimeApprovals` + [`crate::permissions::store`];
 //! policy extensions layer on top of generated defaults.
 
 use lua_doc_derive::LuaOpts;
@@ -74,6 +74,13 @@ impl LuaType for LuaPermissionList {
                     optional: false,
                     doc: "Workspace rules loaded from the on-disk store rooted at the current cwd.",
                 },
+                LuaClassField {
+                    name: "repository",
+                    ty: "smelt.permissions.WorkspaceRule[]".into(),
+                    optional: false,
+                    doc:
+                        "Repository rules shared by all worktrees. Empty outside a Git repository.",
+                },
             ],
         });
         "smelt.permissions.ListResult".into()
@@ -84,6 +91,33 @@ impl IntoLua for LuaPermissionList {
     fn into_lua(self, _: &Lua) -> LuaResult<mlua::Value> {
         Ok(mlua::Value::Table(self.0))
     }
+}
+
+fn lua_workspace_rule_to_runtime(
+    rule: LuaPermissionWorkspaceRule,
+) -> crate::permissions::store::Rule {
+    crate::permissions::store::Rule {
+        tool: rule.tool,
+        patterns: rule.patterns,
+    }
+}
+
+fn permission_rules_to_lua(
+    lua: &Lua,
+    rules: Vec<crate::permissions::store::Rule>,
+) -> LuaResult<mlua::Table> {
+    let array = lua.create_table()?;
+    for (i, rule) in rules.into_iter().enumerate() {
+        let row = lua.create_table()?;
+        row.set("tool", rule.tool)?;
+        let patterns = lua.create_table()?;
+        for (j, pattern) in rule.patterns.into_iter().enumerate() {
+            patterns.set(j + 1, pattern)?;
+        }
+        row.set("patterns", patterns)?;
+        array.set(i + 1, row)?;
+    }
+    Ok(array)
 }
 
 /// Spec for `smelt.permissions.sync`.
@@ -99,6 +133,9 @@ pub struct LuaPermissionSyncSpec {
     /// Workspace rules; persisted to disk under the current cwd.
     #[lua(default)]
     pub workspace: Vec<LuaPermissionWorkspaceRule>,
+    /// Repository rules; persisted under the repository root and shared by its worktrees.
+    #[lua(default)]
+    pub repository: Vec<LuaPermissionWorkspaceRule>,
 }
 
 /// `allow`/`ask`/`deny` arrays accepted by permission policy sections.
@@ -205,16 +242,17 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
+        "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } }, repository = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace and repository entries come from their on-disk stores.",
         &[],
         |lua, ()| -> LuaResult<LuaPermissionList> {
             let snapshot = crate::lua::try_with_platform_host(|host| host.permission_snapshot());
-            let (session_entries, path_grants, workspace_rules) = snapshot
+            let (session_entries, path_grants, workspace_rules, repository_rules) = snapshot
                 .map(|snapshot| {
                     (
                         snapshot.session_entries,
                         snapshot.path_grants,
                         snapshot.workspace_rules,
+                        snapshot.repository_rules,
                     )
                 })
                 .unwrap_or_default();
@@ -240,25 +278,18 @@ pub(super) fn register(
                 path_grants_arr.set(i + 1, row)?;
             }
             out.set("path_grants", path_grants_arr)?;
-            let workspace_arr = lua.create_table()?;
-            for (i, rule) in workspace_rules.into_iter().enumerate() {
-                let row = lua.create_table()?;
-                row.set("tool", rule.tool)?;
-                let pats = lua.create_table()?;
-                for (j, p) in rule.patterns.into_iter().enumerate() {
-                    pats.set(j + 1, p)?;
-                }
-                row.set("patterns", pats)?;
-                workspace_arr.set(i + 1, row)?;
-            }
-            out.set("workspace", workspace_arr)?;
+            out.set("workspace", permission_rules_to_lua(lua, workspace_rules)?)?;
+            out.set(
+                "repository",
+                permission_rules_to_lua(lua, repository_rules)?,
+            )?;
             Ok(LuaPermissionList(out))
         },
     )?;
     let sync_context = Arc::clone(&shared.core);
     m.fn_(
         "sync",
-        "Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.",
+        "Replace runtime and persisted permission entries with `spec.session`, `spec.path_grants`, `spec.workspace`, and `spec.repository`. Workspace rules apply to the exact CWD; repository rules apply to all its worktrees.",
         &["spec"],
         move |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
             let session_entries: Vec<smelt_core::PermissionEntry> = spec
@@ -274,16 +305,23 @@ pub(super) fn register(
                 .into_iter()
                 .map(|grant| lua_path_grant_to_runtime(grant, &sync_context))
                 .collect::<LuaResult<Vec<_>>>()?;
-            let workspace_rules: Vec<crate::permissions::store::Rule> = spec
+            let workspace_rules = spec
                 .workspace
                 .into_iter()
-                .map(|r| crate::permissions::store::Rule {
-                    tool: r.tool,
-                    patterns: r.patterns,
-                })
+                .map(lua_workspace_rule_to_runtime)
+                .collect();
+            let repository_rules = spec
+                .repository
+                .into_iter()
+                .map(lua_workspace_rule_to_runtime)
                 .collect();
             crate::lua::with_platform_host(|host| {
-                host.sync_permissions(session_entries, session_path_grants, workspace_rules)
+                host.sync_permissions(
+                    session_entries,
+                    session_path_grants,
+                    workspace_rules,
+                    repository_rules,
+                )
             });
             Ok(())
         },

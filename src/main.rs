@@ -1345,8 +1345,8 @@ async fn async_main() {
     };
 
     let permission_rules = lua_permission_rules.unwrap_or_default();
-    let workspace_permissions =
-        smelt_core::permissions::store::WorkspacePermissionStore::new(env.state_dir().clone());
+    let permission_store =
+        smelt_core::permissions::store::PermissionStore::new(env.state_dir().clone());
     let permission_resolution = smelt_core::permissions::resolve_permissions(
         &permission_rules,
         &lua_tool_defaults,
@@ -1356,7 +1356,7 @@ async fn async_main() {
             cwd: &cwd,
             home: env.home(),
         },
-        &workspace_permissions,
+        &permission_store,
         None,
     );
     let permissions =

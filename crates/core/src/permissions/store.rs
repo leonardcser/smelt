@@ -1,9 +1,27 @@
-use crate::{config, permissions::workspace};
+use crate::{config, permissions::PermissionGrant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// A single persisted workspace permission rule.
+const WORKSPACE_PERMISSIONS_FILE: &str = "permissions.json";
+const REPOSITORY_PERMISSIONS_FILE: &str = "repository-permissions.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceScope {
+    Workspace,
+    Repository,
+}
+
+impl PersistenceScope {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::Workspace => WORKSPACE_PERMISSIONS_FILE,
+            Self::Repository => REPOSITORY_PERMISSIONS_FILE,
+        }
+    }
+}
+
+/// A single persisted workspace or repository permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     /// Tool name (e.g. `"bash"`) or `"directory"` for dir-based approvals.
@@ -57,11 +75,11 @@ fn decode_path(encoded: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
-pub struct WorkspacePermissionStore {
+pub struct PermissionStore {
     state_root: PathBuf,
 }
 
-impl WorkspacePermissionStore {
+impl PermissionStore {
     pub fn new(state_root: PathBuf) -> Self {
         Self { state_root }
     }
@@ -70,15 +88,15 @@ impl WorkspacePermissionStore {
         Self::new(config::state_dir())
     }
 
-    fn permissions_path(&self, cwd: &str) -> PathBuf {
+    fn permissions_path(&self, root: &str, scope: PersistenceScope) -> PathBuf {
         self.state_root
             .join("workspaces")
-            .join(encode_path(cwd))
-            .join("permissions.json")
+            .join(encode_path(root))
+            .join(scope.filename())
     }
 
-    pub fn load(&self, cwd: &str) -> Vec<Rule> {
-        let path = self.permissions_path(cwd);
+    pub fn load(&self, root: &str, scope: PersistenceScope) -> Vec<Rule> {
+        let path = self.permissions_path(root, scope);
         let Ok(contents) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
@@ -86,24 +104,22 @@ impl WorkspacePermissionStore {
         store.rules
     }
 
-    pub fn load_for_roots(&self, cwd: &str, roots: &[PathBuf]) -> Vec<Rule> {
-        let mut loaded: Vec<PathBuf> = Vec::new();
-        let mut rules = Vec::new();
-        for root in std::iter::once(Path::new(cwd).to_path_buf()).chain(roots.iter().cloned()) {
-            if loaded
-                .iter()
-                .any(|existing| workspace::paths_equivalent(existing, &root))
-            {
-                continue;
-            }
-            merge_rules(&mut rules, self.load(&root.to_string_lossy()));
-            loaded.push(root);
+    pub fn load_for_scopes(&self, workspace: &Path, repository_key: Option<&Path>) -> Vec<Rule> {
+        let mut rules = self.load(&workspace.to_string_lossy(), PersistenceScope::Workspace);
+        if let Some(repository_key) = repository_key {
+            merge_rules(
+                &mut rules,
+                self.load(
+                    &repository_key.to_string_lossy(),
+                    PersistenceScope::Repository,
+                ),
+            );
         }
         rules
     }
 
-    pub fn save(&self, cwd: &str, rules: &[Rule]) {
-        let path = self.permissions_path(cwd);
+    pub fn save(&self, root: &str, scope: PersistenceScope, rules: &[Rule]) {
+        let path = self.permissions_path(root, scope);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -115,9 +131,8 @@ impl WorkspacePermissionStore {
         }
     }
 
-    /// Add a tool-level approval rule, merging with any existing rule for the same tool.
-    pub fn add_tool(&self, cwd: &str, tool: &str, patterns: Vec<String>) {
-        let mut rules = self.load(cwd);
+    pub fn add_tool(&self, root: &str, scope: PersistenceScope, tool: &str, patterns: Vec<String>) {
+        let mut rules = self.load(root, scope);
         if let Some(existing) = rules.iter_mut().find(|r| r.tool == tool) {
             if patterns.is_empty() || existing.patterns.is_empty() {
                 existing.patterns.clear();
@@ -134,12 +149,11 @@ impl WorkspacePermissionStore {
                 patterns,
             });
         }
-        self.save(cwd, &rules);
+        self.save(root, scope, &rules);
     }
 
-    /// Add a directory-level approval rule (idempotent).
-    pub fn add_dir(&self, cwd: &str, dir: &str) {
-        let mut rules = self.load(cwd);
+    pub fn add_dir(&self, root: &str, scope: PersistenceScope, dir: &str) {
+        let mut rules = self.load(root, scope);
         let already = rules
             .iter()
             .any(|r| r.tool == "directory" && r.patterns.iter().any(|p| p == dir));
@@ -149,7 +163,19 @@ impl WorkspacePermissionStore {
                 patterns: vec![dir.to_string()],
             });
         }
-        self.save(cwd, &rules);
+        self.save(root, scope, &rules);
+    }
+
+    pub fn add_grant(&self, root: &str, scope: PersistenceScope, grant: PermissionGrant) {
+        match grant {
+            PermissionGrant::Tool { tool } => self.add_tool(root, scope, &tool, Vec::new()),
+            PermissionGrant::Command { tool, pattern } => {
+                self.add_tool(root, scope, &tool, vec![pattern]);
+            }
+            PermissionGrant::PathPrefix { dir } => {
+                self.add_dir(root, scope, &dir.to_string_lossy());
+            }
+        }
     }
 }
 
@@ -172,19 +198,19 @@ fn merge_rules(rules: &mut Vec<Rule>, incoming: Vec<Rule>) {
 }
 
 pub fn load(cwd: &str) -> Vec<Rule> {
-    WorkspacePermissionStore::from_process().load(cwd)
+    PermissionStore::from_process().load(cwd, PersistenceScope::Workspace)
 }
 
 pub fn save(cwd: &str, rules: &[Rule]) {
-    WorkspacePermissionStore::from_process().save(cwd, rules);
+    PermissionStore::from_process().save(cwd, PersistenceScope::Workspace, rules);
 }
 
 pub fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
-    WorkspacePermissionStore::from_process().add_tool(cwd, tool, patterns);
+    PermissionStore::from_process().add_tool(cwd, PersistenceScope::Workspace, tool, patterns);
 }
 
 pub fn add_dir(cwd: &str, dir: &str) {
-    WorkspacePermissionStore::from_process().add_dir(cwd, dir);
+    PermissionStore::from_process().add_dir(cwd, PersistenceScope::Workspace, dir);
 }
 
 /// Build compiled approval maps from persisted workspace rules.
@@ -280,6 +306,86 @@ mod tests {
             .unwrap()
             .patterns
             .is_empty());
+    }
+
+    #[test]
+    fn scoped_load_combines_workspace_and_repository_without_siblings() {
+        let state = tempfile::tempdir().unwrap();
+        let dirs = tempfile::tempdir().unwrap();
+        let workspace = dirs.path().join("feature");
+        let repository = dirs.path().join("repo");
+        let sibling = dirs.path().join("other-feature");
+        for path in [&workspace, &repository, &sibling] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let store = PermissionStore::new(state.path().to_path_buf());
+        store.add_tool(
+            &workspace.to_string_lossy(),
+            PersistenceScope::Workspace,
+            "bash",
+            vec!["cargo test *".into()],
+        );
+        store.add_grant(
+            &repository.to_string_lossy(),
+            PersistenceScope::Repository,
+            PermissionGrant::Command {
+                tool: "bash".into(),
+                pattern: "git status".into(),
+            },
+        );
+        store.add_tool(
+            &sibling.to_string_lossy(),
+            PersistenceScope::Workspace,
+            "bash",
+            vec!["rm *".into()],
+        );
+
+        let rules = store.load_for_scopes(&workspace, Some(&repository));
+        let patterns = &rules
+            .iter()
+            .find(|rule| rule.tool == "bash")
+            .unwrap()
+            .patterns;
+        assert_eq!(
+            patterns,
+            &vec!["cargo test *".to_string(), "git status".to_string()]
+        );
+    }
+
+    #[test]
+    fn repository_rules_are_distinct_from_main_checkout_rules() {
+        let state = tempfile::tempdir().unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        let store = PermissionStore::new(state.path().to_path_buf());
+        let root = repository.path().to_string_lossy();
+        store.add_tool(
+            &root,
+            PersistenceScope::Workspace,
+            "bash",
+            vec!["checkout-only *".into()],
+        );
+        store.add_grant(
+            &root,
+            PersistenceScope::Repository,
+            PermissionGrant::Command {
+                tool: "bash".into(),
+                pattern: "repository-wide *".into(),
+            },
+        );
+
+        assert_eq!(
+            store.load(&root, PersistenceScope::Workspace)[0].patterns,
+            vec!["checkout-only *"]
+        );
+        assert_eq!(
+            store.load(&root, PersistenceScope::Repository)[0].patterns,
+            vec!["repository-wide *"]
+        );
+        let merged = store.load_for_scopes(repository.path(), Some(repository.path()));
+        assert_eq!(
+            merged[0].patterns,
+            vec!["checkout-only *", "repository-wide *"]
+        );
     }
 
     #[test]

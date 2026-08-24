@@ -355,7 +355,7 @@ impl TuiApp {
                             cwd: &target_cwd,
                             home: self.core.env.home(),
                         },
-                        &self.core.workspace_permissions,
+                        &self.core.permission_store,
                         self.core.permissions.paths_fn(),
                     );
                     let auth_error = startup_auth_error(&mut next_runtime, &next_managed_models);
@@ -515,7 +515,7 @@ impl TuiApp {
                 cwd: &target_cwd,
                 home: self.core.env.home(),
             },
-            &self.core.workspace_permissions,
+            &self.core.permission_store,
             self.core.permissions.paths_fn(),
         );
         for callback in candidate_tui
@@ -687,7 +687,7 @@ impl TuiApp {
                 cwd: &self.core.env.cwd(),
                 home: self.core.env.home(),
             },
-            &self.core.workspace_permissions,
+            &self.core.permission_store,
             self.core.permissions.paths_fn(),
         );
         self.managed_models.replace_catalog(managed_models);
@@ -754,7 +754,7 @@ impl TuiApp {
                 cwd: &self.core.env.cwd(),
                 home: self.core.env.home(),
             },
-            &self.core.workspace_permissions,
+            &self.core.permission_store,
             self.core.permissions.paths_fn(),
         );
         self.core

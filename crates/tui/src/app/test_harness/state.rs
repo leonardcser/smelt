@@ -424,6 +424,17 @@ impl TestApp {
         &mut self,
         matches_grants: impl Fn(&[smelt_core::permissions::PermissionGrant]) -> bool,
     ) -> bool {
+        self.resolve_first_grant_where(
+            |target| matches!(target, smelt_core::ApprovalTarget::Session),
+            matches_grants,
+        )
+    }
+
+    pub(crate) fn resolve_first_grant_where(
+        &mut self,
+        matches_target: impl Fn(&smelt_core::ApprovalTarget) -> bool,
+        matches_grants: impl Fn(&[smelt_core::permissions::PermissionGrant]) -> bool,
+    ) -> bool {
         let Some(handle_id) = self.first_pending_confirm() else {
             return false;
         };
@@ -439,9 +450,7 @@ impl TestApp {
         let Some(option) = req
             .grant_options
             .iter()
-            .find(|option| {
-                option.scope == smelt_core::ApprovalScope::Session && matches_grants(&option.grants)
-            })
+            .find(|option| matches_target(&option.target) && matches_grants(&option.grants))
             .cloned()
         else {
             return false;

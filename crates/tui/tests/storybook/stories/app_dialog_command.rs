@@ -333,9 +333,8 @@ app_story!(resume_dialog, |ctx| {
 
 app_story!(permissions_dialog, |ctx| {
     ctx.set_viewport(70, 16);
-    // /permissions reads `smelt.permissions.list()`. Seed both a
-    // session and a workspace rule so the dialog labels include the
-    // two scope kinds.
+    // /permissions reads `smelt.permissions.list()`. Seed session and
+    // workspace rules so their scope labels are visible.
     ctx.run_lua(
         r#"
         smelt.permissions.sync({

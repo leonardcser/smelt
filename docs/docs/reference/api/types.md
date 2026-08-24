@@ -564,6 +564,7 @@ Current permission state returned by `smelt.permissions.list()`.
 | `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) | yes | Session-scoped tool/pattern approvals for this run. |
 | `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) | yes | Session-scoped path grants for this run. |
 | `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Workspace rules loaded from the on-disk store rooted at the current cwd. |
+| `repository` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Repository rules shared by all worktrees. Empty outside a Git repository. |
 
 ### `smelt.permissions.ModePerms`
 
@@ -624,6 +625,7 @@ Spec for `smelt.permissions.sync`.
 | `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) |  | Session entries; applied for this run only. |
 | `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Tool-specific session path grants; applied for this run only. |
 | `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) |  | Workspace rules; persisted to disk under the current cwd. |
+| `repository` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) |  | Repository rules; persisted under the repository root and shared by its worktrees. |
 
 ### `smelt.permissions.WorkspaceRule`
 
