@@ -4,10 +4,10 @@ assertion_line: 615
 expression: frame.text()
 ---
 │ first paragraph
-│
 │ second paragraph
 │ third paragraph
 │ fourth paragraph
+
 
 
 

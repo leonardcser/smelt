@@ -202,6 +202,101 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
 }
 
 #[test]
+fn streaming_thinking_honors_peek_and_enter_toggles() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 24);
+    app.start_turn(1);
+    app.dispatch_engine_event(protocol::EngineEvent::ReasoningPartStarted {
+        id: "reasoning-1".into(),
+        kind: protocol::ReasoningKind::Raw,
+    });
+    app.dispatch_engine_event(protocol::EngineEvent::ReasoningPartDelta {
+        id: "reasoning-1".into(),
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
+        delta: concat!(
+            "first line\nsecond line\nthird line\nfourth line\nfifth line\n",
+            "sixth line\nseventh line\neighth line"
+        )
+        .into(),
+    });
+    app.render_silent();
+
+    focus_transcript_in_normal_mode(&mut app);
+    let initial_peek = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("streaming thinking block at cursor");
+    assert_eq!(initial_peek.view_state, ViewState::Peek);
+    assert!(
+        initial_peek.rows < 8,
+        "streaming thinking should render its compact default before user interaction"
+    );
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let expanded = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("expanded streaming thinking block at cursor");
+    assert_eq!(expanded.id, initial_peek.id);
+    assert_eq!(expanded.view_state, ViewState::Expanded);
+    assert!(expanded.rows > initial_peek.rows);
+
+    app.dispatch_engine_event(protocol::EngineEvent::ReasoningPartDelta {
+        id: "reasoning-1".into(),
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
+        delta: "\nninth line".into(),
+    });
+    app.render_silent();
+    let updated_expanded = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("updated streaming thinking block at cursor");
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let restored_peek = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("streaming thinking block restored to peek at cursor");
+    assert_eq!(restored_peek.id, initial_peek.id);
+    assert_eq!(restored_peek.view_state, ViewState::Peek);
+    assert!(
+        restored_peek.rows < updated_expanded.rows,
+        "returning streaming thinking to peek should reduce its rendered rows: expanded={}, peek={}",
+        updated_expanded.rows,
+        restored_peek.rows
+    );
+
+    app.dispatch_engine_event(protocol::EngineEvent::ReasoningPartDelta {
+        id: "reasoning-1".into(),
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
+        delta: "\ntenth line".into(),
+    });
+    app.render_silent();
+    let updated_peek = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("updated streaming thinking block in peek state at cursor");
+    assert_eq!(updated_peek.id, initial_peek.id);
+    assert_eq!(updated_peek.view_state, ViewState::Peek);
+    assert_eq!(updated_peek.rows, restored_peek.rows);
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let reopened = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("reopened streaming thinking block at cursor");
+    assert_eq!(reopened.id, initial_peek.id);
+    assert_eq!(reopened.view_state, ViewState::Expanded);
+    assert!(reopened.rows > updated_peek.rows);
+}
+
+#[test]
 fn fold_keys_work_while_compaction_preview_is_streaming() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 24);

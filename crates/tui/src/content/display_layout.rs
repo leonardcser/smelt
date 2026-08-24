@@ -528,7 +528,12 @@ impl LayoutCache {
                         continue;
                     };
                     if history.status(block_id) == Some(Status::Streaming) {
-                        if let Some(layout) = live_streaming_layout(block) {
+                        let live_layout = if key.view_state == ViewState::Expanded {
+                            expanded_live_streaming_layout(block)
+                        } else {
+                            None
+                        };
+                        if let Some(layout) = live_layout {
                             CompileJobSource::Ready(layout)
                         } else {
                             let Some(value) = block_snapshot_json(
@@ -711,7 +716,7 @@ pub(crate) fn live_streaming_markdown_content(block: &Block) -> Option<&str> {
     }
 }
 
-fn live_streaming_layout(block: &Block) -> Option<LayoutIr> {
+fn expanded_live_streaming_layout(block: &Block) -> Option<LayoutIr> {
     let content = live_streaming_markdown_content(block)?;
     match block {
         Block::Text { .. } => Some(markdown_layout(content.to_owned(), false, false)),
