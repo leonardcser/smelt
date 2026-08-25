@@ -1904,7 +1904,7 @@ impl TranscriptDocument {
         restore: TranscriptProjectionRestore,
         local_scroll_top: Option<RowIndex>,
         hint: Option<TranscriptProjectionHint>,
-    ) {
+    ) -> TranscriptScrollIntent {
         let active_record_range_before = Self::trace_record_range(self.records.active_range());
         let previous = self.viewport.state.pending_projection.take();
         let mut next_restore = restore;
@@ -1964,6 +1964,7 @@ impl TranscriptDocument {
             _ => {}
         }
         self.viewport.state.mode = Self::intent_behavior(&intent).viewport_mode;
+        let stored_intent = intent.clone();
         self.viewport.state.pending_projection = Some(PendingTranscriptProjection {
             intent,
             restore: next_restore,
@@ -1971,6 +1972,7 @@ impl TranscriptDocument {
             hint,
             active_record_range_before,
         });
+        stored_intent
     }
 
     pub(crate) fn defer_projection_until_hydrated(&mut self) {

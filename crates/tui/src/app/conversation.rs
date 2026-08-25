@@ -632,13 +632,13 @@ impl ConversationRuntime {
         restore: super::transcript::TranscriptProjectionRestore,
         local_scroll_top: Option<crate::smelt_edit::RowIndex>,
         hint: Option<super::transcript::TranscriptProjectionHint>,
-    ) {
+    ) -> super::transcript_scroll_trace::TranscriptScrollIntent {
         self.document.transcript.set_pending_projection_with_hint(
             intent,
             restore,
             local_scroll_top,
             hint,
-        );
+        )
     }
 
     pub(crate) fn defer_transcript_projection_until_hydrated(&mut self) {

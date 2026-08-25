@@ -201,8 +201,8 @@ impl TuiApp {
                 win.pin_current_scroll();
             }
         }
-        self.conversation.set_pending_transcript_projection(
-            intent.clone(),
+        let projected_intent = self.conversation.set_pending_transcript_projection(
+            intent,
             restore,
             local_scroll_top,
             hint,
@@ -215,7 +215,7 @@ impl TuiApp {
             "scroll_intent_input",
             json!({
                 "label": &label,
-                "intent": format!("{:?}", intent),
+                "intent": format!("{:?}", projected_intent),
                 "window_scroll_before": window_scroll_before,
                 "window_scroll_after_input": window_scroll_after_input,
             }),
@@ -223,7 +223,7 @@ impl TuiApp {
         self.conversation.set_next_transcript_scroll_trace_input(
             TranscriptScrollTraceRenderInput {
                 input_event_or_tick: label,
-                scroll_intent: intent,
+                scroll_intent: projected_intent,
                 window_scroll_before,
                 window_scroll_after_input,
             },

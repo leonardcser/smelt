@@ -1600,6 +1600,19 @@ mod tests {
     }
 
     #[test]
+    fn sparse_zero_net_mixed_wheel_uses_coalesced_intent() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(96, 55, 21);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_wheel(false, 0);
+        app.transcript_scroll_probe_wheel(true, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
     fn sparse_append_away_from_tail_preserves_persisted_anchor() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(502, 40, 10);
