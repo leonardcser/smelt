@@ -104,15 +104,19 @@ jobs:
           - crate: smelt-perf
             rust: "1.70"
             targets: --all-targets
+            local_deps: ""
           - crate: smelt-style
             rust: "1.70"
             targets: --all-targets
+            local_deps: ""
           - crate: smelt-ansi
             rust: "1.70"
             targets: --all-targets
+            local_deps: smelt-style
           - crate: smelt-term
             rust: "1.71"
             targets: --lib
+            local_deps: smelt-style smelt-ansi
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -128,13 +132,29 @@ jobs:
       - name: Package crate
         env:
           CRATE: ${{ matrix.crate }}
+          LOCAL_DEPS: ${{ matrix.local_deps }}
         run: |
+          for dep in $LOCAL_DEPS; do
+            cargo package -p "$dep" --no-verify
+            archive="$(find target/package -maxdepth 1 -type f -name "$dep-*.crate" -print -quit)"
+            test -n "$archive"
+            mkdir -p "/tmp/msrv-deps/$dep"
+            tar -xzf "$archive" -C "/tmp/msrv-deps/$dep" --strip-components=1
+          done
+
           cargo package -p "$CRATE" --no-verify
-          archive="$(find target/package -maxdepth 1 -name "$CRATE-*.crate" -print -quit)"
+          archive="$(find target/package -maxdepth 1 -type f -name "$CRATE-*.crate" -print -quit)"
           test -n "$archive"
           mkdir /tmp/msrv-package
           tar -xzf "$archive" -C /tmp/msrv-package --strip-components=1
           rm -f /tmp/msrv-package/Cargo.lock
+
+          if test -n "$LOCAL_DEPS"; then
+            printf '\n[patch.crates-io]\n' >> /tmp/msrv-package/Cargo.toml
+            for dep in $LOCAL_DEPS; do
+              printf '%s = { path = "/tmp/msrv-deps/%s" }\n' "$dep" "$dep" >> /tmp/msrv-package/Cargo.toml
+            done
+          fi
 
       - name: Install MSRV
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
