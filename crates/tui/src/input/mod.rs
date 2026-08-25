@@ -1,5 +1,6 @@
 mod buffer;
 pub(crate) mod editor;
+mod file_drop;
 mod vim_bridge;
 
 pub(crate) use smelt_core::history::History;
@@ -1153,29 +1154,27 @@ impl PromptState {
         }
 
         if let Event::Paste(data) = ev {
+            let images = match file_drop::read_images(&data) {
+                Ok(images) => images,
+                Err(e) => return Action::NotifyError(e),
+            };
+            let clipboard_image = if images.is_none() && data.trim().is_empty() {
+                clipboard_image_to_data_url(&self.cwd, &self.runtime_dir)
+            } else {
+                None
+            };
+
             self.save_undo(ctx);
             self.replace_selection_for_insert(ctx);
-            if let Some(path) = engine::image::normalize_pasted_path(&data) {
-                if std::path::Path::new(&path).exists()
-                    && engine::image::is_supported_image_tool_result_file(&path)
-                {
-                    match engine::image::read_image_as_data_url(&path) {
-                        Ok(url) => {
-                            let label = engine::image::image_label_from_path(&path);
-                            self.insert_image(ctx, label, url);
-                            return Action::Redraw;
-                        }
-                        Err(e) => {
-                            return Action::NotifyError(format!("cannot read image: {e}"));
-                        }
-                    }
+            if let Some(images) = images {
+                for (label, url) in images {
+                    self.insert_image(ctx, label, url);
                 }
+                return Action::Redraw;
             }
-            if data.trim().is_empty() {
-                if let Some(url) = clipboard_image_to_data_url(&self.cwd, &self.runtime_dir) {
-                    self.insert_image(ctx, "clipboard.png".into(), url);
-                    return Action::Redraw;
-                }
+            if let Some(url) = clipboard_image {
+                self.insert_image(ctx, "clipboard.png".into(), url);
+                return Action::Redraw;
             }
             self.insert_paste(ctx, data);
             return Action::Redraw;

@@ -1111,6 +1111,35 @@ fn pasted_prompt_unicode_renders_and_edits_by_grapheme() {
 }
 
 #[test]
+fn dropping_multiple_image_files_creates_multiple_attachments() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first image.png");
+    let second = dir.path().join("second image.png");
+    std::fs::write(&first, b"\x89PNG\r\n\x1a\nfirst").unwrap();
+    std::fs::write(&second, b"\x89PNG\r\n\x1a\nsecond").unwrap();
+    let first = first.to_string_lossy().replace(' ', "\\ ");
+    let second = second.to_string_lossy().replace(' ', "\\ ");
+    let dropped = format!("{first} {second}");
+
+    app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(dropped)));
+    app.render_silent();
+
+    assert_eq!(app.prompt_attachment_count(), 2);
+    assert_eq!(
+        app.state().prompt_text,
+        format!(
+            "{}{}",
+            smelt_buffer::ATTACHMENT_MARKER,
+            smelt_buffer::ATTACHMENT_MARKER
+        )
+    );
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("[first image.png]"), "frame: {frame}");
+    assert!(frame.contains("[second image.png]"), "frame: {frame}");
+}
+
+#[test]
 fn pasted_missing_image_path_stays_text() {
     let mut app = TestApp::builder().with_vim(false).build();
     let dir = tempfile::tempdir().unwrap();

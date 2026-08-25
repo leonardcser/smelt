@@ -32,6 +32,7 @@ mlua = { workspace = true }
 tempfile = { workspace = true }
 notify = { workspace = true }
 scoped-tls-hkt = "0.1.5"
+shlex = "2"
 
 [dev-dependencies]
 insta = { workspace = true }

@@ -3462,6 +3462,7 @@ dependencies = [
  "seahash",
  "serde",
  "serde_json",
+ "shlex",
  "smelt-buffer",
  "smelt-core",
  "smelt-edit",

@@ -4,14 +4,14 @@ const IMAGE_EXTENSIONS: &[&str] = &[
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg",
 ];
 
-pub fn is_image_file(path: &str) -> bool {
-    if let Ok(bytes) = std::fs::read(path) {
-        if sniff_image_mime(&bytes).is_some() {
-            return true;
-        }
-    }
+fn has_image_extension(path: &str) -> bool {
     let lower = path.to_lowercase();
     IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+pub fn is_image_file(path: &str) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| sniff_image_mime(&bytes).is_some())
+        || has_image_extension(path)
 }
 
 pub fn is_supported_image_tool_result_mime(mime: &str) -> bool {
@@ -19,7 +19,10 @@ pub fn is_supported_image_tool_result_mime(mime: &str) -> bool {
 }
 
 pub fn is_supported_image_tool_result_file(path: &str) -> bool {
-    is_image_file(path) && is_supported_image_tool_result_mime(mime_from_path(path))
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| supported_image_mime(path, &bytes))
+        .is_some()
 }
 
 pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -65,6 +68,15 @@ fn mime_from_extension(path: &str) -> &'static str {
     }
 }
 
+fn supported_image_mime(path: &str, bytes: &[u8]) -> Option<&'static str> {
+    let sniffed = sniff_image_mime(bytes);
+    if sniffed.is_none() && !has_image_extension(path) {
+        return None;
+    }
+    let mime = sniffed.unwrap_or_else(|| mime_from_extension(path));
+    is_supported_image_tool_result_mime(mime).then_some(mime)
+}
+
 pub fn mime_from_path(path: &str) -> &'static str {
     std::fs::read(path)
         .ok()
@@ -77,6 +89,16 @@ pub fn read_image_as_data_url(path: &str) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mime = sniff_image_mime(&bytes).unwrap_or_else(|| mime_from_extension(path));
     Ok(data_url_from_bytes(&bytes, mime))
+}
+
+/// Read an image once and encode it only when its MIME type can be attached to
+/// a model tool result. Unsupported or non-image files return `Ok(None)`.
+pub fn read_supported_image_as_data_url(path: &str) -> Result<Option<String>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let Some(mime) = supported_image_mime(path, &bytes) else {
+        return Ok(None);
+    };
+    Ok(Some(data_url_from_bytes(&bytes, mime)))
 }
 
 /// Read a file and return a data URL with the supplied MIME type.
@@ -97,64 +119,6 @@ pub fn image_label_from_path(path: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("image")
         .to_string()
-}
-
-/// Normalize a terminal-pasted path: handles quoting, backslash-escaped spaces,
-/// and `file://` URLs. Returns `None` for multi-line input.
-pub fn normalize_pasted_path(data: &str) -> Option<String> {
-    let trimmed = smelt_buffer::text::trim_whitespace(data);
-    if trimmed.is_empty() || trimmed.contains('\n') {
-        return None;
-    }
-    let unquoted = trimmed
-        .strip_prefix('\'')
-        .and_then(|s| s.strip_suffix('\''))
-        .or_else(|| trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
-        .unwrap_or(trimmed);
-    let path = if let Some(rest) = unquoted.strip_prefix("file://") {
-        percent_decode(rest)
-    } else {
-        unescape_backslashes(unquoted)
-    };
-    if path.is_empty() {
-        return None;
-    }
-    Some(path)
-}
-
-fn unescape_backslashes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let mut out = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 #[cfg(test)]
@@ -247,6 +211,42 @@ mod tests {
     }
 
     #[test]
+    fn read_supported_image_sniffs_mime_without_extension() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("image.bin");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\npixels").unwrap();
+
+        let url = read_supported_image_as_data_url(path.to_str().unwrap())
+            .unwrap()
+            .expect("supported image");
+
+        assert!(url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn read_supported_image_returns_none_for_unsupported_files() {
+        let dir = tempdir().unwrap();
+        let svg = dir.path().join("image.svg");
+        std::fs::write(&svg, r#"<svg><text>relay</text></svg>"#).unwrap();
+        let text = dir.path().join("notes.txt");
+        std::fs::write(&text, "not an image").unwrap();
+
+        assert_eq!(
+            read_supported_image_as_data_url(svg.to_str().unwrap()).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_supported_image_as_data_url(text.to_str().unwrap()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn read_supported_image_returns_err_for_missing_file() {
+        assert!(read_supported_image_as_data_url("/does/not/exist/nope.png").is_err());
+    }
+
+    #[test]
     fn read_file_uses_supplied_mime_type() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("document.bin");
@@ -268,97 +268,5 @@ mod tests {
     #[test]
     fn image_label_falls_back_to_image_when_basename_unavailable() {
         assert_eq!(image_label_from_path(""), "image");
-    }
-
-    // ---- normalize_pasted_path ----
-
-    #[test]
-    fn normalize_pasted_path_trims_whitespace() {
-        assert_eq!(
-            normalize_pasted_path("  /a/b.png\t").as_deref(),
-            Some("/a/b.png")
-        );
-    }
-
-    #[test]
-    fn normalize_pasted_path_keeps_whitespace_graphemes_atomic() {
-        assert_eq!(
-            normalize_pasted_path(" \u{301}image\u{600} ").as_deref(),
-            Some(" \u{301}image\u{600} ")
-        );
-    }
-
-    #[test]
-    fn normalize_pasted_path_strips_matching_single_or_double_quotes() {
-        assert_eq!(
-            normalize_pasted_path("'/a/b c.png'").as_deref(),
-            Some("/a/b c.png")
-        );
-        assert_eq!(
-            normalize_pasted_path("\"/a/b c.png\"").as_deref(),
-            Some("/a/b c.png")
-        );
-    }
-
-    #[test]
-    fn normalize_pasted_path_unescapes_backslashes_in_unquoted_paths() {
-        assert_eq!(
-            normalize_pasted_path("/a/b\\ c.png").as_deref(),
-            Some("/a/b c.png")
-        );
-    }
-
-    #[test]
-    fn normalize_pasted_path_decodes_file_url_with_percent_encoding() {
-        assert_eq!(
-            normalize_pasted_path("file:///a/b%20c.png").as_deref(),
-            Some("/a/b c.png")
-        );
-    }
-
-    #[test]
-    fn normalize_pasted_path_returns_none_for_empty_input() {
-        assert!(normalize_pasted_path("").is_none());
-        assert!(normalize_pasted_path("   ").is_none());
-    }
-
-    #[test]
-    fn normalize_pasted_path_returns_none_for_multiline_input() {
-        assert!(normalize_pasted_path("a\nb").is_none());
-    }
-
-    // ---- percent_decode ----
-
-    #[test]
-    fn percent_decode_handles_valid_encoding() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(percent_decode("%2F%2F"), "//");
-    }
-
-    #[test]
-    fn percent_decode_leaves_invalid_sequences_intact() {
-        assert_eq!(percent_decode("a%ZZb"), "a%ZZb");
-    }
-
-    #[test]
-    fn percent_decode_passes_through_plain_ascii() {
-        assert_eq!(percent_decode("hello"), "hello");
-    }
-
-    // ---- unescape_backslashes ----
-
-    #[test]
-    fn unescape_backslashes_drops_lone_trailing_backslash() {
-        assert_eq!(unescape_backslashes("abc\\"), "abc");
-    }
-
-    #[test]
-    fn unescape_backslashes_keeps_non_escape_characters() {
-        assert_eq!(unescape_backslashes("plain"), "plain");
-    }
-
-    #[test]
-    fn unescape_backslashes_passes_through_escaped_chars() {
-        assert_eq!(unescape_backslashes("a\\nb"), "anb");
     }
 }
