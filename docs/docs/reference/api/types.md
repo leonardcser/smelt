@@ -537,9 +537,9 @@ Grid slice passed to paint callbacks. Methods delegate to the live grid slice fo
 | --- | --- | --- | --- |
 | `width` | `fun(): integer` | yes | Return the slice width in cells. |
 | `height` | `fun(): integer` | yes | Return the slice height in cells. |
-| `set` | `fun(row: integer, col: integer, ch: string, style: table?): nil` | yes | Write a single character with optional style at (row, col). |
+| `set` | `fun(row: integer, col: integer, ch: string, style: table?): nil` | yes | Write exactly one grapheme cluster with optional style at (row, col). |
 | `put_str` | `fun(row: integer, col: integer, text: string, style: table?): nil` | yes | Write a string with optional style at (row, col). |
-| `fill_rect` | `fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill a rectangle with an optional character and style. |
+| `fill_rect` | `fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill a rectangle with one optional Unicode scalar and style. |
 
 ### `smelt.permissions.EffectRules`
 

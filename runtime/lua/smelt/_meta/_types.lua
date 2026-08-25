@@ -375,9 +375,9 @@
 ---@class smelt.paint.Slice
 ---@field width fun(): integer Return the slice width in cells.
 ---@field height fun(): integer Return the slice height in cells.
----@field set fun(row: integer, col: integer, ch: string, style: table?): nil Write a single character with optional style at (row, col).
+---@field set fun(row: integer, col: integer, ch: string, style: table?): nil Write exactly one grapheme cluster with optional style at (row, col).
 ---@field put_str fun(row: integer, col: integer, text: string, style: table?): nil Write a string with optional style at (row, col).
----@field fill_rect fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with an optional character and style.
+---@field fill_rect fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with one optional Unicode scalar and style.
 
 --- Effect-level decisions that apply to tools without a more specific rule.
 ---@class smelt.permissions.EffectRules
