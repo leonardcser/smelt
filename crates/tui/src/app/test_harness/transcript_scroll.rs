@@ -34,6 +34,7 @@ static SPARSE_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 #[derive(Clone, Copy, Debug)]
 struct UserDeltaAnchor {
     sign: i8,
+    viewport_top: crate::smelt_edit::RowIndex,
     virtual_row: crate::smelt_edit::RowIndex,
     record_index: usize,
     block_id: smelt_core::transcript_model::BlockId,
@@ -42,7 +43,8 @@ struct UserDeltaAnchor {
 
 impl UserDeltaAnchor {
     fn same_position(self, other: Self) -> bool {
-        self.virtual_row == other.virtual_row
+        self.viewport_top == other.viewport_top
+            && self.virtual_row == other.virtual_row
             && self.record_index == other.record_index
             && self.block_id == other.block_id
             && self.row_offset == other.row_offset
@@ -1113,14 +1115,25 @@ fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTrace
     let semantic_movement =
         (after_record, after_block, after_row).cmp(&(before_record, before_block, before_row));
     let virtual_movement = after_virtual_row.cmp(&before_virtual_row);
+    let viewport_movement = frame.resolved_scroll_top.cmp(&frame.window_scroll_before);
     if rows < 0 {
         assert!(
-            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
+            !local_delta_moved_against_direction(
+                rows,
+                semantic_movement,
+                virtual_movement,
+                viewport_movement,
+            ),
             "first upward local movement moved the semantic viewport anchor downward: {frame:?}"
         );
     } else if rows > 0 {
         assert!(
-            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
+            !local_delta_moved_against_direction(
+                rows,
+                semantic_movement,
+                virtual_movement,
+                viewport_movement,
+            ),
             "first downward local movement moved the semantic viewport anchor upward: {frame:?}"
         );
     }
@@ -1130,11 +1143,12 @@ fn local_delta_moved_against_direction(
     rows: isize,
     semantic_movement: std::cmp::Ordering,
     virtual_movement: std::cmp::Ordering,
+    viewport_movement: std::cmp::Ordering,
 ) -> bool {
     if rows < 0 {
-        semantic_movement.is_gt() && !virtual_movement.is_lt()
+        semantic_movement.is_gt() && !virtual_movement.is_lt() && !viewport_movement.is_lt()
     } else if rows > 0 {
-        semantic_movement.is_lt() && !virtual_movement.is_gt()
+        semantic_movement.is_lt() && !virtual_movement.is_gt() && !viewport_movement.is_gt()
     } else {
         false
     }
@@ -1155,6 +1169,7 @@ fn assert_user_delta_direction(
             ..
         }) => Some(UserDeltaAnchor {
             sign,
+            viewport_top: frame.window_scroll_before,
             virtual_row,
             record_index,
             block_id,
@@ -1175,6 +1190,7 @@ fn assert_user_delta_direction(
     };
     let current = UserDeltaAnchor {
         sign,
+        viewport_top: frame.resolved_scroll_top,
         virtual_row,
         record_index,
         block_id,
@@ -1200,14 +1216,25 @@ fn assert_user_delta_direction(
         previous.row_offset,
     ));
     let virtual_movement = current.virtual_row.cmp(&previous.virtual_row);
+    let viewport_movement = current.viewport_top.cmp(&previous.viewport_top);
     if previous.sign == sign && sign < 0 {
         assert!(
-            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
+            !local_delta_moved_against_direction(
+                rows,
+                semantic_movement,
+                virtual_movement,
+                viewport_movement,
+            ),
             "upward local movement moved the semantic viewport anchor downward: previous={previous:?}, current={current:?}, frame={frame:?}"
         );
     } else if previous.sign == sign && sign > 0 {
         assert!(
-            !local_delta_moved_against_direction(rows, semantic_movement, virtual_movement),
+            !local_delta_moved_against_direction(
+                rows,
+                semantic_movement,
+                virtual_movement,
+                viewport_movement,
+            ),
             "downward local movement moved the semantic viewport anchor upward: previous={previous:?}, current={current:?}, frame={frame:?}"
         );
     }
