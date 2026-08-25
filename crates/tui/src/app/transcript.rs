@@ -110,6 +110,15 @@ impl LoadedTranscript {
             retained_store: None,
         })
     }
+
+    pub(crate) fn empty_from_store(store_address: TranscriptStoreAddress) -> Self {
+        Self {
+            transcript: Transcript::new(),
+            record_window: None,
+            store_address: Some(store_address),
+            retained_store: None,
+        }
+    }
 }
 
 mod storage;
@@ -242,6 +251,24 @@ impl TranscriptRecordState {
             .map_or(local_record_index, |range| {
                 range.start.get().saturating_add(local_record_index)
             })
+    }
+
+    fn save_bounds(
+        &self,
+        history: &BlockHistory,
+        order_start: usize,
+    ) -> TranscriptRecordSaveBounds {
+        let record_base = self
+            .active_range
+            .as_ref()
+            .map(|range| range.start.get())
+            .unwrap_or_default();
+        TranscriptRecordSaveBounds {
+            order_start,
+            record_start_idx: record_base
+                .saturating_add(history.record_index_for_order_index(order_start)),
+            record_end_idx: record_base.saturating_add(history.persisted_block_count()),
+        }
     }
 
     fn truncate(&mut self, total_count: usize) {
@@ -825,6 +852,13 @@ impl TranscriptDocument {
         self.set_memory_budget(memory_budget);
     }
 
+    pub(crate) fn install_rewind_prefix(&mut self, loaded: LoadedTranscript, record_count: usize) {
+        self.replace_loaded_transcript(loaded);
+        self.records.truncate(record_count);
+        let order_start = self.history().len();
+        self.history_mut().require_record_resave_from(order_start);
+    }
+
     pub(crate) fn set_memory_budget(&mut self, budget: TranscriptMemoryBudget) {
         self.memory_budget = budget;
         self.content
@@ -937,10 +971,6 @@ impl TranscriptDocument {
 
     pub(super) fn hydration_is_pending(&self) -> bool {
         !self.pending_hydration.is_empty()
-    }
-
-    pub(super) fn record_hydration_failed(&self) -> bool {
-        self.hydration.record_failed
     }
 
     pub(super) fn take_pending_hydration_request(&mut self) -> Option<TranscriptHydrationRequest> {
@@ -2840,17 +2870,6 @@ impl TranscriptDocument {
             .record_index_for_block_idx(block_idx)
             .ok()
             .flatten()
-    }
-
-    pub(super) fn rewind_order_index_for_block(&self, block_id: BlockId) -> Option<usize> {
-        let order_index = self.history().order.iter().position(|id| *id == block_id)?;
-        if self.records.total_count().is_none() || self.history().is_live(block_id) {
-            return Some(order_index);
-        }
-        let active = self.records.active_range()?;
-        self.record_index_for_block_id(block_id)
-            .is_some_and(|index| active.start.get() <= index && index < active.end.get())
-            .then_some(order_index)
     }
 
     pub(crate) fn activate_record_window_for_block_idx(
@@ -6139,18 +6158,7 @@ impl TranscriptDocument {
             (Some(record), Some(history)) => Some(record.min(history)),
             (dirty, None) | (None, dirty) => dirty,
         }?;
-        let record_base_idx = self
-            .records
-            .active_range
-            .as_ref()
-            .map(|range| range.start.get())
-            .unwrap_or_default();
-        Some(TranscriptRecordSaveBounds {
-            order_start,
-            record_start_idx: record_base_idx
-                .saturating_add(history.record_index_for_order_index(order_start)),
-            record_end_idx: record_base_idx.saturating_add(history.persisted_block_count()),
-        })
+        Some(self.records.save_bounds(history, order_start))
     }
 
     pub(crate) fn record_save_bounds_at_or_before(
@@ -6335,14 +6343,6 @@ impl TranscriptDocument {
             self.clear_transcript_layout_caches();
         }
         drained
-    }
-
-    pub(crate) fn last_user_block_index(&self) -> Option<usize> {
-        self.content.transcript.last_user_block_index()
-    }
-
-    pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
-        self.content.transcript.user_turns()
     }
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
@@ -10654,14 +10654,6 @@ impl TuiApp {
             win.resolve_tail_scroll(0);
             win.viewport = None;
         }
-    }
-
-    pub(crate) fn last_user_block_index(&self) -> Option<usize> {
-        self.conversation.transcript().last_user_block_index()
-    }
-
-    pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
-        self.conversation.transcript().user_turns()
     }
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {

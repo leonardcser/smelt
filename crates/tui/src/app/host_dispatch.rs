@@ -239,18 +239,31 @@ impl TuiApp {
             PrepareContextEstimate::full_request(estimated_tokens, current_history_len)
         } else {
             let history_delta = if base_history_len < current_history_len {
-                self.session_history_range(base_history_len..current_history_len)
+                match self.session_history_range(base_history_len..current_history_len) {
+                    Ok(history) => Some(history),
+                    Err(err) => {
+                        self.notify_session_error_sticky(format!(
+                            "failed to read canonical session history: {err}"
+                        ));
+                        None
+                    }
+                }
             } else {
-                Vec::new()
+                Some(Vec::new())
             };
-            PrepareContextEstimate::from_history_delta(
-                self.conversation.session().context_tokens_for(&identity),
-                self.conversation.session().context_tokens_history_len,
-                checkpoint_context_tokens,
-                current_history_len,
-                &history_delta,
-                messages.model(),
-                estimated_tokens,
+            history_delta.map_or_else(
+                || PrepareContextEstimate::full_request(estimated_tokens, current_history_len),
+                |history_delta| {
+                    PrepareContextEstimate::from_history_delta(
+                        self.conversation.session().context_tokens_for(&identity),
+                        self.conversation.session().context_tokens_history_len,
+                        checkpoint_context_tokens,
+                        current_history_len,
+                        &history_delta,
+                        messages.model(),
+                        estimated_tokens,
+                    )
+                },
             )
         };
         if self.agent_is_running() {

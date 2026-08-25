@@ -263,6 +263,12 @@ CREATE TABLE IF NOT EXISTS lineage_transcript_extent_nodes (
     rows_120 INTEGER NOT NULL CHECK (rows_120 >= record_count AND rows_120 <= rows_80),
     rows_160 INTEGER NOT NULL CHECK (rows_160 >= record_count AND rows_160 <= rows_120),
     rows_240 INTEGER NOT NULL CHECK (rows_240 >= record_count AND rows_240 <= rows_160),
+    min_history_idx INTEGER CHECK (min_history_idx IS NULL OR min_history_idx >= 0),
+    max_history_idx INTEGER CHECK (
+        (min_history_idx IS NULL AND max_history_idx IS NULL)
+        OR (min_history_idx IS NOT NULL AND max_history_idx IS NOT NULL
+            AND max_history_idx >= min_history_idx)
+    ),
     PRIMARY KEY (lineage_id, node_id),
     FOREIGN KEY (lineage_id, node_id)
         REFERENCES lineage_sequence_nodes(lineage_id, node_id) ON DELETE CASCADE

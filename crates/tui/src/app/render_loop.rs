@@ -426,7 +426,6 @@ impl TuiApp {
         &mut self,
         focused: bool,
     ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
-        self.complete_pending_transcript_rewind();
         self.complete_pending_transcript_details();
         let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();

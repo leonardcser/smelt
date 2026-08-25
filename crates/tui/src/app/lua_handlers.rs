@@ -9,12 +9,6 @@ enum LuaReloadKind {
     AutoConfig,
 }
 
-pub(super) struct PendingTranscriptRewind {
-    hydration_context_id: u64,
-    block_id: smelt_core::transcript_model::BlockId,
-    restore_vim_insert: bool,
-}
-
 pub(crate) struct LuaRuntimeController {
     generation: crate::lua::LuaGeneration,
     wakeup_tx: tokio::sync::mpsc::UnboundedSender<()>,
@@ -883,103 +877,13 @@ impl TuiApp {
         let Some(turn) = self.conversation.active() else {
             return false;
         };
-        let Some(block_idx) = turn.rewind_block_idx else {
+        let Some(history_idx) = turn.rewind_history_idx else {
             return false;
         };
         if !self.prompt.queue_is_empty() || turn.assistant_output_started {
             return false;
         }
-        self.rewind_to_block(Some(block_idx), restore_vim_insert);
-        true
-    }
-
-    fn defer_transcript_rewind(&mut self, block_idx: usize, restore_vim_insert: bool) -> bool {
-        let Some(block_id) = self
-            .conversation
-            .transcript()
-            .history()
-            .order
-            .get(block_idx)
-            .copied()
-        else {
-            return false;
-        };
-        if self
-            .conversation
-            .transcript()
-            .history()
-            .is_materialized(block_id)
-        {
-            return false;
-        }
-        let ids = [block_id];
-        if self.conversation.deferred_transcript_operation_failed(&ids) {
-            self.notify_error("cannot load this transcript block for rewind".into());
-            return true;
-        }
-        if let Some(previous) = self.pending_transcript_rewind.take() {
-            if previous.hydration_context_id == self.conversation.transcript_hydration_context_id()
-            {
-                self.conversation
-                    .unpin_transcript_operation(&[previous.block_id]);
-            }
-        }
-        self.conversation.pin_deferred_transcript_operation(&ids);
-        self.pending_transcript_rewind = Some(PendingTranscriptRewind {
-            hydration_context_id: self.conversation.transcript_hydration_context_id(),
-            block_id,
-            restore_vim_insert,
-        });
-        self.request_urgent_render();
-        true
-    }
-
-    pub(super) fn complete_pending_transcript_rewind(&mut self) -> bool {
-        let Some(pending) = self.pending_transcript_rewind.take() else {
-            return false;
-        };
-        if pending.hydration_context_id != self.conversation.transcript_hydration_context_id() {
-            return false;
-        }
-        let ids = [pending.block_id];
-        if self.conversation.deferred_transcript_operation_failed(&ids) {
-            self.conversation.unpin_transcript_operation(&ids);
-            self.notify_error("cannot load this transcript block for rewind".into());
-            return false;
-        }
-        if !self
-            .conversation
-            .deferred_transcript_operation_is_ready(&ids)
-        {
-            self.pending_transcript_rewind = Some(pending);
-            return false;
-        }
-        let width = self.transcript_width() as u16;
-        let viewport_rows = self
-            .transcript_win()
-            .viewport
-            .map(|viewport| viewport.rect.height)
-            .unwrap_or(20)
-            .max(1);
-        let _ = self.conversation.activate_transcript_search_record_window(
-            width,
-            pending.block_id.get(),
-            viewport_rows,
-        );
-        let block_idx = self
-            .conversation
-            .transcript_rewind_order_index_for_block(pending.block_id);
-        let Some(block_idx) = block_idx else {
-            if self.conversation.transcript_record_hydration_failed() {
-                self.conversation.unpin_transcript_operation(&ids);
-                self.notify_error("cannot load this transcript block for rewind".into());
-            } else {
-                self.pending_transcript_rewind = Some(pending);
-            }
-            return false;
-        };
-        self.rewind_to_block(Some(block_idx), pending.restore_vim_insert);
-        self.conversation.unpin_transcript_operation(&ids);
+        self.rewind_to_history_index(Some(history_idx), restore_vim_insert);
         true
     }
 
@@ -992,19 +896,19 @@ impl TuiApp {
             .set_vim_mode(win, crate::smelt_edit::VimMode::Insert);
     }
 
-    /// Rewind to a transcript block, or to before the first turn when `block_idx` is `None`.
-    pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
+    /// Rewind to a user history item, or to before the first turn when the index is `None`.
+    pub(crate) fn rewind_to_history_index(
+        &mut self,
+        history_idx: Option<usize>,
+        restore_vim_insert: bool,
+    ) {
         self.cancel_live_search(false);
-        if let Some(bidx) = block_idx {
+        if let Some(history_idx) = history_idx {
             if self.conversation.is_active() {
                 self.cancel_agent();
                 self.conversation.clear_active();
             }
-            if self.defer_transcript_rewind(bidx, restore_vim_insert) {
-                while self.core.engine.try_recv().is_ok() {}
-                return;
-            }
-            let rewound = if let Some((text, images)) = self.rewind_to(bidx) {
+            let rewound = if let Some((text, images)) = self.rewind_to_history(history_idx) {
                 self.clear_prompt_prediction();
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                 self.prompt.restore_from_rewind(&mut pctx, text, images);

@@ -328,11 +328,17 @@ impl TestApp {
         let _ = crate::lua::scope_app(&mut self.app, || lua.load(snippet).exec());
     }
 
-    /// Append a `Block::User` to the transcript history so flows that
-    /// read the user-turn list (rewind dialog, transcript projection)
-    /// see a non-empty conversation without a real engine roundtrip.
+    /// Append a canonical user turn and its transcript block without a real
+    /// engine roundtrip.
     pub fn push_user_block(&mut self, text: &str) {
-        self.app.show_user_message(text, Vec::new());
+        self.app.stage_request_history_item(
+            protocol::HistoryItem::user(protocol::Content::text(text)),
+            Some(smelt_core::transcript_model::Block::User {
+                text: text.to_string(),
+                image_labels: Vec::new(),
+                command: false,
+            }),
+        );
     }
 
     /// Append a command-marked user block to the transcript history.

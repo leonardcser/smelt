@@ -307,7 +307,6 @@ pub struct TuiApp {
     transcript_detail: crate::app::transcript_detail::TranscriptDetailRuntime,
     session_preview: crate::app::session_preview::SessionPreviewRuntime,
     pending_transcript_search: Option<crate::app::search::PendingTranscriptSearch>,
-    pending_transcript_rewind: Option<crate::app::lua_handlers::PendingTranscriptRewind>,
     frame_scheduler: crate::app::render_loop::FrameScheduler,
     transcript_work: crate::app::transcript_work::TranscriptWorkQueue,
     continuing_engine_ask_ids: std::collections::HashSet<u64>,
@@ -880,7 +879,7 @@ pub(crate) struct TurnState {
     pub(crate) pending: Vec<PendingTool>,
     pub(crate) permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
     pub(crate) submitted_history_idx: usize,
-    pub(crate) rewind_block_idx: Option<usize>,
+    pub(crate) rewind_history_idx: Option<usize>,
     pub(crate) assistant_output_started: bool,
     pub(crate) _perf: Option<smelt_perf::perf::Guard>,
 }
@@ -1989,7 +1988,6 @@ impl TuiApp {
             transcript_detail: crate::app::transcript_detail::TranscriptDetailRuntime::default(),
             session_preview: crate::app::session_preview::SessionPreviewRuntime::default(),
             pending_transcript_search: None,
-            pending_transcript_rewind: None,
             frame_scheduler: crate::app::render_loop::FrameScheduler::default(),
             transcript_work: crate::app::transcript_work::TranscriptWorkQueue::default(),
             continuing_engine_ask_ids: std::collections::HashSet::new(),
@@ -2762,9 +2760,6 @@ impl TuiApp {
                         .install_transcript_hydration_result(*result);
                     if self.transcript_work.front_waits_for_hydration() {
                         self.request_continuation_render();
-                    }
-                    if self.pending_transcript_rewind.is_some() {
-                        self.request_urgent_render();
                     }
                     if self.complete_pending_transcript_details() {
                         self.request_urgent_render();

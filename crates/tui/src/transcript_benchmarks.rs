@@ -4789,24 +4789,23 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
 fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let mut app = saved_hot_path_app("rewind-delete", history_len, None);
     let transcript = app.app.conversation.transcript().history();
-    let (rewind_block, rewind_history_idx) = transcript
+    let rewind_history_idx = transcript
         .order
         .iter()
-        .enumerate()
         .rev()
-        .find_map(|(block_idx, block_id)| {
+        .find_map(|block_id| {
             (transcript.block_kind(*block_id) == Some("user"))
                 .then(|| transcript.block_origin(*block_id))
                 .flatten()
                 .and_then(|origin| match origin {
-                    smelt_core::BlockOrigin::History(history_idx) => Some((block_idx, history_idx)),
+                    smelt_core::BlockOrigin::History(history_idx) => Some(history_idx),
                     smelt_core::BlockOrigin::Checkpoint { .. } => None,
                 })
         })
         .expect("rewind benchmark history requires a user block");
     let expected_deleted = history_len.saturating_sub(rewind_history_idx) as u64;
     let (sample, snapshot) = capture_hot_path_sample("rewind_delete_suffix", history_len, || {
-        let rewound = app.app.rewind_to(rewind_block);
+        let rewound = app.app.rewind_to_history(rewind_history_idx);
         assert!(
             rewound.is_some(),
             "rewind benchmark target must be a user block"

@@ -167,15 +167,6 @@ impl ConversationRuntime {
         self.document.transcript.compaction_preview_id()
     }
 
-    pub(super) fn transcript_rewind_order_index_for_block(
-        &self,
-        block_id: smelt_core::transcript_model::BlockId,
-    ) -> Option<usize> {
-        self.document
-            .transcript
-            .rewind_order_index_for_block(block_id)
-    }
-
     pub(super) fn set_transcript_search_hydration_pin(
         &mut self,
         block_id: Option<smelt_core::transcript_model::BlockId>,
@@ -451,10 +442,6 @@ impl ConversationRuntime {
 
     pub(super) fn transcript_hydration_is_pending(&self) -> bool {
         self.document.transcript.hydration_is_pending()
-    }
-
-    pub(super) fn transcript_record_hydration_failed(&self) -> bool {
-        self.document.transcript.record_hydration_failed()
     }
 
     pub(super) fn take_pending_transcript_hydration_request(
@@ -802,18 +789,6 @@ impl ConversationRuntime {
         );
     }
 
-    pub(crate) fn materialize_live_session(
-        &mut self,
-        reason: &'static str,
-    ) -> Result<Option<smelt_core::session::Session>, String> {
-        let Some(live_session) = self.document.live_session.as_ref() else {
-            return Ok(None);
-        };
-        let loaded = live_session.materialize_full_session(&self.session, reason)?;
-        self.document.live_session = None;
-        Ok(Some(loaded))
-    }
-
     pub(crate) fn install_materialized_transcript(
         &mut self,
         transcript: super::transcript::LoadedTranscript,
@@ -824,6 +799,16 @@ impl ConversationRuntime {
             .replace_loaded_transcript(transcript);
         self.document
             .install_materialized_session(records_persisted);
+    }
+
+    pub(crate) fn install_rewind_prefix(
+        &mut self,
+        transcript: super::transcript::LoadedTranscript,
+        record_count: usize,
+    ) {
+        self.document
+            .install_rewind_prefix(transcript, record_count);
+        self.clear_stream_tools();
     }
 
     fn apply_history_mutation(
@@ -1904,40 +1889,52 @@ impl ConversationRuntime {
     pub(crate) fn history_range(
         &self,
         range: std::ops::Range<usize>,
-    ) -> Vec<protocol::HistoryItem> {
+    ) -> Result<Vec<protocol::HistoryItem>, String> {
         if let Some(live) = &self.document.live_session {
-            return live.history_range(range).unwrap_or_else(|_err| {
-                smelt_perf::perf::record_value("live_session:history_range_error", 1);
-                Vec::new()
-            });
+            return live.history_range(range);
         }
         let end = range.end.min(self.session.history.len());
         let start = range.start.min(end);
-        self.session.history[start..end].to_vec()
+        Ok(self.session.history[start..end].to_vec())
+    }
+
+    pub(crate) fn scan_history(
+        &self,
+        range: std::ops::Range<usize>,
+        chunk_items: usize,
+        mut visit: impl FnMut(usize, &[protocol::HistoryItem]),
+    ) -> Result<(), String> {
+        if let Some(live) = &self.document.live_session {
+            return live.scan_history(range, chunk_items, visit);
+        }
+        let end = range.end.min(self.session.history.len());
+        let start = range.start.min(end);
+        let chunk_items = chunk_items.max(1);
+        for (chunk_offset, items) in self.session.history[start..end]
+            .chunks(chunk_items)
+            .enumerate()
+        {
+            visit(
+                start.saturating_add(chunk_offset.saturating_mul(chunk_items)),
+                items,
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn history_tail(
         &self,
         max_items: usize,
         max_bytes: Option<usize>,
-    ) -> Vec<protocol::HistoryItem> {
+    ) -> Result<Vec<protocol::HistoryItem>, String> {
         if let Some(live) = &self.document.live_session {
-            return live
-                .history_tail(max_items, max_bytes)
-                .unwrap_or_else(|_err| {
-                    smelt_perf::perf::record_value("live_session:history_tail_error", 1);
-                    Vec::new()
-                });
+            return live.history_tail(max_items, max_bytes);
         }
         smelt_core::session_runtime::bounded_history_tail(
             &self.session.history,
             max_items,
             max_bytes,
         )
-        .unwrap_or_else(|_err| {
-            smelt_perf::perf::record_value("session:history_tail_error", 1);
-            Vec::new()
-        })
     }
 
     pub(crate) fn has_resume_hint_messages(&self) -> bool {

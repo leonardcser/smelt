@@ -91,6 +91,35 @@ fn vim_insert_double_esc_rewinds_active_user_turn_before_output() {
 }
 
 #[test]
+fn vim_insert_double_esc_rewinds_active_command_by_history_index() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    let context = protocol::HistoryItem::note(protocol::HistoryNote::context(
+        "Current working directory: /workspace.",
+    ));
+    app.app.conversation.append_history_item(context.clone());
+    assert!(app.start_command_request_turn(
+        "/review".into(),
+        "expanded review prompt".into(),
+        smelt_core::custom_commands::CommandOverrides::default(),
+        crate::app::CommandTurnStart::Fresh,
+    ));
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    app.render_silent();
+
+    let after_second = app.state();
+    assert!(!after_second.agent_running);
+    assert_eq!(after_second.prompt_text, "/review");
+    let history = &app.app.conversation.session().history;
+    assert_eq!(history.first(), Some(&context));
+    assert!(history
+        .iter()
+        .all(|item| matches!(item, protocol::HistoryItem::Note(_))));
+    assert!(user_blocks(&mut app).is_empty());
+}
+
+#[test]
 fn empty_reasoning_does_not_count_as_assistant_output() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.start_submitted_turn("wrong prompt");

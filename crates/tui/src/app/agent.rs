@@ -388,7 +388,7 @@ struct PreparedTurn {
     reasoning_effort: protocol::ReasoningEffort,
     permission_overrides: Option<protocol::PermissionOverrides>,
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
-    rewind_block_idx: Option<usize>,
+    rewind_history_idx: Option<usize>,
     rollback: Option<StagedTurnRollback>,
 }
 
@@ -587,7 +587,7 @@ impl TuiApp {
                 reasoning_effort: self.core.config.reasoning_effort,
                 permission_overrides: None,
                 permissions: self.core.permissions.snapshot(),
-                rewind_block_idx: None,
+                rewind_history_idx: None,
                 rollback: None,
             });
         }
@@ -612,7 +612,7 @@ impl TuiApp {
             first_user_message,
         );
         let submitted_history_idx = self.session_history_len().checked_sub(1)?;
-        let rewind_block_idx = self.last_user_block_index();
+        let rewind_history_idx = Some(submitted_history_idx);
         self.publish_turn_input(submitted);
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(content),
@@ -625,7 +625,7 @@ impl TuiApp {
             reasoning_effort: self.core.config.reasoning_effort,
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
-            rewind_block_idx,
+            rewind_history_idx,
             rollback: Some(rollback),
         })
     }
@@ -782,7 +782,7 @@ impl TuiApp {
             pending: Vec::new(),
             permissions,
             submitted_history_idx: turn.submitted_history_idx.get() as usize,
-            rewind_block_idx: turn.rewind_block_idx,
+            rewind_history_idx: turn.rewind_history_idx,
             assistant_output_started: false,
             _perf: smelt_perf::perf::begin("agent:turn"),
         })
@@ -833,7 +833,7 @@ impl TuiApp {
             reasoning_effort: self.core.config.reasoning_effort,
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
-            rewind_block_idx: None,
+            rewind_history_idx: None,
             rollback: (adds_history || adds_block).then_some(rollback),
         })
     }
@@ -970,11 +970,6 @@ impl TuiApp {
             });
             self.model_history_source()
         };
-        let rewind_block_idx = if !evaluated.is_empty() {
-            self.user_turns().last().map(|(idx, _)| *idx)
-        } else {
-            None
-        };
         self.publish_turn_input(submitted);
 
         let reasoning = overrides
@@ -1048,6 +1043,7 @@ impl TuiApp {
         }
 
         let submitted_history_idx = self.session_history_len().checked_sub(1)?;
+        let rewind_history_idx = (!evaluated.is_empty()).then_some(submitted_history_idx);
         let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user_command(Content::text(evaluated), display),
@@ -1060,7 +1056,7 @@ impl TuiApp {
             reasoning_effort: reasoning,
             permission_overrides,
             permissions,
-            rewind_block_idx,
+            rewind_history_idx,
             rollback: Some(rollback),
         })
     }
@@ -2640,7 +2636,7 @@ mod tests {
         assert_eq!(app.state().prompt_text, "retry this exact input");
         assert!(!app.state().agent_running);
         assert_eq!(app.app.session_history_len(), 2);
-        let history = app.app.session_history_range(0..2);
+        let history = app.app.session_history_range(0..2).unwrap();
         assert!(history.last().is_some_and(|item| {
             item.as_note().is_some_and(|note| {
                 note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
@@ -2854,6 +2850,7 @@ mod tests {
         assert!(app
             .app
             .session_history_range(baseline_history_len..baseline_history_len + 1)
+            .unwrap()
             .first()
             .and_then(HistoryItem::as_note)
             .is_some_and(|note| {
@@ -2916,6 +2913,7 @@ mod tests {
         assert!(app
             .app
             .session_history_range(baseline_history_len..baseline_history_len + 1)
+            .unwrap()
             .first()
             .and_then(HistoryItem::as_note)
             .is_some_and(|note| {
@@ -3250,9 +3248,12 @@ mod tests {
         assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 2);
         assert_perf_value_at_most(&snapshot, "store:session:history_rows_inserted", 2);
         assert_perf_value_at_most(&snapshot, "store:session:history_rows_deleted", 0);
-        let tail = app.app.session_history_range(
-            app.app.session_history_len().saturating_sub(2)..app.app.session_history_len(),
-        );
+        let tail = app
+            .app
+            .session_history_range(
+                app.app.session_history_len().saturating_sub(2)..app.app.session_history_len(),
+            )
+            .unwrap();
         assert!(tail[0]
             .as_note()
             .is_some_and(|note| note.context_name() == Some("goal") && note.text().is_empty()));

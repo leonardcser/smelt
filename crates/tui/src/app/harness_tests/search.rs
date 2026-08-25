@@ -408,7 +408,7 @@ fn transcript_search_rewind_cancels_pending_results() {
     let mut app = sparse_display_only_search_app();
     begin_slow_persisted_search(&mut app);
 
-    app.rewind_to_block(Some(100), false);
+    app.rewind_to_history_index(Some(100), false);
     drain_app_events_for(&mut app, std::time::Duration::from_millis(120));
     assert!(app.overlays_probe().search_session().is_none());
 }

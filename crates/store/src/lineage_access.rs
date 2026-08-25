@@ -1137,6 +1137,19 @@ impl LineageSessionReader {
         )
     }
 
+    pub fn transcript_record_index_for_history_idx(
+        &self,
+        history_idx: u64,
+    ) -> Result<Option<usize>> {
+        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        lineage::lineage_transcript_record_index_for_history_idx(
+            &self.conn,
+            &self.lineage,
+            &snapshot.transcript_root,
+            history_idx,
+        )
+    }
+
     pub fn transcript_record_slice_with_total(
         &self,
         range: crate::TranscriptRecordRange,
@@ -1992,7 +2005,103 @@ mod tests {
             reader.transcript_record_index_for_block_idx(100).unwrap(),
             Some(50)
         );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(0).unwrap(),
+            Some(0)
+        );
         assert!(reader.transcript_object_backed_range(50, 51).is_err());
+    }
+
+    #[test]
+    fn transcript_history_lookup_returns_first_record_after_suffix_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('8');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let records = [Some(0), Some(0), None, Some(4), Some(8)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, history_idx)| {
+                let mut record = transcript_record(index as u64, format!("record {index}"));
+                record.history_idx = history_idx;
+                record
+            })
+            .collect();
+        let mut command = initial_commit(&id);
+        command.history = HistorySuffix {
+            start: HistoryIndex::ZERO,
+            final_len: HistoryLen::new(10),
+            items: (0..10)
+                .map(|index| protocol::HistoryItem::system(format!("history {index}")))
+                .collect(),
+        };
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records,
+        });
+        let initial = writer.commit_session(&command).unwrap();
+
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(4).unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(8).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(7).unwrap(),
+            None
+        );
+        drop(reader);
+
+        let replacement = [Some(2), Some(2), Some(9)]
+            .into_iter()
+            .enumerate()
+            .map(|(offset, history_idx)| {
+                let index = offset + 2;
+                let mut record = transcript_record(index as u64, format!("replacement {index}"));
+                record.history_idx = history_idx;
+                record
+            })
+            .collect();
+        command.expected = initial.current;
+        command.history = HistorySuffix {
+            start: HistoryIndex::new(10),
+            final_len: HistoryLen::new(10),
+            items: Vec::new(),
+        };
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::new(2),
+            records: replacement,
+        });
+        writer.commit_session(&command).unwrap();
+
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(2).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(9).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(4).unwrap(),
+            None
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(8).unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ impl TestApp {
                 pending: Vec::new(),
                 permissions: self.app.core.permissions.snapshot(),
                 submitted_history_idx: self.app.session_history_len().saturating_sub(1),
-                rewind_block_idx: None,
+                rewind_history_idx: None,
                 assistant_output_started: false,
                 _perf: smelt_perf::perf::begin("test_harness:turn"),
             }));
@@ -989,11 +989,11 @@ impl TestApp {
         self.app.active_context_token_identity()
     }
 
-    pub(crate) fn rewind_to(
+    pub(crate) fn rewind_to_history(
         &mut self,
-        block_idx: usize,
+        history_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
-        self.app.rewind_to(block_idx)
+        self.app.rewind_to_history(history_idx)
     }
 
     pub(crate) fn rewind_to_start(&mut self) {
@@ -1097,7 +1097,9 @@ impl TestApp {
         &self,
         range: std::ops::Range<usize>,
     ) -> Vec<protocol::HistoryItem> {
-        self.app.session_history_range(range)
+        self.app
+            .session_history_range(range)
+            .expect("read session history range")
     }
 
     pub(crate) fn apply_history_append_to_history(
@@ -1133,8 +1135,13 @@ impl TestApp {
         self.app.session_set_checkpoint(checkpoint);
     }
 
-    pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
-        self.app.rewind_to_block(block_idx, restore_vim_insert);
+    pub(crate) fn rewind_to_history_index(
+        &mut self,
+        history_idx: Option<usize>,
+        restore_vim_insert: bool,
+    ) {
+        self.app
+            .rewind_to_history_index(history_idx, restore_vim_insert);
     }
 
     pub(crate) fn set_prompt_placeholder_text(&mut self, text: String) {

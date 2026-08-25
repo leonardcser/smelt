@@ -371,6 +371,15 @@ impl TuiSessionDocument {
         }
     }
 
+    pub(crate) fn install_rewind_prefix(
+        &mut self,
+        transcript: crate::app::transcript::LoadedTranscript,
+        record_count: usize,
+    ) {
+        self.transcript
+            .install_rewind_prefix(transcript, record_count);
+    }
+
     pub(crate) fn install_loaded_full_session(
         &mut self,
         transcript: crate::app::transcript::LoadedTranscript,

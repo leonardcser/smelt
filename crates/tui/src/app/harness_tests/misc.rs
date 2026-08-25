@@ -1875,7 +1875,7 @@ fn rewind_restores_session_title_snapshot() {
     app.set_session_title("First task".into(), "first-task".into(), Some(1));
     app.set_session_title("Second task".into(), "second-task".into(), Some(3));
 
-    let restored = app.rewind_to(2).expect("second user turn");
+    let restored = app.rewind_to_history(2).expect("second user turn");
 
     assert_eq!(restored.0, "Second task");
     assert_eq!(app.session_snapshot().history.len(), 2);

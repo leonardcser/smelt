@@ -197,10 +197,10 @@ Explicitly retry the latest unsaved generation after session persistence becomes
 ## `smelt.session.rewind_to`
 
 ```lua
-fun(block_idx: integer?, opts: table?): nil
+fun(history_idx: integer?, opts: table?): nil
 ```
 
-Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
+Rewind the session to a prior user turn. `history_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 
 ## `smelt.session.set_fast_mode`
 
@@ -294,7 +294,7 @@ an id not present in `entries` are treated as roots.
 fun(): table
 ```
 
-Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.
+Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `history_idx` is the canonical rewind coordinate, deprecated `block_idx` is its compatibility alias, and `label` is the first line of the user message.
 
 ## `smelt.session.worktrees`
 

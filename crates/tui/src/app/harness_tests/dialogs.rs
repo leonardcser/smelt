@@ -1385,10 +1385,7 @@ fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() 
     );
     app.restrict_permissions_to_cwd();
     app.start_submitted_turn("process outside data");
-    let block_idx = app
-        .app
-        .last_user_block_index()
-        .expect("submitted user block");
+    let history_idx = app.app.session_history_len().saturating_sub(1);
 
     request_bash_permission(&mut app, 21, &command, vec![approval_pattern]);
     assert_eq!(app.pending_confirm_count(), 1);
@@ -1419,7 +1416,7 @@ fn bash_session_grants_for_cd_prefixed_outside_path_survive_cancel_and_rewind() 
     );
 
     app.cancel();
-    app.rewind_to_block(Some(block_idx), false);
+    app.rewind_to_history_index(Some(history_idx), false);
 
     let before = app.actions().len();
     app.start_submitted_turn("process outside data");
@@ -1438,10 +1435,7 @@ fn command_session_grant_survives_cancel_and_rewind() {
     let mut app = TestApp::builder().build();
     let command = format!("cd {} && python3 --version", app.cwd_str());
     app.start_submitted_turn("check python");
-    let block_idx = app
-        .app
-        .last_user_block_index()
-        .expect("submitted user block");
+    let history_idx = app.app.session_history_len().saturating_sub(1);
 
     request_bash_permission(&mut app, 31, &command, vec![approval_pattern]);
     assert_eq!(app.pending_confirm_count(), 1);
@@ -1464,7 +1458,7 @@ fn command_session_grant_survives_cancel_and_rewind() {
     );
 
     app.cancel();
-    app.rewind_to_block(Some(block_idx), false);
+    app.rewind_to_history_index(Some(history_idx), false);
 
     let before = app.actions().len();
     app.start_submitted_turn("check python");

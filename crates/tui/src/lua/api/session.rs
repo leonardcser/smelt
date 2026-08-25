@@ -577,6 +577,7 @@ pub(super) fn register(
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             if let Some(info) = crate::lua::try_with_session_host(|host| host.session_info()) {
+                let info = info.map_err(mlua::Error::RuntimeError)?;
                 out.set("id", info.id)?;
                 out.set("artifact_dir", info.artifact_dir.display().to_string())?;
                 out.set("ephemeral", info.ephemeral)?;
@@ -697,6 +698,8 @@ pub(super) fn register(
                     host.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
                 }
             })
+            .transpose()
+            .map_err(mlua::Error::RuntimeError)?
             .unwrap_or_default();
             let messages = protocol::history_to_messages(&history);
             let role_filter: Option<std::collections::HashSet<String>> =
@@ -768,6 +771,8 @@ pub(super) fn register(
                     host.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
                 }
             })
+            .transpose()
+            .map_err(mlua::Error::RuntimeError)?
             .unwrap_or_default();
             history_items_to_lua(lua, &history)
         },
@@ -780,9 +785,9 @@ pub(super) fn register(
             let all = opt_field::<bool>(&opts, "all")?.unwrap_or(false);
             let since_index = opt_field::<usize>(&opts, "since_index")?;
             let limit = opt_field::<usize>(&opts, "limit")?;
-            match crate::lua::try_with_session_host(|host| {
+            let history = crate::lua::try_with_session_host(|host| {
                 let len = host.session_history_len();
-                let history = if all {
+                if all {
                     host.session_history_range(0..len)
                 } else if let Some(since_index) = since_index {
                     let limit = limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1);
@@ -794,26 +799,30 @@ pub(super) fn register(
                         limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1),
                         Some(DEFAULT_LUA_SESSION_MAX_BYTES),
                     )
-                };
-                conversation_to_lua(lua, &history, limit)
-            }) {
-                Some(result) => result,
-                None => lua.create_table(),
-            }
+                }
+            })
+            .transpose()
+            .map_err(mlua::Error::RuntimeError)?
+            .unwrap_or_default();
+            conversation_to_lua(lua, &history, limit)
         },
     )?;
     m.fn_(
         "turns",
-        "Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.",
+        "Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `history_idx` is the canonical rewind coordinate, deprecated `block_idx` is its compatibility alias, and `label` is the first line of the user message.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let turns = crate::lua::try_with_session_host(|host| host.user_turns()).unwrap_or_default();
+            let turns = crate::lua::try_with_session_host(|host| host.rewind_turns())
+                .transpose()
+                .map_err(mlua::Error::RuntimeError)?
+                .unwrap_or_default();
             let out = lua.create_table()?;
-            for (i, (block_idx, text)) in turns.into_iter().enumerate() {
+            for (i, turn) in turns.into_iter().enumerate() {
                 let row = lua.create_table()?;
-                row.set("block_idx", block_idx)?;
-                let label = text.lines().next().unwrap_or("").to_string();
-                row.set("label", label)?;
+                row.set("history_idx", turn.history_idx)?;
+                // COMPAT(lua-session-turn-block-idx): remove after third-party rewind dialogs use history_idx.
+                row.set("block_idx", turn.history_idx)?;
+                row.set("label", turn.label)?;
                 out.set(i + 1, row)?;
             }
             Ok(out)
@@ -821,14 +830,14 @@ pub(super) fn register(
     )?;
     m.fn_(
         "rewind_to",
-        "Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.",
-        &["block_idx", "opts"],
-        |_, (block_idx, opts): (Option<usize>, Option<mlua::Table>)| -> LuaResult<()> {
+        "Rewind the session to a prior user turn. `history_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.",
+        &["history_idx", "opts"],
+        |_, (history_idx, opts): (Option<usize>, Option<mlua::Table>)| -> LuaResult<()> {
             let restore_vim_insert = opts
                 .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
                 .unwrap_or(false);
             crate::lua::with_session_host(|host| {
-                host.rewind_to_block(block_idx, restore_vim_insert);
+                host.rewind_to_history(history_idx, restore_vim_insert);
             });
             Ok(())
         },

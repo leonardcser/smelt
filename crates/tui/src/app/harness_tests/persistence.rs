@@ -581,6 +581,7 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
     );
     let retained_block_len = app.transcript_block_count();
     let retained = lineage_reader(&session_id).snapshot().unwrap();
+    let retained_history_len = retained.head.history_len.as_usize().unwrap();
 
     app.commit_request_history_item(
         HistoryItem::user(Content::text("discarded prompt")),
@@ -606,7 +607,7 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
     assert_ne!(extended.history_root_id, retained.history_root_id);
     assert_ne!(extended.transcript_root_id, retained.transcript_root_id);
 
-    app.rewind_to_block(Some(retained_block_len), false);
+    app.rewind_to_history_index(Some(retained_history_len), false);
     app.save_session_and_flush();
 
     let rewound_reader = lineage_reader(&session_id);
@@ -1630,7 +1631,7 @@ fn resumed_rewind_restores_prior_turn_context_before_next_request() {
     assert!(resumed.conversation_probe().has_live_session());
     resumed.render_silent();
 
-    resumed.rewind_to_block(Some(2), false);
+    resumed.rewind_to_history_index(Some(2), false);
     assert_eq!(resumed.session_message_count(), 2);
     assert_eq!(resumed.session_snapshot().context_tokens, Some(100));
     assert_eq!(
@@ -1726,7 +1727,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
         }));
         app.save_session_and_flush();
 
-        let second_prompt_block_idx = app.conversation_probe().transcript().history().len();
+        let second_prompt_history_idx = app.session_snapshot().history.len();
         app.commit_request_history_item(
             HistoryItem::user(Content::text("second prompt")),
             Some(Block::User {
@@ -1746,7 +1747,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
             background: false,
         }));
 
-        app.rewind_to_block(Some(second_prompt_block_idx), false);
+        app.rewind_to_history_index(Some(second_prompt_history_idx), false);
         app.save_session_and_flush();
         assert_eq!(app.session_message_count(), 2);
         assert_eq!(app.session_snapshot().display_context_tokens(), Some(100));

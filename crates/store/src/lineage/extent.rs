@@ -28,6 +28,8 @@ struct TranscriptNodeProfile {
     kind_mask: u16,
     role_mask: u8,
     extent: TranscriptExtentProfile,
+    min_history_idx: Option<u64>,
+    max_history_idx: Option<u64>,
 }
 
 impl TranscriptNodeProfile {
@@ -39,6 +41,8 @@ impl TranscriptNodeProfile {
             kind_mask: semantic_bit(&TRANSCRIPT_KINDS, &profile.kind, "transcript kind")?,
             role_mask: semantic_bit::<u8>(&TRANSCRIPT_ROLES, &profile.role, "transcript role")?,
             extent: profile.extent,
+            min_history_idx: profile.history_idx,
+            max_history_idx: profile.history_idx,
         })
     }
 
@@ -52,7 +56,21 @@ impl TranscriptNodeProfile {
         self.kind_mask |= next.kind_mask;
         self.role_mask |= next.role_mask;
         self.extent = add_extent_profiles(self.extent, next.extent);
+        self.min_history_idx = match (self.min_history_idx, next.min_history_idx) {
+            (Some(current), Some(next)) => Some(current.min(next)),
+            (bound, None) | (None, bound) => bound,
+        };
+        self.max_history_idx = match (self.max_history_idx, next.max_history_idx) {
+            (Some(current), Some(next)) => Some(current.max(next)),
+            (bound, None) | (None, bound) => bound,
+        };
         Ok(())
+    }
+
+    fn contains_history_idx(&self, history_idx: u64) -> bool {
+        self.min_history_idx
+            .zip(self.max_history_idx)
+            .is_some_and(|(min, max)| min <= history_idx && history_idx <= max)
     }
 }
 
@@ -212,7 +230,8 @@ fn load_node_profile(
     let row = conn
         .query_row(
             "SELECT record_count, first_block_idx, last_block_idx, kind_mask, role_mask,
-                    rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
+                    rows_20, rows_40, rows_80, rows_120, rows_160, rows_240,
+                    min_history_idx, max_history_idx
              FROM lineage_transcript_extent_nodes
              WHERE lineage_id = ?1 AND node_id = ?2",
             (lineage.as_str(), node.as_str()),
@@ -231,6 +250,8 @@ fn load_node_profile(
                         row.get::<_, i64>(9)?,
                         row.get::<_, i64>(10)?,
                     ],
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
                 ))
             },
         )
@@ -258,6 +279,23 @@ fn load_node_profile(
     let record_count_usize = usize::try_from(record_count).map_err(|_| {
         StoreError::Integrity("transcript extent record count exceeds platform limits".into())
     })?;
+    let min_history_idx = row
+        .6
+        .map(|value| nonnegative_u64(value, "transcript extent min history_idx"))
+        .transpose()?;
+    let max_history_idx = row
+        .7
+        .map(|value| nonnegative_u64(value, "transcript extent max history_idx"))
+        .transpose()?;
+    if min_history_idx.is_some() != max_history_idx.is_some()
+        || min_history_idx
+            .zip(max_history_idx)
+            .is_some_and(|(min, max)| min > max)
+    {
+        return Err(StoreError::Integrity(
+            "transcript extent node has invalid history bounds".into(),
+        ));
+    }
     Ok(TranscriptNodeProfile {
         record_count,
         first_block_idx,
@@ -265,6 +303,8 @@ fn load_node_profile(
         kind_mask,
         role_mask,
         extent: TranscriptExtentProfile::new(validated_profile_rows(row.5, record_count_usize)?),
+        min_history_idx,
+        max_history_idx,
     })
 }
 
@@ -281,14 +321,11 @@ fn entry_profile(
     }
 }
 
-pub(crate) fn install_transcript_node_profile(
+fn profile_sequence_node(
     conn: &Connection,
     lineage: &LineageId,
     node: &SequenceNode,
-) -> Result<()> {
-    if node.kind != SequenceKind::Transcript {
-        return Ok(());
-    }
+) -> Result<TranscriptNodeProfile> {
     let mut profiles = node
         .entries
         .iter()
@@ -316,12 +353,25 @@ pub(crate) fn install_transcript_node_profile(
             node.id.as_str()
         )));
     }
+    Ok(expected)
+}
+
+pub(crate) fn install_transcript_node_profile(
+    conn: &Connection,
+    lineage: &LineageId,
+    node: &SequenceNode,
+) -> Result<()> {
+    if node.kind != SequenceKind::Transcript {
+        return Ok(());
+    }
+    let expected = profile_sequence_node(conn, lineage, node)?;
     let rows = expected.extent.rows();
     conn.execute(
         "INSERT OR IGNORE INTO lineage_transcript_extent_nodes (
              lineage_id, node_id, record_count, first_block_idx, last_block_idx,
-             kind_mask, role_mask, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             kind_mask, role_mask, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240,
+             min_history_idx, max_history_idx
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             lineage.as_str(),
             node.id.as_str(),
@@ -339,6 +389,14 @@ pub(crate) fn install_transcript_node_profile(
             checked_i64(rows[3], "transcript extent rows 120")?,
             checked_i64(rows[4], "transcript extent rows 160")?,
             checked_i64(rows[5], "transcript extent rows 240")?,
+            expected
+                .min_history_idx
+                .map(|value| checked_i64(value, "transcript extent min history_idx"))
+                .transpose()?,
+            expected
+                .max_history_idx
+                .map(|value| checked_i64(value, "transcript extent max history_idx"))
+                .transpose()?,
         ],
     )?;
     let stored = load_node_profile(conn, lineage, &node.id)?;
@@ -392,6 +450,51 @@ pub(crate) fn backfill_transcript_indexes(conn: &Connection) -> Result<()> {
         let node = NodeId::from_db(node)?;
         let node = load_node_shallow(conn, &lineage, &node, None)?;
         install_transcript_node_profile(conn, &lineage, &node)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn backfill_transcript_history_bounds(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT lineage_id, node_id
+         FROM lineage_sequence_nodes
+         WHERE sequence_kind = 'transcript'
+         ORDER BY lineage_id, level, node_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let nodes = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (lineage, node) in nodes {
+        let lineage = LineageId::from_hex(lineage)?;
+        let node = NodeId::from_db(node)?;
+        let node = load_node_shallow(conn, &lineage, &node, None)?;
+        let profile = profile_sequence_node(conn, &lineage, &node)?;
+        let updated = conn.execute(
+            "UPDATE lineage_transcript_extent_nodes
+             SET min_history_idx = ?3, max_history_idx = ?4
+             WHERE lineage_id = ?1 AND node_id = ?2",
+            rusqlite::params![
+                lineage.as_str(),
+                node.id.as_str(),
+                profile
+                    .min_history_idx
+                    .map(|value| checked_i64(value, "transcript extent min history_idx"))
+                    .transpose()?,
+                profile
+                    .max_history_idx
+                    .map(|value| checked_i64(value, "transcript extent max history_idx"))
+                    .transpose()?,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::Integrity(format!(
+                "transcript extent node {} is missing during history-bound backfill",
+                node.id.as_str()
+            )));
+        }
     }
     Ok(())
 }
@@ -1018,6 +1121,99 @@ pub(crate) fn lineage_transcript_record_index_for_block_idx(
     .transpose()
 }
 
+fn record_index_for_history_in_node(
+    conn: &Connection,
+    lineage: &LineageId,
+    node_id: &NodeId,
+    expected_level: u32,
+    history_idx: u64,
+    record_base: u64,
+    profiles_read: &mut u64,
+) -> Result<Option<u64>> {
+    let node = load_node_shallow(conn, lineage, node_id, None)?;
+    if node.kind != SequenceKind::Transcript || node.level != expected_level {
+        return Err(StoreError::Integrity(
+            "transcript history lookup reached an invalid node".into(),
+        ));
+    }
+    let mut entry_start = 0_u64;
+    for entry in &node.entries {
+        *profiles_read = profiles_read.saturating_add(1);
+        let profile = entry_profile(conn, lineage, entry)?;
+        if profile.record_count != entry.item_count {
+            return Err(StoreError::Integrity(
+                "transcript history lookup reached an invalid indexed entry".into(),
+            ));
+        }
+        if profile.contains_history_idx(history_idx) {
+            match &entry.target {
+                EntryTarget::Item(_) => {
+                    return Ok(Some(record_base.saturating_add(entry_start)));
+                }
+                EntryTarget::Child(child) => {
+                    if let Some(index) = record_index_for_history_in_node(
+                        conn,
+                        lineage,
+                        child,
+                        expected_level.saturating_sub(1),
+                        history_idx,
+                        record_base.saturating_add(entry_start),
+                        profiles_read,
+                    )? {
+                        return Ok(Some(index));
+                    }
+                }
+            }
+        }
+        entry_start = entry.cumulative_item_count;
+    }
+    Ok(None)
+}
+
+fn transcript_record_index_for_history_idx_profiled(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    history_idx: u64,
+) -> Result<(Option<usize>, u64)> {
+    validate_transcript_root(root)?;
+    let Some(node) = &root.node_id else {
+        return Ok((None, 0));
+    };
+    let mut profiles_read = 1;
+    if !load_node_profile(conn, lineage, node)?.contains_history_idx(history_idx) {
+        return Ok((None, profiles_read));
+    }
+    let record_index = record_index_for_history_in_node(
+        conn,
+        lineage,
+        node,
+        root.depth.saturating_sub(1),
+        history_idx,
+        0,
+        &mut profiles_read,
+    )?
+    .map(|index| {
+        usize::try_from(index).map_err(|_| {
+            StoreError::Integrity("transcript record index exceeds platform limits".into())
+        })
+    })
+    .transpose()?;
+    Ok((record_index, profiles_read))
+}
+
+pub(crate) fn lineage_transcript_record_index_for_history_idx(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    history_idx: u64,
+) -> Result<Option<usize>> {
+    let (record_index, profiles_read) =
+        transcript_record_index_for_history_idx_profiled(conn, lineage, root, history_idx)?;
+    smelt_perf::perf::record_value("store:extent:history_lookup:profiles_read", profiles_read);
+    Ok(record_index)
+}
+
 fn validated_profile_rows(
     rows: [i64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()],
     record_count: usize,
@@ -1192,6 +1388,8 @@ mod benchmark_tests {
             last_block_idx as i64,
             i64::from(kind_mask),
             i64::from(role_mask),
+            record_start as i64,
+            record_start.saturating_add(item_count).saturating_sub(1) as i64,
         ])?;
         Ok(BenchmarkNode {
             id,
@@ -1258,7 +1456,7 @@ mod benchmark_tests {
                  estimated_text_bytes, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
              )
              SELECT '{lineage_id}', printf('%064x', {BENCHMARK_PAYLOAD_BASE} + record_index),
-                    record_index * 2, NULL,
+                    record_index * 2, record_index,
                     CASE record_index % 10
                         WHEN 0 THEN 'user'
                         WHEN 1 THEN 'mode'
@@ -1304,8 +1502,8 @@ mod benchmark_tests {
                     "INSERT INTO lineage_transcript_extent_nodes (
                          lineage_id, node_id, record_count, first_block_idx, last_block_idx,
                          kind_mask, role_mask, rows_20, rows_40, rows_80,
-                         rows_120, rows_160, rows_240
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?3, ?3, ?3, ?3, ?3, ?3)",
+                         rows_120, rows_160, rows_240, min_history_idx, max_history_idx
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?3, ?3, ?3, ?3, ?3, ?3, ?8, ?9)",
                 )
                 .expect("prepare benchmark extent insert");
 
@@ -1426,6 +1624,27 @@ mod benchmark_tests {
             .iter()
             .find(|row| row.label == "store:object:payloads_loaded")
             .map_or(0, |row| row.total)
+    }
+
+    #[test]
+    fn history_lookup_prunes_unrelated_transcript_subtrees() {
+        const RECORD_COUNT: usize = 4_096;
+        let temp = tempfile::tempdir().expect("sparse history lookup directory");
+        let (conn, lineage, root) =
+            build_sparse_index_fixture(&temp.path().join("lineage.db"), RECORD_COUNT);
+        let target = RECORD_COUNT / 2 + 7;
+
+        let (found, profiles_read) =
+            transcript_record_index_for_history_idx_profiled(&conn, &lineage, &root, target as u64)
+                .expect("lookup transcript history coordinate");
+
+        assert_eq!(found, Some(target));
+        assert!(
+            profiles_read
+                <= u64::from(root.depth).saturating_mul(BENCHMARK_SEQUENCE_FANOUT as u64 + 1),
+            "history lookup read {profiles_read} profiles at depth {}",
+            root.depth
+        );
     }
 
     #[test]

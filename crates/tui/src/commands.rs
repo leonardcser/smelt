@@ -1272,9 +1272,9 @@ mod tests {
                 assistant("reply"),
             ],
         );
-        let first_turn_block = app.app.user_turns()[0].0;
+        let first_turn = app.app.rewind_turns().unwrap()[0].history_idx;
 
-        app.app.rewind_to(first_turn_block);
+        app.app.rewind_to_history(first_turn);
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
 
         assert!(mode_blocks(&app.app).is_empty());
@@ -1305,9 +1305,9 @@ mod tests {
             .append_history_item(assistant("third reply"));
         app.app.sync_session_snapshot();
         app.app.restore_screen();
-        let second_turn_block = app.app.user_turns()[1].0;
+        let second_turn = app.app.rewind_turns().unwrap()[1].history_idx;
 
-        let restored = app.app.rewind_to(second_turn_block).expect("second turn");
+        let restored = app.app.rewind_to_history(second_turn).expect("second turn");
 
         assert_eq!(restored.0, "second");
         assert_eq!(app.app.core.config.mode.as_str(), "normal");
@@ -1315,6 +1315,28 @@ mod tests {
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
 
         assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+    }
+
+    #[test]
+    fn rewind_to_first_message_restores_session_base_mode() {
+        let mut app = normal_app();
+        set_history(&mut app, vec![user("first"), assistant("first reply")]);
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.app
+            .conversation
+            .set_session_mode_for_harness(Some("apply".into()));
+        app.app.conversation.append_history_item(user("second"));
+        app.app
+            .conversation
+            .append_history_item(assistant("second reply"));
+        app.app.sync_session_snapshot();
+        app.app.restore_screen();
+        let first_turn = app.app.rewind_turns().unwrap()[0].history_idx;
+
+        let restored = app.app.rewind_to_history(first_turn).expect("first turn");
+
+        assert_eq!(restored.0, "first");
+        assert_eq!(app.app.core.config.mode.as_str(), "normal");
     }
 
     #[test]
@@ -1328,9 +1350,9 @@ mod tests {
             .append_history_item(assistant("second reply"));
         app.app.sync_session_snapshot();
         app.app.restore_screen();
-        let second_turn_block = app.app.user_turns()[1].0;
+        let second_turn = app.app.rewind_turns().unwrap()[1].history_idx;
 
-        app.app.rewind_to(second_turn_block);
+        app.app.rewind_to_history(second_turn);
         app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
 
         assert!(mode_blocks(&app.app).is_empty());

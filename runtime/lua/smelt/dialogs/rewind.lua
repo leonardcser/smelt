@@ -36,7 +36,7 @@ smelt.cmd.register("rewind", function(args)
       return
     end
 
-    local block_idx = turns[picked.index].block_idx
-    smelt.session.rewind_to(block_idx, { restore_vim_insert = restore_vim_insert })
+    local history_idx = turns[picked.index].history_idx
+    smelt.session.rewind_to(history_idx, { restore_vim_insert = restore_vim_insert })
   end)
 end, { desc = "rewind to a previous turn" })

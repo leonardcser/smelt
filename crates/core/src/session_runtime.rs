@@ -236,29 +236,61 @@ impl LiveSession {
     }
 
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
-        let end = range.end.min(self.history_len());
-        let start = range.start.min(end);
-        if start == end {
-            return Ok(Vec::new());
-        }
-
         let mut out = Vec::new();
+        self.scan_history(range, usize::MAX, |_, items| {
+            out.extend_from_slice(items);
+        })?;
+        Ok(out)
+    }
+
+    pub fn scan_history(
+        &self,
+        range: Range<usize>,
+        chunk_items: usize,
+        mut visit: impl FnMut(usize, &[HistoryItem]),
+    ) -> Result<(), String> {
+        let end = range.end.min(self.history_len());
+        let mut start = range.start.min(end);
+        if start == end {
+            return Ok(());
+        }
+        let chunk_items = chunk_items.max(1);
+
         let stored_end = end.min(self.live_start);
         if start < stored_end {
             let db = self.open_store()?;
-            out.extend(
-                db.read_history_items_range(start..stored_end)
-                    .map_err(|err| format!("read session history range: {err}"))?,
-            );
+            while start < stored_end {
+                let chunk_end = start.saturating_add(chunk_items).min(stored_end);
+                let items = db
+                    .read_history_items_range(start..chunk_end)
+                    .map_err(|err| format!("read session history range: {err}"))?;
+                if items.len() != chunk_end - start {
+                    return Err(format!(
+                        "read session history range {start}..{chunk_end}: expected {} items, found {}",
+                        chunk_end - start,
+                        items.len()
+                    ));
+                }
+                visit(start, &items);
+                start = chunk_end;
+            }
         }
 
         let live_start = start.max(self.live_start);
         if live_start < end {
             let offset_start = live_start - self.live_start;
             let offset_end = end - self.live_start;
-            out.extend(self.live_history[offset_start..offset_end].iter().cloned());
+            for (chunk_offset, items) in self.live_history[offset_start..offset_end]
+                .chunks(chunk_items)
+                .enumerate()
+            {
+                visit(
+                    live_start.saturating_add(chunk_offset.saturating_mul(chunk_items)),
+                    items,
+                );
+            }
         }
-        Ok(out)
+        Ok(())
     }
 
     pub fn history_tail(

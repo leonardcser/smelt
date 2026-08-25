@@ -103,8 +103,8 @@ session.reset = nil
 ---@type fun(): boolean
 session.retry_persistence = nil
 
---- Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
----@type fun(block_idx: integer?, opts: table?): nil
+--- Rewind the session to a prior user turn. `history_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
+---@type fun(history_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
 --- Enable or disable accelerated inference for the current session.
@@ -158,7 +158,7 @@ session.tokens = nil
 ---@type fun(entries: table[], opts: table?): table[]
 session.tree = nil
 
---- Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.
+--- Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `history_idx` is the canonical rewind coordinate, deprecated `block_idx` is its compatibility alias, and `label` is the first line of the user message.
 ---@type fun(): table
 session.turns = nil
 

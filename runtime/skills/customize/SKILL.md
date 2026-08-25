@@ -1617,7 +1617,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.retry_persistence` :: `fun(): boolean`
   Explicitly retry the latest unsaved generation after session persistence becomes blocked.
-- `smelt.session.rewind_to` :: `fun(block_idx: integer?, opts: table?): nil`
+- `smelt.session.rewind_to` :: `fun(history_idx: integer?, opts: table?): nil`
   Rewind the session to a prior user turn.
 - `smelt.session.set_fast_mode` :: `fun(enabled: boolean): nil`
   Enable or disable accelerated inference for the current session.
@@ -1638,7 +1638,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.tree` :: `fun(entries: table[], opts: table?): table[]`
   Arrange a flat list of session entries (as returned by `smelt.session.list`) into a DFS-ordered tree by `parent_id`.
 - `smelt.session.turns` :: `fun(): table`
-  Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message.
+  Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `history_idx` is the canonical rewind coordinate, deprecated `block_idx` is its compatibility alias, and `label` is the first line of the user message.
 - `smelt.session.worktrees` :: `fun(): table`
   List smelt-managed git worktrees for the current repository.
 

@@ -4,8 +4,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::{Result, StoreError};
 
-pub const LINEAGE_SCHEMA_VERSION: i32 = 2;
-const PREVIOUS_LINEAGE_SCHEMA_VERSION: i32 = 1;
+pub const LINEAGE_SCHEMA_VERSION: i32 = 3;
+const PREVIOUS_LINEAGE_SCHEMA_VERSION: i32 = 2;
+const LEGACY_LINEAGE_SCHEMA_VERSION: i32 = 1;
 
 const LINEAGE_SCHEMA: &str = include_str!("lineage_schema.sql");
 const LINEAGE_SCHEMA_V1_EXTENT_TABLE: &str = r#"
@@ -79,6 +80,49 @@ BEGIN
     SELECT RAISE(ABORT, 'transcript extent nodes are immutable');
 END;
 "#;
+const LINEAGE_SCHEMA_V2_EXTENT_TABLE: &str = r#"
+CREATE TABLE lineage_transcript_extent_nodes (
+    lineage_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    record_count INTEGER NOT NULL CHECK (record_count > 0),
+    first_block_idx INTEGER NOT NULL CHECK (first_block_idx >= 0),
+    last_block_idx INTEGER NOT NULL CHECK (last_block_idx >= first_block_idx),
+    kind_mask INTEGER NOT NULL CHECK (kind_mask > 0),
+    role_mask INTEGER NOT NULL CHECK (role_mask > 0),
+    rows_20 INTEGER NOT NULL CHECK (rows_20 >= record_count),
+    rows_40 INTEGER NOT NULL CHECK (rows_40 >= record_count AND rows_40 <= rows_20),
+    rows_80 INTEGER NOT NULL CHECK (rows_80 >= record_count AND rows_80 <= rows_40),
+    rows_120 INTEGER NOT NULL CHECK (rows_120 >= record_count AND rows_120 <= rows_80),
+    rows_160 INTEGER NOT NULL CHECK (rows_160 >= record_count AND rows_160 <= rows_120),
+    rows_240 INTEGER NOT NULL CHECK (rows_240 >= record_count AND rows_240 <= rows_160),
+    PRIMARY KEY (lineage_id, node_id),
+    FOREIGN KEY (lineage_id, node_id)
+        REFERENCES lineage_sequence_nodes(lineage_id, node_id) ON DELETE CASCADE
+) STRICT;
+CREATE TRIGGER lineage_transcript_extent_node_update
+BEFORE UPDATE ON lineage_transcript_extent_nodes
+BEGIN
+    SELECT RAISE(ABORT, 'transcript extent nodes are immutable');
+END;
+"#;
+const LINEAGE_SCHEMA_V3_HISTORY_BOUNDS: &str = r#"
+DROP TRIGGER lineage_transcript_extent_node_update;
+ALTER TABLE lineage_transcript_extent_nodes ADD COLUMN
+    min_history_idx INTEGER CHECK (min_history_idx IS NULL OR min_history_idx >= 0);
+ALTER TABLE lineage_transcript_extent_nodes ADD COLUMN
+    max_history_idx INTEGER CHECK (
+        (min_history_idx IS NULL AND max_history_idx IS NULL)
+        OR (min_history_idx IS NOT NULL AND max_history_idx IS NOT NULL
+            AND max_history_idx >= min_history_idx)
+    );
+"#;
+const LINEAGE_SCHEMA_V3_EXTENT_TRIGGER: &str = r#"
+CREATE TRIGGER lineage_transcript_extent_node_update
+BEFORE UPDATE ON lineage_transcript_extent_nodes
+BEGIN
+    SELECT RAISE(ABORT, 'transcript extent nodes are immutable');
+END;
+"#;
 
 pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
     let version = user_version(conn)?;
@@ -90,7 +134,8 @@ pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
             write_store_meta(&tx)?;
             tx.commit()?;
         }
-        PREVIOUS_LINEAGE_SCHEMA_VERSION => migrate_lineage_schema_v1_to_v2(conn)?,
+        LEGACY_LINEAGE_SCHEMA_VERSION => migrate_lineage_schema_v1_to_v3(conn)?,
+        PREVIOUS_LINEAGE_SCHEMA_VERSION => migrate_lineage_schema_v2_to_v3(conn)?,
         LINEAGE_SCHEMA_VERSION => {}
         found => {
             return Err(StoreError::UnsupportedSchema {
@@ -102,12 +147,41 @@ pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
     validate_lineage_schema(conn)
 }
 
-fn migrate_lineage_schema_v1_to_v2(conn: &mut Connection) -> Result<()> {
+fn migrate_lineage_schema_v1_to_v3(conn: &mut Connection) -> Result<()> {
     validate_schema_shape(conn, canonical_lineage_schema_v1_shape()?)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(LINEAGE_SCHEMA_V2_INDEXES)?;
+    tx.execute_batch(LINEAGE_SCHEMA_V3_HISTORY_BOUNDS)?;
     crate::lineage::backfill_transcript_indexes(&tx)?;
+    tx.execute_batch(LINEAGE_SCHEMA_V3_EXTENT_TRIGGER)?;
     tx.execute_batch("DROP TABLE lineage_transcript_extent_chunks")?;
+    let updated_schema = tx.execute(
+        "UPDATE store_meta SET value = ?1, updated_at = unixepoch()
+         WHERE key = 'schema_version'",
+        [LINEAGE_SCHEMA_VERSION.to_string()],
+    )?;
+    let updated_app = tx.execute(
+        "UPDATE store_meta SET value = ?1, updated_at = unixepoch()
+         WHERE key = 'app_version'",
+        [env!("CARGO_PKG_VERSION")],
+    )?;
+    if updated_schema != 1 || updated_app != 1 {
+        return Err(StoreError::Integrity(
+            "lineage schema migration found invalid store metadata".into(),
+        ));
+    }
+    set_user_version(&tx, LINEAGE_SCHEMA_VERSION)?;
+    validate_lineage_schema(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_lineage_schema_v2_to_v3(conn: &mut Connection) -> Result<()> {
+    validate_schema_shape(conn, canonical_lineage_schema_v2_shape()?)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(LINEAGE_SCHEMA_V3_HISTORY_BOUNDS)?;
+    crate::lineage::backfill_transcript_history_bounds(&tx)?;
+    tx.execute_batch(LINEAGE_SCHEMA_V3_EXTENT_TRIGGER)?;
     let updated_schema = tx.execute(
         "UPDATE store_meta SET value = ?1, updated_at = unixepoch()
          WHERE key = 'schema_version'",
@@ -245,12 +319,34 @@ fn canonical_lineage_schema_shape() -> Result<&'static SchemaShape> {
     }
 }
 
+fn canonical_lineage_schema_v2_shape() -> Result<&'static SchemaShape> {
+    static SHAPE: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
+    match SHAPE.get_or_init(load_canonical_lineage_schema_v2_shape) {
+        Ok(shape) => Ok(shape),
+        Err(message) => Err(StoreError::Integrity(message.clone())),
+    }
+}
+
 fn canonical_lineage_schema_v1_shape() -> Result<&'static SchemaShape> {
     static SHAPE: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
     match SHAPE.get_or_init(load_canonical_lineage_schema_v1_shape) {
         Ok(shape) => Ok(shape),
         Err(message) => Err(StoreError::Integrity(message.clone())),
     }
+}
+
+fn load_canonical_lineage_schema_v2_shape() -> std::result::Result<SchemaShape, String> {
+    let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    conn.execute_batch(LINEAGE_SCHEMA)
+        .map_err(|error| error.to_string())?;
+    conn.execute_batch(
+        "DROP TRIGGER lineage_transcript_extent_node_update;
+         DROP TABLE lineage_transcript_extent_nodes;",
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute_batch(LINEAGE_SCHEMA_V2_EXTENT_TABLE)
+        .map_err(|error| error.to_string())?;
+    load_schema_shape(&conn)
 }
 
 fn load_canonical_lineage_schema_v1_shape() -> std::result::Result<SchemaShape, String> {
@@ -415,6 +511,34 @@ mod tests {
         .unwrap();
     }
 
+    fn downgrade_to_v2(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TRIGGER lineage_transcript_extent_node_update;
+             ALTER TABLE lineage_transcript_extent_nodes
+                 RENAME TO lineage_transcript_extent_nodes_v3;",
+        )
+        .unwrap();
+        conn.execute_batch(LINEAGE_SCHEMA_V2_EXTENT_TABLE).unwrap();
+        conn.execute_batch(
+            "INSERT INTO lineage_transcript_extent_nodes (
+                 lineage_id, node_id, record_count, first_block_idx, last_block_idx,
+                 kind_mask, role_mask, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
+             )
+             SELECT lineage_id, node_id, record_count, first_block_idx, last_block_idx,
+                    kind_mask, role_mask, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
+             FROM lineage_transcript_extent_nodes_v3;
+             DROP TABLE lineage_transcript_extent_nodes_v3;",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE store_meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+        set_user_version(conn, PREVIOUS_LINEAGE_SCHEMA_VERSION).unwrap();
+        validate_schema_shape(conn, canonical_lineage_schema_v2_shape().unwrap()).unwrap();
+    }
+
     fn downgrade_to_v1(conn: &Connection) {
         conn.execute_batch(
             "DROP TRIGGER lineage_transcript_extent_node_update;
@@ -430,7 +554,7 @@ mod tests {
             [],
         )
         .unwrap();
-        set_user_version(conn, PREVIOUS_LINEAGE_SCHEMA_VERSION).unwrap();
+        set_user_version(conn, LEGACY_LINEAGE_SCHEMA_VERSION).unwrap();
         validate_schema_shape(conn, canonical_lineage_schema_v1_shape().unwrap()).unwrap();
     }
 
@@ -499,6 +623,28 @@ mod tests {
     }
 
     #[test]
+    fn migrates_populated_v2_history_bounds_transactionally() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_lineage_schema(&mut conn).unwrap();
+        populate_transcript(&conn);
+        downgrade_to_v2(&conn);
+
+        initialize_lineage_schema(&mut conn).unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), LINEAGE_SCHEMA_VERSION);
+        let bounds = conn
+            .query_row(
+                "SELECT MIN(min_history_idx), MAX(max_history_idx)
+                 FROM lineage_transcript_extent_nodes",
+                [],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bounds, (Some(3), Some(3)));
+        validate_lineage_schema(&conn).unwrap();
+    }
+
+    #[test]
     fn rolls_back_v1_migration_when_payload_content_is_corrupt() {
         let mut conn = Connection::open_in_memory().unwrap();
         initialize_lineage_schema(&mut conn).unwrap();
@@ -522,10 +668,7 @@ mod tests {
         .unwrap();
 
         assert!(initialize_lineage_schema(&mut conn).is_err());
-        assert_eq!(
-            user_version(&conn).unwrap(),
-            PREVIOUS_LINEAGE_SCHEMA_VERSION
-        );
+        assert_eq!(user_version(&conn).unwrap(), LEGACY_LINEAGE_SCHEMA_VERSION);
         assert!(
             schema_object_sql(&conn, "table", "lineage_transcript_extent_chunks")
                 .unwrap()

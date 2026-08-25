@@ -1506,7 +1506,8 @@ impl SessionLuaHost<'_> {
         self.app.conversation.session().created_at_ms
     }
 
-    pub(crate) fn session_info(&self) -> SessionInfoSnapshot {
+    pub(crate) fn session_info(&mut self) -> Result<SessionInfoSnapshot, String> {
+        let turn_count = self.rewind_turns()?.len();
         let session = self.app.conversation.session();
         let history_count = self.app.session_history_len();
         let has_live_session = self.app.conversation.has_live_session();
@@ -1515,7 +1516,7 @@ impl SessionLuaHost<'_> {
         } else {
             protocol::history_to_messages(&session.history).len()
         };
-        SessionInfoSnapshot {
+        Ok(SessionInfoSnapshot {
             id: session.id.clone(),
             artifact_dir: self.app.current_artifact_dir(),
             ephemeral: self.app.ephemeral(),
@@ -1538,14 +1539,14 @@ impl SessionLuaHost<'_> {
             history_count,
             message_count,
             message_count_approximate: has_live_session,
-            turn_count: self.app.user_turns().len(),
+            turn_count,
             usage: session.session_usage.clone(),
             managed_worktree: self.app.workspace.is_managed_worktree(),
             project: self.app.workspace.project().to_owned(),
             branch: self.app.workspace.branch().to_owned(),
             worktree: self.app.workspace.worktree().to_owned(),
             worktree_path: self.app.workspace.worktree_path().to_owned(),
-        }
+        })
     }
 
     pub(crate) fn session_id(&self) -> String {
@@ -1580,30 +1581,53 @@ impl SessionLuaHost<'_> {
     }
 
     pub(crate) fn session_history_range(
-        &self,
+        &mut self,
         range: std::ops::Range<usize>,
-    ) -> Vec<protocol::HistoryItem> {
-        self.app.session_history_range(range)
+    ) -> Result<Vec<protocol::HistoryItem>, String> {
+        let result = self.app.session_history_range(range);
+        if let Err(err) = &result {
+            self.app.notify_session_error_sticky(format!(
+                "failed to read canonical session history: {err}"
+            ));
+        }
+        result
     }
 
     pub(crate) fn session_history_tail(
-        &self,
+        &mut self,
         max_items: usize,
         max_bytes: Option<usize>,
-    ) -> Vec<protocol::HistoryItem> {
-        self.app.session_history_tail(max_items, max_bytes)
+    ) -> Result<Vec<protocol::HistoryItem>, String> {
+        let result = self.app.session_history_tail(max_items, max_bytes);
+        if let Err(err) = &result {
+            self.app.notify_session_error_sticky(format!(
+                "failed to read canonical session history: {err}"
+            ));
+        }
+        result
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
         self.app.model_history_messages()
     }
 
-    pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
-        self.app.user_turns()
+    pub(crate) fn rewind_turns(&mut self) -> Result<Vec<crate::app::history::RewindTurn>, String> {
+        let result = self.app.rewind_turns();
+        if let Err(err) = &result {
+            self.app.notify_session_error_sticky(format!(
+                "failed to enumerate rewindable session turns: {err}"
+            ));
+        }
+        result
     }
 
-    pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
-        self.app.rewind_to_block(block_idx, restore_vim_insert);
+    pub(crate) fn rewind_to_history(
+        &mut self,
+        history_idx: Option<usize>,
+        restore_vim_insert: bool,
+    ) {
+        self.app
+            .rewind_to_history_index(history_idx, restore_vim_insert);
     }
 
     pub(crate) fn rewind_active_user_turn_if_no_output(

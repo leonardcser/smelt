@@ -556,17 +556,18 @@ percent against the 80 percent gate, and no generated `.snap.new` files remained
 - Add persistent readers and merged asynchronous hydration.
 - Remove payload-backed boundary estimation and synchronous navigation scans.
 
-Schema version 2 stores one immutable transcript profile per payload and one
+Schema version 3 stores one immutable transcript profile per payload and one
 aggregate profile per persistent sequence node. Profiles contain bounded preview,
 kind, broad semantic role, block bounds, estimated text bytes, and row extents at
-the supported widths. Sequence aggregates retain record count, block bounds,
-kind/role masks, and summed extents. Range extent, row lookup, previous/next
-kind or role, and block lookup descend the content-addressed sequence tree. They
-do not deserialize transcript payloads or construct root-sized side indexes.
-Existing version 1 databases migrate transactionally: the migration validates the
-exact old shape, backfills payload and node profiles, removes the old root-scoped
-extent table, and advances both schema version markers. A corrupt payload rolls
-the entire migration back after partial backfill work.
+the supported widths. Sequence aggregates retain record count, block and
+canonical history-index bounds, kind/role masks, and summed extents. Range extent,
+row lookup, previous/next kind or role, block lookup, and transcript-boundary
+lookup descend the content-addressed sequence tree. They do not deserialize
+transcript payloads or construct root-sized side indexes. Existing version 1 and
+2 databases migrate transactionally: the migration validates the exact old
+shape, backfills payload and node profiles, removes the old root-scoped extent
+table when present, and advances both schema version markers. A corrupt payload
+rolls the entire migration back after partial backfill work.
 
 The transcript document retains one metadata reader for the immutable session
 store address, while the persistent per-session hydration worker retains a second
@@ -641,9 +642,10 @@ The consolidated production path has one owner for each kind of state:
   per semantic frame before projection; incremental indexes provide pending-tool
   lookup and main-turn cancellation without repeated queue scans. Animation state
   is independent of transcript revisions.
-- Schema version 2 owns immutable payload profiles and persistent sequence-node
-  aggregates. Extent, row, block, role, and kind queries descend that sequence
-  without loading payloads or building a root-sized index.
+- Schema version 3 owns immutable payload profiles and persistent sequence-node
+  aggregates. Extent, row, block, canonical history-boundary, role, and kind
+  queries descend that sequence without loading payloads or building a root-sized
+  index.
 - Derived search format 2 owns immutable FTS and short-posting segments plus an
   atomically published ordered manifest keyed by canonical transcript-root ID.
   Forks and rewinds reuse manifests for shared roots. Candidate queries validate
@@ -703,8 +705,8 @@ rescans, continuation-specific urgent scheduling, duplicate sparse prefix/total
 reconstruction, payload-backed extent boundaries, the 256-record navigation scan,
 per-frame reader opens, and animation-driven transcript projection. The former
 root-scoped 64-record extent table exists only as version 1 migration vocabulary;
-schema version 2 drops it transactionally. A final symbol and metric scan found no
-production prefix-index type, old extent chunk type, obsolete renderer mirror, or
+the current migration drops it transactionally. A final symbol and metric scan
+found no production prefix-index type, old extent chunk type, obsolete renderer mirror, or
 obsolete navigation and extent metric.
 
 Explicit complete materialization remains only in read-only fallback and test or

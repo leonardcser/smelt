@@ -398,7 +398,7 @@ impl TuiApp {
     }
 
     fn preserve_submitted_item_in_history_update(
-        &self,
+        &mut self,
         first_index: usize,
         mut items: Vec<protocol::HistoryItem>,
         submitted_history_idx: usize,
@@ -409,7 +409,16 @@ impl TuiApp {
         let Some(incoming) = items.get(relative_idx) else {
             return items;
         };
-        let existing = self.session_history_range(submitted_history_idx..submitted_history_idx + 1);
+        let existing =
+            match self.session_history_range(submitted_history_idx..submitted_history_idx + 1) {
+                Ok(existing) => existing,
+                Err(err) => {
+                    self.notify_session_error_sticky(format!(
+                        "failed to read canonical session history: {err}"
+                    ));
+                    return items;
+                }
+            };
         if let Some(submitted) = existing.first() {
             if submitted != incoming {
                 items[relative_idx] = submitted.clone();
