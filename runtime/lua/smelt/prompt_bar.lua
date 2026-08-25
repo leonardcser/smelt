@@ -505,15 +505,12 @@ invalidate_on(M.top_win, {
   "prompt_resize_chrome",
   "reasoning",
   "session_epoch",
-  "spinner_frame",
   "tokens_used",
+  "work_elapsed_ms",
   "work_label",
   "work_retry_attempt",
   "work_state",
 })
-invalidate_when_changed(M.top_win, "work_elapsed_ms", function(value)
-  return math.floor((tonumber(value) or 0) / 1000)
-end)
 invalidate_when_changed(M.top_win, "work_retry_remaining_ms", function(value)
   return math.max(1, math.ceil((tonumber(value) or 0) / 1000))
 end)

@@ -1630,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn animation_only_frames_reuse_retained_transcript_projection() {
+    fn animation_only_frames_refresh_prompt_bar_without_reprojecting_transcript() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
         app.dispatch_engine_event(protocol::EngineEvent::Text {
@@ -1642,7 +1642,7 @@ mod tests {
             _G.animation_renderer_calls = 0
             prompt_bar.top_win:set_renderer(function(win)
               _G.animation_renderer_calls = _G.animation_renderer_calls + 1
-              win:buf():lines({ tostring(smelt.signal.get("spinner_frame")) })
+              win:buf():lines({ tostring(smelt.signal.get("work_elapsed_ms")) })
             end)
             "#,
         )
@@ -1660,7 +1660,7 @@ mod tests {
             .expect("animation renderer call count");
 
         for _ in 0..3 {
-            app.clock.advance(std::time::Duration::from_millis(160));
+            app.clock.advance(std::time::Duration::from_millis(16));
             app.app
                 .request_animation_render(std::time::Duration::from_millis(16));
             assert!(app
@@ -1679,7 +1679,7 @@ mod tests {
         assert_eq!(
             app.lua_int_global("animation_renderer_calls"),
             Some(initial_renderer_calls + 3),
-            "spinner frames must still repaint the retained prompt bar"
+            "animation frames must repaint the retained prompt bar"
         );
     }
 
