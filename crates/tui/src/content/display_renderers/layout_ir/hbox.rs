@@ -160,7 +160,10 @@ pub(super) fn render_ir_hbox(
             let rows = items
                 .iter()
                 .zip(computed_widths.iter().copied())
-                .map(|(item, w)| measure_layout_ir_full(&item.layout, w, inline_options))
+                .filter(|(_, child_width)| *child_width > 0)
+                .map(|(item, child_width)| {
+                    measure_layout_ir_full(&item.layout, child_width, inline_options)
+                })
                 .max()
                 .unwrap_or(0);
             (computed_widths.as_slice(), None, rows)

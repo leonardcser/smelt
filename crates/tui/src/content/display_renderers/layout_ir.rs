@@ -251,12 +251,16 @@ fn refresh_layout_ir_content_measurements_inner(
                 .fold(
                     ContentMeasurementRefresh::Unchanged,
                     |refresh, ((item, child_width), measured_child)| {
-                        refresh.merge(refresh_layout_ir_content_measurements_inner(
-                            &item.layout,
-                            measured_child,
-                            child_width,
-                            inline_options,
-                        ))
+                        if child_width == 0 {
+                            refresh
+                        } else {
+                            refresh.merge(refresh_layout_ir_content_measurements_inner(
+                                &item.layout,
+                                measured_child,
+                                child_width,
+                                inline_options,
+                            ))
+                        }
                     },
                 );
             if refresh == ContentMeasurementRefresh::Updated {
@@ -365,7 +369,14 @@ fn measure_layout_ir_plan_with_gutter(
                 .iter()
                 .zip(widths.iter().copied())
                 .map(|(item, child_width)| {
-                    measure_layout_ir_plan(&item.layout, child_width, inline_options)
+                    if child_width == 0 {
+                        MeasuredLayout {
+                            rows: 0,
+                            kind: MeasuredLayoutKind::Terminal,
+                        }
+                    } else {
+                        measure_layout_ir_plan(&item.layout, child_width, inline_options)
+                    }
                 })
                 .collect::<Vec<_>>();
             let rows = children.iter().map(|child| child.rows).max().unwrap_or(0);
@@ -676,7 +687,10 @@ fn measure_layout_ir_full_with_gutter(
             items
                 .iter()
                 .zip(widths)
-                .map(|(item, w)| measure_layout_ir_full(&item.layout, w, inline_options))
+                .filter(|(_, child_width)| *child_width > 0)
+                .map(|(item, child_width)| {
+                    measure_layout_ir_full(&item.layout, child_width, inline_options)
+                })
                 .max()
                 .unwrap_or(0)
         }
@@ -3282,6 +3296,9 @@ fn layout_range_has_visible_text(
             let widths = solve_ir_hbox_widths(items, width);
             let mut saw_unknown = false;
             for (item, item_width) in items.iter().zip(widths) {
+                if item_width == 0 {
+                    continue;
+                }
                 match layout_range_has_visible_text(
                     &item.layout,
                     item_width,
@@ -5064,6 +5081,45 @@ mod tests {
 
         assert!(render_lines(&layout, 16).len() > 2);
         assert_eq!(copy_rendered_text(&layout, 16), source);
+    }
+
+    #[test]
+    fn hbox_measurement_ignores_zero_width_columns() {
+        let layout = BlockLayout::Hbox(vec![
+            HboxItem {
+                constraint: Constraint::Fill(1),
+                layout: BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                    lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                        text: "hidden content".into(),
+                        ..Default::default()
+                    }]]),
+                    hl_group: None,
+                    continuation_indent: 0,
+                    syntax_highlights: Default::default(),
+                })),
+                copy_owner: true,
+            },
+            HboxItem {
+                constraint: Constraint::Fit,
+                layout: BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                    spans: vec![protocol::StyledSpan {
+                        text: "x".into(),
+                        ..Default::default()
+                    }],
+                    hl_group: None,
+                    syntax_highlights: Default::default(),
+                })),
+                copy_owner: false,
+            },
+        ]);
+
+        let lines = render_lines(&layout, 1);
+        assert_eq!(lines, vec!["x"]);
+        assert_eq!(measure_layout_ir(&layout, 1), lines.len());
+        assert_eq!(
+            measure_layout_ir_plan(&layout, 1, &InlineOptions::default()).rows(),
+            lines.len()
+        );
     }
 
     #[test]

@@ -21,6 +21,25 @@ fn notification_highlight_uses_terminal_width_for_unicode() {
 }
 
 #[test]
+fn starting_a_new_turn_keeps_long_tool_names_materialized_at_tail() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id: protocol::InvocationId::new(1),
+        call_id: "call-1".into(),
+        tool_name: format!("\0\0%\0\0\0c{}", "\u{1c}".repeat(68)),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 1,
+    }));
+    app.render_to_frame();
+
+    app.start_turn(255);
+
+    app.render_to_frame();
+    app.assert_invariants();
+}
+
+#[test]
 fn lua_paint_callback_uses_scoped_tui_host_after_ui_paint() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);

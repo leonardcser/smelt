@@ -887,6 +887,14 @@ impl TranscriptDocument {
                     history
                         .stored_ref(id)
                         .cloned()
+                        .or_else(|| {
+                            self.records
+                                .sparse
+                                .records
+                                .values()
+                                .find(|record| record.block_id == id)
+                                .map(|record| Arc::clone(&record.stored))
+                        })
                         .map(|stored| (stored.record_index, id, stored))
                 })?
             })
@@ -2455,11 +2463,42 @@ impl TranscriptDocument {
         if records.is_empty() {
             return;
         }
-        self.content.transcript.history.install_stored_projection(
-            records
-                .into_iter()
-                .map(|record| (record.block_id, record.stored)),
+        let mut projected = records
+            .into_iter()
+            .map(|record| (record.block_id, record.stored))
+            .collect::<Vec<_>>();
+        let projected_ids = projected
+            .iter()
+            .map(|(block_id, _)| *block_id)
+            .collect::<HashSet<_>>();
+        projected.extend(
+            self.content
+                .transcript
+                .history
+                .order
+                .iter()
+                .copied()
+                .filter(|block_id| {
+                    !projected_ids.contains(block_id)
+                        && (self.hydration.pending_projection_pin == Some(*block_id)
+                            || self.hydration.search_pin == Some(*block_id)
+                            || self.hydration.record_save_pins.contains(block_id)
+                            || self.hydration.engine_event_pins.contains(block_id)
+                            || self.hydration.operation_pins.contains_key(block_id))
+                })
+                .filter_map(|block_id| {
+                    self.content
+                        .transcript
+                        .history
+                        .stored_ref(block_id)
+                        .map(|stored| (block_id, Arc::clone(stored)))
+                }),
         );
+        projected.sort_by_key(|(block_id, stored)| (stored.record_index, *block_id));
+        self.content
+            .transcript
+            .history
+            .install_stored_projection(projected);
         self.content.projection.invalidate_source_sequence();
     }
 
@@ -3002,12 +3041,21 @@ impl TranscriptDocument {
             if let Some(row) = self.row_for_content_anchor(lua, width, viewport_rows, anchor) {
                 return Some(row);
             }
+            let block_id = self.current_block_id_for_content_anchor(anchor);
+            if !self.content.transcript.history.is_materialized(block_id) {
+                let _ = self.ensure_hydrated_ids(&[block_id]);
+            }
+            return None;
         }
         let _ = self.activate_semantic_far_seek_record_window(
             width,
             anchor.record_index,
             viewport_rows,
         );
+        let block_id = self.current_block_id_for_content_anchor(anchor);
+        if !self.content.transcript.history.is_materialized(block_id) {
+            let _ = self.ensure_hydrated_ids(&[block_id]);
+        }
         let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
         self.row_for_content_anchor_with_offset(lua, width, anchor, row_offset)
     }
@@ -4396,25 +4444,15 @@ impl TranscriptDocument {
                 .filter(|(exact, tape)| {
                     tape.rows.clamped_scroll.saturating_add(exact.row_offset) == fallback_scroll_top
                 });
-        let current_content_anchor_matches = matches!(
-            self.viewport.state.resolved_anchor,
-            Some(TranscriptResolvedViewportAnchor {
-                top: TranscriptScrollAnchor::Content(_),
-                scroll_top,
-                ..
-            }) if scroll_top == fallback_scroll_top
-        );
-        if !current_content_anchor_matches {
-            if let Some((exact, _)) = exact_viewport {
-                self.capture_viewport_anchor_with_offset(
-                    lua,
-                    width,
-                    fallback_scroll_top,
-                    viewport_rows,
-                    exact.row_offset,
-                    TranscriptScrollAnchor::EstimatedRow(fallback_scroll_top),
-                );
-            }
+        if let Some((exact, _)) = exact_viewport {
+            self.capture_viewport_anchor_with_offset(
+                lua,
+                width,
+                fallback_scroll_top,
+                viewport_rows,
+                exact.row_offset,
+                TranscriptScrollAnchor::EstimatedRow(fallback_scroll_top),
+            );
         }
         let semantic_viewport_matches = self
             .viewport
@@ -4489,19 +4527,28 @@ impl TranscriptDocument {
         });
         let semantic_stable_anchor = reanchored_semantic_anchor
             .or_else(|| semantic_anchor.map(|anchor| anchor.row_anchor.into()));
-        let stable_anchor = present_exact_anchor
-            .or(semantic_stable_anchor)
-            .or(content_exact_anchor)
-            .or(exact_anchor);
-        let (stable_row, stable_delta) =
-            if present_exact_anchor.is_none() && semantic_stable_anchor.is_some() {
-                (
-                    add_signed_row(base, semantic_offset_rows.saturating_neg()),
-                    rows.saturating_add(semantic_offset_rows),
-                )
-            } else {
-                (base, rows)
-            };
+        let use_semantic_offset = semantic_stable_anchor.is_some() && semantic_offset_rows != 0;
+        let stable_anchor = if use_semantic_offset {
+            semantic_stable_anchor
+                .or(present_exact_anchor)
+                .or(content_exact_anchor)
+                .or(exact_anchor)
+        } else {
+            present_exact_anchor
+                .or(semantic_stable_anchor)
+                .or(content_exact_anchor)
+                .or(exact_anchor)
+        };
+        let (stable_row, stable_delta) = if use_semantic_offset
+            || (present_exact_anchor.is_none() && semantic_stable_anchor.is_some())
+        {
+            (
+                add_signed_row(base, semantic_offset_rows.saturating_neg()),
+                rows.saturating_add(semantic_offset_rows),
+            )
+        } else {
+            (base, rows)
+        };
         crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
             stable_row,
             stable_anchor,
@@ -4552,22 +4599,20 @@ impl TranscriptDocument {
                     ..
                 }) = self.viewport.state.resolved_anchor
                 {
-                    if self
-                        .row_for_preserved_content_anchor(lua, width, viewport_rows, anchor)
-                        .is_some()
+                    if let Some(row) =
+                        self.row_for_preserved_content_anchor(lua, width, viewport_rows, anchor)
                     {
-                        if let Some(stable_anchor) =
-                            self.stable_row_anchor_for_content_anchor(lua, width, anchor)
-                        {
-                            return (
-                                crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
-                                    anchor.fallback_row,
-                                    Some(stable_anchor),
-                                    Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
-                                ),
-                                None,
-                            );
-                        }
+                        let stable_anchor = self
+                            .stable_row_anchor_for_content_anchor(lua, width, anchor)
+                            .unwrap_or_else(|| anchor.row_anchor.into());
+                        return (
+                            crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                                row,
+                                Some(stable_anchor),
+                                Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
+                            ),
+                            None,
+                        );
                     }
                     return (
                         crate::content::transcript_buf::ScrollTarget::visible_row(add_signed_row(
@@ -4576,6 +4621,37 @@ impl TranscriptDocument {
                         )),
                         None,
                     );
+                }
+                if self.records.total_count().is_some() {
+                    let row_offset = self.loaded_row_offset(
+                        width,
+                        LoadedRowOffsetPolicy::RenderedViewportOrEstimate,
+                    );
+                    if let Some((anchor, offset_rows)) = self
+                        .content_anchor_at_or_after_row_with_offset(
+                            lua,
+                            width,
+                            fallback_scroll_top,
+                            viewport_rows,
+                            row_offset,
+                        )
+                    {
+                        if let Some(row) =
+                            self.row_for_preserved_content_anchor(lua, width, viewport_rows, anchor)
+                        {
+                            let stable_anchor = self
+                                .stable_row_anchor_for_content_anchor(lua, width, anchor)
+                                .unwrap_or_else(|| anchor.row_anchor.into());
+                            return (
+                                crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                                    row,
+                                    Some(stable_anchor),
+                                    Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
+                                ),
+                                None,
+                            );
+                        }
+                    }
                 }
                 let target = match self.row_for_viewport_anchor(
                     lua,
@@ -5010,8 +5086,14 @@ impl TranscriptDocument {
                 input.fallback_scroll_top,
                 rows,
             ) {
-                if preserve_previous_content_anchor && self.records.total_count().is_some() {
-                    if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
+                if preserve_anchor_intent && self.records.total_count().is_some() {
+                    if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = self
+                        .viewport
+                        .state
+                        .resolved_anchor
+                        .map(|anchor| anchor.top)
+                        .or(previous_top_anchor)
+                    {
                         plan.scroll_anchor = anchor;
                     }
                 }
@@ -5063,7 +5145,11 @@ impl TranscriptDocument {
             intent,
             TranscriptScrollIntent::UserDelta { .. } | TranscriptScrollIntent::PageDelta { .. }
         ) && self.pending_hydration.record_is_pending();
-        if unresolved_command_hydration || unresolved_local_delta_hydration {
+        let unresolved_preserve_hydration = preserve_anchor_intent && self.hydration_is_pending();
+        if unresolved_command_hydration
+            || unresolved_local_delta_hydration
+            || unresolved_preserve_hydration
+        {
             if self.viewport.state.pending_projection.is_none() {
                 self.viewport.state.pending_projection = deferred_projection.or_else(|| {
                     Some(PendingTranscriptProjection {
@@ -5119,7 +5205,13 @@ impl TranscriptDocument {
             }
         };
         if preserve_previous_content_anchor && self.records.total_count().is_some() {
-            if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = previous_top_anchor {
+            if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = self
+                .viewport
+                .state
+                .resolved_anchor
+                .map(|anchor| anchor.top)
+                .or(previous_top_anchor)
+            {
                 plan.scroll_anchor = anchor;
             }
         }
@@ -5843,7 +5935,13 @@ impl TranscriptDocument {
         anchor: TranscriptSearchRangeAnchor,
     ) -> TranscriptSearchMatch {
         if let TranscriptSearchAnchor::Content(target) = anchor.anchor {
-            if self.records.total_count().is_some() {
+            if self.records.total_count().is_some()
+                && !self
+                    .content
+                    .transcript
+                    .history
+                    .is_materialized(target.block_id)
+            {
                 if let Some(range) =
                     self.record_window_range_around_center(width, target.record_index, 20, true)
                 {
@@ -10094,6 +10192,10 @@ pub(super) struct TranscriptSearchRangeAnchor {
 impl TranscriptSearchRangeAnchor {
     pub(super) fn fallback_range(&self) -> crate::smelt_edit::DocRange {
         self.fallback_range
+    }
+
+    pub(super) fn query(&self) -> &str {
+        &self.query
     }
 }
 

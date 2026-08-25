@@ -155,6 +155,25 @@ fn record_transcript_projection_hydration_failure(
     );
 }
 
+fn transcript_search_range_matches_buffer(
+    buf: &crate::smelt_edit::Buffer,
+    materialized: crate::smelt_edit::MaterializedRows,
+    range: crate::smelt_edit::DocRange,
+    query: &str,
+) -> bool {
+    if range.start.row != range.end.row {
+        return false;
+    }
+    if !materialized.contains_abs_row(range.start.row) {
+        return false;
+    }
+    let local_row = materialized.local_row(range.start.row);
+    let Some(line) = buf.get_line(crate::smelt_edit::row_to_usize(local_row)) else {
+        return false;
+    };
+    smelt_buffer::text::slice(line, range.start.byte_col..range.end.byte_col) == query
+}
+
 fn sync_retained_transcript_window(
     ui: &mut crate::smelt_edit::Ui,
     request: crate::smelt_edit::MaterializeRequest,
@@ -199,6 +218,7 @@ pub(super) fn prepare_transcript_window(
         .and_then(|win| win.cursor_screen_row(viewport_rows));
     let transcript_cursor_range;
     let suppress_cursor_screen_row_restore;
+    let allow_cursor_search_range;
     {
         let _p = smelt_perf::perf::begin("compositor:project_transcript");
         let width = request.content_width.max(1);
@@ -232,12 +252,16 @@ pub(super) fn prepare_transcript_window(
             return;
         };
         let mut applied = transcript.project_applied_viewport(lua, buf, theme, plan);
+        let search_is_active = search_anchor.is_some();
+        let mut search_projection_requested = false;
         let settled_search_range = if let Some(anchor) = search_anchor {
             let matched = transcript.resolve_search_range_anchor(lua, width, theme, anchor.clone());
+            let mut resolved_match = matched;
             let search_needs_projection = width_changed
                 || applied.cursor_range.is_some()
                 || matched.range != anchor.fallback_range();
             if search_needs_projection {
+                search_projection_requested = true;
                 let target_screen_row = applied
                     .cursor_range
                     .map(|range| {
@@ -284,22 +308,43 @@ pub(super) fn prepare_transcript_window(
                 match search_plan {
                     Ok(plan) => {
                         applied = transcript.project_applied_viewport(lua, buf, theme, plan);
+                        resolved_match = transcript.resolve_search_range_anchor(
+                            lua,
+                            width,
+                            theme,
+                            anchor.clone(),
+                        );
                     }
                     Err(error) => record_transcript_projection_hydration_failure(error),
                 }
-                let matched = transcript.resolve_search_range_anchor(lua, width, theme, anchor);
-                let range = applied.cursor_range.unwrap_or(matched.range);
-                *search_projection.range_after = Some(range);
-                Some(range)
-            } else {
-                None
             }
+            [
+                applied.cursor_range,
+                Some(resolved_match.range),
+                Some(matched.range),
+                Some(anchor.fallback_range()),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|range| {
+                transcript_search_range_matches_buffer(
+                    buf,
+                    applied.materialized_rows,
+                    *range,
+                    anchor.query(),
+                )
+            })
         } else {
             None
         };
         let desired_scroll_state = applied.scroll_state;
         suppress_cursor_screen_row_restore = settled_search_range.is_some();
-        transcript_cursor_range = settled_search_range.or(applied.cursor_range);
+        allow_cursor_search_range = search_is_active && !search_projection_requested;
+        transcript_cursor_range = if search_is_active {
+            settled_search_range
+        } else {
+            applied.cursor_range
+        };
         let tdata = applied.materialized_rows;
         let backing_lines_tick = buf.lines_tick();
         debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
@@ -342,7 +387,32 @@ pub(super) fn prepare_transcript_window(
             state.cursor = cursor;
             win.set_document_view_state(state);
         }
-        if let Some(range) = transcript_cursor_range {
+        let cursor_search_range = if allow_cursor_search_range {
+            search_projection.anchor.as_ref().and_then(|anchor| {
+                let cursor = win.row_cursor()?;
+                let fallback = anchor.fallback_range();
+                let range = crate::smelt_edit::DocRange {
+                    start: crate::smelt_edit::DocPosition {
+                        row: cursor.row,
+                        byte_col: fallback.start.byte_col,
+                    },
+                    end: crate::smelt_edit::DocPosition {
+                        row: cursor.row,
+                        byte_col: fallback.end.byte_col,
+                    },
+                };
+                transcript_search_range_matches_buffer(
+                    buf,
+                    win.materialized_rows()?,
+                    range,
+                    anchor.query(),
+                )
+                .then_some(range)
+            })
+        } else {
+            None
+        };
+        if let Some(range) = transcript_cursor_range.or(cursor_search_range) {
             if win.set_row_cursor(buf, range.start) {
                 *search_projection.range_after = Some(range);
             }
@@ -406,6 +476,29 @@ impl TuiApp {
                                 request.rect.height,
                                 request.scroll_top,
                             );
+                        }
+                        if let Some(anchor) = transcript_search_anchor.clone() {
+                            let matched = conversation.resolve_transcript_search_range_anchor(
+                                &lua,
+                                request.content_width.max(1),
+                                &theme,
+                                anchor.clone(),
+                            );
+                            let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
+                            if let (Some(win), Some(buf)) = (win, buf) {
+                                if let Some(materialized) = win.materialized_rows() {
+                                    let range = matched.range;
+                                    if transcript_search_range_matches_buffer(
+                                        buf,
+                                        materialized,
+                                        range,
+                                        anchor.query(),
+                                    ) && win.set_row_cursor(buf, range.start)
+                                    {
+                                        transcript_search_range_after_projection = Some(range);
+                                    }
+                                }
+                            }
                         }
                         if !conversation.transcript_hydration_is_pending() {
                             conversation.trace_retained_transcript_frame(

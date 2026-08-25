@@ -129,23 +129,25 @@ impl TestApp {
     }
 
     fn settle_transcript_hydration(&mut self, out: &mut impl std::io::Write) {
-        const MAX_HYDRATION_ROUNDS: usize = 16;
-        const HYDRATION_TIMEOUT: Duration = Duration::from_secs(5);
+        const HYDRATION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+        const HYDRATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-        for _ in 0..MAX_HYDRATION_ROUNDS {
-            if !self.app.conversation.transcript_hydration_is_pending()
-                && !self.app.session_preview_is_pending()
-            {
-                return;
-            }
-            let deadline = std::time::Instant::now() + HYDRATION_TIMEOUT;
+        let settle_deadline = std::time::Instant::now() + HYDRATION_SETTLE_TIMEOUT;
+        while self.app.conversation.transcript_hydration_is_pending()
+            || self.app.session_preview_is_pending()
+        {
+            assert!(
+                std::time::Instant::now() < settle_deadline,
+                "background transcript hydration did not settle within {HYDRATION_SETTLE_TIMEOUT:?}"
+            );
+            let idle_deadline = std::time::Instant::now() + HYDRATION_IDLE_TIMEOUT;
             let event = loop {
                 if let Some(event) = self.app.platform.try_recv_app_event() {
                     break event;
                 }
                 assert!(
-                    std::time::Instant::now() < deadline,
-                    "background transcript hydration did not complete within {HYDRATION_TIMEOUT:?}"
+                    std::time::Instant::now() < idle_deadline,
+                    "background transcript hydration did not make progress within {HYDRATION_IDLE_TIMEOUT:?}"
                 );
                 std::thread::sleep(Duration::from_millis(1));
             };
@@ -154,11 +156,6 @@ impl TestApp {
                 self.app.render_normal_to(out);
             }
         }
-        assert!(
-            !self.app.conversation.transcript_hydration_is_pending()
-                && !self.app.session_preview_is_pending(),
-            "background transcript hydration did not settle within {MAX_HYDRATION_ROUNDS} rounds"
-        );
     }
 
     pub(crate) fn ui_snapshot(&mut self) -> crate::smelt_edit::SnapshotFrame {

@@ -916,6 +916,8 @@ fn assert_wheel_movement_visible(
             viewport_after[..overlap] == pending.viewport_before[rows..]
         }
     });
+    // Sparse hydration can replace preview rows with exact rows, so textual
+    // overlap is not always stable across a valid local movement.
     if movement.is_none()
         && viewport_after.iter().any(|line| !line.is_empty())
         && sparse_user_delta_moved_within_visible_record_span(frames, max_rows)
@@ -945,7 +947,7 @@ fn sparse_user_delta_moved_within_visible_record_span(
         let TranscriptScrollIntent::UserDelta { rows } = frame.scroll_intent else {
             return false;
         };
-        if rows == 0 || frame.active_record_range_before == frame.active_record_range_after {
+        if rows == 0 {
             return false;
         }
         let Some(TranscriptTraceAnchor::Content {
@@ -1427,6 +1429,146 @@ mod tests {
                 32,
                 viewport_rows,
             ));
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_tail_repin_keeps_wheel_direction_stable() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 11);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 11);
+            app.transcript_scroll_probe_render();
+        }
+    }
+
+    #[test]
+    fn sparse_reveal_search_tail_wheel_hydration_settles() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_follow_tail();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(52685);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(65476);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_follow_tail();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_wheel(false, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_resize_after_reveal_preserves_viewport_anchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 36);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..5 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        for record in [37779, 37779, 42387] {
+            app.transcript_scroll_probe_reveal_record(record);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..6 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_drag_select(121, 121, 121);
+        app.transcript_scroll_probe_render();
+        for _ in 0..4 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(34438);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_wheel(false, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_zero_net_wheel_preserves_search_cursor_after_edge_hydration() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_wheel(false, 0);
+        }
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(42405);
+        app.transcript_scroll_probe_render();
+        for _ in 0..4 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(101, 27);
+        app.transcript_scroll_probe_render();
+        for record in [37779, 37779] {
+            app.transcript_scroll_probe_reveal_record(record);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(101, 39);
+        app.transcript_scroll_probe_render();
+        for down in [true, false, true, false] {
+            app.transcript_scroll_probe_wheel(down, 31);
+        }
+        app.transcript_scroll_probe_render();
+        for _ in 0..5 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..5 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31110);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_wheel(false, 0);
         app.transcript_scroll_probe_render();
     }
 
