@@ -43,7 +43,7 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
         .any(|(_, op)| op.as_deref() == Some("&"));
     if has {
         Some(
-            "shell backgrounding (`&`) is not supported in `bash` commands here; remove `&`, set `background=true` on the tool call, then use `read_process_output` and `stop_process` with the returned process id"
+            "shell backgrounding (`&`) is not supported in `bash` commands here; remove `&`, set `background=true` on the tool call, then use `read_process_output` and `stop_process` with the returned job ID"
                 .to_string(),
         )
     } else {

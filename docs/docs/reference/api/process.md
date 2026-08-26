@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
+Run subprocesses and manage contained shell jobs. Background jobs are non-blocking; foreground jobs stream bounded output and wait for completion.
 
 ## `smelt.process.detach_foreground`
 
@@ -14,7 +14,7 @@ Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned proc
 fun(): boolean
 ```
 
-Move the most recently started foreground streaming process to the background process registry. Returns true when a detach request was sent, false when no detachable foreground process is running.
+Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Returns true when a detach request was sent.
 
 ## `smelt.process.get_default_shell`
 
@@ -30,7 +30,7 @@ Return the current default shell as `{ program, args }`, or `nil` when the built
 fun(id: string): nil
 ```
 
-Stop the registered process with `id`. Schedules the kill asynchronously; no-op when no host is installed.
+Stop the supervised shell job with `id`. Schedules containment termination asynchronously; no-op when no host is installed.
 
 ## `smelt.process.list`
 
@@ -38,7 +38,7 @@ Stop the registered process with `id`. Schedules the kill asynchronously; no-op 
 fun(): table
 ```
 
-Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is present when the OS exposes a child pid.
+Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`. `id` is an opaque stable job ID; `pid` is present when the OS exposes the top-level child PID.
 
 ## `smelt.process.output`
 
@@ -46,7 +46,7 @@ Return the registry of running processes as rows of `{ id, pid?, command, elapse
 fun(id: string): table
 ```
 
-Return the buffered output snapshot for registered process `id` without draining it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
+Return the bounded output snapshot for supervised job `id` without draining it. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.
 
 ## `smelt.process.read_output`
 
@@ -54,7 +54,7 @@ Return the buffered output snapshot for registered process `id` without draining
 fun(id: string): table
 ```
 
-Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
+Drain bounded output from supervised job `id`. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.
 
 ## `smelt.process.run`
 
@@ -79,7 +79,7 @@ yielding API.
 fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil
 ```
 
-Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, timeout detaches the still-running process into the process registry instead of killing it.
+Run `command` as a contained job with a `timeout_ms` deadline, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, the same supervised job keeps running in the background.
 
 ## `smelt.process.set_default_shell`
 
@@ -95,7 +95,9 @@ Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-fo
 fun(command: string): string
 ```
 
-Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.
+Spawn `command` as a contained background shell job. Yields while smelt
+selects and verifies the containment backend, then returns an opaque job ID.
+Must be called from inside `smelt.spawn(fn)` or a `tool.execute`.
 
 ## `smelt.process.stop`
 
@@ -103,8 +105,7 @@ Spawn `command` as a background child registered with the process registry. The 
 fun(id: string): { text: string }?, string?
 ```
 
-Stop a registered background process and return its buffered output. Yields
-the calling coroutine until the process has exited and the registry entry is
-removed. Returns `({ text }, nil)` on success or `(nil, err)` when no process
-exists for `id`.
+Stop the supervised shell job `id` and return its bounded output. Yields until
+containment termination and removes the completed job. Returns `({ text },
+nil)` on success or `(nil, err)` when the job does not exist or cannot stop.
 

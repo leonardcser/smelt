@@ -3,10 +3,11 @@
   "mode": "normal",
   "ops": [
     {
-      "kind": "engine_process_completed",
+      "kind": "job_completed",
       "data": {
         "id": "",
-        "exit_code": null
+        "exit_code": null,
+        "termination": "signaled"
       }
     },
     {

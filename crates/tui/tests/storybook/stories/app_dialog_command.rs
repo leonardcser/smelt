@@ -65,7 +65,7 @@ app_story!(ps_dialog_list_and_details_wrap_command, |ctx| {
     ctx.run_lua(
         r#"
         local command = "ls -ld /Users/leo/.dotfiles; realpath /Users/leo/.dotfiles 2>/dev/null || true; cd /Users/leo/dev/rust/smelt && cargo test -p smelt-tui"
-        local row = { id = "proc-1", pid = 4242, command = command, elapsed_secs = 125 }
+        local row = { id = "proc_123", pid = 4242, command = command, elapsed_secs = 125 }
         smelt.process.list = function() return { row } end
         smelt.process.output = function()
           return { text = "running tests...\n", running = true, pid = 4242, elapsed_secs = 125 }

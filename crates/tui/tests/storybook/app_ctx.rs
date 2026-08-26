@@ -145,10 +145,14 @@ impl AppStoryCtx {
     }
 
     /// Push a typed background-process completion status block. This drives the
-    /// same transcript block shape produced by the live background process
-    /// registry without spawning a subprocess in the story.
+    /// same transcript block shape produced by the live job supervisor without
+    /// spawning a subprocess in the story.
     pub fn push_background_process_completed(&mut self, id: &str, exit_code: Option<i32>) {
-        let event = protocol::ProcessStatusEvent::background_process_completed(id, exit_code);
+        let event = protocol::ProcessStatusEvent::background_process_completed(
+            id,
+            exit_code,
+            protocol::JobTermination::Exited,
+        );
         let text = event.display_text();
         self.app.push_process_status(&text, Some(event));
     }
@@ -166,17 +170,15 @@ impl AppStoryCtx {
     }
 
     /// Run a shell-escape (`Block::Exec`) lifecycle: open the block,
-    /// stream `output` line by line, then close. Goes through the same
-    /// `start_exec` / `append_exec_output` / `finish_exec` /
-    /// `finalize_exec` pipeline the live `!cmd` flow uses, so the
-    /// rendered block in the snapshot is byte-identical to what users
-    /// see (chrome bar, `!` accent, captured output).
-    pub fn exec_with_output(&mut self, command: &str, output: &str, exit_code: Option<i32>) {
+    /// stream `output` line by line, then replace the preview with the
+    /// authoritative final output. This uses the same pipeline as the live
+    /// `!cmd` flow, so the rendered block is byte-identical to what users see.
+    pub fn exec_with_output(&mut self, command: &str, output: &str) {
         self.app.start_exec(command);
         for line in output.lines() {
             self.app.append_exec_output(line.to_owned());
         }
-        self.app.finish_exec(exit_code);
+        self.app.finish_exec(None);
     }
 
     /// Drive a tool call lifecycle: `ToolStarted(args)` immediately

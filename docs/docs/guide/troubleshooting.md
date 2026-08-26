@@ -61,13 +61,13 @@ available. Terminal-level `Cmd+V` paste support depends on your terminal.
 
 ## A shell command is taking too long
 
-Press `Ctrl+G` to move a foreground agent-started `bash` call into smelt's
-background process registry. `/ps` shows its live output and lets you stop it.
-Press `Esc Esc` instead when you want to cancel active agent work.
+Press `Ctrl+G` to stop following a foreground agent-started `bash` job while the
+same supervised job keeps running. `/ps` shows its bounded output and lets you
+stop it. Press `Esc Esc` instead when you want to cancel active agent work.
 
-The `bash` tool also moves a command to the background after its timeout by
-default. It rejects shell `&` because smelt must retain process ownership to
-capture output and terminate the process group cleanly.
+The `bash` tool also keeps a command running in the background after its timeout
+by default. It rejects shell `&` because smelt must retain ownership of the
+containment boundary to capture output and terminate the entire process tree.
 
 ## Language-server tools are missing or stale
 

@@ -449,7 +449,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
 | `smelt.plugins.predict` | Input prediction plugin. |
-| `smelt.plugins.process_control` | Ctrl-G: move a foreground bash command to the background registry. |
+| `smelt.plugins.process_control` | Ctrl-G: stop following a foreground bash job while it keeps running. |
 | `smelt.plugins.scroll_pills` | Clickable scroll-pill overlays navigate the transcript. |
 | `smelt.plugins.terminal_title` | Keeps the terminal window/tab title in sync with smelt. |
 | `smelt.plugins.title` | Session title plugin. |
@@ -988,30 +988,30 @@ Lightweight scope timers that feed `smelt.metrics.perf_snapshot`.
 
 #### `smelt.process`
 
-Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
+Run subprocesses and manage contained shell jobs.
 
 - `smelt.process.detach_foreground` :: `fun(): boolean`
-  Move the most recently started foreground streaming process to the background process registry.
+  Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background.
 - `smelt.process.get_default_shell` :: `fun(): any`
   Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
 - `smelt.process.kill` :: `fun(id: string): nil`
-  Stop the registered process with `id`.
+  Stop the supervised shell job with `id`.
 - `smelt.process.list` :: `fun(): table`
-  Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`.
+  Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`.
 - `smelt.process.output` :: `fun(id: string): table`
-  Return the buffered output snapshot for registered process `id` without draining it.
+  Return the bounded output snapshot for supervised job `id` without draining it.
 - `smelt.process.read_output` :: `fun(id: string): table`
-  Drain buffered output from the registered process `id`.
+  Drain bounded output from supervised job `id`.
 - `smelt.process.run` :: `fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?`
   Run `cmd` with `args` off the main thread.
 - `smelt.process.run_streaming` :: `fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil`
-  Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled).
+  Run `command` as a contained job with a `timeout_ms` deadline, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled).
 - `smelt.process.set_default_shell` :: `fun(opts: table?): nil`
   Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands.
 - `smelt.process.spawn_bg` :: `fun(command: string): string`
-  Spawn `command` as a background child registered with the process registry.
+  Spawn `command` as a contained background shell job.
 - `smelt.process.stop` :: `fun(id: string): { text: string }?, string?`
-  Stop a registered background process and return its buffered output.
+  Stop the supervised shell job `id` and return its bounded output.
 
 #### `smelt.provider`
 

@@ -90,10 +90,11 @@ Session and workspace approvals save you from repeatedly confirming the same
 safe operation, for example, allowing every `git status` call in a repo you
 trust. Press `Tab` to attach an optional message to your approval.
 
-Long-running `bash` calls can continue in smelt's background process registry.
-Press `Ctrl+G` while one is foregrounded to detach it, then use `/ps` to inspect
-output or stop it. This is different from putting `&` in a shell command, which
-the built-in tool rejects so it can keep ownership of the process.
+Long-running `bash` calls can continue as supervised background jobs. Press
+`Ctrl+G` while one is foregrounded to stop following it, then use `/ps` to
+inspect output or stop it. This is different from putting `&` in a shell
+command, which the built-in tool rejects so the job supervisor retains ownership
+of the entire process tree.
 
 See [Tools Reference](../reference/tools.md) for the full list and
 [Permissions](../reference/permissions.md) for details on approval scopes.

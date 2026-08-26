@@ -5866,6 +5866,7 @@ pub(crate) mod tests {
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "1",
                 Some(0),
+                protocol::JobTermination::Exited,
             )),
         });
         transcript.push(Block::ProcessStatus {
@@ -5873,6 +5874,7 @@ pub(crate) mod tests {
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "2",
                 Some(7),
+                protocol::JobTermination::Exited,
             )),
         });
         transcript.push(Block::ProcessStatus {

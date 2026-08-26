@@ -56,14 +56,18 @@ impl CommandContext {
 
 pub(crate) enum ExecEvent {
     Output(String),
-    Done(Option<i32>),
+    Done {
+        output: String,
+        exit_code: Option<i32>,
+        termination: Option<protocol::JobTermination>,
+    },
 }
 
-/// Live shell-escape child. Streams stdout/stderr lines and a final exit
-/// status; `kill` cancels the process group on Ctrl-C.
+/// Live view of a supervisor-owned shell job. Output is bounded before it
+/// reaches this channel; `kill` terminates the job's containment boundary.
 pub(crate) struct ExecHandle {
     pub rx: tokio::sync::mpsc::UnboundedReceiver<ExecEvent>,
-    pub kill: std::sync::Arc<tokio::sync::Notify>,
+    pub kill: tokio_util::sync::CancellationToken,
     pub sink: ShellSink,
 }
 
@@ -385,8 +389,8 @@ impl TuiApp {
         }
     }
 
-    /// Spawn a shell command. Returns a handle for streaming output and
-    /// killing the process on Ctrl+C.
+    /// Spawn a supervised shell job. Returns a handle for streaming bounded
+    /// output and terminating the containment boundary on Ctrl+C.
     pub(crate) fn start_shell_escape(&mut self, raw: &str) -> Option<ExecHandle> {
         self.start_shell_escape_with_sink(raw, ShellSink::Transcript)
     }
@@ -413,65 +417,40 @@ impl TuiApp {
         }
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let kill = std::sync::Arc::new(tokio::sync::Notify::new());
-        let kill2 = kill.clone();
+        let kill = tokio_util::sync::CancellationToken::new();
+        let cancel = kill.clone();
         let cmd = cmd.to_string();
         let cwd = self.workspace.cwd_path().to_owned();
+        let started_at = self.core.clock.instant_now();
+        let supervisor = self.core.jobs.clone();
         tokio::spawn(async move {
-            let mut command = tokio::process::Command::new("sh");
-            command
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(&cwd)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            smelt_core::process::without_controlling_terminal(command.as_std_mut());
-            let mut child = match command.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(ExecEvent::Output(format!("error: {e}")));
-                    let _ = tx.send(ExecEvent::Done(None));
-                    return;
-                }
+            let out = supervisor
+                .run(
+                    &cmd,
+                    smelt_core::process::JobRunConfig {
+                        timeout: None,
+                        shell: smelt_core::process::ShellSpec::default(),
+                        cwd,
+                        started_at,
+                        cancel: Some(cancel),
+                        background_on_timeout: false,
+                        detachable: false,
+                    },
+                    |line| {
+                        let _ = tx.send(ExecEvent::Output(line));
+                    },
+                )
+                .await;
+            let output = if out.termination.is_none() && out.is_error {
+                format!("error: {}", out.content)
+            } else {
+                out.content
             };
-
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take().unwrap();
-            let mut stdout_reader =
-                smelt_core::process::LossyLines::new(tokio::io::BufReader::new(stdout));
-            let mut stderr_reader =
-                smelt_core::process::LossyLines::new(tokio::io::BufReader::new(stderr));
-            let mut stdout_done = false;
-            let mut stderr_done = false;
-
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = kill2.notified() => {
-                        smelt_core::process::kill_child_process_group_sigkill(&child);
-                        let _ = child.wait().await;
-                        let _ = tx.send(ExecEvent::Done(Some(130)));
-                        return;
-                    }
-                    line = stdout_reader.next_line(), if !stdout_done => {
-                        match line {
-                            Ok(Some(l)) => { let _ = tx.send(ExecEvent::Output(l)); }
-                            _ => { stdout_done = true; }
-                        }
-                    }
-                    line = stderr_reader.next_line(), if !stderr_done => {
-                        match line {
-                            Ok(Some(l)) => { let _ = tx.send(ExecEvent::Output(l)); }
-                            _ => { stderr_done = true; }
-                        }
-                    }
-                }
-                if stdout_done && stderr_done {
-                    break;
-                }
-            }
-            let status = child.wait().await.ok();
-            let _ = tx.send(ExecEvent::Done(status.and_then(|s| s.code())));
+            let _ = tx.send(ExecEvent::Done {
+                output,
+                exit_code: out.exit_code,
+                termination: out.termination,
+            });
         });
 
         Some(ExecHandle { rx, kill, sink })
@@ -1388,8 +1367,14 @@ mod tests {
         while let Some(event) = handle.rx.recv().await {
             match event {
                 ExecEvent::Output(line) => output.push(line),
-                ExecEvent::Done(code) => {
-                    assert_eq!(code, Some(0));
+                ExecEvent::Done {
+                    output: final_output,
+                    exit_code,
+                    termination,
+                } => {
+                    assert_eq!(exit_code, Some(0));
+                    assert_eq!(termination, Some(protocol::JobTermination::Exited));
+                    assert_eq!(final_output, shell_cwd.to_string_lossy());
                     break;
                 }
             }
@@ -1409,8 +1394,14 @@ mod tests {
         while let Some(event) = handle.rx.recv().await {
             match event {
                 ExecEvent::Output(line) => output.push(line),
-                ExecEvent::Done(code) => {
-                    assert_eq!(code, Some(0));
+                ExecEvent::Done {
+                    output: final_output,
+                    exit_code,
+                    termination,
+                } => {
+                    assert_eq!(exit_code, Some(0));
+                    assert_eq!(termination, Some(protocol::JobTermination::Exited));
+                    assert_eq!(final_output, "besta\u{308}tigt\n\u{fffd}x");
                     break;
                 }
             }

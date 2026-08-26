@@ -1,4 +1,4 @@
--- Ctrl-G: move a foreground bash command to the background registry.
+-- Ctrl-G: stop following a foreground bash job while it keeps running.
 
 smelt.keymap.set("", "<C-g>", function()
   return smelt.process.detach_foreground()

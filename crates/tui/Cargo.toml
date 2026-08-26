@@ -33,6 +33,7 @@ tempfile = { workspace = true }
 notify = { workspace = true }
 scoped-tls-hkt = "0.1.5"
 shlex = "2"
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 insta = { workspace = true }

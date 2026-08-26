@@ -1609,8 +1609,7 @@ mod tests {
         };
         assert!(output.is_empty());
 
-        app.app.finish_exec(Some(0));
-        app.app.finalize_exec();
+        app.app.finish_exec(None);
         assert!(app
             .app
             .render_pending_transient_frame_to(&mut std::io::sink()));

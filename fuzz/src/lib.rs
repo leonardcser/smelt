@@ -116,6 +116,27 @@ pub struct MouseFuzz {
     pub mods: u8,
 }
 
+#[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuzzJobTermination {
+    Exited,
+    Signaled,
+    #[serde(rename = "oom")]
+    OutOfMemory,
+    Stopped,
+}
+
+impl From<FuzzJobTermination> for protocol::JobTermination {
+    fn from(value: FuzzJobTermination) -> Self {
+        match value {
+            FuzzJobTermination::Exited => Self::Exited,
+            FuzzJobTermination::Signaled => Self::Signaled,
+            FuzzJobTermination::OutOfMemory => Self::OutOfMemory,
+            FuzzJobTermination::Stopped => Self::Stopped,
+        }
+    }
+}
+
 const MOUSE_BUTTONS: &[MouseButton] = &[MouseButton::Left, MouseButton::Right, MouseButton::Middle];
 
 const ENGINE_ASK_ERROR_KINDS: &[EngineAskErrorKind] = &[
@@ -252,11 +273,11 @@ pub enum FuzzOp {
     /// Side channel: push a synthetic request-queued entry so `Steered`
     /// has something to drain.
     PushQueuedMessage(String),
-    /// Emit `ProcessCompleted { id, exit_code }`. Pushes a transcript
-    /// block describing the exit.
-    EngineProcessCompleted {
+    /// Deliver supervisor completion through the production job-completion handler.
+    JobCompleted {
         id: String,
         exit_code: Option<i32>,
+        termination: FuzzJobTermination,
     },
     /// Emit `Messages` against the currently-active turn (when any),
     /// carrying `msg_count` synthetic messages. Doesn't end the turn.
@@ -540,7 +561,7 @@ impl FuzzOp {
             EngineRetrying { attempt, .. } => format!("retrying (attempt {attempt})"),
             EngineTokenUsage { prompt, .. } => format!("token usage (prompt {prompt})"),
             PushQueuedMessage(_) => "push queued message".into(),
-            EngineProcessCompleted { id, .. } => format!("process completed {id}"),
+            JobCompleted { id, .. } => format!("job completed {id}"),
             EngineMessages { msg_count } => format!("messages ({msg_count})"),
             EngineRequestPermission { tool_name, .. } => {
                 format!("request permission {tool_name}")
@@ -794,9 +815,10 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
     },
     |u| Ok(FuzzOp::PushQueuedMessage(u.arbitrary()?)),
     |u| {
-        Ok(FuzzOp::EngineProcessCompleted {
+        Ok(FuzzOp::JobCompleted {
             id: u.arbitrary()?,
             exit_code: u.arbitrary()?,
+            termination: u.arbitrary()?,
         })
     },
     |u| {
@@ -1281,7 +1303,7 @@ enum PostCheck {
     ToolFinished {
         invocation_id: protocol::InvocationId,
     },
-    /// `ExecDone` runs `finalize_exec`, which clears `stream_exec_id`.
+    /// `ExecDone` finishes the exec block and clears `stream_exec_id`.
     ExecCleared,
     /// `TurnComplete` against the active turn. Non-empty messages replace
     /// session.messages; an active turn ends.
@@ -1306,10 +1328,8 @@ enum PostCheck {
         cost_usd: f64,
         background: bool,
     },
-    /// `ProcessCompleted` immediately pushes one transcript block when idle.
-    /// Active turns defer the status into pending history; busy plugin scopes
-    /// queue it as input for later.
-    ProcessCompleted,
+    /// Job completion immediately pushes a transcript block when idle.
+    JobCompleted,
     /// `Messages` against the active turn (matching turn_id) merges
     /// `session.messages` mid-turn; idle dispatch is a no-op.
     MessagesReplaced {
@@ -1525,12 +1545,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 );
             }
         }
-        PostCheck::ProcessCompleted => {
+        PostCheck::JobCompleted => {
             if !pre.agent_running && !pre.working.busy {
                 assert_eq!(
                     post.transcript_blocks,
                     pre.transcript_blocks + 1,
-                    "ProcessCompleted did not push exactly one transcript block: pre {} → post {}",
+                    "job completion did not push exactly one transcript block: pre {} -> post {}",
                     pre.transcript_blocks,
                     post.transcript_blocks,
                 );
@@ -1967,9 +1987,8 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         FuzzOp::PushQueuedMessage(_) => {
             unreachable!("PushQueuedMessage handled inline in apply()")
         }
-        FuzzOp::EngineProcessCompleted { id, exit_code } => {
-            let ev = SourceEvent::engine(EngineEvent::ProcessCompleted { id, exit_code });
-            (Some(ev), PostCheck::ProcessCompleted)
+        FuzzOp::JobCompleted { .. } => {
+            unreachable!("JobCompleted handled inline in apply()")
         }
         FuzzOp::EngineMessages { .. } => {
             // Needs the live turn_id; handled inline in `apply` before
@@ -2240,6 +2259,18 @@ fn apply_macro_stream_turn(
 fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp> {
     match op {
         FuzzOp::PushQueuedMessage(text) => app.push_queued_message(text),
+        FuzzOp::JobCompleted {
+            id,
+            exit_code,
+            termination,
+        } => {
+            let pre = Snapshot::capture(app);
+            app.handle_job_completed(id, exit_code, termination.into());
+            let post = Snapshot::capture(app);
+            let new_actions = app.actions_since(pre.action_count);
+            run_check(PostCheck::JobCompleted, &pre, &post, new_actions);
+            check_turn_end_invariants(&pre, &post);
+        }
         FuzzOp::InsertAttachment { label } => app.insert_attachment(label),
         FuzzOp::InstallPlaceholder { text, variant } => {
             let (accept, dismiss) = placeholder_chord_pair(variant);

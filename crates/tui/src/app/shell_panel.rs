@@ -93,22 +93,44 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn finish_shell_output(&mut self, code: Option<i32>, sink: ShellSink) {
+    pub(crate) fn finish_shell_output(
+        &mut self,
+        output: String,
+        exit_code: Option<i32>,
+        termination: Option<protocol::JobTermination>,
+        sink: ShellSink,
+    ) {
         match sink {
-            ShellSink::Transcript => {
-                self.finish_exec(code);
-                self.finalize_exec();
-            }
+            ShellSink::Transcript => self.finish_exec(Some(output)),
             ShellSink::Overlay => {
-                let status = match code {
-                    Some(0) => "[exit 0]".to_string(),
-                    Some(code) => format!("[exit {code}]"),
-                    None => "[process exited]".to_string(),
+                self.replace_shell_panel_output(&output);
+                let status = match termination {
+                    Some(protocol::JobTermination::OutOfMemory) => "[out of memory]".to_string(),
+                    Some(protocol::JobTermination::Signaled) => {
+                        "[terminated by signal]".to_string()
+                    }
+                    Some(protocol::JobTermination::Stopped) => "[stopped]".to_string(),
+                    Some(protocol::JobTermination::Exited) | None => match exit_code {
+                        Some(0) => "[exit 0]".to_string(),
+                        Some(code) => format!("[exit {code}]"),
+                        None => "[process exited]".to_string(),
+                    },
                 };
                 self.append_shell_panel_line("");
                 self.append_shell_panel_line(&status);
             }
         }
+    }
+
+    fn replace_shell_panel_output(&mut self, output: &str) {
+        let Some(panel) = self.overlays.shell_panel() else {
+            return;
+        };
+        let Some(buf) = self.ui.buf_mut(panel.buf) else {
+            self.overlays.clear_shell_panel();
+            return;
+        };
+        buf.set_all_lines(output.split('\n').map(str::to_string).collect());
     }
 
     fn append_shell_panel_line(&mut self, line: &str) {
@@ -139,7 +161,6 @@ impl TuiApp {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
@@ -153,7 +174,12 @@ mod tests {
         assert!(app.shell_panel_is_focused());
 
         app.append_shell_output("hello\nworld", ShellSink::Overlay);
-        app.finish_shell_output(Some(3), ShellSink::Overlay);
+        app.finish_shell_output(
+            "hello\nworld".into(),
+            Some(3),
+            Some(protocol::JobTermination::Exited),
+            ShellSink::Overlay,
+        );
 
         let lines = app.ui.buf(panel.buf).expect("shell panel buffer").lines();
         assert_eq!(lines, ["hello", "world", "", "[exit 3]"]);
@@ -163,23 +189,40 @@ mod tests {
         assert!(!app.close_shell_panel());
     }
 
+    #[test]
+    fn shell_panel_displays_typed_termination_status() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        app.open_shell_panel("oom");
+        let panel = app.overlays.shell_panel().expect("shell panel opens");
+
+        app.finish_shell_output(
+            "partial output".into(),
+            None,
+            Some(protocol::JobTermination::OutOfMemory),
+            ShellSink::Overlay,
+        );
+
+        let lines = app.ui.buf(panel.buf).expect("shell panel buffer").lines();
+        assert_eq!(lines, ["partial output", "", "[out of memory]"]);
+    }
+
     #[tokio::test]
     async fn closing_shell_panel_cancels_overlay_job_once() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.open_shell_panel("sleep 10");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         drop(tx);
-        let kill = Arc::new(tokio::sync::Notify::new());
+        let kill = tokio_util::sync::CancellationToken::new();
         app.overlays.install_execution(crate::commands::ExecHandle {
             rx,
-            kill: Arc::clone(&kill),
+            kill: kill.clone(),
             sink: ShellSink::Overlay,
         });
 
         assert!(app.close_shell_panel_and_stop_job());
-        tokio::time::timeout(Duration::from_millis(100), kill.notified())
+        tokio::time::timeout(Duration::from_millis(100), kill.cancelled())
             .await
-            .expect("closing the panel notifies the process cancellation handle");
+            .expect("closing the panel cancels the supervised job");
         assert!(!app.overlays.execution_is_running());
         assert!(!app.close_shell_panel_and_stop_job());
     }
@@ -206,8 +249,12 @@ mod tests {
                 crate::commands::ExecEvent::Output(line) => {
                     app.append_shell_output(&line, ShellSink::Overlay);
                 }
-                crate::commands::ExecEvent::Done(code) => {
-                    app.finish_shell_output(code, ShellSink::Overlay);
+                crate::commands::ExecEvent::Done {
+                    output,
+                    exit_code,
+                    termination,
+                } => {
+                    app.finish_shell_output(output, exit_code, termination, ShellSink::Overlay);
                     app.overlays.finish_execution();
                     break;
                 }
@@ -222,6 +269,54 @@ mod tests {
         assert!(lines.iter().any(|line| line == "stdout-line"));
         assert!(lines.iter().any(|line| line == "stderr-line"));
         assert_eq!(lines.last().map(String::as_str), Some("[exit 7]"));
+    }
+
+    #[tokio::test]
+    async fn real_shell_transcript_replaces_live_preview_with_final_output() {
+        let mut test_app = crate::app::test_harness::TestApp::builder().build();
+        let app = &mut test_app.app;
+        let handle = app
+            .start_shell_escape(
+                "i=1; while [ $i -le 300 ]; do printf 'line-%03d\\n' $i; i=$((i + 1)); done",
+            )
+            .expect("shell command starts");
+        app.overlays.install_execution(handle);
+
+        loop {
+            let event =
+                tokio::time::timeout(Duration::from_secs(5), app.overlays.next_execution_event())
+                    .await
+                    .expect("shell command completes")
+                    .expect("shell command sends terminal event");
+            match event {
+                crate::commands::ExecEvent::Output(line) => {
+                    app.append_shell_output(&line, ShellSink::Transcript);
+                }
+                crate::commands::ExecEvent::Done {
+                    output,
+                    exit_code,
+                    termination,
+                } => {
+                    app.finish_shell_output(output, exit_code, termination, ShellSink::Transcript);
+                    app.overlays.finish_execution();
+                    break;
+                }
+            }
+        }
+
+        assert!(app.render_pending_transient_frame_to(&mut std::io::sink()));
+        let history = app.conversation.transcript().history();
+        let block = history
+            .last_block_id()
+            .and_then(|id| history.block(id))
+            .expect("completed exec block");
+        let smelt_core::transcript_model::Block::Exec { output, .. } = block else {
+            panic!("last block is exec output");
+        };
+        let output = output.snapshot();
+        assert!(output.contains("line-001"));
+        assert!(output.contains("line-300"));
+        assert!(!output.contains("live process output truncated"));
     }
 
     #[test]
@@ -266,12 +361,16 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        handle.kill.notify_one();
+        handle.kill.cancel();
 
         let done = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match handle.rx.recv().await {
-                    Some(crate::commands::ExecEvent::Done(code)) => break code,
+                    Some(crate::commands::ExecEvent::Done {
+                        exit_code,
+                        termination,
+                        ..
+                    }) => break (exit_code, termination),
                     Some(crate::commands::ExecEvent::Output(_)) => {}
                     None => panic!("shell event channel closed before completion"),
                 }
@@ -279,7 +378,7 @@ mod tests {
         })
         .await
         .expect("cancelled shell is reaped");
-        assert_eq!(done, Some(130));
+        assert_eq!(done, (None, Some(protocol::JobTermination::Stopped)));
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),

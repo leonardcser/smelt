@@ -1,12 +1,13 @@
 {
-  "_about": "Transcript layout seed: a background process status line can exceed the transcript viewport after a narrow resize; process status rendering must wrap to the active layout width instead of producing a preformatted clipped row.",
+  "_about": "Transcript layout seed: a background job status line can exceed the transcript viewport after a narrow resize; job status rendering must wrap to the active layout width instead of producing a preformatted clipped row.",
   "mode": "apply",
   "ops": [
     {
-      "kind": "engine_process_completed",
+      "kind": "job_completed",
       "data": {
         "exit_code": -994351274,
-        "id": "esholdt.command@s2.tog"
+        "id": "esholdt.command@s2.tog",
+        "termination": "exited"
       }
     },
     {

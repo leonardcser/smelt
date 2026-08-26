@@ -11,7 +11,13 @@ local function format_result(r)
   end
 
   local status
-  if r.exit_code ~= nil then
+  if r.termination == "oom" then
+    status = "process was terminated after an out-of-memory event"
+  elseif r.termination == "stopped" then
+    status = "process was stopped"
+  elseif r.termination == "signaled" then
+    status = "process was terminated by a signal"
+  elseif r.exit_code ~= nil then
     status = "process exited with code " .. tostring(r.exit_code)
   else
     status = "process exited"
@@ -33,7 +39,7 @@ smelt.tools.register({
   parameters = {
     type = "object",
     properties = {
-      id = { type = "string", description = "Background process id (usually the child pid returned by bash), e.g. 12345" },
+      id = { type = "string", description = "Opaque background job id returned by bash, e.g. proc_123" },
     },
     required = { "id" },
   },

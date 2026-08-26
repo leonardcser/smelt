@@ -3894,10 +3894,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
             }
             StreamBenchmarkEvent::ExecStarted { command } => app.app.start_exec(command),
             StreamBenchmarkEvent::ExecOutput { chunk } => app.app.append_exec_output(chunk),
-            StreamBenchmarkEvent::ExecFinished => {
-                app.app.finish_exec(Some(0));
-                app.app.finalize_exec();
-            }
+            StreamBenchmarkEvent::ExecFinished => app.app.finish_exec(None),
         }
         let dispatch_elapsed_ms = elapsed_ms(dispatch_start.elapsed());
         traced_frames += pre_dispatch_frames;

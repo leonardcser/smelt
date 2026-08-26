@@ -3278,6 +3278,7 @@ dependencies = [
  "scoped-tls-hkt",
  "serde",
  "serde_json",
+ "shlex",
  "smelt-buffer",
  "smelt-core",
  "smelt-edit",
@@ -3291,6 +3292,7 @@ dependencies = [
  "smelt-test-support",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

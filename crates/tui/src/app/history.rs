@@ -1522,7 +1522,7 @@ impl TuiApp {
         if !self.close_session_persistence(close_policy) {
             return;
         }
-        self.stop_background_processes();
+        self.stop_shell_jobs();
 
         if !preserve_unsaved {
             self.conversation.refresh_live_session_header();
@@ -1663,7 +1663,7 @@ impl TuiApp {
         self.app_focus = crate::app::AppFocus::Prompt;
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
-        self.stop_background_processes();
+        self.stop_shell_jobs();
         let old_id = self
             .conversation
             .reset(self.core.env.pid(), self.core.env.cwd());
@@ -1828,7 +1828,7 @@ impl TuiApp {
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
-        self.stop_background_processes();
+        self.stop_shell_jobs();
         self.conversation.clear_stream_parser();
         self.sync_session_snapshot();
         self.core
@@ -1906,7 +1906,7 @@ impl TuiApp {
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
-        self.stop_background_processes();
+        self.stop_shell_jobs();
         self.clear_transcript();
         self.conversation.install_loaded_store_session(
             transcript,
@@ -2929,19 +2929,18 @@ mod checkpoint_tests {
         smelt_core::session::is_context_checkpoint_summary(item)
     }
 
-    fn add_background_process(app: &mut crate::app::test_harness::TestApp) -> String {
-        let child = smelt_core::process::spawn_shell_child(
-            "sleep 30",
-            &smelt_core::process::ShellSpec::default(),
-            &app.app.core.env.cwd(),
-        )
-        .expect("spawn background child");
-        let id = app.app.core.processes.child_id(&child);
+    async fn add_background_process(app: &mut crate::app::test_harness::TestApp) -> String {
         app.app
             .core
-            .processes
-            .spawn(id.clone(), "sleep 30", child, std::time::Instant::now());
-        id
+            .jobs
+            .spawn_background(
+                "sleep 30",
+                &smelt_core::process::ShellSpec::default(),
+                &app.app.core.env.cwd(),
+                std::time::Instant::now(),
+            )
+            .await
+            .expect("spawn background job")
     }
 
     #[test]
@@ -4195,26 +4194,26 @@ mod checkpoint_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn reset_session_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        add_background_process(&mut app);
-        assert_eq!(app.app.core.processes.running_count(), 1);
+        add_background_process(&mut app).await;
+        assert_eq!(app.app.core.jobs.running_count(), 1);
 
         app.app.reset_session();
 
-        assert_eq!(app.app.core.processes.running_count(), 0);
-        assert!(app.app.core.processes.list().is_empty());
+        assert_eq!(app.app.core.jobs.running_count(), 0);
+        assert!(app.app.core.jobs.list().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn load_session_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        add_background_process(&mut app);
-        assert_eq!(app.app.core.processes.running_count(), 1);
+        add_background_process(&mut app).await;
+        assert_eq!(app.app.core.jobs.running_count(), 1);
 
         let loaded = smelt_core::session::Session::new(99, std::path::PathBuf::from("/tmp/loaded"));
         app.app.load_session(loaded);
 
-        assert_eq!(app.app.core.processes.running_count(), 0);
-        assert!(app.app.core.processes.list().is_empty());
+        assert_eq!(app.app.core.jobs.running_count(), 0);
+        assert!(app.app.core.jobs.list().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4223,13 +4222,13 @@ mod checkpoint_tests {
         app.app
             .conversation
             .replace_history_for_harness(vec![user("hello")]);
-        add_background_process(&mut app);
-        assert_eq!(app.app.core.processes.running_count(), 1);
+        add_background_process(&mut app).await;
+        assert_eq!(app.app.core.jobs.running_count(), 1);
 
         app.app.fork_session();
 
-        assert_eq!(app.app.core.processes.running_count(), 0);
-        assert!(app.app.core.processes.list().is_empty());
+        assert_eq!(app.app.core.jobs.running_count(), 0);
+        assert!(app.app.core.jobs.list().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4264,13 +4263,13 @@ mod checkpoint_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn quit_cleanup_stops_background_processes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        add_background_process(&mut app);
-        assert_eq!(app.app.core.processes.running_count(), 1);
+        add_background_process(&mut app).await;
+        assert_eq!(app.app.core.jobs.running_count(), 1);
 
-        app.app.stop_background_processes();
+        app.app.stop_shell_jobs();
 
-        assert_eq!(app.app.core.processes.running_count(), 0);
-        assert!(app.app.core.processes.list().is_empty());
+        assert_eq!(app.app.core.jobs.running_count(), 0);
+        assert!(app.app.core.jobs.list().is_empty());
     }
 
     #[test]

@@ -89,13 +89,8 @@ impl TuiApp {
         self.request_continuation_render();
     }
 
-    pub(crate) fn finish_exec(&mut self, exit_code: Option<i32>) {
-        self.transcript_work.push_finish_exec(exit_code);
-        self.request_urgent_render();
-    }
-
-    pub(crate) fn finalize_exec(&mut self) {
-        self.transcript_work.push_finalize_exec();
+    pub(crate) fn finish_exec(&mut self, final_output: Option<String>) {
+        self.transcript_work.push_finish_exec(final_output);
         self.request_urgent_render();
     }
 

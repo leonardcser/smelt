@@ -132,35 +132,43 @@ the next call.
 
 - Interactive commands (editors, pagers, interactive rebases) are blocked
 - Shell backgrounding (`&`) in the command string is rejected
-- Output is line-buffered (stdout and stderr multiplexed)
+- Stdout and stderr are multiplexed as bounded line output
 - A non-zero exit code is flagged as an error
 - The call can be cancelled from the UI while it is still foreground
+- Each job runs in its own systemd scope on supported Linux systems, with a
+  process-group fallback on Unix and a Job Object on Windows
 - `background=true` starts the command in the background immediately and returns
-  the process id (the child pid when available)
+  an opaque job ID such as `proc_123`; the OS PID is tracked separately
 - With `background_on_timeout=true` (default), a foreground command that reaches
-  `timeout_ms` keeps running in the background instead of being killed
+  `timeout_ms` keeps running as the same supervised background job
+- Linux cgroup OOM termination is reported separately from an ordinary signal
+- At most 64 shell jobs run concurrently; excess spawns fail instead of allowing
+  unbounded process and output growth
+- Completed output remains available in a bounded recent-job cache; older
+  snapshots are evicted by count or aggregate memory usage
 
-Use `read_process_output` and `stop_process` with the returned process id. `/ps`
-shows the same running process registry with live output, pid, and duration.
+Use `read_process_output` and `stop_process` with the returned job ID. `/ps`
+shows the same supervised jobs with bounded output, PID, and duration.
 
 ### `read_process_output`
 
 Reads the captured output snapshot from a background bash process without
 draining it or waiting. Running processes return only buffered stdout/stderr,
-which may be empty; exited processes append a final status line such as
-`process exited with code 1`.
+which may be empty; exited processes append a typed final status such as
+`process exited with code 1` or `process was terminated by a signal`. Completed
+snapshots can expire from the bounded recent-job cache.
 
-| Parameter | Description                                                            |
-| --------- | ---------------------------------------------------------------------- |
-| `id`      | Background process id (usually the child pid), e.g. `12345` (required) |
+| Parameter | Description                                                |
+| --------- | ---------------------------------------------------------- |
+| `id`      | Opaque background job ID, e.g. `proc_123` (required)       |
 
 ### `stop_process`
 
 Stops a running background bash process and returns its buffered output.
 
-| Parameter | Description                                                            |
-| --------- | ---------------------------------------------------------------------- |
-| `id`      | Background process id (usually the child pid), e.g. `12345` (required) |
+| Parameter | Description                                                |
+| --------- | ---------------------------------------------------------- |
+| `id`      | Opaque background job ID, e.g. `proc_123` (required)       |
 
 ## Workspace and runtime
 

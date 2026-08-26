@@ -47,10 +47,6 @@ enum Op {
         cost_cents: u16,
         background: bool,
     },
-    ProcessCompleted {
-        id: String,
-        exit_code: Option<i32>,
-    },
     ToolEvaluation {
         name: String,
     },
@@ -255,19 +251,6 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             assert!((app.session_cost_usd() - (before_cost + cost_usd)).abs() < 1e-6);
             if !background && prompt > 0 {
                 assert_eq!(app.context_tokens(), Some(prompt));
-            }
-        }
-        Op::ProcessCompleted { id, exit_code } => {
-            let before = app.transcript_block_count();
-            feed(
-                app,
-                EngineEvent::ProcessCompleted {
-                    id: small_text(id),
-                    exit_code,
-                },
-            );
-            if model.active_turn.is_none() {
-                assert_eq!(app.transcript_block_count(), before + 1);
             }
         }
         Op::ToolEvaluation { name } => {

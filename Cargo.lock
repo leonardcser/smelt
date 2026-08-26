@@ -3476,6 +3476,7 @@ dependencies = [
  "smelt-test-support",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

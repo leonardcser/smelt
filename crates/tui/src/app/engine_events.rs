@@ -323,12 +323,8 @@ impl TuiApp {
                     self.conversation.append_exec_output(chunk);
                     false
                 }
-                TranscriptWork::FinishExec(exit_code) => {
-                    self.conversation.finish_exec(exit_code);
-                    false
-                }
-                TranscriptWork::FinalizeExec => {
-                    self.conversation.finalize_exec();
+                TranscriptWork::FinishExec(final_output) => {
+                    self.conversation.finish_exec(final_output);
                     false
                 }
             };
@@ -767,10 +763,6 @@ impl TuiApp {
                 self.notify_warn(message);
                 SessionControl::Continue
             }
-            EngineEvent::ProcessCompleted { id, exit_code } => {
-                self.handle_process_completed(id, exit_code);
-                SessionControl::Continue
-            }
             EngineEvent::EngineAskDelta { id, delta } => {
                 self.continuing_engine_ask_ids.insert(id);
                 let lua = self.lua.execution();
@@ -947,9 +939,6 @@ impl TuiApp {
                 self.continuing_engine_ask_ids.remove(&id);
                 let lua = self.lua.execution();
                 crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
-            }
-            EngineEvent::ProcessCompleted { id, exit_code } => {
-                self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message, .. } => {
                 self.working.finish(TurnOutcome::Errored);

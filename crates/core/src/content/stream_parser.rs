@@ -530,13 +530,25 @@ impl StreamParser {
         }
     }
 
-    pub fn finish_exec(&mut self, _exit_code: Option<i32>) {}
-
-    pub fn finalize_exec(&mut self, history: &mut BlockHistory) {
+    pub fn finish_exec(&mut self, history: &mut BlockHistory, final_output: Option<String>) {
         let Some(id) = self.stream_exec_id.take() else {
             return;
         };
-        history.trim_live_exec_output(id);
+        if let Some(output) = final_output {
+            let Some(Block::Exec { command, .. }) = history.block(id) else {
+                return;
+            };
+            let command = command.clone();
+            history.rewrite(
+                id,
+                Block::Exec {
+                    command,
+                    output: output.into(),
+                },
+            );
+        } else {
+            history.trim_live_exec_output(id);
+        }
         history.set_status(id, Status::Done);
     }
 }
@@ -1026,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_finish_retains_streamed_content_identity() {
+    fn tool_finish_replaces_streamed_content_with_authoritative_output() {
         let (mut parser, mut history) = setup();
         let start = Instant::now();
         parser.start_tool(
@@ -1067,7 +1079,7 @@ mod tests {
 
         let finished = history.tool_state(block_id).expect("finished state");
         let output = finished.output.as_ref().expect("finished output");
-        assert_eq!(output.content.id(), content_id);
+        assert_ne!(output.content.id(), content_id);
         assert_eq!(output.content.snapshot(), "first\nsecond");
         assert!(output.is_error);
         assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 1 })));
@@ -1214,7 +1226,7 @@ mod tests {
                 output: "file.txt".into(),
             }
         );
-        parser.finalize_exec(&mut history);
+        parser.finish_exec(&mut history, None);
         assert_eq!(history.status(exec_id), Some(Status::Done));
     }
 
@@ -1223,13 +1235,29 @@ mod tests {
         let (mut parser, mut history) = setup();
         parser.start_exec(&mut history, "printf".into());
         parser.append_exec_output(&mut history, "value\u{600} \n".to_string());
-        parser.finalize_exec(&mut history);
+        parser.finish_exec(&mut history, None);
 
         assert_eq!(
             block_at(&history, 0),
             &Block::Exec {
                 command: "printf".into(),
                 output: "value\u{600} ".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn exec_finalization_replaces_preview_with_authoritative_output() {
+        let (mut parser, mut history) = setup();
+        parser.start_exec(&mut history, "printf".into());
+        parser.append_exec_output(&mut history, "preview truncated".into());
+        parser.finish_exec(&mut history, Some("bounded final tail".into()));
+
+        assert_eq!(
+            block_at(&history, 0),
+            &Block::Exec {
+                command: "printf".into(),
+                output: "bounded final tail".into(),
             }
         );
     }

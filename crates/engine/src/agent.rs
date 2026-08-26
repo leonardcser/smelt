@@ -3722,7 +3722,11 @@ mod tests {
                 if text == "now in apply mode."
         ));
         let typed_note = protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
+            protocol::ProcessStatusEvent::background_process_completed(
+                "751225",
+                Some(1),
+                protocol::JobTermination::Exited,
+            ),
         );
         turn.push_current_turn_input(protocol::StartTurnInput::note(typed_note.clone()));
 
@@ -3974,7 +3978,11 @@ mod tests {
     #[tokio::test]
     async fn checkpointed_start_turn_emits_canonical_typed_note_update() {
         let note = protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
+            protocol::ProcessStatusEvent::background_process_completed(
+                "751225",
+                Some(1),
+                protocol::JobTermination::Exited,
+            ),
         );
         let mut config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
         config.host_callbacks = crate::HostCallbacks::Disabled;

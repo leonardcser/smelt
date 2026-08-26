@@ -89,21 +89,28 @@ function M.execute(args, ctx)
   end
 
   if background then
-    local proc_id = smelt.process.spawn_bg(command)
+    local job_id = smelt.process.spawn_bg(command)
     return {
-      content = "started background process " .. proc_id .. ", you'll be notified when it completes",
+      content = "started background process " .. job_id .. ", you'll be notified when it completes",
       is_error = false,
-      metadata = { background_id = proc_id },
+      metadata = { background_id = job_id },
     }
   end
 
   local id = smelt.task.alloc()
   smelt.process.run_streaming(id, ctx.call_id or "", command, timeout_ms, background_on_timeout)
   local result = smelt.task.wait(id)
+  local metadata
+  if result.background_id or result.termination then
+    metadata = {
+      background_id = result.background_id,
+      termination = result.termination,
+    }
+  end
   return {
     content = result.content or "",
     is_error = result.is_error and true or false,
-    metadata = result.background_id and { background_id = result.background_id } or nil,
+    metadata = metadata,
   }
 end
 

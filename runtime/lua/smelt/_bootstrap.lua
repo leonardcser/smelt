@@ -636,6 +636,18 @@ if smelt.notebook then
   end
 end
 
+-- Spawn `command` as a contained background shell job. Yields while smelt
+-- selects and verifies the containment backend, then returns an opaque job ID.
+-- Must be called from inside `smelt.spawn(fn)` or a `tool.execute`.
+---@type fun(command: string): string
+function smelt.process.spawn_bg(command)
+  local result = smelt.task.external(function(id)
+    smelt.process.__start_spawn_bg(id, command)
+  end)
+  if result.err ~= nil then error(result.err, 2) end
+  return result.id
+end
+
 -- Run `cmd` with `args` off the main thread. Yields the calling
 -- coroutine until the child exits; must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
@@ -651,10 +663,9 @@ function smelt.process.run(cmd, args, opts)
   return external_or_err(function(id) smelt.process.__start_run(id, cmd, args, opts) end)
 end
 
--- Stop a registered background process and return its buffered output. Yields
--- the calling coroutine until the process has exited and the registry entry is
--- removed. Returns `({ text }, nil)` on success or `(nil, err)` when no process
--- exists for `id`.
+-- Stop the supervised shell job `id` and return its bounded output. Yields until
+-- containment termination and removes the completed job. Returns `({ text },
+-- nil)` on success or `(nil, err)` when the job does not exist or cannot stop.
 ---@type fun(id: string): { text: string }?, string?
 function smelt.process.stop(id)
   return external_or_err(function(task_id) smelt.process.__start_stop(task_id, id) end)

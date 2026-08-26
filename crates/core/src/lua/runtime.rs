@@ -3196,7 +3196,8 @@ fn transcript_render_node_to_lua_table(
                 if let Some(exit_code) = event.exit_code {
                     table.set("exit_code", exit_code)?;
                 }
-                let event_data = lua.create_table_with_capacity(0, 3)?;
+                table.set("termination", event.termination.as_str())?;
+                let event_data = lua.create_table_with_capacity(0, 4)?;
                 event_data.set("event", event.event_type)?;
                 if let Some(process_id) = event.process_id.as_deref() {
                     event_data.set("process_id", process_id)?;
@@ -3204,6 +3205,7 @@ fn transcript_render_node_to_lua_table(
                 if let Some(exit_code) = event.exit_code {
                     event_data.set("exit_code", exit_code)?;
                 }
+                event_data.set("termination", event.termination.as_str())?;
                 table.set("event_data", event_data)?;
             }
         }
@@ -3464,6 +3466,7 @@ struct TranscriptProcessStatusMetadata {
     event_type: &'static str,
     process_id: Option<String>,
     exit_code: Option<i32>,
+    termination: protocol::JobTermination,
 }
 
 #[derive(Clone, Debug)]
@@ -3692,6 +3695,7 @@ pub fn transcript_block_render_node(
                 event_type: event.event_type(),
                 process_id: event.process_id().map(str::to_owned),
                 exit_code: event.exit_code(),
+                termination: event.termination(),
             }),
         },
         Block::Thinking {
@@ -4605,6 +4609,7 @@ mod tests {
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "42",
                 Some(7),
+                protocol::JobTermination::Exited,
             )),
         };
 
@@ -4622,6 +4627,7 @@ mod tests {
         );
         assert_eq!(table.get::<String>("process_id").unwrap(), "42");
         assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
+        assert_eq!(table.get::<String>("termination").unwrap(), "exited");
         let event_data: mlua::Table = table.get("event_data").unwrap();
         assert_eq!(
             event_data.get::<String>("event").unwrap(),
@@ -5090,6 +5096,7 @@ mod tests {
                 event: None,
                 process_id: None,
                 exit_code: None,
+                termination: None,
                 event_data: Default::default(),
             })
             .collect();

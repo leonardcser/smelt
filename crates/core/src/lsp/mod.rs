@@ -1690,7 +1690,7 @@ impl LspClient {
         match timeout(Duration::from_secs(2), child.wait()).await {
             Ok(_) => {}
             Err(_) => {
-                crate::process::kill_child_process_group_sigkill(&child);
+                crate::process::kill_child_process_group(&child);
                 let _ = child.kill().await;
                 let _ = child.wait().await;
             }

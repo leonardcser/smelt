@@ -1720,9 +1720,17 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
-        let id = display_safe_process_id(&id);
-        let event = protocol::ProcessStatusEvent::background_process_completed(id, exit_code);
+    pub(crate) fn handle_job_completed(&mut self, completion: smelt_core::process::JobCompletion) {
+        let id = display_safe_process_id(&completion.id);
+        let event = protocol::ProcessStatusEvent::background_process_completed(
+            id,
+            completion.exit_code,
+            completion.termination,
+        );
+        self.handle_process_status_event(event);
+    }
+
+    fn handle_process_status_event(&mut self, event: protocol::ProcessStatusEvent) {
         let note = protocol::HistoryNote::process_status_event(event);
         if self.agent_is_running() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
@@ -3591,10 +3599,15 @@ mod tests {
     }
 
     #[test]
-    fn idle_process_completion_starts_turn_with_process_status_block() {
+    fn idle_job_completion_starts_turn_with_process_status_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app.handle_process_completed("1234".into(), Some(0));
+        app.app
+            .handle_job_completed(smelt_core::process::JobCompletion {
+                id: "1234".into(),
+                exit_code: Some(0),
+                termination: protocol::JobTermination::Exited,
+            });
 
         assert!(app.app.agent_is_running());
         assert_eq!(user_blocks(&app), Vec::<String>::new());
@@ -3605,15 +3618,33 @@ mod tests {
     }
 
     #[test]
+    fn idle_oom_completion_starts_turn_with_distinct_process_status() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        app.app
+            .handle_job_completed(smelt_core::process::JobCompletion {
+                id: "proc_123".into(),
+                exit_code: None,
+                termination: protocol::JobTermination::OutOfMemory,
+            });
+
+        assert!(app.app.agent_is_running());
+        assert_eq!(
+            process_status_blocks(&app),
+            vec!["background process proc_123 was terminated after an out-of-memory event"]
+        );
+    }
+
+    #[test]
     fn process_status_resize_keeps_transcript_cursor_in_bounds() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.feed_one(crate::app::test_harness::SourceEvent::engine(
-            protocol::EngineEvent::ProcessCompleted {
+        app.app
+            .handle_job_completed(smelt_core::process::JobCompletion {
                 id: String::new(),
                 exit_code: None,
-            },
-        ));
+                termination: protocol::JobTermination::Signaled,
+            });
         app.render_silent();
         app.feed_one(crate::app::test_harness::SourceEvent::Resize {
             width: 1,
@@ -3630,7 +3661,7 @@ mod tests {
     }
 
     #[test]
-    fn running_agent_process_completion_queues_process_status_append() {
+    fn running_agent_job_completion_queues_process_status_append() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(7);
 
@@ -3642,11 +3673,20 @@ mod tests {
             .map(|append| append.history_item())
             .collect::<Vec<_>>();
 
-        app.app.handle_process_completed("4242".into(), Some(9));
+        app.app
+            .handle_job_completed(smelt_core::process::JobCompletion {
+                id: "4242".into(),
+                exit_code: Some(9),
+                termination: protocol::JobTermination::Exited,
+            });
 
         assert!(process_status_blocks(&app).is_empty());
         let expected = protocol::HistoryItem::note(protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed("4242", Some(9)),
+            protocol::ProcessStatusEvent::background_process_completed(
+                "4242",
+                Some(9),
+                protocol::JobTermination::Exited,
+            ),
         ));
         let after = app
             .app
@@ -3693,7 +3733,12 @@ mod tests {
     fn process_status_history_update_stays_out_of_lua_conversation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.app.handle_process_completed("751225".into(), Some(1));
+        app.app
+            .handle_job_completed(smelt_core::process::JobCompletion {
+                id: "751225".into(),
+                exit_code: Some(1),
+                termination: protocol::JobTermination::Exited,
+            });
         let turn_id = app
             .app
             .active_agent_turn_id()
@@ -3711,7 +3756,11 @@ mod tests {
             .expect("process turn dispatched to engine");
         let current_note = current_note.expect("process turn carries typed note");
         let expected_note = protocol::HistoryNote::process_status_event(
-            protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
+            protocol::ProcessStatusEvent::background_process_completed(
+                "751225",
+                Some(1),
+                protocol::JobTermination::Exited,
+            ),
         );
         assert_eq!(current_note, expected_note);
         assert_eq!(
@@ -3796,27 +3845,23 @@ mod tests {
     #[tokio::test]
     async fn cancelling_turn_does_not_kill_registered_background_process() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let registry = app.app.core.processes.clone();
-        let child = smelt_core::process::spawn_shell_child(
-            "echo alive; sleep 30",
-            &smelt_core::process::ShellSpec::default(),
-            &app.app.core.env.cwd(),
-        )
-        .unwrap();
-        let id = registry.child_id(&child);
-        registry.spawn(
-            id.clone(),
-            "echo alive; sleep 30",
-            child,
-            std::time::Instant::now(),
-        );
+        let supervisor = app.app.core.jobs.clone();
+        let id = supervisor
+            .spawn_background(
+                "echo alive; sleep 30",
+                &smelt_core::process::ShellSpec::default(),
+                &app.app.core.env.cwd(),
+                std::time::Instant::now(),
+            )
+            .await
+            .unwrap();
         app.start_turn(1);
 
         app.cancel();
 
-        assert!(registry.snapshot_output(&id).unwrap().running);
-        assert_eq!(registry.running_count(), 1);
-        let _ = registry.stop(&id).await;
+        assert!(supervisor.snapshot_output(&id).unwrap().running);
+        assert_eq!(supervisor.running_count(), 1);
+        let _ = supervisor.stop(&id).await;
     }
 
     #[test]

@@ -40,9 +40,8 @@ impl TestApp {
                 SourceEvent::ExecOutput(line) => {
                     self.app.append_exec_output(line);
                 }
-                SourceEvent::ExecDone(code) => {
-                    self.app.finish_exec(code);
-                    self.app.finalize_exec();
+                SourceEvent::ExecDone(_) => {
+                    self.app.finish_exec(None);
                     self.app.overlays.finish_execution();
                 }
                 SourceEvent::Resize { width, height } => {

@@ -201,13 +201,7 @@ impl ToolStateMutation {
             } => {
                 state.status = status;
                 if let Some(output) = output {
-                    if let Some(streamed) = state.output.as_mut() {
-                        streamed.is_error = output.is_error;
-                        streamed.metadata = output.metadata;
-                        streamed.content_fields = output.content_fields;
-                    } else {
-                        state.output = Some(output);
-                    }
+                    state.output = Some(output);
                 }
                 state.elapsed = elapsed;
                 state.elapsed_active = false;
@@ -1633,6 +1627,7 @@ pub struct TranscriptGroupChildOutputMetadata {
 pub struct TranscriptGroupChildProcessMetadata {
     pub process_id: Option<String>,
     pub exit_code: Option<i32>,
+    pub termination: Option<protocol::JobTermination>,
 }
 
 /// Payload-independent semantic data exposed for one retained group child.
@@ -1649,6 +1644,7 @@ pub struct TranscriptGroupChildMetadata {
     pub event: Option<String>,
     pub process_id: Option<String>,
     pub exit_code: Option<i32>,
+    pub termination: Option<protocol::JobTermination>,
     pub event_data: TranscriptGroupChildProcessMetadata,
 }
 
@@ -1657,6 +1653,7 @@ struct StoredProcessMetadata {
     event: Option<String>,
     process_id: Option<String>,
     exit_code: Option<i32>,
+    termination: Option<protocol::JobTermination>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1767,6 +1764,7 @@ impl StoredBlockRef {
                         .to_string()
                 }),
                 exit_code: event.exit_code(),
+                termination: Some(event.termination()),
             },
             _ => StoredProcessMetadata::default(),
         };
@@ -1867,6 +1865,10 @@ impl StoredBlockRef {
             "event" | "event_type" => self.group_process.event.clone(),
             "process_id" => self.group_process.process_id.clone(),
             "exit_code" => self.group_process.exit_code.map(|code| code.to_string()),
+            "termination" => self
+                .group_process
+                .termination
+                .map(|termination| termination.as_str().to_string()),
             _ => None,
         }
     }
@@ -1874,6 +1876,7 @@ impl StoredBlockRef {
     fn group_child_metadata(&self, id: BlockId) -> TranscriptGroupChildMetadata {
         let process_id = self.group_process.process_id.clone();
         let exit_code = self.group_process.exit_code;
+        let termination = self.group_process.termination;
         TranscriptGroupChildMetadata {
             id,
             kind: self.kind.as_str(),
@@ -1890,9 +1893,11 @@ impl StoredBlockRef {
             event: self.group_process.event.clone(),
             process_id: process_id.clone(),
             exit_code,
+            termination,
             event_data: TranscriptGroupChildProcessMetadata {
                 process_id,
                 exit_code,
+                termination,
             },
         }
     }
@@ -1910,7 +1915,7 @@ fn materialized_group_child_metadata(
             is_error: Some(output.is_error),
         })
         .unwrap_or_default();
-    let (event, process_id, exit_code) = match block {
+    let (event, process_id, exit_code, termination) = match block {
         Block::ProcessStatus {
             event: Some(event), ..
         } => (
@@ -1919,8 +1924,9 @@ fn materialized_group_child_metadata(
                 .process_id()
                 .map(|value| preview(value, GROUP_CHILD_PROCESS_FIELD_MAX_BYTES)),
             event.exit_code(),
+            Some(event.termination()),
         ),
-        _ => (None, None, None),
+        _ => (None, None, None, None),
     };
     TranscriptGroupChildMetadata {
         id,
@@ -1942,9 +1948,11 @@ fn materialized_group_child_metadata(
         event,
         process_id: process_id.clone(),
         exit_code,
+        termination,
         event_data: TranscriptGroupChildProcessMetadata {
             process_id,
             exit_code,
+            termination,
         },
     }
 }
@@ -4506,19 +4514,19 @@ mod tests {
                 elapsed: None,
             },
         ));
-        assert!(history.content_by_id(output_id).is_some());
+        assert!(history.content_by_id(output_id).is_none());
         assert!(history.content_by_id(preview_id).is_none());
-        assert!(history.content_by_id(next_output_id).is_none());
+        assert!(history.content_by_id(next_output_id).is_some());
         let state = history.tool_state(tool_id).expect("finished tool state");
-        let output = state.output.as_ref().expect("streamed output");
+        let output = state.output.as_ref().expect("final output");
         assert_eq!(state.status, ToolStatus::Err);
-        assert_eq!(output.content.id(), output_id);
-        assert_eq!(output.content.snapshot(), "output");
+        assert_eq!(output.content.id(), next_output_id);
+        assert_eq!(output.content.snapshot(), "next output");
         assert!(output.is_error);
         assert_eq!(output.metadata, Some(serde_json::json!({ "exit_code": 1 })));
 
         history.remove_block(tool_id);
-        assert!(history.content_by_id(output_id).is_none());
+        assert!(history.content_by_id(next_output_id).is_none());
         assert!(history.content_by_id(replacement_id).is_some());
 
         history.clear();
@@ -4586,6 +4594,7 @@ mod tests {
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 process_id,
                 Some(0),
+                protocol::JobTermination::Exited,
             )),
         };
         assert!(
@@ -5164,6 +5173,57 @@ mod tests {
             None
         );
         assert_eq!(history.patch_revision(), revision);
+    }
+
+    #[test]
+    fn final_tool_output_replaces_a_large_streamed_preview() {
+        let mut history = BlockHistory::new();
+        let id = history.push_with_state(
+            Block::ToolCall {
+                call_id: "call-1".to_string(),
+                name: "bash".to_string(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new().into(),
+            },
+            ToolState {
+                status: ToolStatus::Pending,
+                elapsed: None,
+                called_at_ms: None,
+                elapsed_active: false,
+                output: None,
+                user_message: None,
+                preview_output: None,
+            },
+        );
+        for index in 0..3_000 {
+            history.append_live_output_line(
+                id,
+                ContentChannel::ToolOutput,
+                format!("streamed-{index}"),
+            );
+        }
+        let streamed_id = history
+            .content(id, ContentChannel::ToolOutput)
+            .expect("streamed output")
+            .id();
+
+        assert!(history.apply_tool_state_mutation(
+            id,
+            ToolStateMutation::Finish {
+                status: ToolStatus::Ok,
+                output: Some(Box::new(ToolOutput::new("bounded final", false, None,))),
+                elapsed: Some(Duration::from_secs(1)),
+            },
+        ));
+
+        let state = history.tool_state(id).expect("finished tool state");
+        assert_eq!(state.status, ToolStatus::Ok);
+        assert_eq!(
+            state.output.as_ref().unwrap().content.snapshot(),
+            "bounded final"
+        );
+        assert!(state.preview_output.is_none());
+        assert!(history.content_by_id(streamed_id).is_none());
     }
 
     #[test]
@@ -5835,7 +5895,7 @@ mod tests {
                 .tool_state(id)
                 .and_then(|tool_state| tool_state.output.as_ref())
                 .map(|output| output.content.snapshot()),
-            Some("before".to_string())
+            Some("after".to_string())
         );
         assert!(history.live_tool_state_retained_bytes() > 0);
         assert_eq!(history.hydrated_tool_state_retained_bytes(), 0);

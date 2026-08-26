@@ -165,14 +165,18 @@ fn tick_event_advances_virtual_clock() {
 }
 
 #[test]
-fn process_completion_after_final_request_starts_follow_up_turn() {
+fn job_completion_after_final_request_starts_follow_up_turn() {
     let mut app = TestApp::builder().build();
     app.start_turn(7);
 
-    app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted {
-        id: "4242".into(),
-        exit_code: Some(1),
-    }));
+    app.app
+        .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
+            smelt_core::process::JobCompletion {
+                id: "4242".into(),
+                exit_code: Some(1),
+                termination: protocol::JobTermination::Exited,
+            },
+        ));
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
 
     assert!(app.finish_turn());
@@ -201,14 +205,14 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
     })
     .expect("queue ready turn completion");
 
-    app.app.handle_platform_event(
-        crate::app::platform_runtime::PlatformEvent::ProcessCompleted(
-            smelt_core::process::ProcessCompletion {
+    app.app
+        .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
+            smelt_core::process::JobCompletion {
                 id: "4242".into(),
                 exit_code: Some(1),
+                termination: protocol::JobTermination::Exited,
             },
-        ),
-    );
+        ));
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
 
     let outcome = app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
@@ -227,17 +231,25 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
 }
 
 #[test]
-fn process_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
+fn job_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
     let mut app = TestApp::builder().build();
     app.start_turn(7);
     let note = protocol::HistoryNote::process_status_event(
-        protocol::ProcessStatusEvent::background_process_completed("4242", Some(0)),
+        protocol::ProcessStatusEvent::background_process_completed(
+            "4242",
+            Some(0),
+            protocol::JobTermination::Exited,
+        ),
     );
 
-    app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted {
-        id: "4242".into(),
-        exit_code: Some(0),
-    }));
+    app.app
+        .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
+            smelt_core::process::JobCompletion {
+                id: "4242".into(),
+                exit_code: Some(0),
+                termination: protocol::JobTermination::Exited,
+            },
+        ));
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
         turn_id: 7,
         delta: protocol::CanonicalHistoryDelta::new(

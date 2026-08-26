@@ -67,7 +67,7 @@ app_story!(process_status_block_states, |ctx| {
 
 app_story!(exec_block_states, |ctx| {
     ctx.set_viewport(64, 14);
-    ctx.exec_with_output("ls -1 src", "lib.rs\nmain.rs\nparser.rs", Some(0));
+    ctx.exec_with_output("ls -1 src", "lib.rs\nmain.rs\nparser.rs");
     ctx.assert_snapshot_named("expanded");
 
     ctx.run_lua("smelt.transcript.fold_kind('exec', 'close')");

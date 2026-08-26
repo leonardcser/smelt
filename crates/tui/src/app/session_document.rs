@@ -859,9 +859,8 @@ pub(crate) enum StreamMutation {
         chunk: String,
     },
     FinishExec {
-        exit_code: Option<i32>,
+        final_output: Option<String>,
     },
-    FinalizeExec,
 }
 
 pub(crate) enum UsageMutation {
@@ -1550,11 +1549,8 @@ impl SessionDocument {
             StreamMutation::AppendExecOutput { chunk } => {
                 parser.append_exec_output(transcript.history_mut(), chunk);
             }
-            StreamMutation::FinishExec { exit_code } => {
-                parser.finish_exec(exit_code);
-            }
-            StreamMutation::FinalizeExec => {
-                parser.finalize_exec(transcript.history_mut());
+            StreamMutation::FinishExec { final_output } => {
+                parser.finish_exec(transcript.history_mut(), final_output);
             }
         }
         let history = transcript.history();
@@ -2769,17 +2765,24 @@ mod tests {
             &mut transcript,
             StreamMutation::AppendExecOutput { chunk: "hi".into() },
         );
-        let finalized = apply_stream_parser_transcript(
+        let finished = apply_stream_parser_transcript(
             &mut parser,
             &mut transcript,
-            StreamMutation::FinalizeExec,
+            StreamMutation::FinishExec {
+                final_output: Some("authoritative hi".into()),
+            },
         );
 
         assert!(started.transcript_dirty);
         assert!(output.transcript_dirty);
-        assert!(!finalized.transcript_dirty);
+        assert!(finished.transcript_dirty);
         assert_eq!(transcript.history().record_dirty_from(), Some(0));
         assert_eq!(transcript.history().len(), 1);
+        let exec_id = transcript.history().last_block_id().expect("exec block id");
+        let Block::Exec { output, .. } = transcript.history().block(exec_id).unwrap() else {
+            panic!("expected exec block");
+        };
+        assert_eq!(output.snapshot(), "authoritative hi");
     }
 
     fn runtime_metadata() -> RuntimeSessionMetadata {

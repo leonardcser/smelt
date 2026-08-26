@@ -47,7 +47,7 @@ impl OverlayRuntime {
         let Some(handle) = self.execution.take() else {
             return false;
         };
-        handle.kill.notify_one();
+        handle.kill.cancel();
         true
     }
 

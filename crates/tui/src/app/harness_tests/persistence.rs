@@ -458,7 +458,11 @@ fn record_resave_preserves_semantic_history_links() {
         }),
     );
     let note = protocol::HistoryNote::process_status_event(
-        protocol::ProcessStatusEvent::background_process_completed("4242", Some(0)),
+        protocol::ProcessStatusEvent::background_process_completed(
+            "4242",
+            Some(0),
+            protocol::JobTermination::Exited,
+        ),
     );
     app.commit_request_history_item(
         HistoryItem::note(note.clone()),
@@ -481,7 +485,7 @@ fn history_only_process_status_session_accepts_persisted_follow_up() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        app.handle_process_completed("4242".into(), Some(0));
+        app.handle_job_completed("4242".into(), Some(0), protocol::JobTermination::Exited);
         let turn_id = app.current_turn_id().expect("process-status turn started");
         app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
             turn_id,

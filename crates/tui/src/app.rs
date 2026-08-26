@@ -1942,12 +1942,12 @@ impl TuiApp {
         core.skills = skills;
         core.mcp = mcp;
         let sessions = core.sessions.clone();
-        let (process_completion_tx, process_completion_rx) = tokio::sync::mpsc::unbounded_channel();
-        core.processes.set_completion_sender(process_completion_tx);
+        let (job_completion_tx, job_completion_rx) = tokio::sync::mpsc::unbounded_channel();
+        core.jobs.set_completion_sender(job_completion_tx);
         let platform = crate::app::platform_runtime::PlatformRuntime::new(
             &core.env,
             sessions.clone(),
-            process_completion_rx,
+            job_completion_rx,
             app_events,
         );
         let lua = crate::lua::LuaGeneration::initial(
@@ -2044,9 +2044,9 @@ impl TuiApp {
         prompt
     }
 
-    pub(crate) fn stop_background_processes(&mut self) {
-        self.core.processes.clear();
-        let _ = self.platform.drain_process_completions();
+    pub(crate) fn stop_shell_jobs(&mut self) {
+        self.core.jobs.clear();
+        let _ = self.platform.drain_job_completions();
     }
 
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
@@ -2173,7 +2173,7 @@ impl TuiApp {
             self.core.config.settings.terminal_title,
         );
 
-        let running_procs = self.core.processes.running_count() as u32;
+        let running_procs = self.core.jobs.running_count() as u32;
         self.core
             .signals
             .publish_if_changed("running_procs", running_procs);
@@ -3325,7 +3325,7 @@ impl TuiApp {
             .signals
             .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
         self.drain_signals_pending();
-        self.stop_background_processes();
+        self.stop_shell_jobs();
         self.save_session_and_flush();
         let unflushed = self.session_document_has_unflushed_work().then(|| {
             format!(
@@ -3354,8 +3354,8 @@ impl TuiApp {
             crate::app::platform_runtime::PlatformEvent::ContextWindow(update) => {
                 self.apply_context_window_update(*update);
             }
-            crate::app::platform_runtime::PlatformEvent::ProcessCompleted(completion) => {
-                self.handle_process_completed(completion.id, completion.exit_code);
+            crate::app::platform_runtime::PlatformEvent::JobCompleted(completion) => {
+                self.handle_job_completed(completion);
             }
             crate::app::platform_runtime::PlatformEvent::PublicStatusHeartbeat => {
                 self.publish_public_status();
@@ -3524,8 +3524,8 @@ impl TuiApp {
 
             self.drain_ready_engine_outputs_for_frame();
 
-            for completion in self.platform.drain_process_completions() {
-                self.handle_process_completed(completion.id, completion.exit_code);
+            for completion in self.platform.drain_job_completions() {
+                self.handle_job_completed(completion);
             }
 
             let drained_more_idle_work = self.drain_idle_work();
@@ -3783,9 +3783,13 @@ impl TuiApp {
                                 self.append_shell_output(&line, sink);
                             }
                         }
-                        crate::commands::ExecEvent::Done(code) => {
+                        crate::commands::ExecEvent::Done {
+                            output,
+                            exit_code,
+                            termination,
+                        } => {
                             if let Some(sink) = sink {
-                                self.finish_shell_output(code, sink);
+                                self.finish_shell_output(output, exit_code, termination, sink);
                             }
                             self.overlays.finish_execution();
                         }

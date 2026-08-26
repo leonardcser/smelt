@@ -84,6 +84,18 @@ impl OutputLimiter {
         format!("{TRUNCATION_NOTICE}: {}\n\n{body}", parts.join(", "))
     }
 
+    pub(crate) fn retained_memory_bytes(&self) -> usize {
+        self.lines
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>()
+            .saturating_add(
+                self.lines
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+            )
+    }
+
     #[cfg(test)]
     pub fn retained_lines(&self) -> usize {
         self.lines.len()

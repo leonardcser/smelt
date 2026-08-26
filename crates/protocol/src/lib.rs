@@ -33,8 +33,8 @@ pub use history::{
     history_item_message_count, history_to_messages, plan_history_append, replace_last_note_kind,
     transcript_block_kind_matches_history_item, AssistantStep, HistoryAppend, HistoryAppendPlan,
     HistoryAppendPolicy, HistoryAppendResult, HistoryAppendView, HistoryItem, HistoryNote,
-    HistoryNoteKind, HistoryNoteProjection, HistoryTailBudget, ProcessStatusEvent, ToolInvocation,
-    UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
+    HistoryNoteKind, HistoryNoteProjection, HistoryTailBudget, JobTermination, ProcessStatusEvent,
+    ToolInvocation, UserHistoryContent, COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
 pub use message::{
     json_value_dynamic_retained_bytes, json_value_retained_bytes,

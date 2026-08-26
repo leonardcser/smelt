@@ -3,7 +3,7 @@ use crate::app::{AppEvent, ContextWindowTarget, ContextWindowUpdate, ControllerR
 pub(super) enum PlatformEvent {
     App(AppEvent),
     ContextWindow(Box<ContextWindowUpdate>),
-    ProcessCompleted(smelt_core::process::ProcessCompletion),
+    JobCompleted(smelt_core::process::JobCompletion),
     PublicStatusHeartbeat,
 }
 
@@ -55,8 +55,7 @@ pub(super) struct PlatformRuntime {
     sessions: smelt_core::session::SessionStorage,
     inspect_server: std::sync::Arc<std::sync::Mutex<Option<crate::inspect_server::Server>>>,
     sleep_inhibitor: crate::sleep_inhibit::SleepInhibitor,
-    process_completion_rx:
-        tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
+    job_completion_rx: tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::JobCompletion>,
     app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     public_status: Option<smelt_core::public_status::StatusPublisher>,
@@ -72,9 +71,7 @@ impl PlatformRuntime {
     pub(super) fn new(
         env: &engine::env::RuntimeEnv,
         sessions: smelt_core::session::SessionStorage,
-        process_completion_rx: tokio::sync::mpsc::UnboundedReceiver<
-            smelt_core::process::ProcessCompletion,
-        >,
+        job_completion_rx: tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::JobCompletion>,
         app_events: Option<(
             tokio::sync::mpsc::UnboundedSender<AppEvent>,
             tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
@@ -106,7 +103,7 @@ impl PlatformRuntime {
             sessions,
             inspect_server: std::sync::Arc::new(std::sync::Mutex::new(None)),
             sleep_inhibitor: crate::sleep_inhibit::SleepInhibitor::new(env.cwd()),
-            process_completion_rx,
+            job_completion_rx,
             app_event_tx,
             app_event_rx,
             public_status,
@@ -143,7 +140,7 @@ impl PlatformRuntime {
             receiver.close();
         }
         self.context_window_rx = None;
-        self.process_completion_rx.close();
+        self.job_completion_rx.close();
         if let Some(receiver) = self.app_event_rx.as_mut() {
             receiver.close();
         }
@@ -287,11 +284,9 @@ impl PlatformRuntime {
         self.context_window.prepare(Some(target))
     }
 
-    pub(super) fn drain_process_completions(
-        &mut self,
-    ) -> Vec<smelt_core::process::ProcessCompletion> {
+    pub(super) fn drain_job_completions(&mut self) -> Vec<smelt_core::process::JobCompletion> {
         let mut completions = Vec::new();
-        while let Ok(completion) = self.process_completion_rx.try_recv() {
+        while let Ok(completion) = self.job_completion_rx.try_recv() {
             completions.push(completion);
         }
         completions
@@ -310,8 +305,8 @@ impl PlatformRuntime {
 
     pub(super) async fn receive(&mut self) -> PlatformEvent {
         tokio::select! {
-            Some(completion) = self.process_completion_rx.recv() => {
-                PlatformEvent::ProcessCompleted(completion)
+            Some(completion) = self.job_completion_rx.recv() => {
+                PlatformEvent::JobCompleted(completion)
             }
             Some(event) = async {
                 match self.app_event_rx.as_mut() {
@@ -510,11 +505,11 @@ mod tests {
             root.path().join("cwd"),
             std::num::NonZeroUsize::new(1).unwrap(),
         );
-        let (_, process_completion_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_, job_completion_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut platform = PlatformRuntime::new(
             &env,
             smelt_core::session::SessionStorage::from_env(&env),
-            process_completion_rx,
+            job_completion_rx,
             None,
         );
 
@@ -566,8 +561,8 @@ mod tests {
             std::num::NonZeroUsize::new(1).unwrap(),
         );
         let (completion_tx, completion_rx) = tokio::sync::mpsc::unbounded_channel();
-        let registry = smelt_core::process::ProcessRegistry::new();
-        registry.set_completion_sender(completion_tx);
+        let supervisor = smelt_core::process::JobSupervisor::new();
+        supervisor.set_completion_sender(completion_tx);
         let mut platform = PlatformRuntime::new(
             &env,
             smelt_core::session::SessionStorage::from_env(&env),
@@ -576,21 +571,22 @@ mod tests {
         );
 
         for (command, expected_code) in [("exit 0", Some(0)), ("exit 7", Some(7))] {
-            let child = smelt_core::process::spawn_shell_child(
-                command,
-                &smelt_core::process::ShellSpec::default(),
-                root.path(),
-            )
-            .unwrap();
-            let id = registry.child_id(&child);
-            registry.spawn(id.clone(), command, child, std::time::Instant::now());
+            let id = supervisor
+                .spawn_background(
+                    command,
+                    &smelt_core::process::ShellSpec::default(),
+                    root.path(),
+                    std::time::Instant::now(),
+                )
+                .await
+                .unwrap();
 
             let event = tokio::time::timeout(std::time::Duration::from_secs(2), platform.receive())
                 .await
                 .expect("background process completion should wake the platform receiver");
             assert!(matches!(
                 event,
-                PlatformEvent::ProcessCompleted(completion)
+                PlatformEvent::JobCompleted(completion)
                     if completion.id == id && completion.exit_code == expected_code
             ));
         }

@@ -363,10 +363,9 @@ app_story!(prompt_working_bar_width_ladder, |ctx| {
 
 app_story!(exec_command_block_with_output, |ctx| {
     // `!ls` drives the real `start_exec` → `append_exec_output` →
-    // `finish_exec` → `finalize_exec` lifecycle. The snapshot
-    // captures the `!` accent prefix, panel chrome shared with user
-    // blocks, and the wrapped output region.
+    // `finish_exec` lifecycle. The snapshot captures the `!` accent prefix,
+    // panel chrome shared with user blocks, and the wrapped output region.
     ctx.set_viewport(50, 12);
-    ctx.exec_with_output("ls -1 src", "lib.rs\nmain.rs\nparser.rs", Some(0));
+    ctx.exec_with_output("ls -1 src", "lib.rs\nmain.rs\nparser.rs");
     ctx.assert_snapshot();
 });

@@ -1,4 +1,4 @@
-//! `smelt.process` - run/spawn/list/kill processes against the `ProcessRegistry`.
+//! `smelt.process` - process helpers backed by the shell job supervisor.
 
 use mlua::prelude::*;
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
 
 fn output_table(
     lua: &Lua,
-    result: Option<Result<process::ProcessOutput, String>>,
+    result: Option<Result<process::JobOutput, String>>,
 ) -> LuaResult<mlua::Table> {
     match result {
         Some(Ok(out)) => {
@@ -36,6 +36,9 @@ fn output_table(
             t.set("running", out.running)?;
             if let Some(code) = out.exit_code {
                 t.set("exit_code", code)?;
+            }
+            if let Some(termination) = out.termination {
+                t.set("termination", termination.as_str())?;
             }
             if let Some(pid) = out.pid {
                 t.set("pid", pid)?;
@@ -52,16 +55,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "process",
-        "Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.",
+        "Run subprocesses and manage contained shell jobs. Background jobs are non-blocking; foreground jobs stream bounded output and wait for completion.",
         Tier::Host,
     )?;
     m.fn_(
         "list",
-        "Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is present when the OS exposes a child pid.",
+        "Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`. `id` is an opaque stable job ID; `pid` is present when the OS exposes the top-level child PID.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let procs =
-                crate::host::try_with_core(|core| core.processes.list()).unwrap_or_default();
+                crate::host::try_with_core(|core| core.jobs.list()).unwrap_or_default();
             let out = lua.create_table()?;
             for (i, p) in procs.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -70,7 +73,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     row.set("pid", pid)?;
                 }
                 row.set("command", p.command)?;
-                row.set("elapsed_secs", p.started_at.elapsed().as_secs())?;
+                row.set("elapsed_secs", p.elapsed_secs)?;
                 out.set(i + 1, row)?;
             }
             Ok(out)
@@ -78,13 +81,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "kill",
-        "Stop the registered process with `id`. Schedules the kill asynchronously; no-op when no host is installed.",
+        "Stop the supervised shell job with `id`. Schedules containment termination asynchronously; no-op when no host is installed.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
             crate::host::with_core(|core| {
-                let registry = core.processes.clone();
+                let supervisor = core.jobs.clone();
                 tokio::spawn(async move {
-                    let _ = registry.stop(&id).await;
+                    let _ = supervisor.stop(&id).await;
                 });
             });
             Ok(())
@@ -92,10 +95,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "detach_foreground",
-        "Move the most recently started foreground streaming process to the background process registry. Returns true when a detach request was sent, false when no detachable foreground process is running.",
+        "Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Returns true when a detach request was sent.",
         &[],
         |_, ()| -> LuaResult<bool> {
-            Ok(crate::host::try_with_core(|core| core.processes.detach_latest_foreground().requested())
+            Ok(crate::host::try_with_core(|core| core.jobs.detach_latest_foreground().requested())
                 .unwrap_or(false))
         },
     )?;
@@ -105,14 +108,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_stop",
             &["task_id", "id"],
             move |_, (task_id, id): (u64, String)| -> LuaResult<()> {
-                let registry = crate::host::try_with_core(|core| core.processes.clone())
-                    .ok_or_else(|| {
+                let supervisor =
+                    crate::host::try_with_core(|core| core.jobs.clone()).ok_or_else(|| {
                         mlua::Error::external("process.__start_stop: app unavailable")
                     })?;
                 let sink = s.resume_sink();
                 tokio::spawn(async move {
-                    let payload = match registry.stop(&id).await {
-                        Ok(text) => serde_json::json!({ "text": text }),
+                    let payload = match supervisor.stop(&id).await {
+                        Ok(output) => serde_json::json!({ "text": output.text }),
                         Err(err) => serde_json::json!({ "err": err }),
                     };
                     sink.resolve_json(task_id, payload);
@@ -123,38 +126,44 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     m.fn_(
         "read_output",
-        "Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.",
+        "Drain bounded output from supervised job `id`. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.",
         &["id"],
         |lua, id: String| -> LuaResult<mlua::Table> {
-            output_table(lua, crate::host::try_with_core(|core| core.processes.drain_output(&id)))
+            output_table(lua, crate::host::try_with_core(|core| core.jobs.drain_output(&id)))
         },
     )?;
     m.fn_(
         "output",
-        "Return the buffered output snapshot for registered process `id` without draining it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.",
+        "Return the bounded output snapshot for supervised job `id` without draining it. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.",
         &["id"],
         |lua, id: String| -> LuaResult<mlua::Table> {
-            output_table(lua, crate::host::try_with_core(|core| core.processes.snapshot_output(&id)))
+            output_table(lua, crate::host::try_with_core(|core| core.jobs.snapshot_output(&id)))
         },
     )?;
     {
         let shared_spawn = Arc::clone(shared);
-        m.fn_(
-            "spawn_bg",
-            "Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.",
-            &["command"],
-            move |_, command: String| -> LuaResult<String> {
-                let (registry, now) = crate::host::try_with_core(|core| {
-                    (core.processes.clone(), core.clock.instant_now())
+        m.private_fn(
+            "__start_spawn_bg",
+            &["task_id", "command"],
+            move |_, (task_id, command): (u64, String)| -> LuaResult<()> {
+                let (supervisor, now) = crate::host::try_with_core(|core| {
+                    (core.jobs.clone(), core.clock.instant_now())
                 })
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
                 let cwd = shared_spawn.evaluation_cwd();
                 let shell = current_shell_spec(&shared_spawn);
-                let child = process::spawn_shell_child(&command, &shell, &cwd)
-                    .map_err(|e| mlua::Error::external(e.to_string()))?;
-                let id = registry.child_id(&child);
-                registry.spawn(id.clone(), &command, child, now);
-                Ok(id)
+                let sink = shared_spawn.resume_sink();
+                tokio::spawn(async move {
+                    let payload = match supervisor
+                        .spawn_background(&command, &shell, &cwd, now)
+                        .await
+                    {
+                        Ok(id) => serde_json::json!({ "id": id }),
+                        Err(error) => serde_json::json!({ "err": error.to_string() }),
+                    };
+                    sink.resolve_json(task_id, payload);
+                });
+                Ok(())
             },
         )?;
     }
@@ -199,13 +208,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared_run_streaming = Arc::clone(shared);
         m.fn_(
             "run_streaming",
-            "Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, timeout detaches the still-running process into the process registry instead of killing it.",
+            "Run `command` as a contained job with a `timeout_ms` deadline, streaming bounded output into live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id?, termination? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, the same supervised job keeps running in the background.",
             &["task_id", "call_id", "command", "timeout_ms", "background_on_timeout"],
             move |_, (task_id, call_id, command, timeout_ms, background_on_timeout): (u64, String, String, u64, bool)| -> LuaResult<()> {
-                let (injector, registry, now) = crate::host::try_with_core(|core| {
+                let (injector, supervisor, now) = crate::host::try_with_core(|core| {
                     (
                         core.engine.injector(),
-                        core.processes.clone(),
+                        core.jobs.clone(),
                         core.clock.instant_now(),
                     )
                 })
@@ -224,29 +233,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
                 let shell = current_shell_spec(&shared_run_streaming);
-                let detach = process::StreamDetach {
-                    registry,
-                    command: command.clone(),
-                    now,
-                };
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(invocation_id, call_id.clone(), line);
                     };
-                    let out = process::run_streaming_with_shell(
-                        &command,
-                        process::StreamConfig {
-                            timeout,
-                            shell,
-                            cwd,
-                            cancel: cancel.clone(),
-                            detach: Some(detach),
-                            detach_on_timeout: background_on_timeout,
-                            manual_detach: true,
-                        },
-                        on_line,
-                    )
-                    .await;
+                    let out = supervisor
+                        .run(
+                            &command,
+                            process::JobRunConfig {
+                                timeout: Some(timeout),
+                                shell,
+                                cwd,
+                                started_at: now,
+                                cancel: cancel.clone(),
+                                background_on_timeout,
+                                detachable: true,
+                            },
+                            on_line,
+                        )
+                        .await;
                     if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
                         let payload = serde_json::json!({ "__cancelled": true });
                         sink.resolve_json(task_id, payload);
@@ -257,6 +262,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         "is_error": out.is_error,
                         "timed_out": out.timed_out,
                         "background_id": out.background_id,
+                        "termination": out.termination.map(protocol::JobTermination::as_str),
                     });
                     sink.resolve_json(task_id, payload);
                 });

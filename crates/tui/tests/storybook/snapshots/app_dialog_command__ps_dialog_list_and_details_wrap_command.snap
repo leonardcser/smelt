@@ -11,8 +11,8 @@ expression: frame.text()
 
 
 ─ ps ─────────────────────────────────────────────────────────────────
- filter processes…
-   4242         2m 05s  ls -ld /Users/leo/.dotfiles; realpath /Users/
+ filter jobs…
+   proc_123       2m 05s  ls -ld /Users/leo/.dotfiles; realpath /User
 
 
 

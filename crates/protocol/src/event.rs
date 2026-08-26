@@ -331,8 +331,6 @@ impl CanonicalHistoryDelta {
 ///   RequestPermission → approved: ToolStarted → ToolOutput* → ToolFinished
 ///   RequestPermission → denied: no further engine event
 ///   ToolStarted → ToolOutput* → ToolFinished
-///
-/// ProcessCompleted can arrive at any time (including between turns).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineEvent {
     /// Engine has initialized and is ready to accept commands.
@@ -469,9 +467,6 @@ pub enum EngineEvent {
     /// Request audit persistence failed. The turn can continue, but request
     /// inspection for this attempt may be incomplete.
     RequestAuditError { message: String },
-
-    /// A background process has finished.
-    ProcessCompleted { id: String, exit_code: Option<i32> },
 
     /// Incremental text token from a background `UiCommand::EngineAsk` request.
     /// The final `EngineAskResponse` still carries the full assistant message.

@@ -352,7 +352,7 @@ impl TestApp {
     }
 
     /// Number of transcript blocks. Used by event invariants that assert
-    /// a block was pushed (e.g. `ProcessCompleted`).
+    /// a block was pushed.
     pub fn transcript_block_count(&self) -> usize {
         self.app.conversation.transcript().history().len()
     }
@@ -855,8 +855,18 @@ impl TestApp {
         self.app.session_append_history(item);
     }
 
-    pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
-        self.app.handle_process_completed(id, exit_code);
+    pub fn handle_job_completed(
+        &mut self,
+        id: String,
+        exit_code: Option<i32>,
+        termination: protocol::JobTermination,
+    ) {
+        self.app
+            .handle_job_completed(smelt_core::process::JobCompletion {
+                id,
+                exit_code,
+                termination,
+            });
     }
 
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {

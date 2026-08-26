@@ -12,7 +12,7 @@ local function format_duration(secs)
   return string.format("%dh %02dm", h, rest // 60)
 end
 
-local function process_rows()
+local function job_rows()
   local rows = smelt.process.list()
   for _, p in ipairs(rows) do
     p._hay = table.concat({ p.pid or "", p.id or "", p.command or "" }, " "):lower()
@@ -30,11 +30,11 @@ local function append_label_value(lines, label, value, width, opts)
   end
 end
 
-local function render_proc(p)
-  local pid = p.pid and tostring(p.pid) or p.id or ""
-  local elapsed = format_duration(p.elapsed_secs)
-  local meta = string.format("  %-10s %8s  ", pid, elapsed)
-  local command = p.command or ""
+local function render_job(job)
+  local id = job.id or ""
+  local elapsed = format_duration(job.elapsed_secs)
+  local meta = string.format("  %-12s %8s  ", id, elapsed)
+  local command = job.command or ""
   return {
     text = meta .. command,
     spans = {
@@ -45,12 +45,12 @@ local function render_proc(p)
   }
 end
 
-local function proc_key(p)
-  return p.id
+local function job_key(job)
+  return job.id
 end
 
-local function proc_output(proc)
-  local out = smelt.process.output(proc.id)
+local function job_output(job)
+  local out = smelt.process.output(job.id)
   if out.text == nil then
     return { text = nil, running = false }
   end
@@ -58,26 +58,27 @@ local function proc_output(proc)
 end
 
 local function output_state(out)
-  if out.running == false then
-    if out.exit_code ~= nil then return "exited " .. tostring(out.exit_code) end
-    return "exited"
-  end
-  return "running"
+  if out.running ~= false then return "running" end
+  if out.termination == "oom" then return "out of memory" end
+  if out.termination == "stopped" then return "stopped" end
+  if out.termination == "signaled" then return "terminated" end
+  if out.exit_code ~= nil then return "exited " .. tostring(out.exit_code) end
+  return "exited"
 end
 
-local function meta_lines(proc, out, width)
+local function meta_lines(job, out, width)
   local lines = {}
-  append_label_value(lines, "pid", proc.pid or proc.id or "", width)
+  if job.pid ~= nil then append_label_value(lines, "pid", job.pid, width) end
   append_label_value(lines, "status", output_state(out), width)
-  append_label_value(lines, "duration", format_duration(proc.elapsed_secs), width)
-  append_label_value(lines, "command", proc.command or "", width, { syntax = "bash" })
+  append_label_value(lines, "duration", format_duration(job.elapsed_secs), width)
+  append_label_value(lines, "command", job.command or "", width, { syntax = "bash" })
   lines[#lines + 1] = { { text = "" } }
   return lines
 end
 
-local function log_lines(proc, out)
+local function log_lines(job, out)
   if out.text == nil then
-    return { "process " .. proc.id .. " is no longer registered" }
+    return { "job " .. job.id .. " is no longer available" }
   end
 
   local lines = {}
@@ -92,29 +93,29 @@ local function log_lines(proc, out)
   return lines
 end
 
-local function show_logs(proc)
+local function show_logs(job)
   local meta_buf = smelt.buf.new({ readonly = true })
   local log_buf = smelt.buf.new({ readonly = true })
   local meta_width = label_value.initial_dialog_width()
 
   local function refresh()
     for _, p in ipairs(smelt.process.list()) do
-      if p.id == proc.id then
-        proc.elapsed_secs = p.elapsed_secs
-        proc.command = p.command
-        proc.pid = p.pid
+      if p.id == job.id then
+        job.elapsed_secs = p.elapsed_secs
+        job.command = p.command
+        job.pid = p.pid
         break
       end
     end
-    local out = proc_output(proc)
+    local out = job_output(job)
     if out.elapsed_secs ~= nil then
-      proc.elapsed_secs = out.elapsed_secs
+      job.elapsed_secs = out.elapsed_secs
     end
     if out.pid ~= nil then
-      proc.pid = out.pid
+      job.pid = out.pid
     end
-    meta_buf:styled(meta_lines(proc, out, meta_width))
-    log_buf:lines(log_lines(proc, out))
+    meta_buf:styled(meta_lines(job, out, meta_width))
+    log_buf:lines(log_lines(job, out))
   end
   refresh()
 
@@ -132,7 +133,7 @@ local function show_logs(proc)
   end
 
   smelt.dialog.open({
-    title  = "ps pid: " .. tostring(proc.pid or proc.id or ""),
+    title  = "ps " .. tostring(job.id or ""),
     height = DIALOG_HEIGHT,
     panels = {
       { leaf = meta_leaf, height = "fit" },
@@ -152,21 +153,21 @@ end
 
 local function open_ps()
   local query = ""
-  local rows = process_rows()
+  local rows = job_rows()
   local timer = nil
   local list_ctx = nil
 
   local function make_filter()
     local q = query:lower()
-    return function(p)
-      return q == "" or (p._hay or ""):find(q, 1, true) ~= nil
+    return function(job)
+      return q == "" or (job._hay or ""):find(q, 1, true) ~= nil
     end
   end
 
   local function refresh_list()
-    rows = process_rows()
+    rows = job_rows()
     if list_ctx then
-      list_ctx.list:set_items_preserve(rows, proc_key)
+      list_ctx.list:set_items_preserve(rows, job_key)
     end
   end
 
@@ -176,28 +177,28 @@ local function open_ps()
   end
 
   local function kill_selected(ctx)
-    local p = ctx.list:selected()
-    if not p then return end
-    smelt.process.kill(p.id)
+    local job = ctx.list:selected()
+    if not job then return end
+    smelt.process.kill(job.id)
     for i, row in ipairs(rows) do
-      if row.id == p.id then table.remove(rows, i); break end
+      if row.id == job.id then table.remove(rows, i); break end
     end
     ctx.list:set_items(rows)
   end
 
   while true do
     query = ""
-    rows = process_rows()
+    rows = job_rows()
     timer = nil
     list_ctx = nil
     local picked = smelt.dialog.picker({
       title       = "ps",
       height      = DIALOG_HEIGHT,
-      placeholder = "filter processes…",
+      placeholder = "filter jobs…",
       items       = rows,
-      render      = render_proc,
+      render      = render_job,
       filter      = make_filter(),
-      empty_text  = "  (no processes)",
+      empty_text  = "  (no jobs)",
 
       on_open = function(ctx)
         list_ctx = ctx

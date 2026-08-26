@@ -40,10 +40,6 @@ enum Op {
         kind: u8,
         is_error: bool,
     },
-    ProcessCompleted {
-        id: String,
-        code: Option<i32>,
-    },
     Complete {
         count: u8,
     },
@@ -115,12 +111,6 @@ fn run_with_app(input: Input) {
             }
             Op::KnownToolRoundTrip { id, kind, is_error } => {
                 known_tool_round_trip(&mut app, id, kind, is_error)
-            }
-            Op::ProcessCompleted { id, code } => {
-                app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted {
-                    id,
-                    exit_code: code,
-                }))
             }
             Op::Complete { count } => {
                 let turn_id = app.current_turn_id().unwrap_or(0);

@@ -4,7 +4,7 @@ use super::{
     confirms::Confirms, engine_client::EngineClient, runtime_state::RuntimeState, signals,
     signals::Signals, timers::Timers, NullSink, Osc52Sink, StartupOverrides, SystemSink,
 };
-use crate::process::ProcessRegistry;
+use crate::process::JobSupervisor;
 use engine::{EngineHandle, SkillLoader};
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ pub struct Core {
     pub skills: Option<Arc<SkillLoader>>,
     pub files: crate::fs::FileStateCache,
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
-    pub processes: ProcessRegistry,
+    pub jobs: JobSupervisor,
     pub permissions: crate::permissions::PermissionsHandle,
     pub permission_store: crate::permissions::store::PermissionStore,
     /// MCP server registry. Shared `Arc` with the engine's
@@ -111,7 +111,7 @@ impl Core {
             skills: None,
             files: crate::fs::FileStateCache::new(),
             workspace_files,
-            processes: ProcessRegistry::new(),
+            jobs: JobSupervisor::new(),
             permissions,
             permission_store,
             mcp: None,

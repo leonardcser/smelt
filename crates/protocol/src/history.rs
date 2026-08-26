@@ -41,11 +41,33 @@ pub enum HistoryItem {
     Note(HistoryNote),
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTermination {
+    Exited,
+    Signaled,
+    #[serde(rename = "oom")]
+    OutOfMemory,
+    Stopped,
+}
+
+impl JobTermination {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exited => "exited",
+            Self::Signaled => "signaled",
+            Self::OutOfMemory => "oom",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ProcessStatusEvent {
     BackgroundProcessCompleted {
         process_id: String,
+        termination: JobTermination,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         exit_code: Option<i32>,
     },
@@ -55,17 +77,17 @@ impl ProcessStatusEvent {
     pub fn background_process_completed(
         process_id: impl Into<String>,
         exit_code: Option<i32>,
+        termination: JobTermination,
     ) -> Self {
         Self::BackgroundProcessCompleted {
             process_id: process_id.into(),
+            termination,
             exit_code,
         }
     }
 
     pub fn event_type(&self) -> &'static str {
-        match self {
-            Self::BackgroundProcessCompleted { .. } => "background_process_completed",
-        }
+        "background_process_completed"
     }
 
     pub fn process_id(&self) -> Option<&str> {
@@ -80,11 +102,18 @@ impl ProcessStatusEvent {
         }
     }
 
+    pub fn termination(&self) -> JobTermination {
+        match self {
+            Self::BackgroundProcessCompleted { termination, .. } => *termination,
+        }
+    }
+
     pub fn field_value(&self, field: &str) -> Option<String> {
         match field {
             "event" | "event_type" => Some(self.event_type().to_string()),
             "process_id" => self.process_id().map(str::to_string),
             "exit_code" => self.exit_code().map(|code| code.to_string()),
+            "termination" => Some(self.termination().as_str().to_string()),
             _ => None,
         }
     }
@@ -93,12 +122,20 @@ impl ProcessStatusEvent {
         match self {
             Self::BackgroundProcessCompleted {
                 process_id,
+                termination,
                 exit_code,
             } => {
-                let status = match exit_code {
-                    Some(0) => "finished successfully".to_string(),
-                    Some(code) => format!("exited with code {code}"),
-                    None => "exited".to_string(),
+                let status = match termination {
+                    JobTermination::Exited => match exit_code {
+                        Some(0) => "finished successfully".to_string(),
+                        Some(code) => format!("exited with code {code}"),
+                        None => "exited".to_string(),
+                    },
+                    JobTermination::Signaled => "was terminated by a signal".to_string(),
+                    JobTermination::OutOfMemory => {
+                        "was terminated after an out-of-memory event".to_string()
+                    }
+                    JobTermination::Stopped => "was stopped".to_string(),
                 };
                 format!("background process {process_id} {status}")
             }
@@ -1486,7 +1523,11 @@ mod tests {
     #[test]
     fn process_status_note_serializes_typed_event() {
         let item = HistoryItem::note(HistoryNote::process_status_event(
-            ProcessStatusEvent::background_process_completed("751225", Some(1)),
+            ProcessStatusEvent::background_process_completed(
+                "751225",
+                Some(1),
+                JobTermination::Exited,
+            ),
         ));
 
         let json = serde_json::to_value(&item).expect("serialize note item");
@@ -1496,10 +1537,38 @@ mod tests {
         assert_eq!(json["text"], "background process 751225 exited with code 1");
         assert_eq!(json["event"]["event"], "background_process_completed");
         assert_eq!(json["event"]["process_id"], "751225");
+        assert_eq!(json["event"]["termination"], "exited");
         assert_eq!(json["event"]["exit_code"], 1);
         let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
         assert_eq!(back, item);
     }
+
+    #[test]
+    fn out_of_memory_process_status_serializes_typed_event() {
+        let item = HistoryItem::note(HistoryNote::process_status_event(
+            ProcessStatusEvent::background_process_completed(
+                "proc_123",
+                None,
+                JobTermination::OutOfMemory,
+            ),
+        ));
+
+        let json = serde_json::to_value(&item).expect("serialize note item");
+
+        assert_eq!(json["kind"], "note");
+        assert_eq!(json["note_kind"], "process_status");
+        assert_eq!(
+            json["text"],
+            "background process proc_123 was terminated after an out-of-memory event"
+        );
+        assert_eq!(json["event"]["event"], "background_process_completed");
+        assert_eq!(json["event"]["process_id"], "proc_123");
+        assert_eq!(json["event"]["termination"], "oom");
+        assert!(json["event"].get("exit_code").is_none());
+        let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
+        assert_eq!(back, item);
+    }
+
     #[test]
     fn orphan_tool_use_in_provider_messages_is_repaired_with_interrupted_result() {
         // Mimic the broken state from issue #8: assistant with tool_calls

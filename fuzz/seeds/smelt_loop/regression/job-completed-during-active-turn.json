@@ -1,0 +1,21 @@
+{
+  "_about": "JobCompleted fuzz seed: a background job completion during an active compaction/engine turn defers status instead of immediately pushing a transcript block.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 147
+      }
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": -2060420017,
+        "termination": "exited"
+      }
+    }
+  ],
+  "vim": false
+}

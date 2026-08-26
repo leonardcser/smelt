@@ -21,7 +21,7 @@ smelt.tools.register({
   parameters = {
     type = "object",
     properties = {
-      id = { type = "string", description = "Background process id (usually the child pid returned by bash), e.g. 12345" },
+      id = { type = "string", description = "Opaque background job id returned by bash, e.g. proc_123" },
     },
     required = { "id" },
   },

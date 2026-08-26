@@ -2236,6 +2236,7 @@ mod tests {
             event: None,
             process_id: None,
             exit_code: None,
+            termination: None,
             event_data: Default::default(),
         };
         let group_node = smelt_core::lua::runtime::TranscriptRenderNode::group(

@@ -1844,6 +1844,43 @@ fn read_process_output_tool_is_snapshot_only() {
     assert_eq!(output_id, "proc_1");
 }
 
+#[test]
+fn read_process_output_tool_reports_oom_distinctly() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            local raw_register = smelt.tools.register
+            CAPTURED_TOOL = nil
+            smelt.tools.register = function(def)
+                CAPTURED_TOOL = def
+                return raw_register(def)
+            end
+            smelt.process.output = function()
+                return { text = "partial", running = false, termination = "oom" }
+            end
+            "#,
+        )
+        .exec()
+        .expect("install capture");
+    rt.lua
+        .load(READ_PROCESS_OUTPUT_LUA)
+        .set_name("smelt/tools/read_process_output.lua")
+        .exec()
+        .expect("load read_process_output");
+
+    let tool: mlua::Table = get_global(&rt, "CAPTURED_TOOL");
+    let execute: mlua::Function = tool.get("execute").expect("execute");
+    let args = rt.lua.create_table().unwrap();
+    args.set("id", "proc_123").unwrap();
+    let result: String = execute.call(args).expect("execute read_process_output");
+
+    assert_eq!(
+        result,
+        "partial\n\nprocess was terminated after an out-of-memory event"
+    );
+}
+
 // -- fs.complete_path -----------------------------------------------------
 
 #[test]

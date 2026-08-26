@@ -43,8 +43,7 @@ pub(super) enum TranscriptWork {
     },
     OrderedEngineEvent(EngineEvent),
     AppendExecOutput(String),
-    FinishExec(Option<i32>),
-    FinalizeExec,
+    FinishExec(Option<String>),
 }
 
 impl TranscriptWork {
@@ -112,12 +111,8 @@ impl TranscriptWorkQueue {
         self.push_back(TranscriptWork::AppendExecOutput(chunk));
     }
 
-    pub(super) fn push_finish_exec(&mut self, exit_code: Option<i32>) {
-        self.push_back(TranscriptWork::FinishExec(exit_code));
-    }
-
-    pub(super) fn push_finalize_exec(&mut self) {
-        self.push_back(TranscriptWork::FinalizeExec);
+    pub(super) fn push_finish_exec(&mut self, final_output: Option<String>) {
+        self.push_back(TranscriptWork::FinishExec(final_output));
     }
 
     pub(super) fn push_front_tool_output(&mut self, pending: PendingToolOutputAppend) {

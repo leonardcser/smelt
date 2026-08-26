@@ -1535,14 +1535,10 @@ impl ConversationRuntime {
         });
     }
 
-    pub(crate) fn finish_exec(&mut self, exit_code: Option<i32>) {
+    pub(crate) fn finish_exec(&mut self, final_output: Option<String>) {
         self.apply_stream_mutation(super::session_document::StreamMutation::FinishExec {
-            exit_code,
+            final_output,
         });
-    }
-
-    pub(crate) fn finalize_exec(&mut self) {
-        self.apply_stream_mutation(super::session_document::StreamMutation::FinalizeExec);
     }
 
     pub(crate) fn begin_turn(&mut self) {
