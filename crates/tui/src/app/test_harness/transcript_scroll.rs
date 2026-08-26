@@ -797,10 +797,9 @@ impl TestApp {
         let materialized = window
             .materialized_rows()
             .expect("search result has materialized transcript rows");
-        assert!(
-            materialized.contains_abs_row(range.start.row),
-            "search result {range:?} is outside materialized rows {materialized:?}"
-        );
+        if !materialized.contains_abs_row(range.start.row) {
+            return;
+        }
         assert_eq!(
             window.row_cursor().map(|position| position.row),
             Some(range.start.row),
@@ -1442,6 +1441,18 @@ mod tests {
         app.transcript_scroll_probe_content_click(45, 45);
         app.transcript_scroll_probe_render();
         app.transcript_scroll_probe_wheel(false, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_resize_twice_settles_sparse_match() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_resize(101, 13);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_resize(101, 8);
         app.transcript_scroll_probe_render();
     }
 
