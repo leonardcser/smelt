@@ -2119,8 +2119,17 @@ mod tests {
             command: "cmd".into(),
             started_at,
             finished_rx: finished_rx(),
-            containment: Containment::ProcessGroup {
-                process_group: None,
+            containment: {
+                #[cfg(windows)]
+                {
+                    Containment::JobObject
+                }
+                #[cfg(not(windows))]
+                {
+                    Containment::ProcessGroup {
+                        process_group: None,
+                    }
+                }
             },
         }
     }
