@@ -1277,9 +1277,9 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
         }
     }
     app.save_session_and_flush();
-    let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
-        app.core_probe().sessions.sessions_dir(),
-        app.session_snapshot().id,
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_id(
+        &app.core_probe().sessions,
+        &app.session_snapshot().id,
         100,
         32,
     )

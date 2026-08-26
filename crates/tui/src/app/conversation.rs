@@ -863,14 +863,9 @@ impl ConversationRuntime {
         transcript: super::transcript::LoadedTranscript,
         live_session: smelt_core::session_runtime::LiveSession,
         store_head: smelt_store::StoreHead,
-        repair_records: bool,
     ) {
-        self.document.install_loaded_store_session(
-            transcript,
-            live_session,
-            store_head,
-            repair_records,
-        );
+        self.document
+            .install_loaded_store_session(transcript, live_session, store_head);
     }
 
     pub(crate) fn install_materialized_transcript(
@@ -2116,7 +2111,7 @@ impl ConversationRuntime {
         persistence
             .delete_branch(
                 target.clone(),
-                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+                std::time::Instant::now() + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE,
             )
             .map_err(|cause| cause.message)?;
         Ok(true)
@@ -2566,9 +2561,10 @@ impl ConversationRuntime {
         Ok(true)
     }
 
-    pub(crate) fn close_persistence(
+    pub(crate) fn close_persistence_until(
         &mut self,
         policy: crate::persist::ClosePolicy,
+        deadline: std::time::Instant,
     ) -> Result<Option<String>, String> {
         let target = self.document.generation();
         if policy == crate::persist::ClosePolicy::RequireDurable {
@@ -2584,11 +2580,7 @@ impl ConversationRuntime {
             return Ok(preparation_failure);
         };
         let epoch = persistence.epoch();
-        let outcome = persistence.close(
-            target,
-            std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
-            policy,
-        );
+        let outcome = persistence.close(target, deadline, policy);
         if let Some(acknowledgement) = outcome.acknowledgement.as_ref() {
             self.apply_persistence_acknowledgement(acknowledgement);
         }
@@ -3011,7 +3003,7 @@ impl ConversationRuntime {
             self.session.checkpoint.as_ref(),
         );
         if applied {
-            self.refresh_transcript_store_address_from_catalog();
+            self.refresh_transcript_store_address(&acknowledgement.receipt);
             if let Some(persistence) = self.persistence.as_ref() {
                 persistence.confirm_acknowledgement(acknowledgement);
             }
@@ -3048,10 +3040,16 @@ impl ConversationRuntime {
         }
     }
 
-    fn refresh_transcript_store_address_from_catalog(&mut self) {
-        self.document.transcript.set_store_address(
-            self.storage
-                .transcript_store_address(&self.sessions, &self.session),
-        );
+    fn refresh_transcript_store_address(&mut self, receipt: &smelt_store::SaveReceipt) {
+        let Some(lineage_id) = receipt.lineage_id.clone() else {
+            return;
+        };
+        self.document.transcript.set_store_address(Some(
+            smelt_core::session::SessionStoreAddress::new(
+                self.sessions.sessions_dir(),
+                self.session.id.clone(),
+                lineage_id,
+            ),
+        ));
     }
 }

@@ -832,9 +832,9 @@ fn wait_for_sparse_reader_metrics(
 }
 
 fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
-    let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
-        app.app.core.sessions.sessions_dir(),
-        app.app.conversation.session().id.clone(),
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_id(
+        &app.app.core.sessions,
+        &app.app.conversation.session().id,
         100,
         32,
     )

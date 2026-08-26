@@ -23,11 +23,37 @@ fn session_revision(_app: &TestApp, id: &str) -> u64 {
     lineage_reader(id).snapshot().unwrap().head.revision.get()
 }
 
+fn save_record_backed_session(app: &mut TestApp) {
+    let transcript = crate::app::history::build_transcript_from_session(
+        &app.app.lua,
+        app.app.conversation.session(),
+    );
+    app.app
+        .conversation
+        .replace_transcript_from_history(transcript);
+    app.save_session_and_flush();
+}
+
 fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) -> String {
     let mut app = TestApp::builder().build_with_test_home_guard(guard);
     app.session_append_history(HistoryItem::user(Content::text("persisted before resume")));
-    app.save_session_and_flush();
+    save_record_backed_session(&mut app);
     app.session_snapshot().id.clone()
+}
+
+fn wait_for_session_load(app: &mut TestApp, id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while app.session_snapshot().id != id {
+        if let Some(event) = app.try_recv_app_event() {
+            app.handle_app_event(event);
+        } else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background session load did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
 }
 
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
@@ -481,7 +507,7 @@ fn record_resave_preserves_semantic_history_links() {
 }
 
 #[test]
-fn history_only_process_status_session_accepts_persisted_follow_up() {
+fn process_status_session_accepts_persisted_follow_up() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -848,7 +874,7 @@ fn sparse_fork_publishes_a_complete_destination() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("fork source")));
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -874,7 +900,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     let source_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("shared root")));
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -909,7 +935,7 @@ fn deleting_source_branch_leaves_active_fork_intact() {
     let source_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("shared fork history")));
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -1329,7 +1355,7 @@ fn store_backed_resume_preserves_context_token_identity() {
             context_tokens: Some(1234),
             ..Default::default()
         });
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
 
@@ -1370,7 +1396,7 @@ fn store_backed_resume_uses_provider_snapshot_for_pre_request_compaction() {
             context_tokens: Some(100),
             ..Default::default()
         });
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
 
@@ -1418,7 +1444,7 @@ fn store_backed_usage_records_canonical_history_coordinate() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("stored prompt")));
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
 
@@ -1813,7 +1839,7 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
         for item in tool_history() {
             app.session_append_history(item);
         }
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
 
@@ -1840,7 +1866,7 @@ fn store_backed_resume_then_continue_preserves_prior_tool_invocations() {
         for item in tool_history() {
             app.session_append_history(item);
         }
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
 
@@ -1866,7 +1892,7 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
         for item in tool_history() {
             app.session_append_history(item);
         }
-        app.save_session_and_flush();
+        save_record_backed_session(&mut app);
         app.session_snapshot().id.clone()
     };
 
@@ -1896,7 +1922,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
     writer.session_append_history(HistoryItem::user(Content::text("owned history")));
-    writer.save_session_and_flush();
+    save_record_backed_session(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
     let before = lineage_reader(&session_id).snapshot().unwrap();
@@ -1946,14 +1972,15 @@ fn loading_writable_session_clears_prior_ownership_conflict_notification() {
     let writable_session_id = saved_one_row_session(&guard);
     let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
     owner.session_append_history(HistoryItem::user(Content::text("owned history")));
-    owner.save_session_and_flush();
+    save_record_backed_session(&mut owner);
     let owned_session_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
 
     reader
-        .set_lua_string_global("__owned_session_id", owned_session_id)
+        .set_lua_string_global("__owned_session_id", owned_session_id.clone())
         .unwrap();
     assert!(reader.run_lua("smelt.session.load(_G.__owned_session_id)"));
+    wait_for_session_load(&mut reader, &owned_session_id);
     assert!(reader
         .overlays_probe()
         .notification()
@@ -1968,6 +1995,7 @@ fn loading_writable_session_clears_prior_ownership_conflict_notification() {
         .set_lua_string_global("__writable_session_id", writable_session_id.clone())
         .unwrap();
     assert!(reader.run_lua("smelt.session.load(_G.__writable_session_id)"));
+    wait_for_session_load(&mut reader, &writable_session_id);
 
     assert_eq!(reader.session_snapshot().id, writable_session_id);
     assert!(!reader.session_is_read_only());
@@ -2027,7 +2055,7 @@ fn session_switch_dismisses_suspended_ownership_conflict_notification() {
     let writable_session_id = saved_one_row_session(&guard);
     let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
     owner.session_append_history(HistoryItem::user(Content::text("owned history")));
-    owner.save_session_and_flush();
+    save_record_backed_session(&mut owner);
     let owned_session_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     reader.load_session_by_id(&owned_session_id);
@@ -2064,11 +2092,11 @@ fn loading_another_owned_session_replaces_warning_with_target_session_scope() {
     let guard = test_home_guard();
     let mut first_owner = TestApp::builder().build_with_test_home_guard(&guard);
     first_owner.session_append_history(HistoryItem::user(Content::text("first owned history")));
-    first_owner.save_session_and_flush();
+    save_record_backed_session(&mut first_owner);
     let first_id = first_owner.session_snapshot().id.clone();
     let mut second_owner = TestApp::builder().build_without_test_home_reset(&guard);
     second_owner.session_append_history(HistoryItem::user(Content::text("second owned history")));
-    second_owner.save_session_and_flush();
+    save_record_backed_session(&mut second_owner);
     let second_id = second_owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
 
@@ -2484,7 +2512,15 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         for idx in 0..4 {
-            app.session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
+            let text = format!("row {idx}");
+            app.commit_request_history_item(
+                HistoryItem::user(Content::text(text.clone())),
+                Some(Block::User {
+                    text,
+                    image_labels: Vec::new(),
+                    command: false,
+                }),
+            );
         }
         app.session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
             kind: "compaction".into(),
@@ -2517,7 +2553,20 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
     assert!(resumed.session_snapshot().checkpoint.is_none());
 
     resumed.session_append_history(HistoryItem::user(Content::text("new after rewind")));
-    resumed.save_session_and_flush();
+    resumed.save_session();
+    let hydration_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while resumed.app.pending_session_save {
+        assert!(
+            std::time::Instant::now() < hydration_deadline,
+            "transcript record hydration did not complete"
+        );
+        resumed.render_silent();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(matches!(
+        resumed.flush_persist(),
+        crate::persist::PersistenceFlushOutcome::Durable { .. }
+    ));
 
     assert!(
         resumed.overlays_probe().notification().is_none(),
@@ -2553,7 +2602,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
     writer.session_append_history(HistoryItem::user(Content::text("writer row")));
-    writer.save_session_and_flush();
+    save_record_backed_session(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
     let before = lineage_reader(&session_id).snapshot().unwrap();

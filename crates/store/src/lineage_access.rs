@@ -261,8 +261,6 @@ impl OwnedLineageWriter {
             ObjectCompression::default(),
         )?;
         self.branch_lease = None;
-        self.publish_catalog_for_commit(command, &receipt)
-            .map_err(crate::session_command::commit_failure_from_store_error)?;
         Ok(receipt)
     }
 
@@ -384,17 +382,6 @@ impl OwnedLineageWriter {
         self.refresh_catalog_branch(&self.branch)
     }
 
-    pub fn publish_catalog_for_commit(
-        &self,
-        command: &SessionCommit,
-        receipt: &SaveReceipt,
-    ) -> Result<()> {
-        let session =
-            CatalogSession::from_commit(command, receipt, Some(self.lineage.as_str().to_string()));
-        self.upsert_catalog_session(&session)?;
-        Ok(())
-    }
-
     fn refresh_catalog_branch(&self, branch: &BranchId) -> Result<()> {
         let snapshot = public_snapshot(
             &self.lineage,
@@ -504,7 +491,6 @@ impl OwnedLineageWriter {
             Some(&source.revision_id),
             created_at,
         )?;
-        self.refresh_catalog_branch(&target)?;
         Ok(SaveReceipt {
             session_id: target.as_str().to_owned(),
             previous: StoreHead::default(),

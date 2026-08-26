@@ -142,7 +142,7 @@ smelt.lifecycle.on_ready(function(ctx)
   if v == "" then
     smelt.cmd.run("resume")
   else
-    smelt.session.load(v)
+    smelt.session.__load_now(v)
   end
 end)
 

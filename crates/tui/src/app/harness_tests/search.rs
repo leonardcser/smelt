@@ -37,6 +37,11 @@ fn sparse_display_only_search_app() -> TestApp {
     let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, &session_id).unwrap();
     let lineage_id = writer.lineage_id().to_string();
     let receipt = writer.commit_session(&commit).unwrap();
+    let store_address = smelt_core::session::SessionStoreAddress::new(
+        sessions_root.clone(),
+        session_id.clone(),
+        writer.lineage_id().to_string(),
+    );
     let projector = writer.spawn_search_projector().unwrap();
     projector.request();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -51,13 +56,8 @@ fn sparse_display_only_search_app() -> TestApp {
     projector.stop();
     writer.release().unwrap();
 
-    let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
-        sessions_root.clone(),
-        session_id.clone(),
-        80,
-        16,
-    )
-    .expect("display-only transcript tail");
+    let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store_address, 80, 16)
+        .expect("display-only transcript tail");
     session.history.clear();
     app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(

@@ -1335,6 +1335,10 @@ impl SessionStorage {
             .as_ref()
             .map_err(String::as_str)
     }
+
+    fn initialized_catalog(&self) -> Option<&crate::session_catalog::SessionCatalog> {
+        self.inner.catalog.get()?.as_ref().ok()
+    }
 }
 
 fn process_storage() -> SessionStorage {
@@ -1442,18 +1446,9 @@ impl SessionStorage {
         let mut writer = smelt_store::SessionWriter::open(&sessions_dir, session_id.as_str())?;
         let expected = writer.store_head()?;
         let command = store_commit_from_session(session, expected, 0)?;
-        let batch = smelt_store::SessionEventBatch::save(
-            expected.revision.get().saturating_add(1),
-            command.clone(),
-            smelt_store::SessionBatchBarrier::Lifecycle,
-        );
-        let receipt = match writer
-            .commit_batch(&batch)
-            .map_err(session_commit_failure_to_store_error)?
-        {
-            smelt_store::SessionEventReceipt::Save(receipt) => receipt,
-            _ => unreachable!("save batch returns a save receipt"),
-        };
+        let receipt = writer
+            .commit_session(&command)
+            .map_err(session_commit_failure_to_store_error)?;
         writer.release()?;
         self.publish_session_catalog_commit(&command, &receipt);
         Ok(receipt)
@@ -1948,25 +1943,30 @@ impl SessionStorage {
         &self,
         id_or_prefix: &str,
     ) -> SessionStoreResult<ResolvedSession> {
-        let id = self.resolve_prefix(id_or_prefix)?;
+        let id = if let Ok(id) = crate::session_id::SessionId::parse(id_or_prefix) {
+            let root = self.sessions_dir();
+            crate::session_store::reject_symlink_in(self.state_root(), &root, "resolve session")?;
+            id
+        } else {
+            self.resolve_prefix(id_or_prefix)?
+        };
         let id_string = id.into_string();
         let catalog_path = self.layout().catalog_path();
-        let catalog = smelt_store::CatalogReader::open_existing(&catalog_path)
-            .map_err(|error| {
-                crate::session_store::store_error("open session catalog", &catalog_path, error)
-            })?
-            .ok_or_else(|| SessionStoreError::CatalogUnavailable {
-                kind: "catalog_unavailable".into(),
-                summary: "session catalog is not initialized".into(),
-            })?;
-        let session = catalog
-            .session(&id_string)
-            .map_err(|error| {
-                crate::session_store::store_error("read session catalog", &catalog_path, error)
-            })?
-            .ok_or_else(|| SessionStoreError::SessionNotFound {
-                id: id_string.clone(),
-            })?;
+        let session = if let Some(catalog) = self.initialized_catalog() {
+            catalog.session(&id_string)
+        } else {
+            match smelt_store::CatalogReader::open_existing(&catalog_path) {
+                Ok(Some(catalog)) => catalog.session(&id_string),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+        .map_err(|error| {
+            crate::session_store::store_error("read session catalog", &catalog_path, error)
+        })?
+        .ok_or_else(|| SessionStoreError::SessionNotFound {
+            id: id_string.clone(),
+        })?;
         if session.availability != smelt_store::CatalogAvailability::Available {
             let kind = session.error_kind.unwrap_or_else(|| "unavailable".into());
             let summary = session
@@ -2344,20 +2344,24 @@ impl SessionStorage {
         let root = self.sessions_dir();
         crate::session_store::reject_symlink_in(self.state_root(), &root, "resolve session")?;
         let catalog_path = self.layout().catalog_path();
-        let Some(catalog) =
-            smelt_store::CatalogReader::open_existing(&catalog_path).map_err(|error| {
-                crate::session_store::store_error("open session catalog", &catalog_path, error)
-            })?
-        else {
-            return Err(SessionStoreError::SessionNotFound {
-                id: prefix.as_str().to_string(),
-            });
-        };
-        let matches = catalog
-            .session_ids_with_prefix(prefix.as_str(), 2)
-            .map_err(|error| {
-                crate::session_store::store_error("resolve session prefix", &catalog_path, error)
-            })?
+        let ids = if let Some(catalog) = self.initialized_catalog() {
+            catalog.session_ids_with_prefix(prefix.as_str(), 2)
+        } else {
+            let Some(catalog) =
+                smelt_store::CatalogReader::open_existing(&catalog_path).map_err(|error| {
+                    crate::session_store::store_error("open session catalog", &catalog_path, error)
+                })?
+            else {
+                return Err(SessionStoreError::SessionNotFound {
+                    id: prefix.as_str().to_string(),
+                });
+            };
+            catalog.session_ids_with_prefix(prefix.as_str(), 2)
+        }
+        .map_err(|error| {
+            crate::session_store::store_error("resolve session prefix", &catalog_path, error)
+        })?;
+        let matches = ids
             .into_iter()
             .map(|id| {
                 crate::session_id::SessionId::parse(&id).expect("catalog session ID is valid")
@@ -2491,6 +2495,12 @@ impl SessionStorage {
         }
     }
 
+    pub fn request_session_catalog_repair(&self, id: &str, minimum_revision: u64) {
+        if let Ok(catalog) = self.catalog() {
+            catalog.request_repair(id, minimum_revision);
+        }
+    }
+
     pub fn wait_for_session_catalog(&self, timeout: std::time::Duration) -> bool {
         self.catalog()
             .is_ok_and(|catalog| catalog.wait_for_queued_work(timeout))
@@ -2504,6 +2514,28 @@ impl SessionStorage {
         if let Ok(catalog) = self.catalog() {
             catalog.publish_commit(command, receipt);
         }
+    }
+
+    pub fn publish_session_catalog_snapshot(
+        &self,
+        session: &Session,
+        receipt: &smelt_store::SaveReceipt,
+    ) -> Result<(), smelt_store::StoreError> {
+        let history_len = usize::try_from(receipt.current.history_len.get()).map_err(|_| {
+            smelt_store::StoreError::Integrity("session history length exceeds usize".into())
+        })?;
+        let identity = store_identity_from_session(session)?;
+        let metadata = store_metadata_from_session(session, history_len)?;
+        let snapshot = smelt_store::CatalogSession::from_snapshot(
+            &identity,
+            &metadata,
+            receipt,
+            receipt.lineage_id.clone(),
+        );
+        if let Ok(catalog) = self.catalog() {
+            catalog.publish_snapshot(snapshot);
+        }
+        Ok(())
     }
 
     fn read_catalog_page(

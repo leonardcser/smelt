@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::types::Value;
 use rusqlite::{named_params, params, params_from_iter, Connection, OpenFlags, OptionalExtension};
@@ -14,6 +14,10 @@ use crate::{Result, StoreError};
 
 pub const CATALOG_SCHEMA_VERSION: i32 = 1;
 pub const MAX_CATALOG_PAGE_SIZE: u32 = 10_000;
+
+const CATALOG_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+const CATALOG_READ_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+const CATALOG_LOCK_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
 const CATALOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -236,7 +240,15 @@ impl CatalogSession {
         receipt: &crate::session_commit::SaveReceipt,
         lineage_id: Option<String>,
     ) -> Self {
-        let metadata = &command.metadata;
+        Self::from_snapshot(&command.identity, &command.metadata, receipt, lineage_id)
+    }
+
+    pub fn from_snapshot(
+        identity: &crate::SessionIdentity,
+        metadata: &crate::SessionMetadata,
+        receipt: &crate::session_commit::SaveReceipt,
+        lineage_id: Option<String>,
+    ) -> Self {
         Self {
             id: receipt.session_id.clone(),
             lineage_id: lineage_id.or_else(|| receipt.lineage_id.clone()),
@@ -248,11 +260,11 @@ impl CatalogSession {
             reasoning_effort: metadata.reasoning_effort.clone(),
             model: metadata.model.clone(),
             fast_mode: metadata.fast_mode,
-            parent_id: command.identity.parent_id.clone(),
+            parent_id: identity.parent_id.clone(),
             context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
             history_len: Some(receipt.current.history_len.get()),
             text_bytes: Some(receipt.history_text_bytes),
-            created_at: command.identity.created_at,
+            created_at: identity.created_at,
             updated_at: metadata.updated_at,
             source_revision: receipt.current.revision.get(),
             availability: CatalogAvailability::Available,
@@ -349,19 +361,21 @@ impl Catalog {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         set_private_file_permissions(path)?;
-        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.busy_timeout(CATALOG_WRITE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.execute_batch(CATALOG_SCHEMA)?;
-        conn.execute(
+        let tx = conn.transaction()?;
+        tx.execute_batch(CATALOG_SCHEMA)?;
+        tx.execute(
             "INSERT OR IGNORE INTO catalog_meta
              (singleton, schema_version, next_scan_id, completed_scan_id, reconciled_at)
              VALUES (1, ?1, 1, 0, NULL)",
             [CATALOG_SCHEMA_VERSION],
         )?;
-        validate_schema(&conn)?;
+        validate_schema(&tx)?;
+        tx.commit()?;
         Ok(Self {
             path: path.to_path_buf(),
             conn,
@@ -582,7 +596,16 @@ impl CatalogReader {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.busy_timeout(CATALOG_READ_BUSY_TIMEOUT)?;
+        let schema_tables = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name IN ('catalog_meta', 'sessions')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if schema_tables != 2 {
+            return Ok(None);
+        }
         validate_schema(&conn)?;
         Ok(Some(Self {
             path: path.to_path_buf(),
@@ -628,8 +651,22 @@ impl CatalogReconcileLock {
             .write(true)
             .open(path)?;
         set_private_file_permissions(path)?;
-        file.lock()?;
-        Ok(Self { file })
+        let deadline = Instant::now() + CATALOG_LOCK_BUSY_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "session catalog reconciliation lock is busy",
+                    )));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
     }
 }
 
@@ -914,6 +951,15 @@ mod tests {
                 .to_ascii_lowercase(),
             "wal"
         );
+    }
+
+    #[test]
+    fn reader_treats_an_uninitialized_catalog_as_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        drop(Connection::open(&path).unwrap());
+
+        assert!(CatalogReader::open_existing(path).unwrap().is_none());
     }
 
     #[test]

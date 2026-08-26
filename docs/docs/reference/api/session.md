@@ -160,7 +160,7 @@ List canonical lineage sessions other than the current one from the read-only de
 fun(id: string): nil
 ```
 
-Switch the UI to canonical lineage session `id`. Replays the bounded persisted tail and resets transient state.
+Request a UI switch to canonical lineage session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.
 
 ## `smelt.session.model_messages`
 

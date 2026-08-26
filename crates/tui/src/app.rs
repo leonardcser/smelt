@@ -27,6 +27,7 @@ pub(crate) mod render_loop;
 pub(crate) mod reveal;
 pub(crate) mod search;
 pub(crate) mod session_document;
+pub(crate) mod session_load;
 pub(crate) mod session_preview;
 pub(crate) mod shell_panel;
 #[cfg(any(test, feature = "harness"))]
@@ -57,7 +58,20 @@ use std::time::{Duration, Instant};
 
 pub(crate) const READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME: usize = 64;
 const READY_QUEUE_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
+const BACKGROUND_WORKER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(50);
 pub(crate) const DOCKED_DIALOG_TRANSCRIPT_ROWS: u16 = 5;
+
+fn join_background_worker(thread: std::thread::JoinHandle<()>) {
+    let deadline = Instant::now() + BACKGROUND_WORKER_SHUTDOWN_DEADLINE;
+    while !thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    if thread.is_finished() {
+        let _ = thread.join();
+    } else {
+        smelt_perf::perf::record_value("app:worker_shutdown:detached", 1);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ContextWindowTarget {
@@ -306,6 +320,7 @@ pub struct TuiApp {
     transcript_hydration_worker:
         Option<crate::app::transcript_hydration::TranscriptHydrationWorker>,
     transcript_detail: crate::app::transcript_detail::TranscriptDetailRuntime,
+    session_load: crate::app::session_load::SessionLoadRuntime,
     session_preview: crate::app::session_preview::SessionPreviewRuntime,
     pending_transcript_search: Option<crate::app::search::PendingTranscriptSearch>,
     frame_scheduler: crate::app::render_loop::FrameScheduler,
@@ -499,6 +514,7 @@ pub enum AppEvent {
     TranscriptHydrationCompleted(
         Box<crate::app::transcript_hydration::TranscriptHydrationWorkerResult>,
     ),
+    SessionLoadCompleted(Box<crate::app::session_load::SessionLoadWorkerResult>),
     SessionPreviewCompleted(crate::app::session_preview::SessionPreviewWorkerResult),
     ShutdownSignal,
 }
@@ -1994,6 +2010,7 @@ impl TuiApp {
             platform,
             transcript_hydration_worker: None,
             transcript_detail: crate::app::transcript_detail::TranscriptDetailRuntime::default(),
+            session_load: crate::app::session_load::SessionLoadRuntime::default(),
             session_preview: crate::app::session_preview::SessionPreviewRuntime::default(),
             pending_transcript_search: None,
             frame_scheduler: crate::app::render_loop::FrameScheduler::default(),
@@ -2867,6 +2884,9 @@ impl TuiApp {
                     }
                 }
             }
+            AppEvent::SessionLoadCompleted(result) => {
+                self.handle_session_load_worker_result(*result)
+            }
             AppEvent::SessionPreviewCompleted(result) => {
                 self.handle_session_preview_worker_result(result)
             }
@@ -3319,21 +3339,21 @@ impl TuiApp {
 
     pub(crate) fn finalize_graceful_shutdown(&mut self) -> Result<(), String> {
         if self.conversation.is_active() {
-            self.finish_turn(crate::app::TurnEnd::Cancelled);
+            self.cancel_agent();
+            self.conversation.clear_active();
         }
         self.core
             .signals
             .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
         self.drain_signals_pending();
         self.stop_shell_jobs();
-        self.save_session_and_flush();
+        let shutdown = self.shutdown_persist().err();
         let unflushed = self.session_document_has_unflushed_work().then(|| {
             format!(
                 "session {} still has unflushed changes",
                 self.conversation.session().id
             )
         });
-        let shutdown = self.shutdown_persist().err();
         match (unflushed, shutdown) {
             (Some(unflushed), Some(shutdown)) => Err(format!("{unflushed}; {shutdown}")),
             (Some(error), None) | (None, Some(error)) => Err(error),
@@ -3855,6 +3875,21 @@ mod tests {
 
     fn active_context_target(app: &TuiApp) -> ContextWindowTarget {
         ContextWindowTarget::from_active(app.core.config.active_model().unwrap())
+    }
+
+    #[test]
+    fn worker_shutdown_does_not_wait_for_a_blocked_thread() {
+        let thread = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        let started = Instant::now();
+        join_background_worker(thread);
+
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "background worker shutdown exceeded its deadline"
+        );
     }
 
     #[test]

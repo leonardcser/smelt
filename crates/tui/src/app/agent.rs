@@ -689,6 +689,7 @@ impl TuiApp {
                 0,
                 self.conversation.persistence_generation().get(),
                 None,
+                None,
             );
         }
         self.submit_prepared_turn_dispatch(dispatch)
@@ -712,6 +713,7 @@ impl TuiApp {
                     acknowledgement.receipt.session.current.revision.get(),
                     acknowledgement.persistence.generation.get(),
                     Some(std::time::Instant::now()),
+                    acknowledgement.receipt.session.lineage_id.clone(),
                 )
             }
             Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
@@ -782,6 +784,7 @@ impl TuiApp {
         submitted_revision: u64,
         required_generation: u64,
         durable_receipt_at: Option<std::time::Instant>,
+        committed_lineage_id: Option<String>,
     ) -> Option<TurnState> {
         let PreparedTurnDispatch {
             turn,
@@ -790,12 +793,13 @@ impl TuiApp {
             mut history,
         } = dispatch;
         let canonical = !self.ephemeral();
-        if canonical && !matches!(turn.kind, smelt_store::TurnKind::Continuation) {
-            if let Some(store_history) = self.store_model_history_source_for_committed_request(
-                &history,
-                turn.submitted_history_idx.get() as usize,
-            ) {
-                history = store_history;
+        if !matches!(turn.kind, smelt_store::TurnKind::Continuation) {
+            if let Some(lineage_id) = committed_lineage_id {
+                history = Self::store_model_history_source_for_committed_request(
+                    &history,
+                    lineage_id,
+                    turn.submitted_history_idx.get() as usize,
+                );
             }
         }
         self.conversation.record_started_turn(
@@ -888,6 +892,14 @@ impl TuiApp {
         self.pending_turn_dispatch.is_some()
     }
 
+    pub(super) fn abandon_pending_turn_submission(&mut self) {
+        let Some(pending) = self.pending_turn_dispatch.take() else {
+            return;
+        };
+        self.conversation
+            .abandon_canonical_operation(pending.command_id);
+    }
+
     pub(super) fn handle_canonical_submit_outcome(
         &mut self,
         outcome: crate::app::conversation::CanonicalTurnSubmitOutcome,
@@ -957,6 +969,7 @@ impl TuiApp {
             acknowledgement.receipt.session.current.revision.get(),
             acknowledgement.persistence.generation.get(),
             Some(std::time::Instant::now()),
+            acknowledgement.receipt.session.lineage_id.clone(),
         ) {
             self.conversation.set_active(Some(turn));
         }
@@ -1373,11 +1386,16 @@ impl TuiApp {
         self.sync_reasoning_effort_applied();
         match turn {
             Some((turn_id, true)) => {
-                self.commit_terminal_turn(
-                    turn_id,
+                if let Err(cause) = self.enqueue_canonical_turn_transition(
+                    smelt_store::TurnId::new(turn_id),
                     smelt_store::TurnState::Cancelled,
                     Some("user_cancelled".into()),
-                );
+                ) {
+                    self.notify_session_save_failure(
+                        &self.conversation.session().id.clone(),
+                        &cause.message,
+                    );
+                }
             }
             Some((_, false)) | None => self.save_session(),
         }
@@ -2235,6 +2253,57 @@ mod tests {
             .expect("stored lineage turn")
     }
 
+    fn save_record_backed_session(
+        app: &crate::app::test_harness::TestApp,
+        session: &smelt_core::session::Session,
+        transcript_text: &str,
+    ) {
+        let receipt = app
+            .app
+            .core
+            .sessions
+            .save_result(session)
+            .expect("save canonical session");
+        let address = smelt_core::session::SessionStoreAddress::new(
+            app.app.core.sessions.sessions_dir(),
+            session.id.clone(),
+            receipt.lineage_id.expect("saved session lineage"),
+        );
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(smelt_core::Block::Text {
+            content: transcript_text.into(),
+        });
+        crate::persist::write_transcript_record_suffix(
+            &address,
+            0,
+            &transcript.history.block_records(),
+        )
+        .expect("save canonical transcript records");
+    }
+
+    fn assert_catalog_converged(app: &crate::app::test_harness::TestApp) {
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+        let canonical_revision = lineage_reader(app)
+            .snapshot()
+            .expect("read canonical session")
+            .head
+            .revision
+            .get();
+        let catalog_session = smelt_store::CatalogReader::open_existing(
+            app.app.core.sessions.layout().catalog_path(),
+        )
+        .expect("open repaired session catalog")
+        .expect("session catalog exists")
+        .session(&app.app.conversation.session().id)
+        .expect("read repaired catalog session")
+        .expect("repaired catalog session exists");
+        assert_eq!(catalog_session.source_revision, canonical_revision);
+    }
+
     #[test]
     fn turn_lifecycle_owns_continuation_and_callback_generations() {
         let mut lifecycle = TurnLifecycle::new(
@@ -2729,6 +2798,622 @@ mod tests {
         assert!(stored
             .finished_at_ms
             .is_some_and(|finished| finished >= stored.created_at_ms));
+    }
+
+    #[test]
+    fn escape_interrupt_is_not_blocked_by_catalog_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_vim(true)
+            .build();
+        app.start_submitted_turn("interrupt me");
+        app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+            delta: "started".into(),
+        });
+        app.press(crossterm::event::KeyCode::Esc);
+        assert!(app.agent_running(), "first Escape is the local Vim action");
+
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
+            .expect("open session catalog");
+        catalog
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold session catalog write lock");
+
+        let started = std::time::Instant::now();
+        app.press(crossterm::event::KeyCode::Esc);
+        let elapsed = started.elapsed();
+        catalog
+            .execute_batch("ROLLBACK")
+            .expect("release catalog lock");
+
+        assert!(!app.agent_running(), "second Escape cancels the agent");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "interrupt waited {elapsed:?} for derived catalog persistence"
+        );
+        assert_catalog_converged(&app);
+    }
+
+    #[test]
+    fn escape_interrupt_is_not_blocked_by_busy_persistence() {
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_vim(true)
+            .build();
+        app.start_submitted_turn("interrupt while persistence is busy");
+        app.press(crossterm::event::KeyCode::Esc);
+        assert!(app.agent_running(), "first Escape is the local Vim action");
+        app.app.flush_persist();
+        let turn_id = app
+            .app
+            .conversation
+            .active()
+            .expect("active canonical turn")
+            .turn_id;
+        let release = app.app.conversation.pause_persistence();
+
+        let started = std::time::Instant::now();
+        app.press(crossterm::event::KeyCode::Esc);
+        let elapsed = started.elapsed();
+        release.send(()).expect("resume persistence actor");
+
+        assert!(!app.agent_running(), "Escape cancels the agent");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "interrupt waited {elapsed:?} for busy session persistence"
+        );
+        let flush = app.app.flush_persist();
+        assert!(
+            matches!(flush, crate::persist::PersistenceFlushOutcome::Durable { .. }),
+            "cancel transition did not become durable: {flush:?}"
+        );
+        assert_eq!(
+            lineage_turn(&lineage_reader(&app), turn_id).state,
+            smelt_store::TurnState::Cancelled
+        );
+    }
+
+    #[test]
+    fn rewind_during_active_turn_is_not_blocked_by_persistence() {
+        let mut app = large_saved_session_app(4);
+        let rewind_history_idx = app.app.rewind_turns().unwrap()[0].history_idx;
+        app.start_submitted_turn("rewind this active turn");
+        app.app.flush_persist();
+        let release = app.app.conversation.pause_persistence();
+
+        let started = std::time::Instant::now();
+        app.app
+            .rewind_to_history_index(Some(rewind_history_idx), false);
+        let elapsed = started.elapsed();
+        release.send(()).expect("resume persistence actor");
+
+        assert!(!app.agent_running(), "rewind cancels the active turn");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "rewind waited {elapsed:?} for canonical turn cancellation"
+        );
+        app.app.flush_persist();
+        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 0);
+    }
+
+    #[test]
+    fn reset_fails_promptly_when_current_session_persistence_is_busy() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("durable baseline"),
+        ));
+        app.app.save_session_and_flush();
+        let original_id = app.app.conversation.session().id.clone();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("preserve this change"),
+        ));
+        let release = app.app.conversation.pause_persistence();
+
+        let started = std::time::Instant::now();
+        app.app.reset_session();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            app.app.conversation.session().id,
+            original_id,
+            "failed reset keeps the current session"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "reset waited {elapsed:?} for busy session persistence"
+        );
+        release.send(()).expect("resume persistence actor");
+        app.app.flush_persist();
+        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 2);
+    }
+
+    #[test]
+    fn session_switch_fails_promptly_when_current_persistence_is_busy() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("switch target"),
+        ));
+        app.app.push_block(smelt_core::Block::Text {
+            content: "switch target transcript".into(),
+        });
+        app.app.save_session_and_flush();
+        let target_id = app.app.conversation.session().id.clone();
+        app.app.reset_session();
+        let current_id = app.app.conversation.session().id.clone();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("current baseline"),
+        ));
+        app.app.save_session_and_flush();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("preserve current change"),
+        ));
+        let release = app.app.conversation.pause_persistence();
+
+        let started = std::time::Instant::now();
+        let loaded = app.app.load_session_by_id(&target_id);
+        let elapsed = started.elapsed();
+
+        assert!(!loaded, "busy persistence prevents the session switch");
+        assert_eq!(
+            app.app.conversation.session().id,
+            current_id,
+            "failed switch keeps the current session"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "session switch waited {elapsed:?} for busy session persistence"
+        );
+        release.send(()).expect("resume persistence actor");
+        app.app.flush_persist();
+        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 2);
+    }
+
+    #[test]
+    fn fork_fails_promptly_when_current_persistence_is_busy() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("durable fork baseline"),
+        ));
+        app.app.save_session_and_flush();
+        let original_id = app.app.conversation.session().id.clone();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("preserve before fork"),
+        ));
+        let session_ids_before =
+            smelt_store::lineage_session_ids(app.app.core.sessions.sessions_dir())
+                .expect("list sessions before fork");
+        let release = app.app.conversation.pause_persistence();
+
+        let started = std::time::Instant::now();
+        app.app.fork_session();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            app.app.conversation.session().id,
+            original_id,
+            "failed fork keeps the current session"
+        );
+        assert_eq!(
+            smelt_store::lineage_session_ids(app.app.core.sessions.sessions_dir())
+                .expect("list sessions after fork"),
+            session_ids_before,
+            "failed fork does not publish a partial destination"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "fork waited {elapsed:?} for busy session persistence"
+        );
+        release.send(()).expect("resume persistence actor");
+        app.app.flush_persist();
+        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 2);
+    }
+
+    #[test]
+    fn delete_fails_promptly_when_lineage_persistence_is_busy() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("fork before delete"),
+        ));
+        app.app.push_block(smelt_core::Block::Text {
+            content: "fork before delete transcript".into(),
+        });
+        app.app.save_session_and_flush();
+        let source_id = app.app.conversation.session().id.clone();
+        app.app.fork_session();
+        assert_ne!(app.app.conversation.session().id, source_id);
+        app.set_lua_string_global("SOURCE_SESSION_ID", source_id.clone())
+            .expect("install source session id");
+        let release = app.app.conversation.pause_persistence();
+
+        let started = std::time::Instant::now();
+        let result = app.run_lua_result("smelt.session.delete(SOURCE_SESSION_ID)");
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "busy lineage deletion fails safely");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "delete waited {elapsed:?} for busy lineage persistence"
+        );
+        release.send(()).expect("resume persistence actor");
+        assert!(
+            smelt_store::LineageSessionReader::try_open_existing(
+                app.app.core.sessions.sessions_dir(),
+                &source_id,
+            )
+            .expect("inspect source branch")
+            .is_some(),
+            "timed-out deletion preserves the source session"
+        );
+    }
+
+    #[test]
+    fn closing_dirty_session_is_not_blocked_by_catalog_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("catalog baseline"),
+        ));
+        app.app.save_session_and_flush();
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+
+        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
+            .expect("open session catalog");
+        catalog
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold session catalog write lock");
+        app.start_submitted_turn("close this active agent");
+        assert!(app.agent_running(), "agent is active before shutdown");
+
+        let started = std::time::Instant::now();
+        let closed = app.app.finalize_graceful_shutdown();
+        let elapsed = started.elapsed();
+        catalog
+            .execute_batch("ROLLBACK")
+            .expect("release catalog lock");
+
+        assert!(closed.is_ok(), "active session closes: {closed:?}");
+        assert!(!app.agent_running(), "shutdown clears the active agent");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "close waited {elapsed:?} for derived catalog persistence"
+        );
+        assert_catalog_converged(&app);
+    }
+
+    #[test]
+    fn session_list_is_not_blocked_by_an_exclusive_catalog_lock() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("catalog baseline"),
+        ));
+        app.app.save_session_and_flush();
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
+            .expect("open session catalog");
+        catalog
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE")
+            .expect("hold exclusive session catalog lock");
+
+        let started = std::time::Instant::now();
+        let listed = app.run_lua_result("smelt.session.list()");
+        let elapsed = started.elapsed();
+        catalog
+            .execute_batch("ROLLBACK")
+            .expect("release catalog lock");
+
+        assert!(
+            listed.is_ok(),
+            "catalog contention degrades the list safely"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "session list waited {elapsed:?} for the derived catalog"
+        );
+    }
+
+    #[test]
+    fn session_load_is_not_blocked_by_an_exclusive_catalog_lock() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut target =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        target
+            .history
+            .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "catalog-locked resume target",
+            )));
+        let target_id = target.id.clone();
+        app.app
+            .core
+            .sessions
+            .save_result(&target)
+            .expect("save resume target");
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+        let current_id = app.app.conversation.session().id.clone();
+        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
+            .expect("open session catalog");
+        catalog
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE")
+            .expect("hold exclusive session catalog lock");
+        app.set_lua_string_global("TARGET_SESSION_ID", target_id)
+            .expect("install target session id");
+
+        let started = std::time::Instant::now();
+        app.run_lua_result("smelt.session.load(TARGET_SESSION_ID)")
+            .expect("request session load through the user-facing API");
+        let dispatch_elapsed = started.elapsed();
+        assert!(
+            dispatch_elapsed < std::time::Duration::from_millis(100),
+            "session load dispatch blocked the UI for {dispatch_elapsed:?}"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if let Some(event) = app.try_recv_app_event() {
+                let completed = matches!(&event, crate::app::AppEvent::SessionLoadCompleted(_));
+                app.handle_app_event(event);
+                if completed {
+                    break;
+                }
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "catalog-locked session load did not fail within its read deadline"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        catalog
+            .execute_batch("ROLLBACK")
+            .expect("release session catalog lock");
+
+        assert_eq!(
+            app.app.conversation.session().id,
+            current_id,
+            "failed session load preserves the current session"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "session load waited {:?} for the derived catalog",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn session_load_rejects_missing_transcript_records_off_thread() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut target =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        target
+            .history
+            .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "recordless resume target",
+            )));
+        let target_id = target.id.clone();
+        app.app
+            .core
+            .sessions
+            .save_result(&target)
+            .expect("save recordless resume target");
+        let current_id = app.app.conversation.session().id.clone();
+        app.app
+            .session_load
+            .set_delay(std::time::Duration::from_millis(500));
+        app.set_lua_string_global("TARGET_SESSION_ID", target_id)
+            .expect("install target session id");
+
+        let started = std::time::Instant::now();
+        app.run_lua_result("smelt.session.load(TARGET_SESSION_ID)")
+            .expect("request session load through the user-facing API");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "session load blocked the UI for {elapsed:?}"
+        );
+        assert_eq!(app.app.conversation.session().id, current_id);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(event) = app.try_recv_app_event() {
+                let completed = matches!(&event, crate::app::AppEvent::SessionLoadCompleted(_));
+                app.handle_app_event(event);
+                if completed {
+                    break;
+                }
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "background session load did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        assert_eq!(app.app.conversation.session().id, current_id);
+    }
+
+    #[test]
+    fn latest_session_load_request_wins_without_head_of_line_blocking() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut first =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        first
+            .history
+            .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "stale resume target",
+            )));
+        let first_id = first.id.clone();
+        save_record_backed_session(&app, &first, "stale resume transcript");
+        let mut latest =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        latest
+            .history
+            .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "latest resume target",
+            )));
+        let latest_id = latest.id.clone();
+        save_record_backed_session(&app, &latest, "latest resume transcript");
+        let current_id = app.app.conversation.session().id.clone();
+        app.app
+            .session_load
+            .set_delay(std::time::Duration::from_millis(500));
+        app.set_lua_string_global("FIRST_SESSION_ID", first_id.clone())
+            .expect("install first session id");
+        app.set_lua_string_global("LATEST_SESSION_ID", latest_id.clone())
+            .expect("install latest session id");
+
+        app.run_lua_result("smelt.session.load(FIRST_SESSION_ID)")
+            .expect("request first session load");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        app.app.session_load.set_delay(std::time::Duration::ZERO);
+        let latest_requested_at = std::time::Instant::now();
+        app.run_lua_result("smelt.session.load(LATEST_SESSION_ID)")
+            .expect("request latest session load");
+        assert_eq!(app.app.conversation.session().id, current_id);
+
+        let deadline = latest_requested_at + std::time::Duration::from_millis(250);
+        while app.app.conversation.session().id != latest_id {
+            if let Some(event) = app.try_recv_app_event() {
+                app.handle_app_event(event);
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "latest background session load did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        assert_ne!(app.app.conversation.session().id, first_id);
+        assert_eq!(app.app.session_history_len(), 1);
+    }
+
+    #[test]
+    fn forking_session_is_not_blocked_by_catalog_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("catalog baseline"),
+        ));
+        app.app.push_block(smelt_core::Block::Text {
+            content: "catalog baseline transcript".into(),
+        });
+        app.app.save_session_and_flush();
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+        let original_id = app.app.conversation.session().id.clone();
+
+        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
+            .expect("open session catalog");
+        catalog
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold session catalog write lock");
+
+        let started = std::time::Instant::now();
+        app.app.fork_session();
+        let elapsed = started.elapsed();
+        catalog
+            .execute_batch("ROLLBACK")
+            .expect("release catalog lock");
+
+        let fork_id = app.app.conversation.session().id.clone();
+        assert_ne!(fork_id, original_id, "fork becomes the active session");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "fork waited {elapsed:?} for derived catalog persistence"
+        );
+        assert!(app
+            .app
+            .core
+            .sessions
+            .resolve_session_for_read_result(&fork_id)
+            .is_ok());
+        assert_catalog_converged(&app);
+    }
+
+    #[test]
+    fn canonical_submit_fails_promptly_when_catalog_marker_is_locked() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let catalog_lock = smelt_store::CatalogReconcileLock::acquire(
+            smelt_store::catalog_reconcile_lock_path(app.app.core.sessions.sessions_dir()),
+        )
+        .expect("hold catalog marker lock");
+
+        let started = std::time::Instant::now();
+        let turn = app.app.begin_agent_turn(
+            "locked catalog marker",
+            Content::text("locked catalog marker"),
+        );
+        let elapsed = started.elapsed();
+        drop(catalog_lock);
+
+        assert!(
+            turn.is_none(),
+            "canonical submission fails without dispatch"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "canonical submit waited {elapsed:?} for derived catalog marker locking"
+        );
+    }
+
+    #[test]
+    fn canonical_submit_is_not_blocked_by_full_catalog_reconciliation() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("catalog baseline"),
+        ));
+        app.app.save_session_and_flush();
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+
+        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
+            .expect("open session catalog");
+        catalog
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold session catalog write lock");
+        app.app
+            .core
+            .sessions
+            .request_session_catalog_reconciliation();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let started = std::time::Instant::now();
+        app.start_submitted_turn("commit during reconciliation");
+        let elapsed = started.elapsed();
+        catalog
+            .execute_batch("ROLLBACK")
+            .expect("release catalog lock");
+
+        assert!(app.agent_running(), "canonical turn submission completes");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "canonical submit waited {elapsed:?} for full catalog reconciliation"
+        );
+        assert!(app
+            .app
+            .core
+            .sessions
+            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
+        app.app.discard_turn(crate::app::TurnEnd::Cancelled);
+        assert!(!app.agent_running());
     }
 
     #[test]

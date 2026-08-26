@@ -1646,7 +1646,11 @@ impl SessionLuaHost<'_> {
         self.app.retry_blocked_persistence()
     }
 
-    pub(crate) fn load_session_by_id(&mut self, id: &str) {
+    pub(crate) fn request_session_load(&mut self, id: &str) {
+        self.app.request_session_load(id);
+    }
+
+    pub(crate) fn load_session_by_id_now(&mut self, id: &str) {
         self.app.load_session_by_id(id);
     }
 

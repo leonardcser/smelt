@@ -531,12 +531,36 @@ end)
     let sessions_root = state_home.join("smelt/sessions");
     let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, session_id)
         .expect("create lineage fixture");
+    let mut command = smelt_core::session::initial_store_commit_from_session(&session)
+        .expect("build lineage fixture");
+    let mut transcript = smelt_core::content::transcript::Transcript::new();
+    transcript.push(smelt_core::Block::Text {
+        content: transcript_marker.into(),
+    });
+    let records = transcript
+        .history
+        .block_records()
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                index,
+                index as u64,
+                &record,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("build transcript fixture");
+    command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+        start: smelt_store::TranscriptRecordIndex::ZERO,
+        records,
+    });
     writer
-        .commit_session(
-            &smelt_core::session::initial_store_commit_from_session(&session)
-                .expect("build lineage fixture"),
-        )
+        .commit_session(&command)
         .expect("commit lineage fixture");
+    writer
+        .refresh_catalog()
+        .expect("publish lineage fixture catalog row");
     writer.release().expect("release lineage fixture");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));

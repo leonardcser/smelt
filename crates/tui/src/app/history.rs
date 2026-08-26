@@ -6,7 +6,6 @@ use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::time::Duration;
 
 const REWIND_HISTORY_SCAN_CHUNK_ITEMS: usize = 256;
@@ -161,23 +160,18 @@ fn live_session_for_test_with_address(
     )
 }
 
-/// Every TUI full-history load must use one of these reasons. Healthy resume,
-/// render, save, Lua lightweight APIs, rewind, and fork paths stay store-backed.
-/// Read-only fallback is reserved for stores without a usable record projection.
+/// Full-history materialization is reserved for explicit test assertions. Resume, render, save,
+/// Lua lightweight APIs, rewind, and fork paths stay store-backed.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FullSessionMaterializationReason {
-    ReadOnlyTranscriptFallback,
-    #[cfg(test)]
     TestSavedSessionAssertion,
 }
 
+#[cfg(test)]
 impl FullSessionMaterializationReason {
     fn counter(self) -> &'static str {
         match self {
-            FullSessionMaterializationReason::ReadOnlyTranscriptFallback => {
-                "session:transcript:read_only_full_fallback"
-            }
-            #[cfg(test)]
             FullSessionMaterializationReason::TestSavedSessionAssertion => {
                 "test:session:load_full_assertion"
             }
@@ -191,37 +185,9 @@ pub(crate) fn materialize_full_session(
     id: &str,
     reason: FullSessionMaterializationReason,
 ) -> Option<session::Session> {
-    materialize_full_session_result(sessions, id, reason)
-        .ok()
-        .flatten()
-}
-
-pub(crate) fn materialize_full_session_result(
-    sessions: &session::SessionStorage,
-    id: &str,
-    reason: FullSessionMaterializationReason,
-) -> session::SessionStoreResult<Option<session::Session>> {
     smelt_perf::perf::record_value("session:full_materialized", 1);
     smelt_perf::perf::record_value(reason.counter(), 1);
-    sessions.load_full_result(id)
-}
-
-pub(crate) fn materialize_full_transcript_read_only_result(
-    sessions: &session::SessionStorage,
-    lua: &smelt_core::lua::LuaRuntime,
-    id: &str,
-) -> session::SessionStoreResult<Option<crate::app::transcript::LoadedTranscript>> {
-    let Some(session) = materialize_full_session_result(
-        sessions,
-        id,
-        FullSessionMaterializationReason::ReadOnlyTranscriptFallback,
-    )?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(crate::app::transcript::LoadedTranscript::full(
-        build_transcript_from_session(lua, &session),
-    )))
+    sessions.load_full_result(id).ok().flatten()
 }
 
 fn checkpoint_transcript_markers(
@@ -344,15 +310,9 @@ pub(crate) fn load_transcript_tail_from_sqlite(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    load_transcript_tail_from_sqlite_store(
-        sessions.sessions_dir(),
-        session.id.clone(),
-        width,
-        viewport_rows,
-    )
+    load_transcript_tail_from_sqlite_id(sessions, &session.id, width, viewport_rows)
 }
 
-#[cfg(test)]
 pub(crate) fn load_transcript_tail_from_sqlite_id(
     sessions: &session::SessionStorage,
     id: &str,
@@ -360,29 +320,12 @@ pub(crate) fn load_transcript_tail_from_sqlite_id(
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
     let resolved = sessions.resolve_session_for_read(id)?;
-    load_transcript_tail_from_sqlite_store(
-        resolved.sessions_root,
-        resolved.id,
-        width,
-        viewport_rows,
-    )
-}
-
-pub(crate) fn load_transcript_tail_from_sqlite_store(
-    sessions_root: PathBuf,
-    session_id: String,
-    width: u16,
-    viewport_rows: u16,
-) -> Option<crate::app::transcript::LoadedTranscript> {
-    let catalog_path =
-        smelt_store::SessionStoreLayout::from_sessions_root(&sessions_root).catalog_path();
-    let lineage_id = smelt_store::CatalogReader::open_existing(catalog_path)
-        .ok()
-        .flatten()
-        .and_then(|catalog| catalog.session(&session_id).ok().flatten())
-        .and_then(|session| session.lineage_id)?;
     crate::app::transcript::LoadedTranscript::tail_from_sqlite(
-        crate::app::transcript::TranscriptStoreAddress::new(sessions_root, session_id, lineage_id),
+        crate::app::transcript::TranscriptStoreAddress::new(
+            resolved.sessions_root,
+            resolved.id,
+            resolved.lineage_id,
+        ),
         width,
         viewport_rows,
     )
@@ -1454,6 +1397,7 @@ impl TuiApp {
     }
 
     fn cancel_session_bound_work(&mut self) {
+        self.cancel_pending_session_load();
         self.cancel_live_search(false);
         if self.conversation.is_active() {
             self.cancel_agent();
@@ -1464,14 +1408,18 @@ impl TuiApp {
         self.lua.cancel_tasks();
     }
 
-    fn close_current_session_for_replacement(
-        &mut self,
-        policy: crate::persist::ClosePolicy,
-    ) -> bool {
-        if !self.close_session_persistence(policy) {
+    fn begin_session_replacement(&mut self, policy: crate::persist::ClosePolicy) -> bool {
+        self.cancel_session_bound_work();
+        if policy == crate::persist::ClosePolicy::RequireDurable {
+            self.save_session();
+        }
+        let deadline = std::time::Instant::now() + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE;
+        if !self.close_session_persistence_until(policy, deadline) {
             return false;
         }
+        self.abandon_pending_turn_submission();
         self.dismiss_notification_for_session_change();
+        self.stop_shell_jobs();
         true
     }
 
@@ -1480,11 +1428,23 @@ impl TuiApp {
             self.notify_error("nothing to fork".into());
             return;
         }
-        self.cancel_session_bound_work();
-        let preserve_unsaved =
-            self.session_is_read_only() && self.session_document_has_unflushed_work();
+        let source_is_read_only = self.session_is_read_only();
+        let close_policy = if source_is_read_only {
+            crate::persist::ClosePolicy::AllowUnsaved
+        } else {
+            crate::persist::ClosePolicy::RequireDurable
+        };
+        if !self.begin_session_replacement(close_policy) {
+            return;
+        }
+
+        let preserve_unsaved = source_is_read_only && self.session_document_has_unflushed_work();
+        if !preserve_unsaved {
+            self.conversation.refresh_live_session_header();
+        }
+
         let acknowledged_head = self.conversation.acknowledged_head();
-        let preserved = if preserve_unsaved {
+        let prepared_fork = if preserve_unsaved {
             let mut forked = self
                 .conversation
                 .session()
@@ -1510,42 +1470,22 @@ impl TuiApp {
         } else {
             None
         };
-
-        if !preserve_unsaved {
-            self.save_session_and_flush();
-        }
-        let close_policy = if preserve_unsaved {
-            crate::persist::ClosePolicy::AllowUnsaved
-        } else {
-            crate::persist::ClosePolicy::RequireDurable
-        };
-        if !self.close_session_persistence(close_policy) {
-            return;
-        }
-        self.stop_shell_jobs();
-
-        if !preserve_unsaved {
-            self.conversation.refresh_live_session_header();
-        }
-
         let original_id = self.conversation.session().id.clone();
-        let (fork_target, preserved_intent) = preserved.map_or_else(
+        let (forked, preserved_intent) = prepared_fork.map_or_else(
             || {
                 (
-                    self.conversation.session().fork_target(self.core.env.pid()),
+                    self.conversation
+                        .session()
+                        .fork_store_backed(self.core.env.pid()),
                     None,
                 )
             },
-            |(forked, intent)| {
-                (
-                    smelt_core::session::SessionForkTarget {
-                        id: forked.id,
-                        created_at_ms: forked.created_at_ms,
-                    },
-                    Some(intent),
-                )
-            },
+            |(forked, intent)| (forked, Some(intent)),
         );
+        let fork_target = smelt_core::session::SessionForkTarget {
+            id: forked.id.clone(),
+            created_at_ms: forked.created_at_ms,
+        };
         let fork_root = self.conversation.sessions().sessions_dir();
         let resolved_source = match self
             .conversation
@@ -1597,7 +1537,7 @@ impl TuiApp {
                 return;
             }
         };
-        if let Some(intent) = preserved_intent {
+        let published = if let Some(intent) = preserved_intent {
             if let Err(err) = source.switch_branch(&fork_target.id) {
                 self.notify_session_error_sticky(format!(
                     "failed to select fork destination: {err}"
@@ -1613,25 +1553,37 @@ impl TuiApp {
                     return;
                 }
             };
-            if let Err(err) = source.commit_session(&command) {
+            match source.commit_session(&command) {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    self.notify_session_error_sticky(format!(
+                        "failed to preserve unsaved fork state: {err:?}"
+                    ));
+                    return;
+                }
+            }
+        } else {
+            if let Err(err) = source.switch_branch(&fork_target.id) {
                 self.notify_session_error_sticky(format!(
-                    "failed to preserve unsaved fork state: {err:?}"
+                    "failed to select fork destination: {err}"
                 ));
                 return;
             }
-        } else if let Err(err) = source.switch_branch(&fork_target.id) {
-            self.notify_session_error_sticky(format!("failed to select fork destination: {err}"));
-            return;
-        }
-        if let Err(err) = source.refresh_catalog() {
-            self.notify_session_error_sticky(format!("failed to publish fork catalog row: {err}"));
-            return;
-        }
+            imported
+        };
         if let Err(err) = source.release() {
             self.notify_session_error_sticky(format!("failed to release lineage writer: {err}"));
             return;
         }
-        if self.load_current_session_by_id(&fork_target.id) {
+        if let Err(err) = self
+            .conversation
+            .sessions()
+            .publish_session_catalog_snapshot(&forked, &published)
+        {
+            self.notify_session_error_sticky(format!("failed to publish fork session: {err}"));
+            return;
+        }
+        if self.load_session_by_id(&fork_target.id) {
             self.publish_history_delta(HistoryDeltaKind::Forked);
             self.notify(format!("forked from {original_id}"));
         }
@@ -1645,10 +1597,7 @@ impl TuiApp {
         if !self.conversation.is_active() {
             self.core.engine.send(UiCommand::Cancel);
         }
-        self.cancel_session_bound_work();
-        self.save_session_and_flush();
-        if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
-        {
+        if !self.begin_session_replacement(crate::persist::ClosePolicy::RequireDurable) {
             return;
         }
         self.clear_session_scoped_permissions_for_session_boundary();
@@ -1663,7 +1612,6 @@ impl TuiApp {
         self.app_focus = crate::app::AppFocus::Prompt;
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
-        self.stop_shell_jobs();
         let old_id = self
             .conversation
             .reset(self.core.env.pid(), self.core.env.cwd());
@@ -1772,11 +1720,8 @@ impl TuiApp {
         } = document;
         // Loading a session is a hard boundary for engine and Lua work tied to
         // the previous session.
-        self.cancel_session_bound_work();
         let old_id = self.conversation.session().id.clone();
-        self.save_session_and_flush();
-        if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
-        {
+        if !self.begin_session_replacement(crate::persist::ClosePolicy::RequireDurable) {
             return;
         }
         self.conversation.clear_live_session();
@@ -1828,7 +1773,6 @@ impl TuiApp {
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
-        self.stop_shell_jobs();
         self.conversation.clear_stream_parser();
         self.sync_session_snapshot();
         self.core
@@ -1853,13 +1797,9 @@ impl TuiApp {
             transcript,
             live_session,
             store_head,
-            repair_records,
         } = document;
-        self.cancel_session_bound_work();
         let old_id = self.conversation.session().id.clone();
-        self.save_session_and_flush();
-        if !self.close_current_session_for_replacement(crate::persist::ClosePolicy::RequireDurable)
-        {
+        if !self.begin_session_replacement(crate::persist::ClosePolicy::RequireDurable) {
             return false;
         }
 
@@ -1906,14 +1846,9 @@ impl TuiApp {
         self.prompt.clear_queue();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt.clear_for_session_change(&mut pctx);
-        self.stop_shell_jobs();
         self.clear_transcript();
-        self.conversation.install_loaded_store_session(
-            transcript,
-            live_session,
-            store_head,
-            repair_records,
-        );
+        self.conversation
+            .install_loaded_store_session(transcript, live_session, store_head);
         self.claim_writer_access_for_current_session();
         self.publish_shared_session_state();
         self.core
@@ -2032,10 +1967,10 @@ impl TuiApp {
     }
 
     pub(crate) fn store_model_history_source_for_committed_request(
-        &self,
         source: &protocol::ModelHistorySource,
+        lineage_id: String,
         end_index: usize,
-    ) -> Option<protocol::ModelHistorySource> {
+    ) -> protocol::ModelHistorySource {
         let coordinates = source.coordinates();
         let prefix = match source {
             protocol::ModelHistorySource::Items { items, .. } => items
@@ -2045,17 +1980,12 @@ impl TuiApp {
                 .collect(),
             protocol::ModelHistorySource::Store { prefix, .. } => prefix.clone(),
         };
-        let resolved = self
-            .conversation
-            .sessions()
-            .resolve_session_for_read_result(&self.conversation.session().id)
-            .ok()?;
-        Some(protocol::ModelHistorySource::store(
+        protocol::ModelHistorySource::store(
             prefix,
-            resolved.lineage_id,
+            lineage_id,
             coordinates.canonical_start().get(),
             end_index,
-        ))
+        )
     }
 
     fn materialize_model_history_source(
@@ -2288,9 +2218,13 @@ impl TuiApp {
         outcome
     }
 
-    fn close_session_persistence(&mut self, policy: crate::persist::ClosePolicy) -> bool {
+    fn close_session_persistence_until(
+        &mut self,
+        policy: crate::persist::ClosePolicy,
+        deadline: std::time::Instant,
+    ) -> bool {
         let session_id = self.conversation.session().id.clone();
-        match self.conversation.close_persistence(policy) {
+        match self.conversation.close_persistence_until(policy, deadline) {
             Ok(Some(warning)) => {
                 self.notify_warn(warning);
                 true
@@ -2304,8 +2238,11 @@ impl TuiApp {
     }
 
     pub(crate) fn shutdown_persist(&mut self) -> Result<(), String> {
-        self.save_session_and_flush();
-        if self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+        self.save_session();
+        let deadline = std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE;
+        if self
+            .close_session_persistence_until(crate::persist::ClosePolicy::RequireDurable, deadline)
+        {
             Ok(())
         } else {
             Err("session persistence did not close at the current generation".into())
@@ -2984,56 +2921,6 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn recordless_store_resume_falls_back_without_repairing() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut saved = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        saved.first_user_message = Some("old user 0".into());
-        saved.history = (0usize..256)
-            .map(|index| {
-                if index.is_multiple_of(2) {
-                    user(&format!("old user {index}"))
-                } else {
-                    assistant(&format!("old assistant {index}"))
-                }
-            })
-            .collect();
-        let id = saved.id.clone();
-        app.app
-            .core
-            .sessions
-            .save_result(&saved)
-            .expect("save recordless canonical fixture");
-
-        smelt_perf::perf::clear();
-        smelt_perf::perf::set_enabled(true);
-        app.app.load_session_by_id(&id);
-        smelt_perf::perf::set_enabled(false);
-
-        assert_eq!(app.app.session_history_len(), 256);
-        assert!(app.app.conversation.has_live_session());
-        assert!(app.app.conversation.session().history.is_empty());
-        assert!(app.app.transcript_total_rows() > 0);
-        assert_eq!(
-            perf_value_max("session:transcript:read_only_full_fallback"),
-            1
-        );
-        assert_eq!(
-            lineage_reader(&app, &id).snapshot().unwrap().transcript_len,
-            0
-        );
-
-        app.app
-            .session_append_history(user("repair records on owned save"));
-        app.app.save_session();
-        app.app.flush_persist();
-
-        assert_eq!(
-            lineage_reader(&app, &id).snapshot().unwrap().transcript_len,
-            256
-        );
-    }
-
-    #[test]
     fn display_only_request_append_preserves_persisted_history_prefix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
@@ -3252,8 +3139,10 @@ mod checkpoint_tests {
         assert_eq!(snapshot.head.history_len.get(), 0);
         assert_eq!(snapshot.head.transcript_record_count.get(), 0);
 
-        assert!(app.app.load_session_by_id(&id));
-        assert!(app.app.rewind_turns().unwrap().is_empty());
+        assert!(
+            !app.app.load_session_by_id(&id),
+            "recordless sessions cannot be resumed"
+        );
     }
 
     #[test]
@@ -3521,7 +3410,7 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn normal_preview_and_open_avoid_compat_full_load_fallbacks() {
+    fn normal_preview_and_open_use_only_bounded_store_reads() {
         let mut app = large_saved_session_app(256);
         let id = app.app.conversation.session().id.clone();
 
@@ -3558,70 +3447,6 @@ mod checkpoint_tests {
         smelt_perf::perf::set_enabled(false);
 
         assert_no_full_store_reads();
-    }
-
-    #[test]
-    fn history_only_session_preview_and_open_fall_back_to_full_rebuild() {
-        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-
-        let mut saved = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        saved.id = id.into();
-        saved.first_user_message = Some("history only user 0".into());
-        saved.history = vec![
-            user("history only user 0"),
-            assistant("history only assistant 1"),
-            user("history only user 2"),
-        ];
-        app.app
-            .core
-            .sessions
-            .save_result(&saved)
-            .expect("save history-only session fixture");
-
-        app.run_lua_result(
-            r#"
-                    history_preview_buf = smelt.buf.new({})
-                    smelt.session.render_preview_into(
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                        { buf = history_preview_buf, width = 80, height = 12 }
-                    )
-                    "#,
-        )
-        .expect("request history-only preview");
-        app.render_silent();
-        app.run_lua_result(
-            r#"
-                    local out = smelt.session.render_preview_into(
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                        { buf = history_preview_buf, width = 80, height = 12 }
-                    )
-                    assert(out ~= nil, "preview returned nil")
-                    assert(out.total_rows > 0, "preview was empty")
-                    "#,
-        )
-        .expect("render history-only preview");
-
-        app.app.load_session_by_id(id);
-        let total_rows = app.app.transcript_total_rows();
-        assert!(total_rows > 0, "opened transcript was empty");
-        let rows = app
-            .app
-            .transcript_visible_rows(0, total_rows.min(80))
-            .join("\n");
-        assert!(
-            rows.contains("history only user 0") || rows.contains("history only assistant 1"),
-            "opened transcript did not render saved history: {rows:?}"
-        );
-
-        app.app
-            .shutdown_persist()
-            .expect("release history-only fixture");
-        app.app
-            .core
-            .sessions
-            .delete(id)
-            .expect("delete history-only fixture");
     }
 
     #[test]
@@ -4727,7 +4552,6 @@ mod checkpoint_tests {
             .expect("far sparse block");
         app.app.save_session_and_flush();
 
-        let sessions_root = app.app.core.sessions.sessions_dir();
         let session_id = app.app.conversation.session().id.clone();
         let expected_record_prefix = lineage_transcript(&lineage_reader(&app, &session_id))
             .into_iter()
@@ -4735,7 +4559,7 @@ mod checkpoint_tests {
             .collect::<Vec<_>>();
         assert_eq!(expected_record_prefix.len(), TARGET_HISTORY_INDEX);
         let loaded =
-            load_transcript_tail_from_sqlite_store(sessions_root, session_id.clone(), 100, 32)
+            load_transcript_tail_from_sqlite_id(&app.app.core.sessions, &session_id, 100, 32)
                 .expect("load sparse transcript");
         app.app.clear_transcript();
         app.app

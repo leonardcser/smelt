@@ -346,6 +346,27 @@ impl SessionWriter {
         self.inner.append_request_attempt(entry, payload_mode)
     }
 
+    pub fn commit_session(
+        &mut self,
+        command: &SessionCommit,
+    ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+        self.inner.commit_session(command)
+    }
+
+    pub fn submit_turn(
+        &mut self,
+        command: &SubmitTurn,
+    ) -> std::result::Result<SubmitTurnReceipt, SessionCommitFailure> {
+        self.inner.submit_turn(command)
+    }
+
+    pub fn transition_turn(
+        &mut self,
+        command: &TurnTransition,
+    ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
+        self.inner.transition_turn(command)
+    }
+
     pub fn recover_submit_turn(
         &self,
         command: &SubmitTurn,
@@ -368,8 +389,7 @@ impl SessionWriter {
             .load_complete()
             .map_err(crate::session_command::commit_failure_from_store_error)?;
         for batch in &batches {
-            let receipt = self.apply_batch(batch)?;
-            self.publish_catalog(batch, &receipt)?;
+            self.apply_batch(batch)?;
         }
         if !batches.is_empty() || ignored_tail {
             self.journal
@@ -386,12 +406,9 @@ impl SessionWriter {
         &mut self,
         batch: &SessionEventBatch,
     ) -> std::result::Result<SessionEventReceipt, SessionCommitFailure> {
-        let mut receipts = self.commit_batches(std::slice::from_ref(batch))?;
-        receipts.pop().ok_or_else(|| {
-            crate::session_command::commit_failure_from_store_error(StoreError::Integrity(
-                "session event batch produced no receipt".into(),
-            ))
-        })
+        // A single event is already atomic in the canonical lineage transaction. The journal is
+        // only needed to recover a group that spans multiple canonical transactions.
+        self.apply_batch(batch)
     }
 
     pub fn commit_batches(
@@ -403,9 +420,7 @@ impl SessionWriter {
             .map_err(crate::session_command::commit_failure_from_store_error)?;
         let mut receipts = Vec::with_capacity(batches.len());
         for batch in batches {
-            let receipt = self.apply_batch(batch)?;
-            self.publish_catalog(batch, &receipt)?;
-            receipts.push(receipt);
+            receipts.push(self.apply_batch(batch)?);
         }
         self.journal
             .clear()
@@ -427,37 +442,6 @@ impl SessionWriter {
             SessionEventCommand::TurnTransition { command } => Ok(
                 SessionEventReceipt::TurnTransition(self.inner.transition_turn(command)?),
             ),
-        }
-    }
-
-    pub fn refresh_catalog(&self) -> Result<()> {
-        self.inner.refresh_catalog()
-    }
-
-    fn publish_catalog(
-        &self,
-        batch: &SessionEventBatch,
-        receipt: &SessionEventReceipt,
-    ) -> std::result::Result<(), SessionCommitFailure> {
-        match (&batch.command, receipt) {
-            (SessionEventCommand::Save { .. }, SessionEventReceipt::Save(_)) => Ok(()),
-            (
-                SessionEventCommand::SubmitTurn { command },
-                SessionEventReceipt::SubmitTurn(receipt),
-            ) => self
-                .inner
-                .publish_catalog_for_commit(&command.session, &receipt.session)
-                .map_err(crate::session_command::commit_failure_from_store_error),
-            (
-                SessionEventCommand::TurnTransition { command },
-                SessionEventReceipt::TurnTransition(receipt),
-            ) => self
-                .inner
-                .publish_catalog_for_commit(&command.session, &receipt.session)
-                .map_err(crate::session_command::commit_failure_from_store_error),
-            _ => Err(crate::session_command::commit_failure_from_store_error(
-                StoreError::Integrity("session event receipt did not match its batch".into()),
-            )),
         }
     }
 }

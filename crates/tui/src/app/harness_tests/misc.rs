@@ -1239,15 +1239,18 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
     };
 
     let sessions_root = smelt_core::session::sessions_dir();
-    let preview = crate::app::history::load_transcript_tail_from_sqlite_store(
-        sessions_root.clone(),
-        session_id.clone(),
+    let lineage = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id)
+        .expect("open canonical preview fixture");
+    let preview = crate::app::transcript::LoadedTranscript::tail_from_sqlite(
+        smelt_core::session::SessionStoreAddress::new(
+            sessions_root.clone(),
+            session_id.clone(),
+            lineage.lineage_id().to_string(),
+        ),
         59,
         22,
     )
     .expect("load compact preview before corruption");
-    let lineage = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id)
-        .expect("open canonical preview fixture");
     let db = rusqlite::Connection::open(lineage.database_path())
         .expect("open canonical preview fixture database");
     db.execute(

@@ -387,7 +387,7 @@ impl Drop for TranscriptHydrationWorker {
         self.shared.changed.notify_one();
         drop(state);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            super::join_background_worker(thread);
         }
     }
 }

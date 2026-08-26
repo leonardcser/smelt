@@ -141,7 +141,7 @@ impl Drop for TranscriptSearchWorker {
         self.shared.changed.notify_one();
         drop(state);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            super::join_background_worker(thread);
         }
     }
 }
@@ -1457,9 +1457,9 @@ mod tests {
             })
             .expect("search target block");
         app.app.save_session_and_flush();
-        let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
-            app.app.core.sessions.sessions_dir(),
-            app.app.conversation.session().id.clone(),
+        let loaded = crate::app::history::load_transcript_tail_from_sqlite_id(
+            &app.app.core.sessions,
+            &app.app.conversation.session().id,
             100,
             32,
         )

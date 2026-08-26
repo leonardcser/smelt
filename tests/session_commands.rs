@@ -22,6 +22,9 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
             "persist me",
         )));
     smelt_core::session::save_result(&session).unwrap();
+    assert!(smelt_core::session::wait_for_session_catalog(
+        std::time::Duration::from_secs(5)
+    ));
     let sessions_root = smelt_core::session::sessions_dir();
 
     let doctor = smelt(state.path(), &["session", "doctor", &session.id, "--json"]);
@@ -181,6 +184,8 @@ fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
         .unwrap()
         .as_millis() as u64;
     writer.rewind_to_sequence(1, updated_at).unwrap();
+    writer.switch_branch(&target_id).unwrap();
+    writer.refresh_catalog().unwrap();
     writer.release().unwrap();
 
     let gc = smelt(state.path(), &["session", "gc", &session.id]);

@@ -398,7 +398,6 @@ impl TuiSessionDocument {
         transcript: crate::app::transcript::LoadedTranscript,
         live_session: LiveSession,
         store_head: smelt_store::StoreHead,
-        repair_records: bool,
     ) {
         debug_assert_eq!(
             store_head.history_len.as_usize(),
@@ -408,13 +407,6 @@ impl TuiSessionDocument {
         self.transcript.replace_loaded_transcript(transcript);
         self.changes.install_head(store_head);
         self.persistence_epoch = None;
-        if repair_records {
-            // The record fallback materializes a complete transcript.
-            // Repair only its record projection, preserving store-backed
-            // history and side-table rows outside the transcript.
-            self.changes.force_dirty();
-            self.transcript.history_mut().require_record_resave_from(0);
-        }
     }
 
     #[cfg(test)]
@@ -685,7 +677,6 @@ pub(crate) struct StoreBackedSessionDocument {
     pub(crate) transcript: crate::app::transcript::LoadedTranscript,
     pub(crate) live_session: smelt_core::session_runtime::LiveSession,
     pub(crate) store_head: smelt_store::StoreHead,
-    pub(crate) repair_records: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -982,13 +973,7 @@ impl StoreBackedSessionDocument {
             transcript,
             live_session,
             store_head,
-            repair_records: false,
         }
-    }
-
-    pub(crate) fn requiring_record_repair(mut self) -> Self {
-        self.repair_records = true;
-        self
     }
 }
 
@@ -3150,32 +3135,6 @@ mod tests {
                 .unwrap()
             );
         }
-    }
-
-    #[test]
-    fn materialized_record_repair_preserves_store_backed_history_boundary() {
-        let session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
-        transcript.push(Block::Text {
-            content: "reconstructed".into(),
-        });
-        let loaded = crate::app::transcript::LoadedTranscript::full(transcript);
-
-        document.install_loaded_store_session(
-            loaded,
-            empty_live_session_for(&session, 2),
-            smelt_store::StoreHead {
-                revision: smelt_store::Revision::new(0),
-                history_len: smelt_store::HistoryLen::new(2),
-                transcript_record_count: smelt_store::TranscriptRecordCount::new(1),
-            },
-            true,
-        );
-
-        assert_eq!(document.dirty_history_from_for_test(), None);
-        assert_eq!(document.transcript.history().record_dirty_from(), Some(0));
-        assert!(document.has_session_work());
     }
 
     #[test]

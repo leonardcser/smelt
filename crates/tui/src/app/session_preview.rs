@@ -156,7 +156,7 @@ impl Drop for SessionPreviewWorker {
         self.shared.changed.notify_one();
         drop(state);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            super::join_background_worker(thread);
         }
     }
 }
@@ -443,10 +443,7 @@ fn load_session_preview(
     let reader = &retained_reader.as_ref()?.1;
     let total_count = usize::try_from(reader.snapshot().ok()?.transcript_len).ok()?;
     if total_count == 0 {
-        let lua = crate::lua::LuaRuntime::new();
-        return super::history::materialize_full_transcript_read_only_result(sessions, &lua, id)
-            .ok()
-            .flatten();
+        return None;
     }
     let target_rows = super::transcript::record_tail_target_rows(height);
     let slice = reader
@@ -847,6 +844,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn worker_rejects_a_session_without_transcript_records() {
+        let root = tempfile::tempdir().expect("preview state root");
+        let storage = smelt_core::session::SessionStorage::new(root.path().to_path_buf());
+        let session_id = "f".repeat(64);
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.id.clone_from(&session_id);
+        storage
+            .save_result(&session)
+            .expect("save recordless session");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = SessionPreviewWorker::spawn(event_tx);
+
+        worker.request(load_request(1, storage, session_id, 80, 20));
+        let result = receive_preview_event(&mut event_rx);
+
+        assert!(matches!(
+            result.outcome,
+            SessionPreviewWorkerOutcome::Loaded(None)
+        ));
     }
 
     #[test]

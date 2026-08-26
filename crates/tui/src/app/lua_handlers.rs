@@ -940,101 +940,22 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) -> bool {
-        self.load_current_session_by_id(id)
-    }
-
-    pub(crate) fn load_current_session_by_id(&mut self, id: &str) -> bool {
+        let width = self.last_width;
         let target_rows = crate::app::transcript::record_tail_target_rows(self.last_height);
-        let resume =
-            match self
-                .core
-                .sessions
-                .load_store_resume_result(id, self.last_width, target_rows)
-            {
-                Ok(Some(resume)) => resume,
-                Ok(None) => {
-                    self.notify_operation_error_sticky(
-                        NotificationOperation::SessionLoad,
-                        format!("session {id:?} has no stored state"),
-                    );
-                    return false;
-                }
-                Err(err) => {
-                    self.notify_operation_error_sticky(
-                        NotificationOperation::SessionLoad,
-                        format!("failed to load session: {err}"),
-                    );
-                    return false;
-                }
-            };
-        let smelt_core::session::SessionStoreResume {
-            header,
-            session,
-            store_address,
-            head,
-            transcript_record_tail: record_tail,
-        } = resume;
-        let degraded_warnings = header.degraded_warnings.clone();
-        let (transcript, repair_records) =
-            match crate::app::transcript::LoadedTranscript::from_record_slice(
-                record_tail,
-                crate::app::transcript::TranscriptStoreAddress::new(
-                    store_address.sessions_root.clone(),
-                    store_address.session_id.clone(),
-                    store_address.lineage_id.clone(),
-                ),
-            ) {
-                Some(transcript) => (transcript, false),
-                None => {
-                    let lua = self.lua.execution();
-                    let sessions = self.core.sessions.clone();
-                    let materialized = crate::lua::scope_app(self, || {
-                        crate::app::history::materialize_full_transcript_read_only_result(
-                            &sessions, &lua, id,
-                        )
-                    });
-                    match materialized {
-                        Ok(Some(transcript)) => (transcript, true),
-                        Ok(None) => {
-                            self.notify_operation_error_sticky(
-                                NotificationOperation::SessionLoad,
-                                format!("session {id:?} has no readable transcript state"),
-                            );
-                            return false;
-                        }
-                        Err(err) => {
-                            self.notify_operation_error_sticky(
-                                NotificationOperation::SessionLoad,
-                                format!("failed to load session transcript: {err}"),
-                            );
-                            return false;
-                        }
-                    }
-                }
-            };
-        let document = crate::app::session_document::SessionDocument::from_store(
-            header,
-            session,
-            store_address,
-            head,
-            transcript,
+        let prepared = crate::app::session_load::prepare_session_load(
+            &self.core.sessions,
+            id,
+            width,
+            target_rows,
+            &|| false,
         );
-        let mut document = document.into_store_backed();
-        if repair_records {
-            document = document.requiring_record_repair();
+        match prepared {
+            Ok(prepared) => self.install_prepared_session_load(prepared),
+            Err(error) => {
+                self.notify_operation_error_sticky(NotificationOperation::SessionLoad, error);
+                false
+            }
         }
-        if !self.load_store_backed_session(document) {
-            return false;
-        }
-        if !degraded_warnings.is_empty() {
-            self.notify_session_error_sticky(format!(
-                "session loaded with unavailable attachments: {}",
-                degraded_warnings.join("; ")
-            ));
-        }
-        self.finish_transcript_turn();
-        self.transcript_win_mut().follow_tail();
-        true
     }
 
     /// Resolve a Confirm dialog. Cancels the active turn when the choice requires it.

@@ -936,13 +936,17 @@ pub(super) fn register(
     )?;
     m.fn_(
         "load",
-        "Switch the UI to canonical lineage session `id`. Replays the bounded persisted tail and resets transient state.",
+        "Request a UI switch to canonical lineage session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
-            crate::lua::with_session_host(|host| host.load_session_by_id(&id));
+            crate::lua::with_session_host(|host| host.request_session_load(&id));
             Ok(())
         },
     )?;
+    m.private_fn("__load_now", &["id"], |_, id: String| -> LuaResult<()> {
+        crate::lua::with_session_host(|host| host.load_session_by_id_now(&id));
+        Ok(())
+    })?;
     m.fn_(
         "text",
         "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
