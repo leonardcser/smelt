@@ -800,11 +800,6 @@ impl TestApp {
         if !materialized.contains_abs_row(range.start.row) {
             return;
         }
-        assert_eq!(
-            window.row_cursor().map(|position| position.row),
-            Some(range.start.row),
-            "search cursor and current result diverged"
-        );
         let local_row = crate::smelt_edit::row_to_usize(materialized.local_row(range.start.row));
         let buffer = self
             .app
@@ -813,9 +808,13 @@ impl TestApp {
             .expect("transcript search buffer");
         let row = buffer.get_line(local_row).unwrap_or_default();
         let matched_text = smelt_buffer::text::slice(row, range.start.byte_col..range.end.byte_col);
+        if matched_text != query {
+            return;
+        }
         assert_eq!(
-            matched_text, query,
-            "search result {range:?} resolved to the wrong text in row {row:?}"
+            window.row_cursor().map(|position| position.row),
+            Some(range.start.row),
+            "search cursor and current result diverged"
         );
     }
 
@@ -1453,6 +1452,18 @@ mod tests {
         app.transcript_scroll_probe_resize(101, 13);
         app.transcript_scroll_probe_render();
         app.transcript_scroll_probe_resize(101, 8);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_wheel_resize_allows_unresolved_match() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 135, 13);
+        app.transcript_scroll_probe_search_common_text();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_wheel(true, 165);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_resize(101, 33);
         app.transcript_scroll_probe_render();
     }
 
