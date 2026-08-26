@@ -3480,6 +3480,69 @@ mod checkpoint_tests {
     }
 
     #[test]
+    fn clear_command_detaches_resumed_canonical_history_before_next_message() {
+        const OLD_HISTORY_LEN: usize = 504;
+        let mut app = large_saved_session_app(OLD_HISTORY_LEN);
+        let old_id = app.app.conversation.session().id.clone();
+        assert!(app.app.load_session_by_id(&old_id));
+        assert!(app.app.conversation.has_live_session());
+        assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN);
+
+        app.type_text("/clear");
+        app.press(crossterm::event::KeyCode::Enter);
+
+        assert_ne!(app.app.conversation.session().id, old_id);
+        assert!(!app.app.conversation.has_live_session());
+        assert_eq!(app.app.session_history_len(), 0);
+
+        app.type_text("fresh user");
+        app.press(crossterm::event::KeyCode::Enter);
+
+        let turn_id = app.current_turn_id().expect("fresh turn is active");
+        let submitted_history_idx = app.app.session_history_len() - 1;
+        let flush = app.app.flush_persist();
+        assert!(matches!(
+            flush,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ));
+
+        let history = app
+            .app
+            .session_history_range(0..app.app.session_history_len())
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| matches!(item, HistoryItem::User { .. }))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![user("fresh user")]
+        );
+        assert!(!history
+            .iter()
+            .any(|item| matches!(item, HistoryItem::Assistant(_))));
+
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
+            protocol::EngineEvent::TurnComplete {
+                turn_id,
+                history: Some(protocol::CanonicalHistoryDelta::new(
+                    submitted_history_idx,
+                    vec![user("fresh user")],
+                )),
+                meta: None,
+            },
+        ));
+
+        assert!(app.app.overlays.notification().is_none());
+        assert_eq!(
+            app.app
+                .session_history_range(submitted_history_idx..submitted_history_idx + 1)
+                .unwrap(),
+            vec![user("fresh user")]
+        );
+    }
+
+    #[test]
     fn live_session_save_persists_one_canonical_item() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);

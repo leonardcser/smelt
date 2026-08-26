@@ -2174,6 +2174,7 @@ impl ConversationRuntime {
     pub(crate) fn reset(&mut self, pid: u32, cwd: std::path::PathBuf) -> String {
         let old_id = self.session.id.clone();
         self.session = smelt_core::session::Session::new(pid, cwd);
+        self.clear_live_session();
         self.document.transcript.set_store_address(
             self.storage
                 .transcript_store_address(&self.sessions, &self.session),
