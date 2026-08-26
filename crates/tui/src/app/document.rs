@@ -612,13 +612,9 @@ impl TuiApp {
                 drag_endpoint_screen_row: None,
                 cursor_document_position: None,
             };
-            let total_rows = self
-                .conversation
-                .transcript_search_total_rows(&self.lua, viewport_cols.max(1));
-            let target = total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)));
             self.record_transcript_scroll_intent_from_document_command(
                 "document_command",
-                TranscriptScrollIntent::ApproximateRowSeek(target),
+                TranscriptScrollIntent::Tail,
                 window_scroll_before,
                 restore,
                 None,

@@ -3326,6 +3326,38 @@ fn assert_transcript_window_at_tail(app: &TestApp, label: &str) {
     );
 }
 
+fn transcript_vim_tail_is_settled(app: &TestApp) -> bool {
+    let window = app.transcript_window();
+    let Some(viewport) = window.viewport else {
+        return false;
+    };
+    let max_scroll = viewport
+        .total_rows
+        .saturating_sub(RowIndex::from(viewport.rect.height.max(1)));
+    let expected_cursor_row = window
+        .scroll_top
+        .saturating_add(RowIndex::from(viewport.rect.height.saturating_sub(1)))
+        .min(viewport.total_rows.saturating_sub(1));
+    window.following_tail
+        && window.scroll_top == max_scroll
+        && window.row_cursor.map(|cursor| cursor.row) == Some(expected_cursor_row)
+}
+
+fn settle_transcript_vim_tail(app: &mut TestApp) {
+    const MAX_PROJECTION_FRAMES: usize = 16;
+
+    for _ in 0..MAX_PROJECTION_FRAMES {
+        app.render_silent();
+        if transcript_vim_tail_is_settled(app) {
+            return;
+        }
+    }
+    panic!(
+        "vim G did not settle at the exact transcript tail after {MAX_PROJECTION_FRAMES} frames: {:?}",
+        app.transcript_window()
+    );
+}
+
 fn assert_transcript_tail_follows_append(app: &mut TestApp, label: &str) {
     assert_transcript_window_at_tail(app, label);
     let append_marker = format!("tail-follow append via {label}");
@@ -3354,7 +3386,7 @@ fn resumed_sparse_vim_g_pins_semantic_tail() {
 
     app.configure_transcript_vim(true, VimMode::Normal);
     app.type_char('G');
-    app.render_silent();
+    settle_transcript_vim_tail(&mut app);
 
     assert!(
         app.transcript_window().following_tail,
@@ -3366,6 +3398,27 @@ fn resumed_sparse_vim_g_pins_semantic_tail() {
         "vim G should render the resumed transcript tail: {lines:?}"
     );
     assert_transcript_tail_follows_append(&mut app, "vim G");
+}
+
+#[test]
+fn resumed_sparse_vim_g_after_gg_pins_semantic_tail() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    prepare_transcript_burst_app(&mut app);
+
+    jump_transcript_top(&mut app);
+    app.type_char('G');
+    let pending_tail_marker = "tail content appended while G is pending";
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: pending_tail_marker.into(),
+    });
+    settle_transcript_vim_tail(&mut app);
+
+    let lines = transcript_viewport_lines(&app);
+    assert!(
+        lines.iter().any(|line| line.contains(pending_tail_marker)),
+        "vim G after gg did not include content appended before projection: {lines:?}"
+    );
+    assert_transcript_tail_follows_append(&mut app, "vim G after gg");
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5036,11 +5089,7 @@ fn jump_transcript_top(app: &mut TestApp) {
 
 fn jump_transcript_bottom(app: &mut TestApp) {
     app.type_char('G');
-    app.render_silent();
-    assert!(
-        app.transcript_window().scroll_top > 0,
-        "G should reach a non-top viewport before an upward key-repeat burst"
-    );
+    settle_transcript_vim_tail(app);
 }
 
 fn jump_transcript_middle(app: &mut TestApp) {
@@ -5321,7 +5370,7 @@ fn transcript_jump_top_uses_first_record_anchor_from_sparse_tail() {
 }
 
 #[test]
-fn transcript_jump_bottom_labels_sparse_row_seek_as_approximate() {
+fn transcript_jump_bottom_projects_sparse_semantic_tail() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.install_sparse_transcript_scroll_fixture(96, 40, 29);
 
@@ -5333,18 +5382,20 @@ fn transcript_jump_bottom_labels_sparse_row_seek_as_approximate() {
     }
 
     assert!(
-        frames.iter().any(|frame| matches!(
-            frame.scroll_intent,
-            TranscriptScrollIntent::ApproximateRowSeek(_)
-        )),
-        "G should label sparse transcript bottom jumps as approximate row seeks: {frames:?}"
+        frames
+            .iter()
+            .any(|frame| matches!(frame.scroll_intent, TranscriptScrollIntent::Tail)),
+        "G should project sparse transcript bottom jumps through the semantic tail: {frames:?}"
     );
     assert!(
         frames.iter().all(|frame| !matches!(
             frame.scroll_intent,
-            TranscriptScrollIntent::ExactContentAnchor(TranscriptTraceAnchor::EstimatedRow(_))
+            TranscriptScrollIntent::ApproximateRowSeek(_)
+                | TranscriptScrollIntent::ExactContentAnchor(TranscriptTraceAnchor::EstimatedRow(
+                    _
+                ))
         )),
-        "G used an estimated row as an exact content anchor: {frames:?}"
+        "G used an estimated row instead of the semantic transcript tail: {frames:?}"
     );
 }
 

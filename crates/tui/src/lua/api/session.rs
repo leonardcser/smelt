@@ -1018,14 +1018,27 @@ pub(super) fn register(
                     out.set("status", "pending")?;
                 }
                 crate::app::session_preview::SessionPreviewRenderOutcome::Unavailable(error) => {
-                    smelt_perf::perf::record_value(
-                        "session:render_preview_into:hydration_failure_required_blocks",
-                        error.required_blocks as u64,
-                    );
-                    smelt_perf::perf::record_value(
-                        "session:render_preview_into:hydration_failure_missing_blocks",
-                        error.missing_blocks as u64,
-                    );
+                    match error {
+                        crate::app::transcript::TranscriptProjectionHydrationError::MissingBlocks {
+                            required_blocks,
+                            missing_blocks,
+                        } => {
+                            smelt_perf::perf::record_value(
+                                "session:render_preview_into:hydration_failure_required_blocks",
+                                required_blocks as u64,
+                            );
+                            smelt_perf::perf::record_value(
+                                "session:render_preview_into:hydration_failure_missing_blocks",
+                                missing_blocks as u64,
+                            );
+                        }
+                        crate::app::transcript::TranscriptProjectionHydrationError::Pending(_) => {
+                            smelt_perf::perf::record_value(
+                                "session:render_preview_into:hydration_pending_without_request",
+                                1,
+                            );
+                        }
+                    }
                     out.set("status", "unavailable")?;
                     out.set("reason", "persisted content could not be hydrated")?;
                 }

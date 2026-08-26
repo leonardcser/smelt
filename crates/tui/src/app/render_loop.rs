@@ -142,17 +142,45 @@ pub(super) struct TranscriptSearchProjection<'a> {
     pub(super) range_after: &'a mut Option<crate::smelt_edit::DocRange>,
 }
 
-fn record_transcript_projection_hydration_failure(
+fn record_transcript_projection_hydration_deferred(
     error: crate::app::transcript::TranscriptProjectionHydrationError,
 ) {
-    smelt_perf::perf::record_value(
-        "transcript:projection_hydration_failure:required_blocks",
-        error.required_blocks as u64,
-    );
-    smelt_perf::perf::record_value(
-        "transcript:projection_hydration_failure:missing_blocks",
-        error.missing_blocks as u64,
-    );
+    use crate::app::transcript::{
+        TranscriptProjectionHydrationError, TranscriptProjectionHydrationPending,
+    };
+
+    match error {
+        TranscriptProjectionHydrationError::MissingBlocks {
+            required_blocks,
+            missing_blocks,
+        } => {
+            smelt_perf::perf::record_value(
+                "transcript:projection_hydration_failure:required_blocks",
+                required_blocks as u64,
+            );
+            smelt_perf::perf::record_value(
+                "transcript:projection_hydration_failure:missing_blocks",
+                missing_blocks as u64,
+            );
+        }
+        TranscriptProjectionHydrationError::Pending(pending) => {
+            let metric = match pending {
+                TranscriptProjectionHydrationPending::CommandTarget => {
+                    "transcript:projection_hydration_pending:command_target"
+                }
+                TranscriptProjectionHydrationPending::LocalDelta => {
+                    "transcript:projection_hydration_pending:local_delta"
+                }
+                TranscriptProjectionHydrationPending::PreserveViewport => {
+                    "transcript:projection_hydration_pending:preserve_viewport"
+                }
+                TranscriptProjectionHydrationPending::TailRecordWindow => {
+                    "transcript:projection_hydration_pending:tail_record_window"
+                }
+            };
+            smelt_perf::perf::record_value(metric, 1);
+        }
+    }
 }
 
 fn transcript_search_range_matches_buffer(
@@ -242,7 +270,7 @@ pub(super) fn prepare_transcript_window(
         let plan = match plan {
             Ok(plan) => plan,
             Err(error) => {
-                record_transcript_projection_hydration_failure(error);
+                record_transcript_projection_hydration_deferred(error);
                 sync_retained_transcript_window(ui, request, render_now);
                 return;
             }
@@ -316,7 +344,7 @@ pub(super) fn prepare_transcript_window(
                             anchor.clone(),
                         );
                     }
-                    Err(error) => record_transcript_projection_hydration_failure(error),
+                    Err(error) => record_transcript_projection_hydration_deferred(error),
                 }
             }
             [

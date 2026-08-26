@@ -745,9 +745,27 @@ pub(crate) struct TranscriptProjectionPlan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TranscriptProjectionHydrationError {
-    pub(crate) required_blocks: usize,
-    pub(crate) missing_blocks: usize,
+pub(crate) enum TranscriptProjectionHydrationError {
+    MissingBlocks {
+        required_blocks: usize,
+        missing_blocks: usize,
+    },
+    Pending(TranscriptProjectionHydrationPending),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptProjectionHydrationPending {
+    CommandTarget,
+    LocalDelta,
+    PreserveViewport,
+    TailRecordWindow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptTailRecordWindowState {
+    Ready,
+    Hydrating,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1186,7 +1204,7 @@ impl TranscriptDocument {
                     "transcript:hydration:projection_plan:max_required_ids",
                     max_required_ids as u64,
                 );
-                return Err(TranscriptProjectionHydrationError {
+                return Err(TranscriptProjectionHydrationError::MissingBlocks {
                     required_blocks: next_ids.len(),
                     missing_blocks,
                 });
@@ -3958,11 +3976,21 @@ impl TranscriptDocument {
         }
     }
 
-    fn activate_tail_record_window(&mut self, width: u16, viewport_rows: u16) -> bool {
-        let Some(range) = self.tail_record_window_range(width, viewport_rows) else {
-            return false;
-        };
-        self.activate_record_window_range(range)
+    fn ensure_tail_record_window(
+        &mut self,
+        width: u16,
+        viewport_rows: u16,
+    ) -> TranscriptTailRecordWindowState {
+        if let Some(range) = self.tail_record_window_range(width, viewport_rows) {
+            let _ = self.activate_record_window_range(range);
+        }
+        if self.semantic_tail_record_is_materialized() {
+            TranscriptTailRecordWindowState::Ready
+        } else if self.hydration_is_pending() {
+            TranscriptTailRecordWindowState::Hydrating
+        } else {
+            TranscriptTailRecordWindowState::Unavailable
+        }
     }
 
     fn scroll_anchor_for_projection_target(
@@ -5192,10 +5220,14 @@ impl TranscriptDocument {
                     })
                 });
             }
-            return Err(TranscriptProjectionHydrationError {
-                required_blocks: usize::from(unresolved_command_hydration),
-                missing_blocks: usize::from(unresolved_command_hydration),
-            });
+            let pending = if unresolved_command_hydration {
+                TranscriptProjectionHydrationPending::CommandTarget
+            } else if unresolved_local_delta_hydration {
+                TranscriptProjectionHydrationPending::LocalDelta
+            } else {
+                TranscriptProjectionHydrationPending::PreserveViewport
+            };
+            return Err(TranscriptProjectionHydrationError::Pending(pending));
         }
         if self.scroll_trace_enabled() && !self.scroll_trace_has_pending_input() {
             self.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
@@ -5309,7 +5341,15 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => {
                 let _perf = smelt_perf::perf::begin("transcript:sparse:activate_tail_window");
-                let _ = self.activate_tail_record_window(width, viewport_rows);
+                match self.ensure_tail_record_window(width, viewport_rows) {
+                    TranscriptTailRecordWindowState::Hydrating => {
+                        return Err(TranscriptProjectionHydrationError::Pending(
+                            TranscriptProjectionHydrationPending::TailRecordWindow,
+                        ));
+                    }
+                    TranscriptTailRecordWindowState::Ready
+                    | TranscriptTailRecordWindowState::Unavailable => {}
+                }
             }
         }
         let stable_local_delta = options.semantic_far_seek.is_none()
