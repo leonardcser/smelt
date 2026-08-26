@@ -2086,6 +2086,16 @@ impl TranscriptDocument {
             .is_some()
     }
 
+    pub(crate) fn has_pending_search_projection(&self) -> bool {
+        self.viewport
+            .state
+            .pending_projection
+            .as_ref()
+            .is_some_and(|pending| {
+                matches!(pending.intent, TranscriptScrollIntent::SearchJump { .. })
+            })
+    }
+
     fn exact_viewport_state(
         &self,
         lua: &LuaRuntime,

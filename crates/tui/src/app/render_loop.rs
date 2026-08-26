@@ -469,6 +469,15 @@ impl TuiApp {
                     .map(|matched| (matched, session.query.clone())),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
+            .filter(|(matched, _)| {
+                self.conversation
+                    .transcript()
+                    .has_pending_search_projection()
+                    || self
+                        .transcript_win()
+                        .row_cursor()
+                        .is_some_and(|cursor| cursor.row == matched.range.start.row)
+            })
             .map(|(matched, query)| {
                 self.conversation
                     .transcript_search_range_anchor(matched, query)

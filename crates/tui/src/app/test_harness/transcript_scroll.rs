@@ -1434,6 +1434,18 @@ mod tests {
     }
 
     #[test]
+    fn sparse_search_click_then_wheel_settles() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(96, 103, 13);
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_content_click(45, 45);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_wheel(false, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
     fn sparse_command_scroll_keeps_upward_anchor_direction() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(502, 40, 13);
