@@ -17,7 +17,10 @@ pub const MAX_CATALOG_PAGE_SIZE: u32 = 10_000;
 
 const CATALOG_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const CATALOG_READ_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
-const CATALOG_LOCK_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+const CATALOG_MARKER_LOCK_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+const CATALOG_COMMIT_MARKER_LOCK_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+const CATALOG_RECONCILIATION_LOCK_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+const CATALOG_RECOVERY_LEASE_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
 const CATALOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -57,23 +60,16 @@ CREATE INDEX IF NOT EXISTS sessions_cwd_updated_idx ON sessions(cwd, updated_at 
 CREATE INDEX IF NOT EXISTS sessions_status_updated_idx ON sessions(status, updated_at DESC, id);
 "#;
 
-pub fn catalog_reconcile_lock_path(sessions_root: impl AsRef<Path>) -> PathBuf {
-    crate::SessionStoreLayout::from_sessions_root(sessions_root.as_ref()).catalog_lock_path()
-}
-
 pub(crate) struct CatalogPendingGuard {
-    _lock: CatalogReconcileLock,
+    _lock: CatalogMarkerLock,
 }
 
 pub(crate) fn mark_catalog_session_pending(
     sessions_root: impl AsRef<Path>,
     session_id: &str,
 ) -> Result<CatalogPendingGuard> {
-    BranchId::new(session_id.to_string())?;
     let sessions_root = sessions_root.as_ref();
-    ensure_private_directory_all(sessions_root)?;
-    let lock_path = catalog_reconcile_lock_path(sessions_root);
-    let lock = CatalogReconcileLock::acquire(lock_path)?;
+    let lock = CatalogMarkerLock::acquire_for_commit(sessions_root, session_id)?;
     let layout = crate::SessionStoreLayout::from_sessions_root(sessions_root);
     let pending_dir = layout.catalog_pending_dir();
     let created_pending_directory = match fs::create_dir(&pending_dir) {
@@ -164,9 +160,8 @@ pub fn clear_catalog_session_pending(
     session_id: &str,
     expected_token: &[u8],
 ) -> Result<bool> {
-    BranchId::new(session_id.to_string())?;
     let sessions_root = sessions_root.as_ref();
-    let _lock = CatalogReconcileLock::acquire(catalog_reconcile_lock_path(sessions_root))?;
+    let _lock = CatalogMarkerLock::acquire(sessions_root, session_id)?;
     let layout = crate::SessionStoreLayout::from_sessions_root(sessions_root);
     let pending_dir = layout.catalog_pending_dir();
     let path = layout.catalog_pending_path(session_id);
@@ -353,6 +348,7 @@ impl CatalogMetadata {
 pub struct Catalog {
     path: PathBuf,
     conn: Connection,
+    _lease: FileLock,
 }
 
 impl Catalog {
@@ -361,25 +357,49 @@ impl Catalog {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut conn = Connection::open(path)?;
-        set_private_file_permissions(path)?;
-        conn.busy_timeout(CATALOG_WRITE_BUSY_TIMEOUT)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let tx = conn.transaction()?;
-        tx.execute_batch(CATALOG_SCHEMA)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO catalog_meta
-             (singleton, schema_version, next_scan_id, completed_scan_id, reconciled_at)
-             VALUES (1, ?1, 1, 0, NULL)",
-            [CATALOG_SCHEMA_VERSION],
+        let lease = FileLock::acquire_shared(
+            &catalog_lease_path(path),
+            "open session catalog",
+            CATALOG_WRITE_BUSY_TIMEOUT,
         )?;
-        validate_schema(&tx)?;
-        tx.commit()?;
+        let conn = open_catalog_connection(path)?;
         Ok(Self {
             path: path.to_path_buf(),
             conn,
+            _lease: lease,
         })
+    }
+
+    fn open_recovering(path: &Path) -> Result<(Self, bool)> {
+        match Self::open(path) {
+            Ok(catalog) => return Ok((catalog, false)),
+            Err(error) if !error.is_recoverable_catalog_corruption() => return Err(error),
+            Err(_) => {}
+        }
+
+        let lease = FileLock::acquire(
+            &catalog_lease_path(path),
+            "recover session catalog",
+            CATALOG_RECOVERY_LEASE_BUSY_TIMEOUT,
+        )?;
+        let (conn, rebuilt) = match open_catalog_connection(path) {
+            Ok(conn) => (conn, false),
+            Err(error) if error.is_recoverable_catalog_corruption() => {
+                rebuild_catalog(path)?;
+                (open_catalog_connection(path)?, true)
+            }
+            Err(error) => return Err(error),
+        };
+        let lease =
+            lease.downgrade("open recovered session catalog", CATALOG_WRITE_BUSY_TIMEOUT)?;
+        Ok((
+            Self {
+                path: path.to_path_buf(),
+                conn,
+                _lease: lease,
+            },
+            rebuilt,
+        ))
     }
 
     pub fn path(&self) -> &Path {
@@ -581,14 +601,67 @@ impl Catalog {
     }
 }
 
+pub struct CatalogReconciliation {
+    catalog: Catalog,
+    rebuilt: bool,
+    _lock: FileLock,
+}
+
+impl CatalogReconciliation {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = FileLock::acquire(
+            &sqlite_companion_path(path, ".reconciliation.lock"),
+            "reconcile session catalog",
+            CATALOG_RECONCILIATION_LOCK_BUSY_TIMEOUT,
+        )?;
+        let (catalog, rebuilt) = Catalog::open_recovering(path)?;
+        Ok(Self {
+            catalog,
+            rebuilt,
+            _lock: lock,
+        })
+    }
+
+    pub fn rebuilt(&self) -> bool {
+        self.rebuilt
+    }
+}
+
+impl std::ops::Deref for CatalogReconciliation {
+    type Target = Catalog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+
+impl std::ops::DerefMut for CatalogReconciliation {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.catalog
+    }
+}
+
 pub struct CatalogReader {
     path: PathBuf,
     conn: Connection,
+    _lease: FileLock,
 }
 
 impl CatalogReader {
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Option<Self>> {
         let path = path.as_ref();
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let lease = FileLock::acquire_shared(
+            &catalog_lease_path(path),
+            "open session catalog reader",
+            CATALOG_READ_BUSY_TIMEOUT,
+        )?;
         if !path.is_file() {
             return Ok(None);
         }
@@ -610,6 +683,7 @@ impl CatalogReader {
         Ok(Some(Self {
             path: path.to_path_buf(),
             conn,
+            _lease: lease,
         }))
     }
 
@@ -634,16 +708,33 @@ impl CatalogReader {
     }
 }
 
-pub struct CatalogReconcileLock {
+#[derive(Clone, Copy)]
+enum FileLockMode {
+    Shared,
+    Exclusive,
+}
+
+#[derive(Debug)]
+struct FileLock {
     file: File,
 }
 
-impl CatalogReconcileLock {
-    pub fn acquire(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+impl FileLock {
+    fn acquire(path: &Path, operation: &'static str, timeout: Duration) -> Result<Self> {
+        Self::acquire_with_mode(path, operation, timeout, FileLockMode::Exclusive)
+    }
+
+    fn acquire_shared(path: &Path, operation: &'static str, timeout: Duration) -> Result<Self> {
+        Self::acquire_with_mode(path, operation, timeout, FileLockMode::Shared)
+    }
+
+    fn acquire_with_mode(
+        path: &Path,
+        operation: &'static str,
+        timeout: Duration,
+        mode: FileLockMode,
+    ) -> Result<Self> {
+        reject_symlink(path)?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -651,37 +742,124 @@ impl CatalogReconcileLock {
             .write(true)
             .open(path)?;
         set_private_file_permissions(path)?;
-        let deadline = Instant::now() + CATALOG_LOCK_BUSY_TIMEOUT;
+        Self::lock(&file, operation, timeout, mode)?;
+        Ok(Self { file })
+    }
+
+    fn lock(
+        file: &File,
+        operation: &'static str,
+        timeout: Duration,
+        mode: FileLockMode,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut attempts = 0_u32;
         loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { file }),
-                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+            attempts = attempts.saturating_add(1);
+            let result = match mode {
+                FileLockMode::Shared => fs4::FileExt::try_lock_shared(file),
+                FileLockMode::Exclusive => fs4::FileExt::try_lock(file),
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(StoreError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "session catalog reconciliation lock is busy",
-                    )));
+                Err(fs4::TryLockError::WouldBlock) => {
+                    return Err(StoreError::Busy {
+                        operation,
+                        attempts,
+                        waited_ms: started.elapsed().as_millis() as u64,
+                    });
                 }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+                Err(fs4::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
     }
-}
 
-impl Drop for CatalogReconcileLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
+    fn downgrade(self, operation: &'static str, timeout: Duration) -> Result<Self> {
+        fs4::FileExt::unlock(&self.file)?;
+        Self::lock(&self.file, operation, timeout, FileLockMode::Shared)?;
+        Ok(self)
     }
 }
 
-pub fn rebuild_catalog(path: impl AsRef<Path>) -> Result<()> {
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
+
+#[derive(Debug)]
+pub struct CatalogMarkerLock {
+    _lock: FileLock,
+}
+
+impl CatalogMarkerLock {
+    pub fn acquire(sessions_root: impl AsRef<Path>, session_id: &str) -> Result<Self> {
+        Self::acquire_with_timeout(
+            sessions_root.as_ref(),
+            session_id,
+            CATALOG_MARKER_LOCK_BUSY_TIMEOUT,
+        )
+    }
+
+    fn acquire_for_commit(sessions_root: &Path, session_id: &str) -> Result<Self> {
+        Self::acquire_with_timeout(
+            sessions_root,
+            session_id,
+            CATALOG_COMMIT_MARKER_LOCK_BUSY_TIMEOUT,
+        )
+    }
+
+    fn acquire_with_timeout(
+        sessions_root: &Path,
+        session_id: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        BranchId::new(session_id.to_string())?;
+        let layout = crate::SessionStoreLayout::from_sessions_root(sessions_root);
+        ensure_private_directory_all(sessions_root)?;
+        ensure_private_directory_all(&layout.locks_dir())?;
+        let lock = FileLock::acquire(
+            &layout.catalog_marker_lock_path(session_id),
+            "lock session catalog marker",
+            timeout,
+        )?;
+        Ok(Self { _lock: lock })
+    }
+}
+
+fn open_catalog_connection(path: &Path) -> Result<Connection> {
+    let mut conn = Connection::open(path)?;
+    set_private_file_permissions(path)?;
+    conn.busy_timeout(CATALOG_WRITE_BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(CATALOG_SCHEMA)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO catalog_meta
+         (singleton, schema_version, next_scan_id, completed_scan_id, reconciled_at)
+         VALUES (1, ?1, 1, 0, NULL)",
+        [CATALOG_SCHEMA_VERSION],
+    )?;
+    validate_schema(&tx)?;
+    tx.commit()?;
+    Ok(conn)
+}
+
+fn catalog_lease_path(path: &Path) -> PathBuf {
+    sqlite_companion_path(path, ".lease.lock")
+}
+
+fn rebuild_catalog(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     for candidate in [
-        path.to_path_buf(),
         sqlite_companion_path(path, "-wal"),
         sqlite_companion_path(path, "-shm"),
+        path.to_path_buf(),
     ] {
         match fs::remove_file(candidate) {
             Ok(()) => {}
@@ -1012,8 +1190,8 @@ mod tests {
             Err(StoreError::UnsupportedSchema { found: 99, expected })
                 if expected == CATALOG_SCHEMA_VERSION
         ));
-        rebuild_catalog(&path).unwrap();
-        let mut rebuilt = Catalog::open(&path).unwrap();
+        let mut rebuilt = CatalogReconciliation::open(&path).unwrap();
+        assert!(rebuilt.rebuilt());
         let rebuilt_scan = rebuilt.allocate_scan().unwrap();
         rebuilt.complete_scan(rebuilt_scan, 2).unwrap();
         drop(rebuilt);
@@ -1286,16 +1464,19 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_lock_serializes_catalog_mutations() {
+    fn catalog_marker_locks_are_session_scoped() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(".catalog.lock");
-        let _held = CatalogReconcileLock::acquire(&path).unwrap();
-        let contender = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .unwrap();
-        assert!(contender.try_lock().is_err());
+        let sessions_root = temp.path().join("sessions");
+        let first = "1".repeat(64);
+        let second = "2".repeat(64);
+        let _held = CatalogMarkerLock::acquire(&sessions_root, &first).unwrap();
+
+        CatalogMarkerLock::acquire(&sessions_root, &second).unwrap();
+        assert!(matches!(
+            CatalogMarkerLock::acquire(&sessions_root, &first),
+            Err(StoreError::Busy { operation, .. })
+                if operation == "lock session catalog marker"
+        ));
     }
 
     #[test]
@@ -1488,14 +1669,72 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_catalog_can_be_deleted_and_rebuilt() {
+    fn environmental_open_failure_does_not_delete_catalog_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        fs::create_dir(&path).unwrap();
+
+        let error = match CatalogReconciliation::open(&path) {
+            Ok(_) => panic!("catalog directory unexpectedly opened"),
+            Err(error) => error,
+        };
+
+        assert!(!error.is_recoverable_catalog_corruption());
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn recovery_never_replaces_a_catalog_with_a_live_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        catalog.upsert_available(&row("preserved", 1, 10)).unwrap();
+        catalog
+            .conn
+            .execute(
+                "UPDATE catalog_meta SET schema_version = 99 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+
+        let recovery_path = path.clone();
+        let error = std::thread::spawn(move || {
+            CatalogReconciliation::open(recovery_path).map(|catalog| catalog.rebuilt())
+        })
+        .join()
+        .unwrap()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::Busy {
+                operation: "recover session catalog",
+                ..
+            }
+        ));
+        assert_eq!(
+            catalog
+                .page(&CatalogQuery::default())
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+        drop(catalog);
+
+        let recovered = CatalogReconciliation::open(&path).unwrap();
+        assert!(recovered.rebuilt());
+    }
+
+    #[test]
+    fn corrupt_catalog_is_recovered() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("catalog.db");
         fs::write(&path, b"not sqlite").unwrap();
-        assert!(Catalog::open(&path).is_err());
-        let _lock = CatalogReconcileLock::acquire(temp.path().join(".catalog.lock")).unwrap();
-        rebuild_catalog(&path).unwrap();
-        let mut catalog = Catalog::open(&path).unwrap();
+
+        let mut catalog = CatalogReconciliation::open(&path).unwrap();
+
+        assert!(catalog.rebuilt());
         catalog.upsert_available(&row("restored", 1, 10)).unwrap();
         assert_eq!(
             catalog
@@ -1505,5 +1744,30 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn concurrent_catalog_recovery_rebuilds_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        fs::write(&path, b"not sqlite").unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+        let recover = |path: PathBuf, start: std::sync::Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                start.wait();
+                let catalog = CatalogReconciliation::open(path).unwrap();
+                let rebuilt = catalog.rebuilt();
+                drop(catalog);
+                rebuilt
+            })
+        };
+        let first = recover(path.clone(), start.clone());
+        let second = recover(path, start.clone());
+        start.wait();
+
+        let mut recovered = [first.join().unwrap(), second.join().unwrap()];
+        recovered.sort_unstable();
+        assert_eq!(recovered, [false, true]);
     }
 }

@@ -39,14 +39,15 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    pub fn is_database_locked(&self) -> bool {
-        matches!(self, StoreError::Busy { .. })
+    pub fn is_recoverable_catalog_corruption(&self) -> bool {
+        matches!(self, Self::UnsupportedSchema { .. } | Self::Integrity(_))
             || matches!(
                 self,
-                StoreError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
+                Self::Sqlite(rusqlite::Error::SqliteFailure(error, _))
                     if matches!(
-                        err.code,
-                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        error.code,
+                        rusqlite::ErrorCode::DatabaseCorrupt
+                            | rusqlite::ErrorCode::NotADatabase
                     )
             )
     }

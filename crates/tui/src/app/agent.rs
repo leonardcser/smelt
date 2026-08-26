@@ -3349,12 +3349,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_submit_fails_promptly_when_catalog_marker_is_locked() {
+    fn canonical_submit_ignores_an_unrelated_catalog_marker_lock() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let catalog_lock = smelt_store::CatalogReconcileLock::acquire(
-            smelt_store::catalog_reconcile_lock_path(app.app.core.sessions.sessions_dir()),
+        let unrelated_session = "f".repeat(64);
+        let catalog_lock = smelt_store::CatalogMarkerLock::acquire(
+            app.app.core.sessions.sessions_dir(),
+            &unrelated_session,
         )
-        .expect("hold catalog marker lock");
+        .expect("hold unrelated catalog marker lock");
 
         let started = std::time::Instant::now();
         let turn = app.app.begin_agent_turn(
@@ -3364,14 +3366,46 @@ mod tests {
         let elapsed = started.elapsed();
         drop(catalog_lock);
 
-        assert!(
-            turn.is_none(),
-            "canonical submission fails without dispatch"
-        );
+        assert!(turn.is_some(), "canonical submission remains independent");
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "canonical submit waited {elapsed:?} for derived catalog marker locking"
+            "canonical submit waited {elapsed:?} for an unrelated catalog marker"
         );
+    }
+
+    #[test]
+    fn same_session_catalog_marker_contention_retries_before_commit() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let session_id = app.app.conversation.session().id.clone();
+        let catalog_lock = smelt_store::CatalogMarkerLock::acquire(
+            app.app.core.sessions.sessions_dir(),
+            &session_id,
+        )
+        .expect("hold current session catalog marker lock");
+        app.app.session_append_history(protocol::HistoryItem::note(
+            protocol::HistoryNote::context("blocked save"),
+        ));
+        let synchronized = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = {
+            let synchronized = synchronized.clone();
+            std::thread::spawn(move || {
+                synchronized.wait();
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                drop(catalog_lock);
+            })
+        };
+
+        synchronized.wait();
+        let started = std::time::Instant::now();
+        app.app.save_session_and_flush();
+        let elapsed = started.elapsed();
+        release.join().unwrap();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "canonical save did not recover promptly from marker contention: {elapsed:?}"
+        );
+        assert!(!app.app.session_document_has_unflushed_work());
     }
 
     #[test]

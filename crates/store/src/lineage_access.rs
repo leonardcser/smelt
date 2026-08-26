@@ -25,6 +25,12 @@ use storage::*;
 
 const LINEAGE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LineageSessionLocation {
+    pub session_id: String,
+    pub lineage_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LineageSessionState {
     pub lineage_id: String,
@@ -819,14 +825,14 @@ pub fn cleanup_abandoned_lineages(root: impl AsRef<Path>, limit: usize) -> Resul
     Ok(removed)
 }
 
-pub fn lineage_session_ids(root: impl AsRef<Path>) -> Result<Vec<String>> {
+pub fn lineage_session_locations(root: impl AsRef<Path>) -> Result<Vec<LineageSessionLocation>> {
     let root = root.as_ref();
     validate_storage_root(root)?;
     if !root.exists() {
         return Ok(Vec::new());
     }
     ensure_private_directory(root)?;
-    let mut ids = Vec::new();
+    let mut sessions = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         if entry.file_type()?.is_symlink() || !entry.file_type()?.is_dir() {
@@ -853,16 +859,33 @@ pub fn lineage_session_ids(root: impl AsRef<Path>) -> Result<Vec<String>> {
              WHERE lineage_id = ?1 AND deleted_at IS NULL
              ORDER BY session_id",
         )?;
-        let rows = statement.query_map([lineage.as_str()], |row| row.get::<_, String>(0))?;
-        ids.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        let rows = statement.query_map([lineage.as_str()], |row| {
+            Ok(LineageSessionLocation {
+                session_id: row.get(0)?,
+                lineage_id: lineage.as_str().to_owned(),
+            })
+        })?;
+        sessions.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
     }
-    ids.sort_unstable();
-    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+    sessions.sort_unstable_by(|left, right| left.session_id.cmp(&right.session_id));
+    if sessions
+        .windows(2)
+        .any(|pair| pair[0].session_id == pair[1].session_id)
+    {
         return Err(StoreError::Integrity(
             "a live session belongs to multiple lineages".into(),
         ));
     }
-    Ok(ids)
+    Ok(sessions)
+}
+
+pub fn lineage_session_ids(root: impl AsRef<Path>) -> Result<Vec<String>> {
+    lineage_session_locations(root).map(|sessions| {
+        sessions
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect()
+    })
 }
 
 #[derive(Debug)]
@@ -1646,6 +1669,35 @@ mod tests {
         assert!(LineageSessionReader::try_open_existing(root.path(), &id)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn lineage_session_locations_retain_direct_addresses() {
+        let root = tempfile::tempdir().unwrap();
+        let first_id = session_id('1');
+        let second_id = session_id('2');
+        let mut first = OwnedLineageWriter::open(root.path(), &first_id).unwrap();
+        first.commit_session(&initial_commit(&first_id)).unwrap();
+        let first_lineage = first.lineage_id().to_owned();
+        first.release().unwrap();
+        let mut second = OwnedLineageWriter::open(root.path(), &second_id).unwrap();
+        second.commit_session(&initial_commit(&second_id)).unwrap();
+        let second_lineage = second.lineage_id().to_owned();
+        second.release().unwrap();
+
+        assert_eq!(
+            lineage_session_locations(root.path()).unwrap(),
+            vec![
+                LineageSessionLocation {
+                    session_id: first_id,
+                    lineage_id: first_lineage,
+                },
+                LineageSessionLocation {
+                    session_id: second_id,
+                    lineage_id: second_lineage,
+                },
+            ]
+        );
     }
 
     #[test]

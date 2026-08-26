@@ -107,9 +107,8 @@ impl PersistenceCause {
             | smelt_store::StoreError::MissingObject { .. }
             | smelt_store::StoreError::ObjectTooLarge { .. }
             | smelt_store::StoreError::Json(_) => PersistenceFailureClass::Unsupported,
-            smelt_store::StoreError::Busy { .. } | smelt_store::StoreError::Cancelled => {
-                PersistenceFailureClass::Invariant
-            }
+            smelt_store::StoreError::Busy { .. } => PersistenceFailureClass::Unavailable,
+            smelt_store::StoreError::Cancelled => PersistenceFailureClass::Invariant,
             smelt_store::StoreError::Io(_)
             | smelt_store::StoreError::Sqlite(_)
             | smelt_store::StoreError::TransactionCleanup { .. }
@@ -126,7 +125,7 @@ impl PersistenceCause {
             smelt_store::SessionCommitFailure::UnsupportedSchema { .. } => {
                 PersistenceFailureClass::Unsupported
             }
-            smelt_store::SessionCommitFailure::Busy { .. } => PersistenceFailureClass::Invariant,
+            smelt_store::SessionCommitFailure::Busy { .. } => PersistenceFailureClass::Unavailable,
             smelt_store::SessionCommitFailure::Io { .. }
             | smelt_store::SessionCommitFailure::Sqlite { .. } => {
                 PersistenceFailureClass::Environment
@@ -4039,13 +4038,13 @@ mod tests {
     }
 
     #[test]
-    fn persistent_busy_is_an_invariant_failure() {
+    fn persistent_busy_is_an_unavailable_failure() {
         let cause = PersistenceCause::from_commit(&smelt_store::SessionCommitFailure::Busy {
             operation: "begin transaction".into(),
             attempts: 1,
             waited_ms: 100,
         });
-        assert_eq!(cause.class, PersistenceFailureClass::Invariant);
+        assert_eq!(cause.class, PersistenceFailureClass::Unavailable);
     }
 
     #[test]

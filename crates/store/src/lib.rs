@@ -41,10 +41,6 @@ impl SessionStoreLayout {
         self.sessions_root.join("catalog.db")
     }
 
-    pub fn catalog_lock_path(&self) -> std::path::PathBuf {
-        self.sessions_root.join(".catalog.lock")
-    }
-
     pub fn catalog_pending_dir(&self) -> std::path::PathBuf {
         self.sessions_root.join(".catalog-pending")
     }
@@ -67,6 +63,11 @@ impl SessionStoreLayout {
 
     pub fn lineage_lock_path(&self, lineage_id: &str) -> std::path::PathBuf {
         self.locks_dir().join(format!("{lineage_id}.lock"))
+    }
+
+    pub fn catalog_marker_lock_path(&self, session_id: &str) -> std::path::PathBuf {
+        self.locks_dir()
+            .join(format!("{session_id}.catalog-marker.lock"))
     }
 
     pub fn trash_dir(&self) -> std::path::PathBuf {
@@ -103,10 +104,10 @@ impl SessionStoreLayout {
 }
 
 pub use catalog::{
-    catalog_reconcile_lock_path, catalog_session_pending_token, clear_catalog_session_pending,
-    pending_catalog_session_ids, rebuild_catalog, Catalog, CatalogAvailability, CatalogCursor,
-    CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader, CatalogReconcileLock,
-    CatalogSession, CATALOG_SCHEMA_VERSION, MAX_CATALOG_PAGE_SIZE,
+    catalog_session_pending_token, clear_catalog_session_pending, pending_catalog_session_ids,
+    Catalog, CatalogAvailability, CatalogCursor, CatalogMarkerLock, CatalogMetadata, CatalogPage,
+    CatalogQuery, CatalogReader, CatalogReconciliation, CatalogSession, CATALOG_SCHEMA_VERSION,
+    MAX_CATALOG_PAGE_SIZE,
 };
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
@@ -121,8 +122,9 @@ pub use history::{
     TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use lineage_access::{
-    cleanup_abandoned_lineages, lineage_session_ids, verify_lineage_backup, LineageReclamation,
-    LineageSessionReader, LineageSessionState, LineageVacuum, OwnedLineageWriter,
+    cleanup_abandoned_lineages, lineage_session_ids, lineage_session_locations,
+    verify_lineage_backup, LineageReclamation, LineageSessionLocation, LineageSessionReader,
+    LineageSessionState, LineageVacuum, OwnedLineageWriter,
 };
 pub use lineage_search::{
     LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
