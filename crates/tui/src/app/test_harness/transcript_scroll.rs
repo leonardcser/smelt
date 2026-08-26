@@ -1076,6 +1076,9 @@ fn assert_record_ranges_overlap(
     let Some(edge) = state.drag_edge else {
         return;
     };
+    if viewport_anchor_preserved(frame) {
+        return;
+    }
     let Some(before) = frame.active_record_range_before else {
         return;
     };
@@ -1086,6 +1089,26 @@ fn assert_record_ranges_overlap(
         ranges_overlap(before, after),
         "{edge:?} drag/autoscroll jumped to disjoint record coverage: before={before:?}, after={after:?}, frame={frame:?}"
     );
+}
+
+fn viewport_anchor_preserved(frame: &TranscriptScrollTraceFrame) -> bool {
+    matches!(
+        (frame.viewport_anchor_before, frame.viewport_anchor_after),
+        (
+            Some(TranscriptTraceAnchor::Content {
+                record_index: before_record,
+                block_id: before_block,
+                row_offset: before_row,
+                ..
+            }),
+            Some(TranscriptTraceAnchor::Content {
+                record_index: after_record,
+                block_id: after_block,
+                row_offset: after_row,
+                ..
+            })
+        ) if before_record == after_record && before_block == after_block && before_row == after_row
+    )
 }
 
 fn ranges_overlap(a: TranscriptRecordTraceRange, b: TranscriptRecordTraceRange) -> bool {
@@ -1465,6 +1488,22 @@ mod tests {
         app.transcript_scroll_probe_render();
         app.transcript_scroll_probe_resize(101, 33);
         app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_bottom_drag_autoscroll_allows_preserved_anchor_rehydration() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(141, 85, 23);
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+        app.transcript_scroll_probe_render();
+        for _ in 0..64 {
+            app.transcript_scroll_probe_drag_autoscroll_tick();
+            app.transcript_scroll_probe_render();
+        }
     }
 
     #[test]
