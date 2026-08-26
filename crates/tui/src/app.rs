@@ -295,6 +295,7 @@ pub struct TuiApp {
     pub(crate) task_label: Option<String>,
     pub(crate) pending_quit: bool,
     pub(crate) pending_session_save: bool,
+    pending_turn_dispatch: Option<crate::app::agent::PendingTurnDispatch>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) working: smelt_core::working::WorkingState,
     /// Resolved viewport rectangles read by mouse hit-testing and scroll estimation.
@@ -1274,6 +1275,12 @@ impl TuiApp {
         self.active_agent_turn_id().is_some()
     }
 
+    pub(crate) fn turn_lifecycle_is_active(&self) -> bool {
+        self.agent_is_running()
+            || self.turn_submission_is_pending()
+            || self.conversation.canonical_operations_are_pending()
+    }
+
     pub(crate) fn request_urgent_render(&mut self) {
         self.frame_scheduler
             .request(crate::app::render_loop::FrameUrgency::Urgent);
@@ -1299,7 +1306,7 @@ impl TuiApp {
     }
 
     pub(crate) fn prompt_work_state(&self) -> PromptWorkState {
-        let turn_active = self.agent_is_running() || self.working.is_compacting();
+        let turn_active = self.turn_lifecycle_is_active() || self.working.is_compacting();
         if turn_active {
             PromptWorkState::TurnActive
         } else if self.busy_stack.is_busy() {
@@ -1626,13 +1633,13 @@ impl TuiApp {
                             *overrides,
                             CommandTurnStart::Fresh,
                         );
-                        let started = turn.is_some();
+                        let started = turn.is_some() || self.turn_submission_is_pending();
                         self.conversation.set_active(turn);
                         started
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
                         let turn = self.begin_agent_turn(&req.display, req.content);
-                        let started = turn.is_some();
+                        let started = turn.is_some() || self.turn_submission_is_pending();
                         self.conversation.set_active(turn);
                         started
                     }
@@ -1645,7 +1652,7 @@ impl TuiApp {
             }
             QueuedInput::ProcessStatus(note) if !note.text().is_empty() => {
                 let turn = self.begin_process_status_turn(note);
-                let started = turn.is_some();
+                let started = turn.is_some() || self.turn_submission_is_pending();
                 self.conversation.set_active(turn);
                 started
             }
@@ -1979,6 +1986,7 @@ impl TuiApp {
             task_label: None,
             pending_quit: false,
             pending_session_save: false,
+            pending_turn_dispatch: None,
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             working: smelt_core::working::WorkingState::new(working_clock),
             layout: crate::content::layout::LayoutState::default(),
@@ -2691,14 +2699,98 @@ impl TuiApp {
         if let Some(session_id) = report.acknowledged_session_id {
             self.dismiss_session_save_failure_notification(&session_id);
         }
-        if let Some((session_id, message)) = report.failure {
-            self.notify_session_save_failure(&session_id, &message);
+        for completion in report.canonical_completions {
+            self.handle_canonical_completion(completion);
+        }
+        if let Some(failure) = report.failure {
+            let notify = match failure.target {
+                crate::app::conversation::PersistenceFailureTarget::Command(command_id) => {
+                    self.fail_pending_turn_submission(Some(command_id), &failure.cause);
+                    false
+                }
+                crate::app::conversation::PersistenceFailureTarget::AllCanonicalCommands => {
+                    self.fail_pending_turn_submission(None, &failure.cause);
+                    self.conversation.abandon_all_canonical_operations();
+                    true
+                }
+                crate::app::conversation::PersistenceFailureTarget::None => true,
+            };
+            if notify {
+                self.notify_session_save_failure(&failure.session_id, &failure.cause.message);
+            }
         }
         if let Some(warning) = report.audit_warning {
             self.notify_warn(warning);
         }
-        if report.terminal_turn_id.is_some() {
-            self.start_next_queued_input_if_idle();
+        self.drive_canonical_operations();
+    }
+
+    fn handle_canonical_completion(
+        &mut self,
+        completion: crate::persist::CanonicalCommandCompletion,
+    ) {
+        match completion {
+            crate::persist::CanonicalCommandCompletion::Submit(acknowledgement) => {
+                let command_id = acknowledgement.command_id;
+                if self.resume_turn_submission_after_persistence(*acknowledgement) {
+                    self.conversation.confirm_canonical_completion(command_id);
+                }
+            }
+            crate::persist::CanonicalCommandCompletion::Transition(acknowledgement) => {
+                let command_id = acknowledgement.command_id;
+                let turn_id = acknowledgement.receipt.turn_id;
+                let terminal = acknowledgement.receipt.state.is_terminal();
+                if self.conversation.confirm_canonical_completion(command_id) && terminal {
+                    self.conversation.mark_terminal(turn_id.get());
+                    self.start_next_queued_input_if_idle();
+                }
+            }
+            crate::persist::CanonicalCommandCompletion::Failed {
+                command_id, cause, ..
+            } => {
+                if !self.fail_pending_turn_submission(Some(command_id), &cause) {
+                    self.conversation.confirm_canonical_completion(command_id);
+                }
+                self.notify_session_save_failure(
+                    &self.conversation.session().id.clone(),
+                    &cause.message,
+                );
+            }
+        }
+    }
+
+    fn drive_canonical_operations(&mut self) {
+        loop {
+            let events = self.conversation.drive_canonical_operations();
+            if events.is_empty() {
+                return;
+            }
+            for event in events {
+                match event {
+                    crate::app::conversation::CanonicalOperationEvent::Submit(outcome) => {
+                        self.handle_canonical_submit_outcome(outcome);
+                    }
+                    crate::app::conversation::CanonicalOperationEvent::TransitionDurable(
+                        acknowledgement,
+                    ) => {
+                        if acknowledgement.receipt.state.is_terminal() {
+                            self.conversation
+                                .mark_terminal(acknowledgement.receipt.turn_id.get());
+                            self.start_next_queued_input_if_idle();
+                        }
+                    }
+                    crate::app::conversation::CanonicalOperationEvent::Failed {
+                        command_id,
+                        cause,
+                    } => {
+                        self.fail_pending_turn_submission(Some(command_id), &cause);
+                        self.notify_session_save_failure(
+                            &self.conversation.session().id.clone(),
+                            &cause.message,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2764,6 +2856,7 @@ impl TuiApp {
                     if self.complete_pending_transcript_details() {
                         self.request_urgent_render();
                     }
+                    self.drive_canonical_operations();
                     self.save_deferred_session_batch_if_ready();
                     if !self.conversation.transcript_hydration_is_pending() {
                         self.retry_pending_transcript_search();

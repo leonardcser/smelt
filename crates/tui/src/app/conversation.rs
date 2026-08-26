@@ -7,9 +7,86 @@ use super::{
 
 pub(crate) struct PersistenceReport {
     pub(crate) acknowledged_session_id: Option<String>,
-    pub(crate) terminal_turn_id: Option<u64>,
-    pub(crate) failure: Option<(String, String)>,
+    pub(crate) canonical_completions: Vec<crate::persist::CanonicalCommandCompletion>,
+    pub(crate) failure: Option<PersistenceFailureReport>,
     pub(crate) audit_warning: Option<String>,
+}
+
+pub(crate) struct PersistenceFailureReport {
+    pub(crate) session_id: String,
+    pub(crate) target: PersistenceFailureTarget,
+    pub(crate) cause: crate::persist::PersistenceCause,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PersistenceFailureTarget {
+    Command(crate::persist::CanonicalCommandId),
+    AllCanonicalCommands,
+    None,
+}
+
+pub(crate) enum CanonicalTurnSubmitOutcome {
+    Durable(Box<crate::persist::SubmitTurnAcknowledgement>),
+    PendingPersistence {
+        command_id: crate::persist::CanonicalCommandId,
+        generation: super::session_document::PersistenceGeneration,
+    },
+    PendingPreparation {
+        command_id: crate::persist::CanonicalCommandId,
+    },
+}
+
+pub(crate) enum CanonicalOperationEvent {
+    Submit(CanonicalTurnSubmitOutcome),
+    TransitionDurable(Box<crate::persist::TurnTransitionAcknowledgement>),
+    Failed {
+        command_id: crate::persist::CanonicalCommandId,
+        cause: crate::persist::PersistenceCause,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum CanonicalTransitionDispatch {
+    Enqueue,
+    Commit,
+}
+
+#[derive(Clone)]
+enum CanonicalOperationPayload {
+    Submit {
+        metadata: super::session_document::RuntimeSessionMetadata,
+        turn: smelt_store::NewTurn,
+    },
+    Transition {
+        metadata: super::session_document::RuntimeSessionMetadata,
+        turn_id: smelt_store::TurnId,
+        state: smelt_store::TurnState,
+        at_ms: u64,
+        terminal_reason: Option<String>,
+        dispatch: CanonicalTransitionDispatch,
+    },
+}
+
+#[derive(Clone)]
+struct CanonicalOperation {
+    command_id: crate::persist::CanonicalCommandId,
+    payload: CanonicalOperationPayload,
+}
+
+#[derive(Clone, Copy)]
+enum InflightCanonicalCommand {
+    Submit,
+    Transition {
+        generation: super::session_document::PersistenceGeneration,
+        terminal: bool,
+    },
+}
+
+enum CanonicalOperationProgress {
+    DeferredPreparation,
+    Submit(CanonicalTurnSubmitOutcome),
+    TransitionDurable(Box<crate::persist::TurnTransitionAcknowledgement>),
+    Queued,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +122,10 @@ pub(crate) struct ConversationRuntime {
     persistence_epoch: crate::persist::SessionEpoch,
     observed_persistence_status: Option<crate::persist::SessionPersistenceStatus>,
     persistence_preparation_block: Option<PersistencePreparationBlock>,
+    next_canonical_command_id: u64,
+    canonical_operations: std::collections::VecDeque<CanonicalOperation>,
+    inflight_canonical_commands:
+        std::collections::HashMap<crate::persist::CanonicalCommandId, InflightCanonicalCommand>,
     access: SessionAccess,
     sessions: smelt_core::session::SessionStorage,
     storage: SessionPersistence,
@@ -74,6 +155,9 @@ impl ConversationRuntime {
             persistence_epoch: crate::persist::SessionEpoch::ZERO,
             observed_persistence_status: None,
             persistence_preparation_block: None,
+            next_canonical_command_id: 1,
+            canonical_operations: std::collections::VecDeque::new(),
+            inflight_canonical_commands: std::collections::HashMap::new(),
             access: SessionAccess::Owned,
             sessions,
             storage,
@@ -2106,6 +2190,8 @@ impl ConversationRuntime {
         self.access = SessionAccess::Owned;
         self.document.enable_change_tracking();
         self.turn.reset_session();
+        self.canonical_operations.clear();
+        self.inflight_canonical_commands.clear();
         self.document.mark_session_unpersisted();
         self.clear_shared_state();
         old_id
@@ -2117,6 +2203,8 @@ impl ConversationRuntime {
     ) -> Option<String> {
         self.session = loaded;
         self.turn.reset_session();
+        self.canonical_operations.clear();
+        self.inflight_canonical_commands.clear();
         self.session.cwd.clone()
     }
 
@@ -2181,36 +2269,91 @@ impl ConversationRuntime {
 
     pub(crate) fn drain_persistence_report(&mut self) -> Option<PersistenceReport> {
         let persistence = self.persistence.as_ref()?;
-        if !persistence.drain_status_wake() && !persistence.is_finished() {
+        let status_woke = persistence.drain_status_wake();
+        if !status_woke
+            && !persistence.is_finished()
+            && persistence.status().canonical_completions.is_empty()
+        {
             return None;
         }
         let status = persistence.take_status();
-        if self.observed_persistence_status.as_ref() == Some(&status) {
+        if self.observed_persistence_status.as_ref() == Some(&status)
+            && status.canonical_completions.is_empty()
+        {
             return None;
         }
         self.observed_persistence_status = Some(status.clone());
 
         let mut acknowledged_session_id = None;
-        let mut terminal_turn_id = None;
-        if let Some(acknowledgement) = status.acknowledgement.as_ref() {
-            if self.apply_persistence_acknowledgement(acknowledgement) {
-                acknowledged_session_id = Some(acknowledgement.receipt.session_id.clone());
-                terminal_turn_id = status.latest_terminal_turn_id.map(smelt_store::TurnId::get);
-                if let Some(turn_id) = terminal_turn_id {
-                    self.turn.mark_terminal(turn_id);
-                }
-            }
-        }
+        let acknowledgement_applied =
+            status
+                .acknowledgement
+                .as_ref()
+                .is_none_or(|acknowledgement| {
+                    let applied = self.apply_persistence_acknowledgement(acknowledgement);
+                    if applied {
+                        acknowledged_session_id = Some(acknowledgement.receipt.session_id.clone());
+                    }
+                    applied
+                });
+        let durable_generation = self.document.durable_generation();
+        let canonical_completions = status
+            .canonical_completions
+            .iter()
+            .filter(|completion| {
+                acknowledgement_applied
+                    || match completion {
+                        crate::persist::CanonicalCommandCompletion::Submit(acknowledgement) => {
+                            acknowledgement.persistence.generation <= durable_generation
+                        }
+                        crate::persist::CanonicalCommandCompletion::Transition(acknowledgement) => {
+                            acknowledgement.persistence.generation <= durable_generation
+                        }
+                        crate::persist::CanonicalCommandCompletion::Failed { .. } => true,
+                    }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
 
-        let cause = match &status.state {
-            crate::persist::PersistenceState::Blocked { cause, .. }
-            | crate::persist::PersistenceState::Stopped {
-                cause: Some(cause), ..
-            } => Some(cause),
+        let failure = match &status.state {
+            crate::persist::PersistenceState::Blocked { desired, cause, .. } => {
+                let command_id =
+                    canonical_completions
+                        .iter()
+                        .find_map(|completion| match completion {
+                            crate::persist::CanonicalCommandCompletion::Failed {
+                                command_id,
+                                generation,
+                                cause: command_cause,
+                            } if generation == desired && command_cause == cause => {
+                                Some(*command_id)
+                            }
+                            _ => None,
+                        });
+                Some(PersistenceFailureReport {
+                    session_id: self.session.id.clone(),
+                    target: command_id.map_or(
+                        PersistenceFailureTarget::None,
+                        PersistenceFailureTarget::Command,
+                    ),
+                    cause: cause.clone(),
+                })
+            }
             crate::persist::PersistenceState::OwnershipLost { cause, .. } => {
                 self.mark_read_only(cause.message.clone());
-                Some(cause)
+                Some(PersistenceFailureReport {
+                    session_id: self.session.id.clone(),
+                    target: PersistenceFailureTarget::AllCanonicalCommands,
+                    cause: cause.clone(),
+                })
             }
+            crate::persist::PersistenceState::Stopped {
+                cause: Some(cause), ..
+            } => Some(PersistenceFailureReport {
+                session_id: self.session.id.clone(),
+                target: PersistenceFailureTarget::AllCanonicalCommands,
+                cause: cause.clone(),
+            }),
             crate::persist::PersistenceState::Idle { .. }
             | crate::persist::PersistenceState::Saving { .. }
             | crate::persist::PersistenceState::Durable { .. }
@@ -2218,8 +2361,8 @@ impl ConversationRuntime {
         };
         Some(PersistenceReport {
             acknowledged_session_id,
-            terminal_turn_id,
-            failure: cause.map(|cause| (self.session.id.clone(), cause.message.clone())),
+            canonical_completions,
+            failure,
             audit_warning: status.latest_audit_warning.map(|warning| warning.message),
         })
     }
@@ -2467,6 +2610,8 @@ impl ConversationRuntime {
         self.document.unbind_persistence(epoch);
         self.persistence = None;
         self.observed_persistence_status = None;
+        self.canonical_operations.clear();
+        self.inflight_canonical_commands.clear();
         Ok(outcome
             .cause
             .map(|cause| cause.message)
@@ -2477,7 +2622,7 @@ impl ConversationRuntime {
         &mut self,
         metadata: super::session_document::RuntimeSessionMetadata,
         turn: smelt_store::NewTurn,
-    ) -> Result<crate::persist::SubmitTurnAcknowledgement, crate::persist::PersistenceCause> {
+    ) -> Result<CanonicalTurnSubmitOutcome, crate::persist::PersistenceCause> {
         if self.persistence.is_none() {
             if let Err(reason) = self.claim_writer_access() {
                 self.mark_read_only(reason.clone());
@@ -2489,30 +2634,32 @@ impl ConversationRuntime {
                 "session is read-only",
             ));
         }
-        let intent = self
-            .document
-            .prepare_turn_batch(&mut self.session, metadata)
-            .map_err(|error| crate::persist::PersistenceCause::invariant(error.to_string()))?;
-        self.publish_shared_state();
-        let acknowledgement = self
-            .persistence
-            .as_ref()
-            .ok_or_else(|| {
-                crate::persist::PersistenceCause::unavailable("persistence actor is unavailable")
-            })?
-            .submit_turn(
-                crate::persist::SubmitTurnIntent {
-                    session: intent,
-                    turn,
-                },
-                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
-            )?;
-        if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
-            return Err(crate::persist::PersistenceCause::invariant(
-                "turn submission receipt did not match the session document",
-            ));
+        let command_id = self.allocate_canonical_command_id();
+        let operation = CanonicalOperation {
+            command_id,
+            payload: CanonicalOperationPayload::Submit { metadata, turn },
+        };
+        let can_drive = self.canonical_operations.is_empty();
+        self.canonical_operations.push_back(operation);
+        if !can_drive {
+            return Ok(CanonicalTurnSubmitOutcome::PendingPreparation { command_id });
         }
-        Ok(acknowledgement)
+        match self.process_front_canonical_operation() {
+            Ok(CanonicalOperationProgress::Submit(outcome)) => Ok(outcome),
+            Ok(CanonicalOperationProgress::DeferredPreparation) => {
+                Ok(CanonicalTurnSubmitOutcome::PendingPreparation { command_id })
+            }
+            Ok(
+                CanonicalOperationProgress::TransitionDurable(_)
+                | CanonicalOperationProgress::Queued,
+            ) => {
+                unreachable!("new canonical submission is the front operation")
+            }
+            Err(cause) => {
+                self.discard_canonical_operation(command_id);
+                Err(cause)
+            }
+        }
     }
 
     pub(crate) fn enqueue_canonical_turn_transition(
@@ -2522,23 +2669,39 @@ impl ConversationRuntime {
         state: smelt_store::TurnState,
         terminal_reason: Option<String>,
     ) -> Result<(), crate::persist::PersistenceCause> {
-        let intent = self
-            .document
-            .prepare_turn_batch(&mut self.session, metadata)
-            .map_err(|error| crate::persist::PersistenceCause::invariant(error.to_string()))?;
-        self.publish_shared_state();
-        self.persistence
-            .as_ref()
-            .ok_or_else(|| {
-                crate::persist::PersistenceCause::unavailable("persistence actor is unavailable")
-            })?
-            .enqueue_turn_transition(crate::persist::TurnTransitionIntent {
-                session: intent,
+        let command_id = self.allocate_canonical_command_id();
+        let operation = CanonicalOperation {
+            command_id,
+            payload: CanonicalOperationPayload::Transition {
+                metadata,
                 turn_id,
                 state,
                 at_ms: smelt_core::session::now_ms(),
                 terminal_reason,
-            })
+                dispatch: CanonicalTransitionDispatch::Enqueue,
+            },
+        };
+        let can_drive = self.canonical_operations.is_empty();
+        self.canonical_operations.push_back(operation);
+        if !can_drive {
+            return Ok(());
+        }
+        match self.process_front_canonical_operation() {
+            Ok(
+                CanonicalOperationProgress::DeferredPreparation
+                | CanonicalOperationProgress::Queued,
+            ) => Ok(()),
+            Ok(
+                CanonicalOperationProgress::TransitionDurable(_)
+                | CanonicalOperationProgress::Submit(_),
+            ) => {
+                unreachable!("enqueued transition cannot complete synchronously")
+            }
+            Err(cause) => {
+                self.discard_canonical_operation(command_id);
+                Err(cause)
+            }
+        }
     }
 
     pub(crate) fn commit_canonical_turn_transition(
@@ -2548,35 +2711,297 @@ impl ConversationRuntime {
         state: smelt_store::TurnState,
         terminal_reason: Option<String>,
     ) -> Result<crate::persist::TurnTransitionOutcome, crate::persist::PersistenceCause> {
-        let intent = self
-            .document
-            .prepare_turn_batch(&mut self.session, metadata)
-            .map_err(|error| crate::persist::PersistenceCause::invariant(error.to_string()))?;
-        self.publish_shared_state();
-        let outcome = self
-            .persistence
-            .as_ref()
-            .ok_or_else(|| {
-                crate::persist::PersistenceCause::unavailable("persistence actor is unavailable")
-            })?
-            .transition_turn(
-                crate::persist::TurnTransitionIntent {
-                    session: intent,
-                    turn_id,
-                    state,
-                    at_ms: smelt_core::session::now_ms(),
-                    terminal_reason,
-                },
-                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
-            )?;
-        if let crate::persist::TurnTransitionOutcome::Durable(acknowledgement) = &outcome {
-            if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
-                return Err(crate::persist::PersistenceCause::invariant(
-                    "turn transition receipt did not match the session document",
-                ));
+        let command_id = self.allocate_canonical_command_id();
+        let operation = CanonicalOperation {
+            command_id,
+            payload: CanonicalOperationPayload::Transition {
+                metadata,
+                turn_id,
+                state,
+                at_ms: smelt_core::session::now_ms(),
+                terminal_reason,
+                dispatch: CanonicalTransitionDispatch::Commit,
+            },
+        };
+        let can_drive = self.canonical_operations.is_empty();
+        self.canonical_operations.push_back(operation);
+        if !can_drive {
+            return Ok(crate::persist::TurnTransitionOutcome::Pending {
+                command_id,
+                generation: self.document.generation(),
+            });
+        }
+        match self.process_front_canonical_operation() {
+            Ok(CanonicalOperationProgress::TransitionDurable(acknowledgement)) => Ok(
+                crate::persist::TurnTransitionOutcome::Durable(acknowledgement),
+            ),
+            Ok(
+                CanonicalOperationProgress::DeferredPreparation
+                | CanonicalOperationProgress::Queued,
+            ) => Ok(crate::persist::TurnTransitionOutcome::Pending {
+                command_id,
+                generation: self.document.generation(),
+            }),
+            Ok(CanonicalOperationProgress::Submit(_)) => {
+                unreachable!("committed transition is the front operation")
+            }
+            Err(cause) => {
+                self.discard_canonical_operation(command_id);
+                Err(cause)
             }
         }
-        Ok(outcome)
+    }
+
+    pub(crate) fn canonical_operations_are_pending(&self) -> bool {
+        !self.canonical_operations.is_empty() || !self.inflight_canonical_commands.is_empty()
+    }
+
+    pub(crate) fn confirm_canonical_completion(
+        &mut self,
+        command_id: crate::persist::CanonicalCommandId,
+    ) -> bool {
+        if self
+            .inflight_canonical_commands
+            .remove(&command_id)
+            .is_none()
+        {
+            return false;
+        }
+        if let Some(persistence) = self.persistence.as_ref() {
+            persistence.confirm_canonical_completion(command_id);
+        }
+        true
+    }
+
+    pub(crate) fn abandon_canonical_operation(
+        &mut self,
+        command_id: crate::persist::CanonicalCommandId,
+    ) {
+        self.discard_canonical_operation(command_id);
+        self.inflight_canonical_commands.remove(&command_id);
+        if let Some(persistence) = self.persistence.as_ref() {
+            persistence.confirm_canonical_completion(command_id);
+        }
+    }
+
+    pub(crate) fn abandon_all_canonical_operations(&mut self) {
+        let mut command_ids = self
+            .canonical_operations
+            .drain(..)
+            .map(|operation| operation.command_id)
+            .collect::<Vec<_>>();
+        command_ids.extend(
+            self.inflight_canonical_commands
+                .drain()
+                .map(|(command_id, _)| command_id),
+        );
+        if let Some(persistence) = self.persistence.as_ref() {
+            for command_id in command_ids {
+                persistence.confirm_canonical_completion(command_id);
+            }
+        }
+    }
+
+    pub(crate) fn drive_canonical_operations(&mut self) -> Vec<CanonicalOperationEvent> {
+        let mut events = Vec::new();
+        loop {
+            if self.canonical_operations.is_empty() {
+                break;
+            }
+            let command_id = self
+                .canonical_operations
+                .front()
+                .expect("front canonical operation")
+                .command_id;
+            match self.process_front_canonical_operation() {
+                Ok(CanonicalOperationProgress::DeferredPreparation) => break,
+                Ok(CanonicalOperationProgress::Queued) => {}
+                Ok(CanonicalOperationProgress::Submit(outcome)) => {
+                    events.push(CanonicalOperationEvent::Submit(outcome));
+                    break;
+                }
+                Ok(CanonicalOperationProgress::TransitionDurable(acknowledgement)) => {
+                    events.push(CanonicalOperationEvent::TransitionDurable(acknowledgement));
+                }
+                Err(cause) => {
+                    self.discard_canonical_operation(command_id);
+                    events.push(CanonicalOperationEvent::Failed { command_id, cause });
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    fn process_front_canonical_operation(
+        &mut self,
+    ) -> Result<CanonicalOperationProgress, crate::persist::PersistenceCause> {
+        let operation = self
+            .canonical_operations
+            .front()
+            .cloned()
+            .expect("front canonical operation");
+        let metadata = match &operation.payload {
+            CanonicalOperationPayload::Submit { metadata, .. }
+            | CanonicalOperationPayload::Transition { metadata, .. } => metadata.clone(),
+        };
+        let session = match self
+            .document
+            .prepare_turn_batch(&mut self.session, metadata)
+        {
+            Ok(session) => session,
+            Err(super::session_document::SessionBatchPreparationError::HydrationPending) => {
+                return Ok(CanonicalOperationProgress::DeferredPreparation);
+            }
+            Err(super::session_document::SessionBatchPreparationError::Invalid(message)) => {
+                return Err(crate::persist::PersistenceCause::invariant(message));
+            }
+        };
+        self.publish_shared_state();
+        match operation.payload {
+            CanonicalOperationPayload::Submit { turn, .. } => {
+                let outcome = self
+                    .persistence
+                    .as_ref()
+                    .ok_or_else(|| {
+                        crate::persist::PersistenceCause::unavailable(
+                            "persistence actor is unavailable",
+                        )
+                    })?
+                    .submit_turn(
+                        crate::persist::SubmitTurnIntent {
+                            command_id: operation.command_id,
+                            session,
+                            turn,
+                        },
+                        std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+                    )?;
+                match outcome {
+                    crate::persist::SubmitTurnOutcome::Durable(acknowledgement) => {
+                        if !self.apply_persistence_acknowledgement(&acknowledgement.persistence) {
+                            return Err(crate::persist::PersistenceCause::invariant(
+                                "turn submission receipt did not match the session document",
+                            ));
+                        }
+                        self.canonical_operations.pop_front();
+                        Ok(CanonicalOperationProgress::Submit(
+                            CanonicalTurnSubmitOutcome::Durable(acknowledgement),
+                        ))
+                    }
+                    crate::persist::SubmitTurnOutcome::Pending {
+                        command_id,
+                        generation,
+                    } => {
+                        self.canonical_operations.pop_front();
+                        self.inflight_canonical_commands
+                            .insert(command_id, InflightCanonicalCommand::Submit);
+                        Ok(CanonicalOperationProgress::Submit(
+                            CanonicalTurnSubmitOutcome::PendingPersistence {
+                                command_id,
+                                generation,
+                            },
+                        ))
+                    }
+                }
+            }
+            CanonicalOperationPayload::Transition {
+                turn_id,
+                state,
+                at_ms,
+                terminal_reason,
+                dispatch,
+                ..
+            } => {
+                let generation = session.generation;
+                let intent = crate::persist::TurnTransitionIntent {
+                    command_id: operation.command_id,
+                    session,
+                    turn_id,
+                    state,
+                    at_ms,
+                    terminal_reason,
+                };
+                match dispatch {
+                    CanonicalTransitionDispatch::Enqueue => {
+                        self.persistence
+                            .as_ref()
+                            .ok_or_else(|| {
+                                crate::persist::PersistenceCause::unavailable(
+                                    "persistence actor is unavailable",
+                                )
+                            })?
+                            .enqueue_turn_transition(intent)?;
+                        self.canonical_operations.pop_front();
+                        self.inflight_canonical_commands.insert(
+                            operation.command_id,
+                            InflightCanonicalCommand::Transition {
+                                generation,
+                                terminal: state.is_terminal(),
+                            },
+                        );
+                        Ok(CanonicalOperationProgress::Queued)
+                    }
+                    CanonicalTransitionDispatch::Commit => {
+                        let outcome = self
+                            .persistence
+                            .as_ref()
+                            .ok_or_else(|| {
+                                crate::persist::PersistenceCause::unavailable(
+                                    "persistence actor is unavailable",
+                                )
+                            })?
+                            .transition_turn(
+                                intent,
+                                std::time::Instant::now()
+                                    + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+                            )?;
+                        match outcome {
+                            crate::persist::TurnTransitionOutcome::Durable(acknowledgement) => {
+                                if !self
+                                    .apply_persistence_acknowledgement(&acknowledgement.persistence)
+                                {
+                                    return Err(crate::persist::PersistenceCause::invariant(
+                                        "turn transition receipt did not match the session document",
+                                    ));
+                                }
+                                self.canonical_operations.pop_front();
+                                Ok(CanonicalOperationProgress::TransitionDurable(
+                                    acknowledgement,
+                                ))
+                            }
+                            crate::persist::TurnTransitionOutcome::Pending {
+                                command_id,
+                                generation,
+                            } => {
+                                self.canonical_operations.pop_front();
+                                self.inflight_canonical_commands.insert(
+                                    command_id,
+                                    InflightCanonicalCommand::Transition {
+                                        generation,
+                                        terminal: state.is_terminal(),
+                                    },
+                                );
+                                Ok(CanonicalOperationProgress::Queued)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn allocate_canonical_command_id(&mut self) -> crate::persist::CanonicalCommandId {
+        let command_id = crate::persist::CanonicalCommandId::new(self.next_canonical_command_id);
+        self.next_canonical_command_id = self
+            .next_canonical_command_id
+            .checked_add(1)
+            .expect("canonical command ID overflow");
+        command_id
+    }
+
+    fn discard_canonical_operation(&mut self, command_id: crate::persist::CanonicalCommandId) {
+        self.canonical_operations
+            .retain(|operation| operation.command_id != command_id);
     }
 
     fn apply_persistence_acknowledgement(
@@ -2595,7 +3020,36 @@ impl ConversationRuntime {
                 persistence.confirm_acknowledgement(acknowledgement);
             }
         }
+        if applied || acknowledgement.generation <= self.document.durable_generation() {
+            self.confirm_superseded_nonterminal_commands(acknowledgement.generation);
+        }
         applied
+    }
+
+    fn confirm_superseded_nonterminal_commands(
+        &mut self,
+        durable_generation: super::session_document::PersistenceGeneration,
+    ) {
+        // A later cumulative acknowledgement makes nonterminal transitions durable.
+        // Equal-generation receipts still need exact command confirmation.
+        let command_ids = self
+            .inflight_canonical_commands
+            .iter()
+            .filter_map(|(command_id, command)| match command {
+                InflightCanonicalCommand::Transition {
+                    generation,
+                    terminal: false,
+                } if *generation < durable_generation => Some(*command_id),
+                InflightCanonicalCommand::Submit => None,
+                InflightCanonicalCommand::Transition { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        for command_id in command_ids {
+            self.inflight_canonical_commands.remove(&command_id);
+            if let Some(persistence) = self.persistence.as_ref() {
+                persistence.confirm_canonical_completion(command_id);
+            }
+        }
     }
 
     fn refresh_transcript_store_address_from_catalog(&mut self) {

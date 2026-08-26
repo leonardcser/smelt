@@ -62,7 +62,7 @@ end
 
 local function should_auto_continue()
   return auto_continue_request() ~= nil
-    and not smelt.engine.is_running()
+    and not smelt.engine.has_active_turn()
     and not smelt.work.is_busy()
     and prompt_is_empty()
 end

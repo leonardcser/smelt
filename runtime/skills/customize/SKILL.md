@@ -1334,6 +1334,8 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
   Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list.
 - `smelt.engine.cancel` :: `fun(): nil`
   Cancel the in-flight turn or foreground/background work.
+- `smelt.engine.has_active_turn` :: `fun(): boolean`
+  Return `true` while a turn is being prepared, persisted, executed, or finalized.
 - `smelt.engine.is_running` :: `fun(): boolean`
   Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
 - `smelt.engine.on_context_limit` :: `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: any))): smelt.Reg`

@@ -20,6 +20,10 @@ engine.ask_inherited = nil
 ---@type fun(): nil
 engine.cancel = nil
 
+--- Return `true` while a turn is being prepared, persisted, executed, or finalized.
+---@type fun(): boolean
+engine.has_active_turn = nil
+
 --- Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
 ---@type fun(): boolean
 engine.is_running = nil

@@ -263,6 +263,12 @@ impl TuiApp {
                                             self.conversation.set_active(Some(turn));
                                             true
                                         }
+                                        None if self.turn_submission_is_pending() => {
+                                            self.commit_prompt_submission(
+                                                edit.take().expect("submit edit"),
+                                            );
+                                            true
+                                        }
                                         None => false,
                                     }
                                 }
@@ -2251,12 +2257,176 @@ mod tests {
     }
 
     #[test]
+    fn queued_turn_submit_timeout_resumes_without_making_session_read_only() {
+        let mut app = TestApp::builder().build();
+        app.type_text("baseline");
+        app.press(KeyCode::Enter);
+        assert!(app.finish_turn());
+        let _ = app.app.flush_persist();
+        assert!(!app.app.conversation.canonical_operations_are_pending());
+
+        let release_persistence = app.app.conversation.pause_persistence();
+        app.type_text("queued submit");
+        app.press(KeyCode::Enter);
+
+        assert!(app.app.turn_submission_is_pending());
+        assert!(app.app.turn_lifecycle_is_active());
+        assert!(!app.agent_running());
+        assert!(!app.session_is_read_only());
+        assert_eq!(app.state().prompt_text, "");
+        assert!(!app.app.fail_pending_turn_submission(
+            Some(crate::persist::CanonicalCommandId::new(u64::MAX)),
+            &crate::persist::PersistenceCause::invariant("unrelated command failed"),
+        ));
+        assert!(app.app.turn_submission_is_pending());
+
+        release_persistence
+            .send(())
+            .expect("release turn submission");
+        let flush = app.app.flush_persist();
+        assert!(matches!(
+            flush,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ));
+        assert!(app.agent_running());
+        assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.session_is_read_only());
+    }
+
+    #[test]
+    fn queued_process_status_accepts_persistence_pending_turn() {
+        let mut app = TestApp::builder().build();
+        app.type_text("baseline");
+        app.press(KeyCode::Enter);
+        assert!(app.finish_turn());
+        let _ = app.app.flush_persist();
+
+        let release_persistence = app.app.conversation.pause_persistence();
+        let queued = crate::app::QueuedInput::ProcessStatus(protocol::HistoryNote::process_status(
+            "background process finished",
+        ));
+        assert!(app.app.start_queued_input(queued).is_ok());
+        assert!(app.app.turn_submission_is_pending());
+        assert!(!app.agent_running());
+
+        release_persistence
+            .send(())
+            .expect("release process-status turn submission");
+        let flush = app.app.flush_persist();
+        assert!(matches!(
+            flush,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ));
+        assert!(app.agent_running());
+        assert!(!app.app.turn_submission_is_pending());
+    }
+
+    #[test]
+    fn cancelling_pending_turn_submit_does_not_dispatch_after_receipt() {
+        let mut app = TestApp::builder().build();
+        app.type_text("baseline");
+        app.press(KeyCode::Enter);
+        assert!(app.finish_turn());
+        let _ = app.app.flush_persist();
+        let baseline_turn_id = app
+            .app
+            .conversation
+            .last_terminal_turn_id()
+            .expect("baseline turn is terminal");
+        app.clear_actions();
+
+        let release_persistence = app.app.conversation.pause_persistence();
+        app.type_text("cancel before dispatch");
+        app.press(KeyCode::Enter);
+        assert!(app.app.turn_submission_is_pending());
+        assert!(!app.agent_running());
+
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        assert!(app.app.turn_submission_is_pending());
+        assert!(!app.agent_running());
+
+        release_persistence
+            .send(())
+            .expect("release cancelled turn submission");
+        let flush = app.app.flush_persist();
+        assert!(matches!(
+            flush,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ));
+        assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.agent_running());
+        assert!(!app.session_is_read_only());
+        let terminal_flush = app.app.flush_persist();
+        assert!(matches!(
+            terminal_flush,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ));
+        assert_eq!(
+            app.app.conversation.last_terminal_turn_id(),
+            Some(baseline_turn_id + 1)
+        );
+        assert!(app.actions().iter().all(|action| !matches!(
+            action,
+            Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(payload)
+                    if payload.input.provider_content().text_content() == "cancel before dispatch")
+        )));
+    }
+
+    #[test]
+    fn replacing_session_resolves_pending_turn_without_dispatching_it() {
+        let mut app = TestApp::builder().build();
+        app.type_text("baseline");
+        app.press(KeyCode::Enter);
+        assert!(app.finish_turn());
+        let _ = app.app.flush_persist();
+
+        let release_persistence = app.app.conversation.pause_persistence();
+        app.type_text("replace before dispatch");
+        app.press(KeyCode::Enter);
+        assert!(app.app.turn_submission_is_pending());
+        assert!(!app.agent_running());
+
+        let replacement =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let replacement_id = replacement.id.clone();
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            release_persistence
+                .send(())
+                .expect("release replaced turn submission");
+        });
+        app.app.load_session(replacement);
+        release_thread.join().expect("release persistence thread");
+
+        assert_eq!(app.session_snapshot().id, replacement_id);
+        assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.agent_running());
+        assert!(!app.session_is_read_only());
+        assert!(app.drain_engine_sends().iter().all(|command| !matches!(
+            command,
+            protocol::UiCommand::StartTurn(payload)
+                if payload.input.provider_content().text_content() == "replace before dispatch"
+        )));
+    }
+
+    #[test]
     fn interrupt_waits_for_terminal_turn_before_submitting_queued_request() {
         let mut app = TestApp::builder().build();
         app.type_text("first turn");
         app.press(KeyCode::Enter);
         assert!(app.agent_running());
         let _ = app.app.flush_persist();
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
+            protocol::EngineEvent::ToolStarted {
+                invocation_id: protocol::InvocationId::new(1),
+                call_id: "call-1".into(),
+                tool_name: "read_file".into(),
+                args: std::collections::HashMap::new(),
+                called_at_ms: 1,
+            },
+        ));
 
         app.type_text("run now");
         app.press(KeyCode::Enter);
@@ -2297,6 +2467,17 @@ mod tests {
             matches!(item, protocol::HistoryItem::User { content, .. }
                 if content.text_content() == "run now")
         }));
+
+        app.set_session_title(
+            "Writable after interrupt".into(),
+            "writable-after-interrupt".into(),
+            None,
+        );
+        let _ = app.app.flush_persist();
+        assert_eq!(
+            app.session_snapshot().title.as_deref(),
+            Some("Writable after interrupt")
+        );
     }
 
     #[test]

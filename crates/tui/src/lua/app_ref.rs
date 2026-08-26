@@ -647,6 +647,10 @@ impl AgentLuaHost<'_> {
         self.app.agent_is_running()
     }
 
+    pub(crate) fn turn_lifecycle_is_active(&self) -> bool {
+        self.app.turn_lifecycle_is_active()
+    }
+
     pub(crate) fn reload_lua_now(&mut self) {
         if self.app.prompt_input_is_busy() {
             self.app
@@ -706,7 +710,7 @@ impl AgentLuaHost<'_> {
             return false;
         }
         let turn = self.app.begin_custom_command_continuation(command);
-        let started = turn.is_some();
+        let started = turn.is_some() || self.app.turn_submission_is_pending();
         self.app.conversation.set_active(turn);
         started
     }

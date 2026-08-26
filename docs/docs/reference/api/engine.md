@@ -36,6 +36,14 @@ fun(): nil
 
 Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.
 
+## `smelt.engine.has_active_turn`
+
+```lua
+fun(): boolean
+```
+
+Return `true` while a turn is being prepared, persisted, executed, or finalized.
+
 ## `smelt.engine.is_running`
 
 ```lua

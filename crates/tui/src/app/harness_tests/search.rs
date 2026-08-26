@@ -35,6 +35,7 @@ fn sparse_display_only_search_app() -> TestApp {
         records,
     });
     let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, &session_id).unwrap();
+    let lineage_id = writer.lineage_id().to_string();
     let receipt = writer.commit_session(&commit).unwrap();
     let projector = writer.spawn_search_projector().unwrap();
     projector.request();
@@ -51,7 +52,7 @@ fn sparse_display_only_search_app() -> TestApp {
     writer.release().unwrap();
 
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_store(
-        sessions_root,
+        sessions_root.clone(),
         session_id.clone(),
         80,
         16,
@@ -62,7 +63,16 @@ fn sparse_display_only_search_app() -> TestApp {
         crate::app::session_document::StoreBackedSessionDocument::new(
             session,
             loaded,
-            crate::app::history::live_session_for_test(session_id, 200, None),
+            crate::app::history::store_backed_live_session_for_test(
+                session_id.clone(),
+                200,
+                None,
+                smelt_core::session::SessionStoreAddress::new(
+                    sessions_root,
+                    session_id,
+                    lineage_id,
+                ),
+            ),
             receipt.current,
         ),
     );
@@ -70,6 +80,25 @@ fn sparse_display_only_search_app() -> TestApp {
     app.configure_transcript_vim(true, VimMode::Normal);
     app.render_silent();
     app
+}
+
+fn wait_for_agent_turn(app: &mut TestApp) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if app.agent_running() {
+            return;
+        }
+        if let Some(event) = app.try_recv_app_event() {
+            app.app.handle_app_event(event);
+        }
+        app.app.drain_persist_reports();
+        app.render_silent();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "deferred canonical turn did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 fn wait_for_live_search(app: &mut TestApp) {
@@ -136,6 +165,137 @@ fn begin_slow_persisted_search(app: &mut TestApp) {
         .set_transcript_search_worker_delay_for_harness(std::time::Duration::from_millis(80));
     app.type_char('/');
     app.type_text("needle");
+}
+
+#[test]
+fn cancelling_hydration_pending_submit_rolls_back_without_dispatch() {
+    let mut app = sparse_display_only_search_app();
+    app.focus_prompt();
+    app.app
+        .conversation
+        .require_transcript_record_resave_from_for_harness(0);
+    let initial_history_len = app.session_message_count();
+
+    app.type_text("cancel before hydration");
+    app.press(KeyCode::Enter);
+    assert!(app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    assert_eq!(app.session_message_count(), initial_history_len + 2);
+
+    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(!app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    assert_eq!(app.session_message_count(), initial_history_len + 1);
+
+    drain_app_events_for(&mut app, std::time::Duration::from_millis(100));
+    assert!(!app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    assert!(!app.session_is_read_only());
+}
+
+#[test]
+fn hydration_preserves_terminal_transition_before_following_submit() {
+    let mut app = sparse_display_only_search_app();
+    app.focus_prompt();
+    app.type_text("first ordered turn");
+    app.press(KeyCode::Enter);
+    assert!(app.agent_running());
+    let _ = app.app.flush_persist();
+    app.feed_one(crate::app::test_harness::SourceEvent::engine(
+        protocol::EngineEvent::ToolStarted {
+            invocation_id: protocol::InvocationId::new(1),
+            call_id: "call-1".into(),
+            tool_name: "read_file".into(),
+            args: std::collections::HashMap::new(),
+            called_at_ms: 1,
+        },
+    ));
+
+    app.app
+        .conversation
+        .require_transcript_record_resave_from_for_harness(0);
+    assert_eq!(
+        app.app.discard_turn(crate::app::TurnEnd::Cancelled),
+        crate::app::agent::TerminalCommitStatus::Deferred
+    );
+    assert!(!app.agent_running());
+    assert!(app.app.conversation.canonical_operations_are_pending());
+
+    assert!(app
+        .app
+        .begin_agent_turn(
+            "second ordered turn",
+            protocol::Content::text("second ordered turn"),
+        )
+        .is_none());
+    assert!(app.app.turn_submission_is_pending());
+
+    wait_for_agent_turn(&mut app);
+    let _ = app.app.flush_persist();
+    let reader = smelt_store::LineageSessionReader::open_existing(
+        app.app.core.sessions.sessions_dir(),
+        &app.app.conversation.session().id,
+    )
+    .expect("open ordered canonical lineage");
+    let turns = reader.turns().expect("read ordered canonical turns");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].state, smelt_store::TurnState::Cancelled);
+    assert!(matches!(
+        turns[1].state,
+        smelt_store::TurnState::Ready | smelt_store::TurnState::Running
+    ));
+    assert_eq!(
+        turns[1].submitted_revision.get(),
+        turns[0].submitted_revision.get() + 3,
+        "running and terminal transitions must commit before the following submit"
+    );
+}
+
+#[test]
+fn sparse_transcript_hydrates_interrupted_tool_turn_before_persisting() {
+    let mut app = sparse_display_only_search_app();
+    app.focus_prompt();
+    app.type_text("first turn");
+    app.press(KeyCode::Enter);
+    assert!(app.agent_running());
+    let _ = app.app.flush_persist();
+    app.feed_one(crate::app::test_harness::SourceEvent::engine(
+        protocol::EngineEvent::ToolStarted {
+            invocation_id: protocol::InvocationId::new(1),
+            call_id: "call-1".into(),
+            tool_name: "read_file".into(),
+            args: std::collections::HashMap::new(),
+            called_at_ms: 1,
+        },
+    ));
+
+    app.app
+        .conversation
+        .require_transcript_record_resave_from_for_harness(0);
+    app.type_text("next turn");
+    app.press(KeyCode::Enter);
+    app.press(KeyCode::Enter);
+    assert_eq!(app.state().queued_inputs, vec!["next turn"]);
+
+    app.press(KeyCode::Enter);
+    assert!(!app.agent_running());
+    assert!(!app.session_is_read_only());
+    assert_eq!(app.state().queued_inputs, vec!["next turn"]);
+
+    wait_for_agent_turn(&mut app);
+    assert!(!app.session_is_read_only());
+    assert!(app.state().queued_inputs.is_empty());
+
+    app.set_session_title(
+        "Writable sparse interrupt".into(),
+        "writable-sparse-interrupt".into(),
+        None,
+    );
+    let _ = app.app.flush_persist();
+    assert_eq!(
+        app.session_snapshot().title.as_deref(),
+        Some("Writable sparse interrupt")
+    );
 }
 
 #[test]

@@ -106,6 +106,26 @@ pub(crate) fn live_session_for_test(
     history_len: usize,
     checkpoint: Option<smelt_core::ContextCheckpoint>,
 ) -> smelt_core::session_runtime::LiveSession {
+    live_session_for_test_with_address(id, history_len, checkpoint, None)
+}
+
+#[cfg(test)]
+pub(crate) fn store_backed_live_session_for_test(
+    id: String,
+    history_len: usize,
+    checkpoint: Option<smelt_core::ContextCheckpoint>,
+    store_address: smelt_core::session::SessionStoreAddress,
+) -> smelt_core::session_runtime::LiveSession {
+    live_session_for_test_with_address(id, history_len, checkpoint, Some(store_address))
+}
+
+#[cfg(test)]
+fn live_session_for_test_with_address(
+    id: String,
+    history_len: usize,
+    checkpoint: Option<smelt_core::ContextCheckpoint>,
+    store_address: Option<smelt_core::session::SessionStoreAddress>,
+) -> smelt_core::session_runtime::LiveSession {
     let revision = smelt_core::session::load_store_header(&id)
         .map(|(header, _)| header.revision)
         .unwrap_or(0);
@@ -134,7 +154,11 @@ pub(crate) fn live_session_for_test(
         revision,
         degraded_warnings: Vec::new(),
     };
-    smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
+    smelt_core::session_runtime::LiveSession::from_parts(
+        header,
+        std::path::PathBuf::new(),
+        store_address,
+    )
 }
 
 /// Every TUI full-history load must use one of these reasons. Healthy resume,
@@ -1434,6 +1458,8 @@ impl TuiApp {
         if self.conversation.is_active() {
             self.cancel_agent();
             self.conversation.clear_active();
+        } else if self.turn_submission_is_pending() {
+            self.discard_turn(crate::app::TurnEnd::Cancelled);
         }
         self.lua.cancel_tasks();
     }
@@ -2173,7 +2199,10 @@ impl TuiApp {
     pub(crate) fn submit_canonical_turn(
         &mut self,
         turn: smelt_store::NewTurn,
-    ) -> Result<crate::persist::SubmitTurnAcknowledgement, crate::persist::PersistenceCause> {
+    ) -> Result<
+        crate::app::conversation::CanonicalTurnSubmitOutcome,
+        crate::persist::PersistenceCause,
+    > {
         let metadata = self.runtime_session_metadata();
         self.conversation.submit_canonical_turn(metadata, turn)
     }

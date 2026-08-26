@@ -392,6 +392,28 @@ struct PreparedTurn {
     rollback: Option<StagedTurnRollback>,
 }
 
+#[derive(Clone, Copy)]
+enum PendingTurnSubmitState {
+    Preparation,
+    Persistence {
+        generation: crate::app::session_document::PersistenceGeneration,
+    },
+}
+
+pub(super) struct PendingTurnDispatch {
+    command_id: crate::persist::CanonicalCommandId,
+    dispatch: PreparedTurnDispatch,
+    submit_state: PendingTurnSubmitState,
+    cancelled_meta: Option<protocol::TurnMeta>,
+}
+
+struct PreparedTurnDispatch {
+    turn: PreparedTurn,
+    system_prompt: String,
+    tools: Vec<protocol::ToolDef>,
+    history: protocol::ModelHistorySource,
+}
+
 fn is_resumable_turn_error(
     kind: Option<protocol::EngineAskErrorKind>,
     retry_at_ms: Option<u64>,
@@ -652,49 +674,123 @@ impl TuiApp {
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
-        let mut history = turn.history.clone();
-        let (turn_id, submitted_revision, required_generation, durable_receipt_at) =
-            if self.ephemeral() {
-                let turn_id = self.conversation.next_turn_id();
-                (
-                    turn_id,
-                    0,
-                    self.conversation.persistence_generation().get(),
-                    None,
-                )
-            } else {
-                let acknowledgement = match self.submit_canonical_turn(smelt_store::NewTurn {
-                    kind: turn.kind,
-                    submitted_history_idx: turn.submitted_history_idx,
-                    continuation_of: turn.continuation_of,
-                    created_at_ms: session::now_ms(),
-                }) {
-                    Ok(acknowledgement) => acknowledgement,
-                    Err(cause) => {
-                        if cause.definitely_not_committed() {
-                            if let Some(rollback) = turn.rollback.as_ref() {
-                                self.rollback_staged_turn(rollback);
-                            }
-                        } else if cause.requires_reopen() {
-                            self.require_reopen_after_submit_failure(&cause);
-                        }
-                        self.platform.set_sleep_inhibited(false);
-                        self.working.finish(TurnOutcome::Errored);
-                        self.notify_session_save_failure(
-                            &self.conversation.session().id.clone(),
-                            &cause.message,
-                        );
-                        return None;
-                    }
-                };
-                (
+        let history = turn.history.clone();
+        let dispatch = PreparedTurnDispatch {
+            turn,
+            system_prompt,
+            tools,
+            history,
+        };
+        if self.ephemeral() {
+            let turn_id = self.conversation.next_turn_id();
+            return self.finish_prepared_turn_dispatch(
+                dispatch,
+                turn_id,
+                0,
+                self.conversation.persistence_generation().get(),
+                None,
+            );
+        }
+        self.submit_prepared_turn_dispatch(dispatch)
+    }
+
+    fn submit_prepared_turn_dispatch(
+        &mut self,
+        dispatch: PreparedTurnDispatch,
+    ) -> Option<TurnState> {
+        let new_turn = smelt_store::NewTurn {
+            kind: dispatch.turn.kind,
+            submitted_history_idx: dispatch.turn.submitted_history_idx,
+            continuation_of: dispatch.turn.continuation_of,
+            created_at_ms: session::now_ms(),
+        };
+        match self.submit_canonical_turn(new_turn) {
+            Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::Durable(acknowledgement)) => {
+                self.finish_prepared_turn_dispatch(
+                    dispatch,
                     acknowledgement.receipt.turn_id.get(),
                     acknowledgement.receipt.session.current.revision.get(),
                     acknowledgement.persistence.generation.get(),
                     Some(std::time::Instant::now()),
                 )
-            };
-        if !self.ephemeral() && !matches!(turn.kind, smelt_store::TurnKind::Continuation) {
+            }
+            Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
+                command_id,
+                generation,
+            }) => {
+                self.defer_prepared_turn_dispatch(
+                    command_id,
+                    dispatch,
+                    PendingTurnSubmitState::Persistence { generation },
+                );
+                None
+            }
+            Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPreparation {
+                command_id,
+            }) => {
+                self.defer_prepared_turn_dispatch(
+                    command_id,
+                    dispatch,
+                    PendingTurnSubmitState::Preparation,
+                );
+                self.request_urgent_render();
+                None
+            }
+            Err(cause) => {
+                self.fail_prepared_turn_dispatch(dispatch, &cause);
+                None
+            }
+        }
+    }
+
+    fn defer_prepared_turn_dispatch(
+        &mut self,
+        command_id: crate::persist::CanonicalCommandId,
+        dispatch: PreparedTurnDispatch,
+        submit_state: PendingTurnSubmitState,
+    ) {
+        debug_assert!(self.pending_turn_dispatch.is_none());
+        self.pending_turn_dispatch = Some(PendingTurnDispatch {
+            command_id,
+            dispatch,
+            submit_state,
+            cancelled_meta: None,
+        });
+    }
+
+    fn fail_prepared_turn_dispatch(
+        &mut self,
+        dispatch: PreparedTurnDispatch,
+        cause: &crate::persist::PersistenceCause,
+    ) {
+        if cause.definitely_not_committed() {
+            if let Some(rollback) = dispatch.turn.rollback.as_ref() {
+                self.rollback_staged_turn(rollback);
+            }
+        } else if cause.requires_reopen() {
+            self.require_reopen_after_submit_failure(cause);
+        }
+        self.platform.set_sleep_inhibited(false);
+        self.working.finish(TurnOutcome::Errored);
+        self.notify_session_save_failure(&self.conversation.session().id.clone(), &cause.message);
+    }
+
+    fn finish_prepared_turn_dispatch(
+        &mut self,
+        dispatch: PreparedTurnDispatch,
+        turn_id: u64,
+        submitted_revision: u64,
+        required_generation: u64,
+        durable_receipt_at: Option<std::time::Instant>,
+    ) -> Option<TurnState> {
+        let PreparedTurnDispatch {
+            turn,
+            system_prompt,
+            tools,
+            mut history,
+        } = dispatch;
+        let canonical = !self.ephemeral();
+        if canonical && !matches!(turn.kind, smelt_store::TurnKind::Continuation) {
             if let Some(store_history) = self.store_model_history_source_for_committed_request(
                 &history,
                 turn.submitted_history_idx.get() as usize,
@@ -733,7 +829,7 @@ impl TuiApp {
             .try_send(UiCommand::StartTurn(Box::new(payload)))
             .is_err()
         {
-            if !self.ephemeral() {
+            if canonical {
                 let _ = self.enqueue_canonical_turn_transition(
                     smelt_store::TurnId::new(turn_id),
                     smelt_store::TurnState::Failed,
@@ -763,7 +859,7 @@ impl TuiApp {
             smelt_perf::perf::timestamp_us(),
         );
 
-        if !self.ephemeral() {
+        if canonical {
             if let Err(cause) = self.enqueue_canonical_turn_transition(
                 smelt_store::TurnId::new(turn_id),
                 smelt_store::TurnState::Running,
@@ -778,7 +874,7 @@ impl TuiApp {
 
         Some(TurnState {
             turn_id,
-            canonical: !self.ephemeral(),
+            canonical,
             pending: Vec::new(),
             permissions,
             submitted_history_idx: turn.submitted_history_idx.get() as usize,
@@ -786,6 +882,136 @@ impl TuiApp {
             assistant_output_started: false,
             _perf: smelt_perf::perf::begin("agent:turn"),
         })
+    }
+
+    pub(crate) fn turn_submission_is_pending(&self) -> bool {
+        self.pending_turn_dispatch.is_some()
+    }
+
+    pub(super) fn handle_canonical_submit_outcome(
+        &mut self,
+        outcome: crate::app::conversation::CanonicalTurnSubmitOutcome,
+    ) -> bool {
+        match outcome {
+            crate::app::conversation::CanonicalTurnSubmitOutcome::Durable(acknowledgement) => {
+                self.resume_turn_submission_after_persistence(*acknowledgement)
+            }
+            crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
+                command_id,
+                generation,
+            } => {
+                let Some(pending) = self.pending_turn_dispatch.as_mut() else {
+                    return false;
+                };
+                if pending.command_id != command_id
+                    || !matches!(pending.submit_state, PendingTurnSubmitState::Preparation)
+                {
+                    return false;
+                }
+                pending.submit_state = PendingTurnSubmitState::Persistence { generation };
+                true
+            }
+            crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPreparation { .. } => {
+                false
+            }
+        }
+    }
+
+    pub(super) fn resume_turn_submission_after_persistence(
+        &mut self,
+        acknowledgement: crate::persist::SubmitTurnAcknowledgement,
+    ) -> bool {
+        let Some(pending) = self.pending_turn_dispatch.take() else {
+            return false;
+        };
+        let matches_command = pending.command_id == acknowledgement.command_id;
+        let matches_state = matches!(pending.submit_state, PendingTurnSubmitState::Preparation)
+            || matches!(
+                pending.submit_state,
+                PendingTurnSubmitState::Persistence { generation }
+                    if generation == acknowledgement.persistence.generation
+            );
+        if !matches_command || !matches_state {
+            self.pending_turn_dispatch = Some(pending);
+            return false;
+        }
+        if let Some(meta) = pending.cancelled_meta {
+            self.record_finished_turn_state(meta);
+            self.sync_agent_mode_applied();
+            self.sync_reasoning_effort_applied();
+            if let Err(cause) = self.enqueue_canonical_turn_transition(
+                acknowledgement.receipt.turn_id,
+                smelt_store::TurnState::Cancelled,
+                Some("user_cancelled".into()),
+            ) {
+                self.notify_session_save_failure(
+                    &self.conversation.session().id.clone(),
+                    &cause.message,
+                );
+            }
+            return true;
+        }
+        if let Some(turn) = self.finish_prepared_turn_dispatch(
+            pending.dispatch,
+            acknowledgement.receipt.turn_id.get(),
+            acknowledgement.receipt.session.current.revision.get(),
+            acknowledgement.persistence.generation.get(),
+            Some(std::time::Instant::now()),
+        ) {
+            self.conversation.set_active(Some(turn));
+        }
+        true
+    }
+
+    fn cancel_pending_turn_submission(
+        &mut self,
+        meta: protocol::TurnMeta,
+    ) -> Option<TerminalCommitStatus> {
+        match self.pending_turn_dispatch.as_ref()?.submit_state {
+            PendingTurnSubmitState::Preparation => {
+                let pending = self
+                    .pending_turn_dispatch
+                    .take()
+                    .expect("pending prepared turn submission");
+                self.conversation
+                    .abandon_canonical_operation(pending.command_id);
+                if let Some(rollback) = pending.dispatch.turn.rollback.as_ref() {
+                    self.rollback_staged_turn(rollback);
+                }
+                Some(TerminalCommitStatus::Durable)
+            }
+            PendingTurnSubmitState::Persistence { .. } => {
+                let pending = self
+                    .pending_turn_dispatch
+                    .as_mut()
+                    .expect("pending persisted turn submission");
+                if pending.cancelled_meta.is_none() {
+                    pending.cancelled_meta = Some(meta);
+                }
+                Some(TerminalCommitStatus::Deferred)
+            }
+        }
+    }
+
+    pub(super) fn fail_pending_turn_submission(
+        &mut self,
+        command_id: Option<crate::persist::CanonicalCommandId>,
+        cause: &crate::persist::PersistenceCause,
+    ) -> bool {
+        let should_fail = self.pending_turn_dispatch.as_ref().is_some_and(|pending| {
+            command_id.is_none_or(|command_id| pending.command_id == command_id)
+        });
+        if !should_fail {
+            return false;
+        }
+        let pending = self
+            .pending_turn_dispatch
+            .take()
+            .expect("pending turn submission");
+        self.conversation
+            .abandon_canonical_operation(pending.command_id);
+        self.fail_prepared_turn_dispatch(pending.dispatch, cause);
+        true
     }
 
     pub(crate) fn begin_process_status_turn(
@@ -1106,6 +1332,7 @@ impl TuiApp {
                 TerminalCommitStatus::Durable
             }
             Ok(crate::persist::TurnTransitionOutcome::Pending { .. }) => {
+                self.request_urgent_render();
                 TerminalCommitStatus::Deferred
             }
             Err(cause) => {
@@ -1170,21 +1397,23 @@ impl TuiApp {
                 self.start_next_queued_input_if_idle();
             }
             outcome.terminal_commit
+        } else if matches!(end, crate::app::TurnEnd::Cancelled) {
+            // No active turn but user requested cancel - still notify the
+            // engine and kill any stale turn-owned Lua tasks (tool calls,
+            // bash executions, etc.). App-scoped background work survives.
+            self.platform.set_sleep_inhibited(false);
+            self.core.engine.send(UiCommand::Cancel);
+            self.cancel_turn_lua_tasks();
+            self.conversation.invalidate_turn_callbacks();
+            self.busy_stack.clear();
+            self.discard_pending_transcript_work();
+            self.clear_compaction_preview();
+            // Archive an interrupted outcome so the prompt bar shows
+            // "interrupted" rather than falling back to idle/done.
+            let meta = self.working.finish(TurnOutcome::Cancelled);
+            self.cancel_pending_turn_submission(meta)
+                .unwrap_or(TerminalCommitStatus::Durable)
         } else {
-            if matches!(end, crate::app::TurnEnd::Cancelled) {
-                // No active turn but user requested cancel - still notify the
-                // engine and kill any stale turn-owned Lua tasks (tool calls,
-                // bash executions, etc.). App-scoped background work survives.
-                self.core.engine.send(UiCommand::Cancel);
-                self.cancel_turn_lua_tasks();
-                self.conversation.invalidate_turn_callbacks();
-                self.busy_stack.clear();
-                self.discard_pending_transcript_work();
-                self.clear_compaction_preview();
-                // Archive an interrupted outcome so the prompt bar shows
-                // "interrupted" rather than falling back to idle/done.
-                self.working.finish(TurnOutcome::Cancelled);
-            }
             TerminalCommitStatus::Durable
         }
     }

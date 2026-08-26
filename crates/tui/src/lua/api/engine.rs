@@ -312,6 +312,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |_, ()| Ok(crate::lua::try_with_agent_host(|host| host.agent_is_running()).unwrap_or(false)),
     )?;
     m.fn_(
+        "has_active_turn",
+        "Return `true` while a turn is being prepared, persisted, executed, or finalized.",
+        &[],
+        |_, ()| {
+            Ok(
+                crate::lua::try_with_agent_host(|host| host.turn_lifecycle_is_active())
+                    .unwrap_or(false),
+            )
+        },
+    )?;
+    m.fn_(
         "summary_prefix",
         "Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.",
         &[],

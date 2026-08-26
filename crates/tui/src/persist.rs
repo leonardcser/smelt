@@ -205,7 +205,7 @@ pub(crate) struct SessionPersistenceStatus {
     pub(crate) epoch: SessionEpoch,
     pub(crate) state: PersistenceState,
     pub(crate) acknowledgement: Option<PersistenceAcknowledgement>,
-    pub(crate) latest_terminal_turn_id: Option<smelt_store::TurnId>,
+    pub(crate) canonical_completions: VecDeque<CanonicalCommandCompletion>,
     pub(crate) latest_audit_warning: Option<PersistenceCause>,
 }
 
@@ -271,14 +271,26 @@ pub(crate) struct RequestAuditIntent {
     pub(crate) payload_capture_skipped_bytes: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CanonicalCommandId(u64);
+
+impl CanonicalCommandId {
+    pub(crate) const fn new(id: u64) -> Self {
+        assert!(id != 0, "canonical command ID must be non-zero");
+        Self(id)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SubmitTurnIntent {
+    pub(crate) command_id: CanonicalCommandId,
     pub(crate) session: PreparedSessionBatch,
     pub(crate) turn: smelt_store::NewTurn,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TurnTransitionIntent {
+    pub(crate) command_id: CanonicalCommandId,
     pub(crate) session: PreparedSessionBatch,
     pub(crate) turn_id: smelt_store::TurnId,
     pub(crate) state: smelt_store::TurnState,
@@ -288,20 +300,55 @@ pub(crate) struct TurnTransitionIntent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SubmitTurnAcknowledgement {
+    pub(crate) command_id: CanonicalCommandId,
     pub(crate) persistence: PersistenceAcknowledgement,
     pub(crate) receipt: smelt_store::SubmitTurnReceipt,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TurnTransitionAcknowledgement {
+    pub(crate) command_id: CanonicalCommandId,
     pub(crate) persistence: PersistenceAcknowledgement,
     pub(crate) receipt: smelt_store::TurnTransitionReceipt,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CanonicalCommandCompletion {
+    Submit(Box<SubmitTurnAcknowledgement>),
+    Transition(Box<TurnTransitionAcknowledgement>),
+    Failed {
+        command_id: CanonicalCommandId,
+        generation: PersistenceGeneration,
+        cause: PersistenceCause,
+    },
+}
+
+impl CanonicalCommandCompletion {
+    pub(crate) const fn command_id(&self) -> CanonicalCommandId {
+        match self {
+            Self::Submit(acknowledgement) => acknowledgement.command_id,
+            Self::Transition(acknowledgement) => acknowledgement.command_id,
+            Self::Failed { command_id, .. } => *command_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SubmitTurnOutcome {
+    Durable(Box<SubmitTurnAcknowledgement>),
+    Pending {
+        command_id: CanonicalCommandId,
+        generation: PersistenceGeneration,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TurnTransitionOutcome {
     Durable(Box<TurnTransitionAcknowledgement>),
-    Pending { generation: PersistenceGeneration },
+    Pending {
+        command_id: CanonicalCommandId,
+        generation: PersistenceGeneration,
+    },
 }
 
 enum PersistenceControl {
@@ -312,7 +359,6 @@ enum PersistenceControl {
     SubmitTurn {
         intent: Box<SubmitTurnIntent>,
         queued_at: Instant,
-        deadline: Instant,
         reply: mpsc::Sender<Result<SubmitTurnAcknowledgement, PersistenceCause>>,
     },
     TransitionTurn {
@@ -510,7 +556,7 @@ impl SessionPersistence {
                 head: acknowledged_head,
             },
             acknowledgement: None,
-            latest_terminal_turn_id: None,
+            canonical_completions: VecDeque::new(),
             latest_audit_warning: None,
         }));
         let pending_audits = Arc::new(AtomicUsize::new(0));
@@ -721,14 +767,16 @@ impl SessionPersistence {
         &self,
         intent: SubmitTurnIntent,
         deadline: Instant,
-    ) -> Result<SubmitTurnAcknowledgement, PersistenceCause> {
+    ) -> Result<SubmitTurnOutcome, PersistenceCause> {
         if intent.session.identity.id != self.session_id.as_str() {
             return Err(PersistenceCause::invariant(format!(
                 "turn submit session {} does not match actor session {}",
                 intent.session.identity.id, self.session_id
             )));
         }
-        let superseded = self.supersede_queued_intent(intent.session.generation)?;
+        let command_id = intent.command_id;
+        let generation = intent.session.generation;
+        let superseded = self.supersede_queued_intent(generation)?;
         let Some(control) = &self.control else {
             self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(
@@ -741,7 +789,6 @@ impl SessionPersistence {
             PersistenceControl::SubmitTurn {
                 intent: Box::new(intent),
                 queued_at: Instant::now(),
-                deadline,
                 reply,
             },
             deadline,
@@ -757,22 +804,25 @@ impl SessionPersistence {
             }));
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(PersistenceCause::unavailable(
-                "persistence deadline elapsed before turn submission completed",
-            )
-            .with_unknown_commit());
+            return Ok(SubmitTurnOutcome::Pending {
+                command_id,
+                generation,
+            });
         };
-        result.recv_timeout(remaining).unwrap_or_else(|error| {
-            Err(PersistenceCause::unavailable(match error {
-                mpsc::RecvTimeoutError::Timeout => {
-                    "persistence deadline elapsed before turn submission completed"
-                }
-                mpsc::RecvTimeoutError::Disconnected => {
-                    "persistence actor stopped before turn submission completed"
-                }
-            })
-            .with_unknown_commit())
-        })
+        match result.recv_timeout(remaining) {
+            Ok(result) => {
+                self.confirm_canonical_completion(command_id);
+                result.map(|acknowledgement| SubmitTurnOutcome::Durable(Box::new(acknowledgement)))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(SubmitTurnOutcome::Pending {
+                command_id,
+                generation,
+            }),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(PersistenceCause::unavailable(
+                "persistence actor stopped before turn submission completed",
+            )
+            .with_unknown_commit()),
+        }
     }
 
     pub(crate) fn enqueue_turn_transition(
@@ -819,6 +869,7 @@ impl SessionPersistence {
                 intent.session.identity.id, self.session_id
             )));
         }
+        let command_id = intent.command_id;
         let generation = intent.session.generation;
         let superseded = self.supersede_queued_intent(generation)?;
         let Some(control) = &self.control else {
@@ -848,14 +899,22 @@ impl SessionPersistence {
             }));
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Ok(TurnTransitionOutcome::Pending { generation });
+            return Ok(TurnTransitionOutcome::Pending {
+                command_id,
+                generation,
+            });
         };
         match result.recv_timeout(remaining) {
-            Ok(result) => result
-                .map(|acknowledgement| TurnTransitionOutcome::Durable(Box::new(acknowledgement))),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Ok(TurnTransitionOutcome::Pending { generation })
+            Ok(result) => {
+                self.confirm_canonical_completion(command_id);
+                result.map(|acknowledgement| {
+                    TurnTransitionOutcome::Durable(Box::new(acknowledgement))
+                })
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(TurnTransitionOutcome::Pending {
+                command_id,
+                generation,
+            }),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(PersistenceCause::unavailable(
                 "persistence actor stopped before turn transition completed",
             )
@@ -1067,7 +1126,6 @@ impl SessionPersistence {
                 false
             } else {
                 status.acknowledgement = None;
-                status.latest_terminal_turn_id = None;
                 true
             }
         };
@@ -1086,6 +1144,16 @@ impl SessionPersistence {
             latest.desired = None;
             smelt_perf::perf::record_value("persist:pending_batch:released", 1);
         }
+    }
+
+    pub(crate) fn confirm_canonical_completion(&self, command_id: CanonicalCommandId) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        status
+            .canonical_completions
+            .retain(|completion| completion.command_id() != command_id);
     }
 
     pub(crate) fn drain_status_wake(&self) -> bool {
@@ -1413,6 +1481,17 @@ impl Drop for SessionPersistence {
     }
 }
 
+enum CanonicalCommandReceipt {
+    Submit {
+        command_id: CanonicalCommandId,
+        receipt: smelt_store::SubmitTurnReceipt,
+    },
+    Transition {
+        command_id: CanonicalCommandId,
+        receipt: smelt_store::TurnTransitionReceipt,
+    },
+}
+
 #[derive(Clone)]
 struct StatusPublisher {
     status: Arc<Mutex<SessionPersistenceStatus>>,
@@ -1441,7 +1520,7 @@ impl StatusPublisher {
         generation: PersistenceGeneration,
         record_projection: SessionRecordSaveProjection,
         receipt: smelt_store::SaveReceipt,
-        latest_terminal_turn_id: Option<smelt_store::TurnId>,
+        command_receipt: Option<CanonicalCommandReceipt>,
     ) -> PersistenceAcknowledgement {
         let mut status = self
             .status
@@ -1457,7 +1536,6 @@ impl StatusPublisher {
                 );
                 current.previous
             });
-        status.latest_terminal_turn_id = latest_terminal_turn_id.or(status.latest_terminal_turn_id);
         let acknowledgement = PersistenceAcknowledgement {
             epoch: status.epoch,
             generation,
@@ -1465,6 +1543,29 @@ impl StatusPublisher {
             previous,
             receipt: receipt.clone(),
         };
+        if let Some(command_receipt) = command_receipt {
+            let completion = match command_receipt {
+                CanonicalCommandReceipt::Submit {
+                    command_id,
+                    receipt,
+                } => CanonicalCommandCompletion::Submit(Box::new(SubmitTurnAcknowledgement {
+                    command_id,
+                    persistence: acknowledgement.clone(),
+                    receipt,
+                })),
+                CanonicalCommandReceipt::Transition {
+                    command_id,
+                    receipt,
+                } => CanonicalCommandCompletion::Transition(Box::new(
+                    TurnTransitionAcknowledgement {
+                        command_id,
+                        persistence: acknowledgement.clone(),
+                        receipt,
+                    },
+                )),
+            };
+            status.canonical_completions.push_back(completion);
+        }
         status.acknowledgement = Some(acknowledgement.clone());
         status.state = PersistenceState::Durable {
             generation,
@@ -1473,6 +1574,24 @@ impl StatusPublisher {
         drop(status);
         let _ = self.wake.try_send(());
         acknowledgement
+    }
+
+    fn publish_command_failure(
+        &self,
+        command_id: CanonicalCommandId,
+        generation: PersistenceGeneration,
+        cause: PersistenceCause,
+    ) {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .canonical_completions
+            .push_back(CanonicalCommandCompletion::Failed {
+                command_id,
+                generation,
+                cause,
+            });
+        let _ = self.wake.try_send(());
     }
 
     fn publish_audit_warning(&self, warning: Option<PersistenceCause>) {
@@ -1724,23 +1843,17 @@ impl PersistenceActor {
                 PersistenceControl::SubmitTurn {
                     intent,
                     queued_at,
-                    deadline,
                     reply,
                 } => {
                     smelt_perf::perf::record_value(
                         "persist:submit_turn:queue_wait_ms",
                         queued_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                     );
+                    let command_id = intent.command_id;
                     let generation = intent.session.generation;
-                    let result = if Instant::now() >= deadline {
-                        Err(PersistenceCause::unavailable(
-                            "persistence deadline elapsed before turn submission started",
-                        ))
-                    } else {
-                        self.submit_turn_intent(&intent)
-                    };
+                    let result = self.submit_turn_intent(&intent);
                     if let Err(cause) = &result {
-                        self.block_canonical(generation, cause.clone());
+                        self.block_canonical_command(command_id, generation, cause.clone());
                     }
                     let _ = reply.send(result);
                 }
@@ -1753,10 +1866,11 @@ impl PersistenceActor {
                         "persist:turn_transition:queue_wait_ms",
                         queued_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                     );
+                    let command_id = intent.command_id;
                     let generation = intent.session.generation;
                     let result = self.transition_turn_intent(&intent);
                     if let Err(cause) = &result {
-                        self.block_canonical(generation, cause.clone());
+                        self.block_canonical_command(command_id, generation, cause.clone());
                     }
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
@@ -1944,6 +2058,17 @@ impl PersistenceActor {
             .unwrap_or_else(|poison| poison.into_inner());
         latest.wake_pending = false;
         latest.desired.clone()
+    }
+
+    fn block_canonical_command(
+        &mut self,
+        command_id: CanonicalCommandId,
+        desired: PersistenceGeneration,
+        cause: PersistenceCause,
+    ) {
+        self.block_canonical(desired, cause.clone());
+        self.publisher
+            .publish_command_failure(command_id, desired, cause);
     }
 
     fn block_canonical(&mut self, desired: PersistenceGeneration, cause: PersistenceCause) {
@@ -2305,9 +2430,13 @@ impl PersistenceActor {
             intent.session.generation,
             intent.session.record_projection,
             receipt.session.clone(),
-            None,
+            Some(CanonicalCommandReceipt::Submit {
+                command_id: intent.command_id,
+                receipt: receipt.clone(),
+            }),
         );
         Ok(SubmitTurnAcknowledgement {
+            command_id: intent.command_id,
             persistence,
             receipt,
         })
@@ -2427,9 +2556,13 @@ impl PersistenceActor {
             intent.session.generation,
             intent.session.record_projection,
             receipt.session.clone(),
-            intent.state.is_terminal().then_some(intent.turn_id),
+            Some(CanonicalCommandReceipt::Transition {
+                command_id: intent.command_id,
+                receipt: receipt.clone(),
+            }),
         );
         Ok(TurnTransitionAcknowledgement {
+            command_id: intent.command_id,
             persistence,
             receipt,
         })
@@ -2986,9 +3119,22 @@ mod tests {
         Instant::now() + Duration::from_secs(5)
     }
 
+    fn durable_submit(outcome: SubmitTurnOutcome) -> SubmitTurnAcknowledgement {
+        match outcome {
+            SubmitTurnOutcome::Durable(acknowledgement) => *acknowledgement,
+            SubmitTurnOutcome::Pending { generation, .. } => {
+                panic!(
+                    "turn submission generation {} remained pending",
+                    generation.get()
+                )
+            }
+        }
+    }
+
     fn submit_intent(generation: u64, history: &[&str]) -> SubmitTurnIntent {
         assert!(!history.is_empty());
         SubmitTurnIntent {
+            command_id: CanonicalCommandId::new(generation),
             session: intent(generation, history),
             turn: smelt_store::NewTurn {
                 kind: smelt_store::TurnKind::User,
@@ -3008,6 +3154,7 @@ mod tests {
         state: smelt_store::TurnState,
     ) -> TurnTransitionIntent {
         TurnTransitionIntent {
+            command_id: CanonicalCommandId::new(generation),
             session: intent(generation, history),
             turn_id,
             state,
@@ -3052,9 +3199,11 @@ mod tests {
     fn canonical_submit_does_not_create_or_touch_derived_search() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
-        let acknowledgement = actor
-            .submit_turn(submit_intent(1, &["sent"]), deadline())
-            .unwrap();
+        let acknowledgement = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["sent"]), deadline())
+                .unwrap(),
+        );
         let close = actor.close(
             acknowledgement.persistence.generation,
             deadline(),
@@ -3087,7 +3236,6 @@ mod tests {
             .send(PersistenceControl::SubmitTurn {
                 intent: Box::new(submit_intent(1, &["sent"])),
                 queued_at: Instant::now(),
-                deadline: deadline(),
                 reply: submit_reply,
             })
             .unwrap();
@@ -3241,7 +3389,7 @@ mod tests {
                 thread::yield_now();
             }
             release.send(()).unwrap();
-            submit.join().unwrap().unwrap()
+            durable_submit(submit.join().unwrap().unwrap())
         });
 
         assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
@@ -3263,9 +3411,11 @@ mod tests {
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
 
-        let acknowledgement = actor
-            .submit_turn(submit_intent(1, &["committed once"]), deadline())
-            .expect("ambiguous committed submission is recovered");
+        let acknowledgement = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["committed once"]), deadline())
+                .expect("ambiguous committed submission is recovered"),
+        );
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
 
@@ -3297,41 +3447,146 @@ mod tests {
     }
 
     #[test]
-    fn queued_submit_timeout_requires_reopen_before_retry() {
+    fn queued_submit_timeout_still_commits_after_actor_resumes() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
         let release = actor.pause();
 
-        let cause = actor
+        let outcome = actor
             .submit_turn(
                 submit_intent(1, &["queued past its deadline"]),
                 Instant::now() + Duration::from_millis(20),
             )
-            .expect_err("caller times out while the actor is paused");
+            .expect("caller sees the queued submission as pending");
 
-        assert!(cause.requires_reopen());
-        assert!(!cause.definitely_not_committed());
+        assert_eq!(
+            outcome,
+            SubmitTurnOutcome::Pending {
+                command_id: CanonicalCommandId::new(1),
+                generation: PersistenceGeneration::new(1),
+            }
+        );
         release.send(()).unwrap();
         assert!(matches!(
             actor.flush(PersistenceGeneration::new(1), deadline()),
-            PersistenceFlushOutcome::Blocked { durable, cause, .. }
-                if durable == PersistenceGeneration::ZERO && cause.definitely_not_committed()
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
         ));
-        let closed = actor.close(
-            PersistenceGeneration::new(1),
-            deadline(),
-            ClosePolicy::AllowUnsaved,
+        actor
+            .enqueue_turn_transition(transition_intent(
+                2,
+                &["queued past its deadline"],
+                smelt_store::TurnId::new(1),
+                smelt_store::TurnState::Running,
+            ))
+            .unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(2)
+        ));
+        let status = actor.take_status();
+        assert!(status.canonical_completions.iter().any(|completion| {
+            matches!(
+                completion,
+                CanonicalCommandCompletion::Submit(acknowledgement)
+                    if acknowledgement.command_id == CanonicalCommandId::new(1)
+                        && acknowledgement.receipt.turn_id == smelt_store::TurnId::new(1)
+            )
+        }));
+        actor.confirm_canonical_completion(CanonicalCommandId::new(99));
+        assert_eq!(
+            actor.status().canonical_completions.len(),
+            status.canonical_completions.len()
         );
-        assert_eq!(closed.omitted, Some(PersistenceGeneration::new(1)));
+        actor.confirm_canonical_completion(CanonicalCommandId::new(1));
+        assert!(actor
+            .status()
+            .canonical_completions
+            .iter()
+            .all(|completion| completion.command_id() != CanonicalCommandId::new(1)));
+        assert_eq!(lineage_reader().turns().unwrap().len(), 1);
+        let closed = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(closed.cause.is_none());
+    }
+
+    #[test]
+    fn canonical_completions_retain_command_identity_across_failure_and_retry() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let actor = actor();
+        let submitted = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["first turn"]), deadline())
+                .unwrap(),
+        );
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+            message: "injected transition failure".into(),
+        });
+        let release = actor.pause();
+        actor
+            .enqueue_turn_transition(transition_intent(
+                2,
+                &["first turn"],
+                submitted.receipt.turn_id,
+                smelt_store::TurnState::Running,
+            ))
+            .unwrap();
+        actor.retry_blocked().unwrap();
+
+        let outcome = actor
+            .submit_turn(
+                submit_intent(3, &["first turn", "second turn"]),
+                Instant::now() + Duration::from_millis(20),
+            )
+            .expect("later submit remains queued while the actor is paused");
+        assert_eq!(
+            outcome,
+            SubmitTurnOutcome::Pending {
+                command_id: CanonicalCommandId::new(3),
+                generation: PersistenceGeneration::new(3),
+            }
+        );
+
+        release.send(()).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(3), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(3)
+        ));
+        let status = actor.take_status();
+        assert_eq!(
+            status
+                .canonical_completions
+                .iter()
+                .map(CanonicalCommandCompletion::command_id)
+                .collect::<Vec<_>>(),
+            vec![CanonicalCommandId::new(2), CanonicalCommandId::new(3)]
+        );
+        assert!(matches!(
+            status.canonical_completions.front(),
+            Some(CanonicalCommandCompletion::Failed { generation, .. })
+                if *generation == PersistenceGeneration::new(2)
+        ));
+        assert!(matches!(
+            status.canonical_completions.back(),
+            Some(CanonicalCommandCompletion::Submit(acknowledgement))
+                if acknowledgement.command_id == CanonicalCommandId::new(3)
+        ));
     }
 
     #[test]
     fn queued_turn_transition_timeout_still_commits_after_actor_resumes() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
-        let submitted = actor
-            .submit_turn(submit_intent(1, &["queued transition"]), deadline())
-            .unwrap();
+        let submitted = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["queued transition"]), deadline())
+                .unwrap(),
+        );
         actor
             .enqueue_turn_transition(transition_intent(
                 2,
@@ -3362,7 +3617,8 @@ mod tests {
         assert_eq!(
             outcome,
             TurnTransitionOutcome::Pending {
-                generation: PersistenceGeneration::new(3)
+                command_id: CanonicalCommandId::new(3),
+                generation: PersistenceGeneration::new(3),
             }
         );
         release.send(()).unwrap();
@@ -3372,10 +3628,15 @@ mod tests {
                 if durable == PersistenceGeneration::new(3)
         ));
         let status = actor.take_status();
-        assert_eq!(
-            status.latest_terminal_turn_id,
-            Some(submitted.receipt.turn_id)
-        );
+        assert!(status.canonical_completions.iter().any(|completion| {
+            matches!(
+                completion,
+                CanonicalCommandCompletion::Transition(acknowledgement)
+                    if acknowledgement.command_id == CanonicalCommandId::new(3)
+                        && acknowledgement.receipt.turn_id == submitted.receipt.turn_id
+                        && acknowledgement.receipt.state == smelt_store::TurnState::Completed
+            )
+        }));
         let reader = lineage_reader();
         assert_eq!(
             lineage_turn(&reader, submitted.receipt.turn_id).state,
@@ -3393,12 +3654,15 @@ mod tests {
     fn failed_running_transition_leaves_ready_for_restart_interruption() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
-        let submitted = actor
-            .submit_turn(submit_intent(1, &["dispatch accepted"]), deadline())
-            .unwrap();
+        let submitted = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["dispatch accepted"]), deadline())
+                .unwrap(),
+        );
         actor.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
         actor
             .enqueue_turn_transition(TurnTransitionIntent {
+                command_id: CanonicalCommandId::new(2),
                 session: intent(2, &["dispatch accepted"]),
                 turn_id: submitted.receipt.turn_id,
                 state: smelt_store::TurnState::Running,
@@ -3455,7 +3719,7 @@ mod tests {
             let submit =
                 scope.spawn(|| actor.submit_turn(submit_intent(2, &["saved", "turn"]), deadline()));
             release.send(()).unwrap();
-            submit.join().unwrap().unwrap()
+            durable_submit(submit.join().unwrap().unwrap())
         });
 
         assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
