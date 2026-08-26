@@ -2457,13 +2457,18 @@ impl TuiApp {
         history_idx: usize,
     ) -> Result<TranscriptRewindTarget, String> {
         let transcript = self.conversation.transcript().history();
-        if let Some(block_idx) = transcript
+        let loaded_block_idx = transcript
             .first_block_index_for_history_origin_at_or_after(history_idx)
             .filter(|block_idx| {
                 transcript.block_origin_at(*block_idx)
                     == Some(smelt_core::BlockOrigin::History(history_idx))
-            })
-        {
+            });
+        if let Some(block_idx) = loaded_block_idx.filter(|block_idx| {
+            !self
+                .conversation
+                .transcript()
+                .has_unloaded_records_before_block(*block_idx)
+        }) {
             return Ok(TranscriptRewindTarget::LoadedBlock(block_idx));
         }
 
@@ -3142,6 +3147,105 @@ mod checkpoint_tests {
         assert!(
             !app.app.load_session_by_id(&id),
             "recordless sessions cannot be resumed"
+        );
+    }
+
+    #[test]
+    fn repeated_rewind_dialog_keeps_older_sparse_turn_rewindable() {
+        const HISTORY_LEN: usize = 128;
+        const TARGET_HISTORY_INDEX: usize = 100;
+        const PREVIOUS_USER_INDEX: usize = TARGET_HISTORY_INDEX - 2;
+        let mut app = large_saved_session_app(HISTORY_LEN);
+        let session_id = app.app.conversation.session().id.clone();
+
+        assert!(app.app.load_session_by_id(&session_id));
+        let slice = lineage_reader(&app, &session_id)
+            .transcript_record_slice_with_total(
+                smelt_store::TranscriptRecordRange::from(
+                    TARGET_HISTORY_INDEX..TARGET_HISTORY_INDEX + 12,
+                ),
+                HISTORY_LEN,
+            )
+            .expect("load deterministic sparse window");
+        let address = {
+            let store = app
+                .app
+                .conversation
+                .live_session()
+                .and_then(|live| live.store_address.as_ref())
+                .expect("loaded session store address");
+            crate::app::transcript::TranscriptStoreAddress::new(
+                store.sessions_root.clone(),
+                store.session_id.clone(),
+                store.lineage_id.clone(),
+            )
+        };
+        let loaded = crate::app::transcript::LoadedTranscript::from_record_slice(slice, address)
+            .expect("install deterministic sparse window");
+        app.app
+            .conversation
+            .replace_loaded_transcript_for_harness(loaded);
+        assert_eq!(
+            app.app
+                .conversation
+                .transcript()
+                .history()
+                .block_origin_at(0),
+            Some(smelt_core::BlockOrigin::History(TARGET_HISTORY_INDEX))
+        );
+
+        app.apply_lua_command("rewind");
+        app.drive_lua_tasks();
+        assert!(app.state().active_modal.is_some());
+        for _ in 0..HISTORY_LEN / 2 - TARGET_HISTORY_INDEX / 2 {
+            app.press(crossterm::event::KeyCode::Up);
+        }
+        app.press(crossterm::event::KeyCode::Enter);
+        app.drive_lua_tasks();
+        assert_eq!(
+            app.prompt_source(),
+            format!("old user {TARGET_HISTORY_INDEX}")
+        );
+        let retained_origins = {
+            let transcript = app.app.conversation.transcript().history();
+            transcript
+                .order
+                .iter()
+                .filter_map(|id| transcript.block_origin(*id))
+                .collect::<Vec<_>>()
+        };
+        assert!(!retained_origins.is_empty());
+        assert!(retained_origins.iter().all(|origin| {
+            !matches!(origin, smelt_core::BlockOrigin::History(index) if *index >= TARGET_HISTORY_INDEX)
+        }));
+        app.app.flush_persist();
+        let rewound = lineage_reader(&app, &session_id)
+            .snapshot()
+            .expect("read first rewind");
+        assert_eq!(
+            rewound.head.history_len.get() as usize,
+            TARGET_HISTORY_INDEX
+        );
+        assert_eq!(
+            rewound.head.transcript_record_count.get() as usize,
+            TARGET_HISTORY_INDEX
+        );
+
+        app.apply_lua_command("rewind");
+        app.drive_lua_tasks();
+        assert!(app.state().active_modal.is_some());
+        app.press(crossterm::event::KeyCode::Up);
+        app.press(crossterm::event::KeyCode::Enter);
+        app.drive_lua_tasks();
+
+        assert_eq!(
+            app.prompt_source(),
+            format!("old user {PREVIOUS_USER_INDEX}")
+        );
+        assert!(
+            app.app.overlays.notification().is_none(),
+            "repeated rewind should not report an error: {:?}",
+            app.app.overlays.notification()
         );
     }
 

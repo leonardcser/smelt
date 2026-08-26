@@ -206,14 +206,22 @@ struct TranscriptContentState {
 
 struct TranscriptRecordState {
     sparse: SparseTranscriptRecords,
+    // Global record index for local block zero, even when no records remain loaded.
+    projection_start: usize,
     active_range: Option<Range<smelt_store::TranscriptRecordOffset>>,
     store_address: Option<TranscriptStoreAddress>,
 }
 
 impl TranscriptRecordState {
     fn from_loaded(loaded: &LoadedTranscript) -> Self {
+        let projection_start = loaded
+            .record_window
+            .as_ref()
+            .map(|window| window.start.get())
+            .unwrap_or_default();
         Self {
             sparse: SparseTranscriptRecords::from_loaded(loaded.record_window.as_ref()),
+            projection_start,
             active_range: loaded
                 .record_window
                 .as_ref()
@@ -224,6 +232,11 @@ impl TranscriptRecordState {
 
     fn active_range(&self) -> Option<&Range<smelt_store::TranscriptRecordOffset>> {
         self.active_range.as_ref()
+    }
+
+    fn set_active_range(&mut self, range: Range<smelt_store::TranscriptRecordOffset>) {
+        self.projection_start = range.start.get();
+        self.active_range = Some(range);
     }
 
     fn store_address(&self) -> Option<&TranscriptStoreAddress> {
@@ -246,11 +259,7 @@ impl TranscriptRecordState {
     }
 
     fn global_record_index(&self, local_record_index: usize) -> usize {
-        self.active_range
-            .as_ref()
-            .map_or(local_record_index, |range| {
-                range.start.get().saturating_add(local_record_index)
-            })
+        self.projection_start.saturating_add(local_record_index)
     }
 
     fn save_bounds(
@@ -258,21 +267,20 @@ impl TranscriptRecordState {
         history: &BlockHistory,
         order_start: usize,
     ) -> TranscriptRecordSaveBounds {
-        let record_base = self
-            .active_range
-            .as_ref()
-            .map(|range| range.start.get())
-            .unwrap_or_default();
         TranscriptRecordSaveBounds {
             order_start,
-            record_start_idx: record_base
+            record_start_idx: self
+                .projection_start
                 .saturating_add(history.record_index_for_order_index(order_start)),
-            record_end_idx: record_base.saturating_add(history.persisted_block_count()),
+            record_end_idx: self
+                .projection_start
+                .saturating_add(history.persisted_block_count()),
         }
     }
 
     fn truncate(&mut self, total_count: usize) {
         let total_count = self.sparse.truncate(total_count);
+        self.projection_start = self.projection_start.min(total_count);
         self.active_range = self.active_range.take().and_then(|mut range| {
             range.end = range
                 .end
@@ -798,10 +806,7 @@ impl TranscriptDocument {
             store_cache.store_for_session(loaded.store_address.as_ref());
         }
         let records = TranscriptRecordState::from_loaded(&loaded);
-        let compacted_record_len = records
-            .active_range()
-            .map(|range| range.start.get())
-            .unwrap_or_default();
+        let compacted_record_len = records.projection_start;
         let mut document = Self {
             hydration_context_id: next_transcript_hydration_context_id(),
             content: TranscriptContentState {
@@ -1038,7 +1043,8 @@ impl TranscriptDocument {
                 .range_is_loaded(&record.projection_range)
             {
                 let active_changed = self.records.active_range() != Some(&record.projection_range);
-                self.records.active_range = Some(record.projection_range.clone());
+                self.records
+                    .set_active_range(record.projection_range.clone());
                 self.records.sparse.touch_range(&record.projection_range);
                 self.records.sparse.enforce_byte_budget(
                     &record.projection_range,
@@ -1351,13 +1357,17 @@ impl TranscriptDocument {
             let record_start = smelt_store::TranscriptRecordOffset::new(bounds.record_start_idx);
             self.records.sparse.invalidate_from(record_start);
             self.records.sparse.total_count = Some(total_count);
-            if let Some(active) = self.records.active_range.as_mut() {
+            if let Some(active) = self.records.active_range.as_ref() {
                 let start = active.start.get().min(total_count);
                 let end = start
                     .saturating_add(self.content.transcript.history.persisted_block_count())
                     .min(total_count);
-                *active = smelt_store::TranscriptRecordOffset::new(start)
-                    ..smelt_store::TranscriptRecordOffset::new(end);
+                self.records.set_active_range(
+                    smelt_store::TranscriptRecordOffset::new(start)
+                        ..smelt_store::TranscriptRecordOffset::new(end),
+                );
+            } else {
+                self.records.projection_start = self.records.projection_start.min(total_count);
             }
             self.extent_index.clear_persisted_record_estimates();
             self.clear_transcript_layout_caches();
@@ -1773,7 +1783,7 @@ impl TranscriptDocument {
         if !self.merge_record_cache_window(&window) {
             return false;
         }
-        self.records.active_range = Some(active_range);
+        self.records.set_active_range(active_range);
         self.install_active_record_projection();
         true
     }
@@ -3814,7 +3824,7 @@ impl TranscriptDocument {
         if !active_changed {
             return false;
         }
-        self.records.active_range = Some(projection_range.clone());
+        self.records.set_active_range(projection_range.clone());
         self.records.sparse.touch_range(&cache_range);
         self.records
             .sparse
@@ -6175,12 +6185,7 @@ impl TranscriptDocument {
             return Ok(Some(bounds));
         }
 
-        let record_base_idx = self
-            .records
-            .active_range
-            .as_ref()
-            .map(|range| range.start.get())
-            .unwrap_or_default();
+        let record_base_idx = self.records.projection_start;
         if record_base_idx > acknowledged_record_count {
             return Err(format!(
                 "loaded transcript starts at record {record_base_idx}, beyond persisted length {acknowledged_record_count}"
@@ -6232,6 +6237,10 @@ impl TranscriptDocument {
                 .sparse
                 .total_count()
                 .is_none_or(|total_count| total_count == 0)
+    }
+
+    pub(crate) fn has_unloaded_records_before_block(&self, block_idx: usize) -> bool {
+        block_idx == 0 && self.records.projection_start > 0
     }
 
     #[cfg(any(test, feature = "harness"))]
@@ -11080,6 +11089,37 @@ mod tests {
         assert_eq!(document.loaded_record_ranges().len(), 1);
         assert_eq!(document.loaded_record_ranges()[0].start.get(), 34);
         assert_eq!(document.loaded_record_ranges()[0].end.get(), 35);
+    }
+
+    #[test]
+    fn transcript_truncation_preserves_sparse_projection_start_when_window_empties() {
+        let slice = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(34),
+            100,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (34..37).map(test_record_record).collect(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = super::LoadedTranscript::from_record_slice(
+            slice,
+            super::TranscriptStoreAddress::new(
+                dir.path().to_path_buf(),
+                TEST_LINEAGE_SESSION_ID.into(),
+                TEST_LINEAGE_SESSION_ID.into(),
+            ),
+        )
+        .expect("loaded sparse window");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+
+        document.truncate_to(0);
+
+        assert_eq!(document.record_total_count(), Some(34));
+        assert!(document.history().is_empty());
+        let bounds = document
+            .record_save_bounds(None)
+            .expect("empty sparse projection still truncates at its global boundary");
+        assert_eq!(bounds.record_start_idx, 34);
+        assert_eq!(bounds.record_end_idx, 34);
     }
 
     #[test]
