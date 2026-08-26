@@ -2867,7 +2867,10 @@ mod tests {
         );
         let flush = app.app.flush_persist();
         assert!(
-            matches!(flush, crate::persist::PersistenceFlushOutcome::Durable { .. }),
+            matches!(
+                flush,
+                crate::persist::PersistenceFlushOutcome::Durable { .. }
+            ),
             "cancel transition did not become durable: {flush:?}"
         );
         assert_eq!(
