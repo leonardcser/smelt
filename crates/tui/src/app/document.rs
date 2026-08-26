@@ -559,7 +559,7 @@ impl TuiApp {
             );
         let selection_active_before =
             state.selection_anchor.is_some() || state.drag_endpoint.is_some();
-        let defer_local_transcript_scroll = local_transcript_command && !selection_active_before;
+        let defer_local_transcript_scroll = local_transcript_command;
         let window_scroll_before = scroll_top;
         if defer_local_transcript_scroll {
             scroll_top = self

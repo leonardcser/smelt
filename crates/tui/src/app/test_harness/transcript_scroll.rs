@@ -1420,6 +1420,20 @@ mod tests {
     }
 
     #[test]
+    fn sparse_top_edge_drag_half_page_up_then_wheel_settles() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(150, 65, 19);
+        app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Top);
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_wheel(false, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
     fn sparse_command_scroll_keeps_upward_anchor_direction() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(502, 40, 13);
