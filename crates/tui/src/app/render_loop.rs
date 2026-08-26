@@ -252,6 +252,7 @@ pub(super) fn prepare_transcript_window(
             return;
         };
         let mut applied = transcript.project_applied_viewport(lua, buf, theme, plan);
+        let search_anchor = (!request.follow_tail).then_some(search_anchor).flatten();
         let search_is_active = search_anchor.is_some();
         let mut search_projection_requested = false;
         let settled_search_range = if let Some(anchor) = search_anchor {
@@ -476,7 +477,10 @@ impl TuiApp {
                                 request.scroll_top,
                             );
                         }
-                        if let Some(anchor) = transcript_search_anchor.clone() {
+                        if let Some(anchor) = (!request.follow_tail)
+                            .then_some(transcript_search_anchor.clone())
+                            .flatten()
+                        {
                             let matched = conversation.resolve_transcript_search_range_anchor(
                                 &lua,
                                 request.content_width.max(1),

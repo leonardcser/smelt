@@ -834,7 +834,10 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_follow_tail(&mut self) {
-        self.app.transcript_win_mut().follow_tail();
+        self.app.scroll_window(
+            crate::app::TRANSCRIPT_WIN,
+            crate::app::transcript_scroll::WindowScrollCommand::Tail,
+        );
     }
 
     pub(crate) fn transcript_viewport_lines(&self) -> Vec<String> {
@@ -1345,6 +1348,17 @@ mod tests {
         app.transcript_scroll_probe_render();
         app.set_terminal_size(32, 8);
         app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_follow_tail_after_deferred_match_settles() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(380, 40, 10);
+        app.transcript_scroll_probe_search_record(65476);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_follow_tail();
+        app.transcript_scroll_probe_render();
+        assert!(app.transcript_window().following_tail);
     }
 
     #[test]
