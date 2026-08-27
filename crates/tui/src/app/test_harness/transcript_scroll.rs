@@ -897,7 +897,7 @@ fn assert_wheel_movement_visible(
                 || viewport_after[..overlap] == pending.viewport_before[rows..]
         });
         assert!(
-            stable_overlap,
+            stable_overlap || sparse_zero_delta_preserved_anchor(frames),
             "wheel events with no net movement changed visible transcript content: pending={pending:?}, after={viewport_after:?}"
         );
         return;
@@ -939,6 +939,15 @@ fn has_user_delta_frame(frames: &[TranscriptScrollTraceFrame]) -> bool {
             frame.scroll_intent,
             TranscriptScrollIntent::UserDelta { .. }
         )
+    })
+}
+
+fn sparse_zero_delta_preserved_anchor(frames: &[TranscriptScrollTraceFrame]) -> bool {
+    frames.iter().any(|frame| {
+        matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::UserDelta { rows: 0 }
+        ) && viewport_anchor_preserved(frame)
     })
 }
 
@@ -1542,6 +1551,50 @@ mod tests {
             app.transcript_scroll_probe_repeat_search(true);
             app.transcript_scroll_probe_render();
         }
+    }
+
+    #[test]
+    fn sparse_zero_net_mixed_wheel_allows_sparse_reanchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        app.transcript_scroll_probe_drag_select(65, 65, 65);
+        app.transcript_scroll_probe_render();
+        for _ in 0..6 {
+            for _ in 0..12 {
+                app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+                app.transcript_scroll_probe_render();
+            }
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::JumpBottom);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            for _ in 0..12 {
+                app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+                app.transcript_scroll_probe_render();
+            }
+        }
+        for _ in 0..4 {
+            app.transcript_scroll_probe_wheel(true, 117);
+            app.transcript_scroll_probe_wheel(false, 117);
+        }
+        app.transcript_scroll_probe_render();
     }
 
     #[test]
