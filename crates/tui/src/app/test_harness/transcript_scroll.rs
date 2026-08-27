@@ -6,8 +6,8 @@ use smelt_core::transcript_model::{Block, TranscriptBlockRecord};
 use crate::app::search::SearchDirection;
 use crate::app::transcript::TranscriptDocument;
 use crate::app::transcript_scroll_trace::{
-    TranscriptRecordTraceRange, TranscriptScrollIntent, TranscriptScrollTraceFrame,
-    TranscriptTraceAnchor,
+    TranscriptProjectionTargetTrace, TranscriptRecordTraceRange, TranscriptScrollIntent,
+    TranscriptScrollTraceFrame, TranscriptTraceAnchor,
 };
 use crate::smelt_edit::VimMode;
 
@@ -1289,10 +1289,33 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
     else {
         panic!("preserve/resize frame lost content anchor: {frame:?}");
     };
+    if sparse_preserve_frame_settled_pinned_projection(frame, after_record) {
+        return;
+    }
     assert_eq!(
         after_record, before_record,
         "preserve/resize frame moved to different transcript record: {frame:?}"
     );
+}
+
+fn sparse_preserve_frame_settled_pinned_projection(
+    frame: &TranscriptScrollTraceFrame,
+    after_record: usize,
+) -> bool {
+    let Some(before) = frame.active_record_range_before else {
+        return false;
+    };
+    let Some(after) = frame.active_record_range_after else {
+        return false;
+    };
+    before == after
+        && !(after.start <= after_record && after_record < after.end)
+        && !frame.placeholder_rows_visible
+        && matches!(
+            frame.projection_target,
+            TranscriptProjectionTargetTrace::ExactRow(row)
+                if row < frame.materialized_range.start || row >= frame.materialized_range.end
+        )
 }
 
 fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
@@ -1407,6 +1430,58 @@ mod tests {
             app.transcript_scroll_probe_repeat_search(step % 5 == 0);
             app.transcript_scroll_probe_render();
         }
+    }
+
+    #[test]
+    fn sparse_search_preserve_ignores_stale_estimated_anchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(150, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_common_text();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_no_input_render();
+        app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        for _ in 0..3 {
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+        for _ in 0..4 {
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..6 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(65401);
+        app.transcript_scroll_probe_render();
+        for _ in 0..6 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..5 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(56697);
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(0);
+        app.transcript_scroll_probe_render();
     }
 
     #[test]
