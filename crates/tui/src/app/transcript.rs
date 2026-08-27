@@ -1137,6 +1137,14 @@ impl TranscriptDocument {
         self.hydration.viewport_pins.clear();
         self.hydration.viewport_pins.extend(ids.iter().copied());
         let hydrated = self.ensure_hydrated_ids(ids);
+        if hydrated {
+            self.hydration.projection_hydration_pins.clear();
+        } else {
+            self.hydration.projection_hydration_pins.clear();
+            self.hydration
+                .projection_hydration_pins
+                .extend(ids.iter().copied());
+        }
         self.enforce_hydrated_budget();
         hydrated
     }
@@ -1923,6 +1931,7 @@ impl TranscriptDocument {
 
     fn clear_pending_projection(&mut self) {
         self.viewport.state.pending_projection = None;
+        self.hydration.projection_hydration_pins.clear();
         self.set_pending_projection_pin(None);
     }
 
@@ -2550,7 +2559,8 @@ impl TranscriptDocument {
                 .copied()
                 .filter(|block_id| {
                     !projected_ids.contains(block_id)
-                        && (self.hydration.pending_projection_pin == Some(*block_id)
+                        && (self.hydration.projection_hydration_pins.contains(block_id)
+                            || self.hydration.pending_projection_pin == Some(*block_id)
                             || self.hydration.search_pin == Some(*block_id)
                             || self.hydration.record_save_pins.contains(block_id)
                             || self.hydration.engine_event_pins.contains(block_id)

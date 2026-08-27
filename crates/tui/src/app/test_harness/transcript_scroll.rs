@@ -1507,6 +1507,44 @@ mod tests {
     }
 
     #[test]
+    fn sparse_resize_wheel_reverse_search_hydration_settles() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(256, 51, 21);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 11);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..4 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(101, 33);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_common_text();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_scrollbar_click(21);
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_wheel(true, 21);
+        }
+        app.transcript_scroll_probe_render();
+        for _ in 0..88 {
+            app.transcript_scroll_probe_wheel(true, 11);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..4 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(57, 33);
+        app.transcript_scroll_probe_render();
+        for _ in 0..4 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+    }
+
+    #[test]
     fn sparse_no_input_render_settles_after_search_projection() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(128, 55, 21);

@@ -64,6 +64,7 @@ pub(super) struct TranscriptHydrationState {
     pub(super) lru: VecDeque<BlockId>,
     pub(super) lru_ids: HashSet<BlockId>,
     pub(super) viewport_pins: HashSet<BlockId>,
+    pub(super) projection_hydration_pins: HashSet<BlockId>,
     pub(super) pending_projection_pin: Option<BlockId>,
     pub(super) record_save_pins: HashSet<BlockId>,
     pub(super) engine_event_pins: HashSet<BlockId>,
@@ -84,6 +85,7 @@ pub(super) struct TranscriptHydrationState {
 impl TranscriptHydrationState {
     pub(super) fn is_pinned(&self, id: BlockId) -> bool {
         self.viewport_pins.contains(&id)
+            || self.projection_hydration_pins.contains(&id)
             || self.pending_projection_pin == Some(id)
             || self.record_save_pins.contains(&id)
             || self.engine_event_pins.contains(&id)
