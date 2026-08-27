@@ -407,12 +407,10 @@ impl HeadlessApp {
             eprintln!("error: no model is available for headless dispatch");
             return;
         };
-        let fast_mode = model_target.provider_type == "codex"
-            && model_target.config.supports_fast_mode == Some(true)
-            && self
-                .session
-                .fast_mode
-                .unwrap_or(self.core.config.settings.fast_mode);
+        let fast_mode = self
+            .session
+            .fast_mode
+            .unwrap_or(self.core.config.settings.fast_mode);
 
         self.core
             .engine

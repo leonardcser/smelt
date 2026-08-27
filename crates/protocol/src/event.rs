@@ -731,6 +731,7 @@ pub struct StartTurnPayload {
     /// Runtime policy snapshot that remains stable for this turn.
     pub request_config: RequestRuntimeConfig,
     pub reasoning_effort: ReasoningEffort,
+    /// Accelerated-inference preference; the provider filters it against the target capability.
     #[serde(default)]
     pub fast_mode: bool,
     pub history: ModelHistorySource,
@@ -835,6 +836,7 @@ pub enum UiCommand {
         response_format: Option<AskResponseFormat>,
         #[serde(default)]
         reasoning_effort: ReasoningEffort,
+        /// Accelerated-inference preference; the provider filters it against the target capability.
         #[serde(default)]
         fast_mode: bool,
         /// Tools to send alongside the request. When this matches the

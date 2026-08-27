@@ -792,7 +792,7 @@ impl AgentLuaHost<'_> {
             request_config,
             response_format,
             reasoning_effort,
-            fast_mode: self.app.fast_mode_active(),
+            fast_mode: self.app.fast_mode(),
             tools,
             session_id,
             persistence,

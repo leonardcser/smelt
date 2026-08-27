@@ -816,7 +816,7 @@ impl TuiApp {
             model_target: turn.model_target,
             request_config: turn.request_config,
             reasoning_effort: turn.reasoning_effort,
-            fast_mode: self.fast_mode_active(),
+            fast_mode: self.fast_mode(),
             history,
             session_id: self.conversation.session().id.clone(),
             sessions_root: self.core.sessions.sessions_dir(),

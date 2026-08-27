@@ -156,7 +156,11 @@ impl ProviderClient {
                 body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
             }
         }
-        apply_fast_mode(&mut body, provider_kind, request.fast_mode);
+        let service_tier = (provider_kind == ProviderKind::Codex
+            && request.fast_mode
+            && request.config.supports_fast_mode == Some(true))
+        .then_some(codex::FAST_SERVICE_TIER);
+        apply_service_tier(&mut body, service_tier);
 
         let use_stream = opts.on_delta.is_some() || provider_kind == ProviderKind::Codex;
         if use_stream {
@@ -183,7 +187,8 @@ impl ProviderClient {
                 transport.kimi_headers = Some(headers);
             }
             ChatProviderKind::Codex { tokens, turn_state } => {
-                transport.headers = codex_request_headers(Some(tokens), turn_state);
+                transport.headers =
+                    codex_request_headers(Some(tokens), turn_state, request.model, service_tier);
             }
             ChatProviderKind::Copilot {
                 tokens,
@@ -495,15 +500,17 @@ impl ProviderClient {
     }
 }
 
-fn apply_fast_mode(body: &mut Value, provider_kind: ProviderKind, enabled: bool) {
-    if provider_kind == ProviderKind::Codex && enabled {
-        body["service_tier"] = serde_json::json!(codex::FAST_SERVICE_TIER);
+fn apply_service_tier(body: &mut Value, service_tier: Option<&str>) {
+    if let Some(service_tier) = service_tier {
+        body["service_tier"] = serde_json::json!(service_tier);
     }
 }
 
 fn codex_request_headers(
     tokens: Option<&codex::CodexTokens>,
     turn_state: Option<&str>,
+    model: &str,
+    service_tier: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut headers = vec![("Accept".to_string(), "text/event-stream".to_string())];
     if let Some(tokens) = tokens {
@@ -517,6 +524,13 @@ fn codex_request_headers(
         }
         if let Some(ts) = turn_state {
             headers.push(("x-codex-turn-state".to_string(), ts.to_string()));
+        }
+        let routing_hint = match service_tier {
+            Some(service_tier) => format!("model={model};tier={service_tier}"),
+            None => format!("model={model}"),
+        };
+        if reqwest::header::HeaderValue::from_str(&routing_hint).is_ok() {
+            headers.push(("x-codex-routing-hint".to_string(), routing_hint));
         }
     }
     headers
@@ -596,6 +610,7 @@ pub struct ChatRequest<'a> {
     pub config: &'a ModelConfig,
     pub cache: CacheConfig,
     pub response_format: Option<ResponseFormat>,
+    /// Accelerated-inference preference, filtered against provider and model capabilities.
     pub fast_mode: bool,
 }
 
@@ -710,6 +725,7 @@ impl CopilotInitiator {
 pub struct ChatRequestOptions {
     pub response_format: Option<ResponseFormat>,
     pub cache: CacheConfig,
+    /// Accelerated-inference preference, filtered by the provider client.
     pub fast_mode: bool,
 }
 
@@ -1066,7 +1082,20 @@ mod tests {
         );
     }
 
-    async fn capture_codex_request(fast_mode: bool) -> (Value, Vec<u32>) {
+    fn test_codex_tokens() -> codex::CodexTokens {
+        codex::CodexTokens {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: u64::MAX,
+            account_id: Some("acct".into()),
+            last_refresh: 0,
+        }
+    }
+
+    async fn capture_codex_request(
+        fast_mode: bool,
+        supports_fast_mode: bool,
+    ) -> (Value, String, Vec<u32>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1084,17 +1113,15 @@ mod tests {
                 event
             );
             stream.write_all(response.as_bytes()).await.unwrap();
-            body
+            (body, headers)
         });
 
-        let tokens = codex::CodexTokens {
-            access_token: "access".into(),
-            refresh_token: "refresh".into(),
-            expires_at: u64::MAX,
-            account_id: Some("acct".into()),
-            last_refresh: 0,
-        };
+        let tokens = test_codex_tokens();
         let messages = [user_msg("hi")];
+        let config = ModelConfig {
+            supports_fast_mode: Some(supports_fast_mode),
+            ..ModelConfig::default()
+        };
         let cancel = CancellationToken::new();
         let attempts = std::sync::Mutex::new(Vec::new());
         {
@@ -1112,7 +1139,7 @@ mod tests {
                         messages: &messages,
                         tools: &[],
                         effort: ReasoningEffort::Max,
-                        config: &ModelConfig::default(),
+                        config: &config,
                         cache: CacheConfig::default(),
                         response_format: None,
                         fast_mode,
@@ -1122,34 +1149,52 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let (body, headers) = server.await.unwrap();
         (
-            server.await.unwrap(),
+            body,
+            headers,
             attempts.into_inner().expect("attempt callback mutex"),
         )
     }
 
     #[tokio::test]
     async fn codex_http_request_normalizes_endpoint_and_emits_one_based_attempts() {
-        let (fast_body, fast_attempts) = capture_codex_request(true).await;
-        assert_eq!(fast_body["service_tier"], "priority");
-        assert_eq!(fast_body["reasoning"]["effort"], "xhigh");
-        assert_eq!(fast_attempts, vec![1]);
+        let (body, _headers, attempts) = capture_codex_request(false, true).await;
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(attempts, vec![1]);
+    }
 
-        let (standard_body, standard_attempts) = capture_codex_request(false).await;
-        assert!(standard_body.get("service_tier").is_none());
-        assert_eq!(standard_attempts, vec![1]);
+    #[tokio::test]
+    async fn codex_http_request_includes_fast_service_tier_and_routing_hint() {
+        let (body, headers, _attempts) = capture_codex_request(true, true).await;
+        assert_eq!(body["service_tier"], "priority");
+        assert!(headers.lines().any(|line| {
+            line.eq_ignore_ascii_case("x-codex-routing-hint: model=gpt-test;tier=priority")
+        }));
+    }
+
+    #[tokio::test]
+    async fn codex_http_request_omits_fast_tier_in_standard_mode() {
+        let (body, headers, _attempts) = capture_codex_request(false, true).await;
+        assert!(body.get("service_tier").is_none());
+        assert!(headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("x-codex-routing-hint: model=gpt-test")));
+    }
+
+    #[tokio::test]
+    async fn codex_http_request_filters_fast_tier_for_unsupported_model() {
+        let (body, headers, _attempts) = capture_codex_request(true, false).await;
+        assert!(body.get("service_tier").is_none());
+        assert!(headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("x-codex-routing-hint: model=gpt-test")));
     }
 
     #[test]
     fn codex_request_headers_include_auth_originator_and_turn_state() {
-        let tokens = codex::CodexTokens {
-            access_token: "access".into(),
-            refresh_token: "refresh".into(),
-            expires_at: 123,
-            account_id: Some("acct".into()),
-            last_refresh: 0,
-        };
-        let headers = codex_request_headers(Some(&tokens), Some("turn"));
+        let tokens = test_codex_tokens();
+        let headers = codex_request_headers(Some(&tokens), Some("turn"), "gpt-test", None);
 
         assert_eq!(header_value(&headers, "Accept"), Some("text/event-stream"));
         assert_eq!(
@@ -1159,6 +1204,22 @@ mod tests {
         assert_eq!(header_value(&headers, "ChatGPT-Account-ID"), Some("acct"));
         assert_eq!(header_value(&headers, "originator"), Some("smelt"));
         assert_eq!(header_value(&headers, "x-codex-turn-state"), Some("turn"));
+    }
+
+    #[test]
+    fn codex_request_headers_include_fast_routing_hint() {
+        let tokens = test_codex_tokens();
+        let headers = codex_request_headers(
+            Some(&tokens),
+            None,
+            "gpt-test",
+            Some(codex::FAST_SERVICE_TIER),
+        );
+
+        assert_eq!(
+            header_value(&headers, "x-codex-routing-hint"),
+            Some("model=gpt-test;tier=priority")
+        );
     }
 
     #[test]
