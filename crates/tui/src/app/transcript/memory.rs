@@ -69,6 +69,7 @@ pub(super) struct TranscriptHydrationState {
     pub(super) record_save_pins: HashSet<BlockId>,
     pub(super) engine_event_pins: HashSet<BlockId>,
     pub(super) search_pin: Option<BlockId>,
+    pub(super) search_candidate_pins: HashSet<BlockId>,
     pub(super) record_failed: bool,
     pub(super) failed_blocks: HashSet<BlockId>,
     pub(super) operation_pins: HashMap<BlockId, usize>,
@@ -90,6 +91,7 @@ impl TranscriptHydrationState {
             || self.record_save_pins.contains(&id)
             || self.engine_event_pins.contains(&id)
             || self.search_pin == Some(id)
+            || self.search_candidate_pins.contains(&id)
             || self.operation_pins.contains_key(&id)
     }
 

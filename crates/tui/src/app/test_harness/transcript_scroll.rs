@@ -1554,6 +1554,40 @@ mod tests {
     }
 
     #[test]
+    fn sparse_search_reveal_common_hydration_settles() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(150, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(43385);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(36729);
+        app.transcript_scroll_probe_render();
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 9);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 143);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_reveal_record(36751);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(36751);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_common_text();
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
     fn sparse_zero_net_mixed_wheel_allows_sparse_reanchor() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(502, 40, 10);

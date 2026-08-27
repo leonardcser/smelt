@@ -1911,12 +1911,17 @@ impl TranscriptDocument {
 
     pub(crate) fn set_search_hydration_pin(&mut self, block_id: Option<BlockId>) {
         if self.hydration.search_pin == block_id {
+            if block_id.is_none() {
+                self.hydration.search_candidate_pins.clear();
+                self.enforce_hydrated_budget();
+            }
             return;
         }
         self.hydration.search_pin = block_id;
         if let Some(block_id) = block_id {
             let _ = self.ensure_hydrated_ids(&[block_id]);
         } else {
+            self.hydration.search_candidate_pins.clear();
             self.enforce_hydrated_budget();
         }
     }
@@ -2562,6 +2567,7 @@ impl TranscriptDocument {
                         && (self.hydration.projection_hydration_pins.contains(block_id)
                             || self.hydration.pending_projection_pin == Some(*block_id)
                             || self.hydration.search_pin == Some(*block_id)
+                            || self.hydration.search_candidate_pins.contains(block_id)
                             || self.hydration.record_save_pins.contains(block_id)
                             || self.hydration.engine_event_pins.contains(block_id)
                             || self.hydration.operation_pins.contains_key(block_id))
@@ -3539,6 +3545,10 @@ impl TranscriptDocument {
             .copied()
             .map(BlockId::new)
             .collect::<Vec<_>>();
+        self.hydration.search_candidate_pins.clear();
+        self.hydration
+            .search_candidate_pins
+            .extend(hydration_ids.iter().copied());
         if !self.pin_operation_blocks(&hydration_ids) {
             return crate::content::transcript_buf::TranscriptSearchLayout {
                 generation: 0,
