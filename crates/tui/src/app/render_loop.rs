@@ -140,6 +140,7 @@ pub(crate) enum EngineOutputDrainOutcome {
 pub(super) struct TranscriptSearchProjection<'a> {
     pub(super) anchor: Option<crate::app::transcript::TranscriptSearchRangeAnchor>,
     pub(super) range_after: &'a mut Option<crate::smelt_edit::DocRange>,
+    pub(super) match_after: &'a mut Option<crate::app::transcript::TranscriptSearchMatch>,
 }
 
 fn record_transcript_projection_hydration_deferred(
@@ -247,6 +248,7 @@ pub(super) fn prepare_transcript_window(
     let transcript_cursor_range;
     let suppress_cursor_screen_row_restore;
     let allow_cursor_search_range;
+    let mut settled_search_match = None;
     {
         let _p = smelt_perf::perf::begin("compositor:project_transcript");
         let width = request.content_width.max(1);
@@ -343,6 +345,7 @@ pub(super) fn prepare_transcript_window(
                             theme,
                             anchor.clone(),
                         );
+                        settled_search_match = Some(resolved_match);
                     }
                     Err(error) => record_transcript_projection_hydration_deferred(error),
                 }
@@ -443,7 +446,12 @@ pub(super) fn prepare_transcript_window(
         };
         if let Some(range) = transcript_cursor_range.or(cursor_search_range) {
             if win.set_row_cursor(buf, range.start) {
-                *search_projection.range_after = Some(range);
+                if let Some(matched) = settled_search_match.filter(|matched| matched.range == range)
+                {
+                    *search_projection.match_after = Some(matched);
+                } else {
+                    *search_projection.range_after = Some(range);
+                }
             }
         }
     }
@@ -469,20 +477,17 @@ impl TuiApp {
                     .map(|matched| (matched, session.query.clone())),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
-            .filter(|(matched, _)| {
+            .filter(|(_, _)| {
                 self.conversation
                     .transcript()
                     .has_pending_search_projection()
-                    || self
-                        .transcript_win()
-                        .row_cursor()
-                        .is_some_and(|cursor| cursor.row == matched.range.start.row)
             })
             .map(|(matched, query)| {
                 self.conversation
                     .transcript_search_range_anchor(matched, query)
             });
         let mut transcript_search_range_after_projection = None;
+        let mut transcript_search_match_after_projection = None;
         let lua = self.lua.execution();
         let prepared_transcript = {
             let core = &mut self.core;
@@ -535,7 +540,7 @@ impl TuiApp {
                                         anchor.query(),
                                     ) && win.set_row_cursor(buf, range.start)
                                     {
-                                        transcript_search_range_after_projection = Some(range);
+                                        transcript_search_match_after_projection = Some(matched);
                                     }
                                 }
                             }
@@ -558,6 +563,7 @@ impl TuiApp {
                             TranscriptSearchProjection {
                                 anchor: transcript_search_anchor.clone(),
                                 range_after: &mut transcript_search_range_after_projection,
+                                match_after: &mut transcript_search_match_after_projection,
                             },
                         );
                     }
@@ -565,7 +571,10 @@ impl TuiApp {
             })
         };
         let transcript_visible = prepared_transcript.is_some();
-        if let Some(range) = transcript_search_range_after_projection {
+        if let Some(matched) = transcript_search_match_after_projection {
+            self.overlays
+                .replace_current_transcript_search_match(matched);
+        } else if let Some(range) = transcript_search_range_after_projection {
             self.update_current_transcript_search_range(crate::app::TRANSCRIPT_WIN, range);
         }
         {

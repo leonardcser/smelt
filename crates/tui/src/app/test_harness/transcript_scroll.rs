@@ -1507,6 +1507,49 @@ mod tests {
     }
 
     #[test]
+    fn sparse_no_input_render_settles_after_search_projection() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(128, 55, 21);
+        for _ in 0..3 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        app.transcript_scroll_probe_search_record(34181);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(11141);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(53125);
+        app.transcript_scroll_probe_render();
+        for _ in 0..4 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        app.transcript_scroll_probe_scrollbar_click(207);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_wheel(false, 207);
+        }
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        app.transcript_scroll_probe_reveal_record(53199);
+        app.transcript_scroll_probe_render();
+        for _ in 0..3 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_record(34181);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31354);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(34181);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_no_input_render();
+    }
+
+    #[test]
     fn sparse_command_scroll_keeps_upward_anchor_direction() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(502, 40, 13);
