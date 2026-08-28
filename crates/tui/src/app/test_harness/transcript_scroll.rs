@@ -1301,7 +1301,7 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
     else {
         panic!("preserve/resize frame lost content anchor: {frame:?}");
     };
-    if sparse_preserve_frame_settled_pinned_projection(frame, after_record) {
+    if sparse_preserve_frame_settled_pinned_projection(frame, before_record, after_record) {
         return;
     }
     assert_eq!(
@@ -1312,6 +1312,7 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
 
 fn sparse_preserve_frame_settled_pinned_projection(
     frame: &TranscriptScrollTraceFrame,
+    before_record: usize,
     after_record: usize,
 ) -> bool {
     let Some(before) = frame.active_record_range_before else {
@@ -1320,14 +1321,21 @@ fn sparse_preserve_frame_settled_pinned_projection(
     let Some(after) = frame.active_record_range_after else {
         return false;
     };
-    before == after
-        && !(after.start <= after_record && after_record < after.end)
-        && !frame.placeholder_rows_visible
-        && matches!(
-            frame.projection_target,
-            TranscriptProjectionTargetTrace::ExactRow(row)
-                if row < frame.materialized_range.start || row >= frame.materialized_range.end
-        )
+    let target_outside_materialized = matches!(
+        frame.projection_target,
+        TranscriptProjectionTargetTrace::ExactRow(row)
+            if row < frame.materialized_range.start || row >= frame.materialized_range.end
+    );
+    if !target_outside_materialized || frame.placeholder_rows_visible {
+        return false;
+    }
+    (before == after && !record_range_contains(after, after_record))
+        || (!record_range_contains(before, before_record)
+            && record_range_contains(after, after_record))
+}
+
+fn record_range_contains(range: TranscriptRecordTraceRange, record: usize) -> bool {
+    range.start <= record && record < range.end
 }
 
 fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
@@ -1478,6 +1486,52 @@ mod tests {
         app.transcript_scroll_probe_repeat_search(true);
         app.transcript_scroll_probe_render();
         app.transcript_scroll_probe_drag_select(0, 0, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_preserve_allows_stale_projection_reanchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(150, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..16 {
+            let _ = app.transcript_scroll_probe_drag_autoscroll_tick();
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..6 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_content_click(121, 121);
+        app.transcript_scroll_probe_render();
+        for _ in 0..5 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31071);
+        app.transcript_scroll_probe_render();
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+        for _ in 0..7 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(30976);
         app.transcript_scroll_probe_render();
     }
 
