@@ -915,11 +915,11 @@ fn assert_wheel_movement_visible(
         return;
     }
 
-    let max_rows = pending
-        .rows
+    let effective_rows = effective_wheel_rows(pending.rows, frames);
+    let max_rows = effective_rows
         .unsigned_abs()
         .saturating_add(max_leading_rows_before_content(frames));
-    if pending.rows.unsigned_abs() >= viewport_after.len() {
+    if effective_rows.unsigned_abs() >= viewport_after.len() {
         return;
     }
     let max_rows = max_rows.min(viewport_after.len().saturating_sub(1));
@@ -952,6 +952,22 @@ fn has_user_delta_frame(frames: &[TranscriptScrollTraceFrame]) -> bool {
             TranscriptScrollIntent::UserDelta { .. }
         )
     })
+}
+
+fn effective_wheel_rows(pending_rows: isize, frames: &[TranscriptScrollTraceFrame]) -> isize {
+    frames
+        .iter()
+        .filter_map(|frame| match frame.scroll_intent {
+            TranscriptScrollIntent::UserDelta { rows }
+                if rows.signum() == pending_rows.signum() =>
+            {
+                Some(rows)
+            }
+            _ => None,
+        })
+        .max_by_key(|rows| rows.unsigned_abs())
+        .filter(|rows| rows.unsigned_abs() > pending_rows.unsigned_abs())
+        .unwrap_or(pending_rows)
 }
 
 fn sparse_zero_delta_preserved_anchor(frames: &[TranscriptScrollTraceFrame]) -> bool {
@@ -1486,6 +1502,55 @@ mod tests {
         app.transcript_scroll_probe_repeat_search(true);
         app.transcript_scroll_probe_render();
         app.transcript_scroll_probe_drag_select(0, 0, 0);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_coalesced_wheel_trace_sets_visible_movement_bound() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(256, 77, 15);
+        app.transcript_scroll_probe_reveal_record(65535);
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..5 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_common_text();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_follow_tail();
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..12 {
+            for _ in 0..8 {
+                app.transcript_scroll_probe_wheel(true, 11);
+            }
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..4 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_no_input_render();
+        app.transcript_scroll_probe_repeat_search(true);
         app.transcript_scroll_probe_render();
     }
 
