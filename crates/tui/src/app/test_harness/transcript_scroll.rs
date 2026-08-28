@@ -110,6 +110,15 @@ impl Drop for SparseTranscriptFixture {
     }
 }
 
+fn frames_include_search_jump(frames: &[TranscriptScrollTraceFrame]) -> bool {
+    frames.iter().any(|frame| {
+        matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::SearchJump { .. }
+        )
+    })
+}
+
 impl TestApp {
     pub fn transcript_window(&self) -> TranscriptWindowSnapshot {
         let win = self.app.transcript_win();
@@ -504,7 +513,7 @@ impl TestApp {
             let viewport_after = self.transcript_viewport_lines();
             assert_wheel_movement_visible(&pending, &viewport_after, &frames);
         }
-        if check_search_match {
+        if check_search_match && frames_include_search_jump(&frames) {
             self.assert_current_transcript_search_match();
         }
         self.assert_invariants();
@@ -729,7 +738,8 @@ impl TestApp {
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
-            .is_some();
+            .is_some()
+            && self.app.pending_transcript_search.is_none();
     }
 
     pub fn transcript_scroll_probe_search_common_text(&mut self) {
@@ -743,7 +753,8 @@ impl TestApp {
             .overlays
             .search_session()
             .and_then(|session| session.current_range())
-            .is_some();
+            .is_some()
+            && self.app.pending_transcript_search.is_none();
     }
 
     pub fn transcript_scroll_probe_repeat_search(&mut self, reverse: bool) {
@@ -755,7 +766,8 @@ impl TestApp {
             .is_some();
         if has_match {
             self.type_char(if reverse { 'N' } else { 'n' });
-            self.transcript_scroll_probe.pending_search_match_check = true;
+            self.transcript_scroll_probe.pending_search_match_check =
+                self.app.pending_transcript_search.is_none();
         }
     }
 
@@ -1430,6 +1442,43 @@ mod tests {
             app.transcript_scroll_probe_repeat_search(step % 5 == 0);
             app.transcript_scroll_probe_render();
         }
+    }
+
+    #[test]
+    fn sparse_search_repeat_after_reflow_keeps_cursor_on_match() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(173, 55, 21);
+        for _ in 0..5 {
+            app.transcript_scroll_probe_resize(103, 15);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(96, 15);
+        app.transcript_scroll_probe_render();
+        for _ in 0..4 {
+            app.transcript_scroll_probe_resize(103, 15);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..18 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(71, 15);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_resize(103, 15);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_resize(103, 23);
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        for _ in 0..5 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_drag_select(0, 0, 0);
+        app.transcript_scroll_probe_render();
     }
 
     #[test]
