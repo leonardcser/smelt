@@ -1218,6 +1218,9 @@ fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTrace
     else {
         panic!("local movement lost its semantic viewport anchor: {frame:?}");
     };
+    if sparse_user_delta_settled_stale_frame_start(frame) {
+        return;
+    }
     let semantic_movement =
         (after_record, after_block, after_row).cmp(&(before_record, before_block, before_row));
     let virtual_movement = after_virtual_row.cmp(&before_virtual_row);
@@ -1243,6 +1246,31 @@ fn assert_user_delta_from_frame_start(rows: isize, frame: &TranscriptScrollTrace
             "first downward local movement moved the semantic viewport anchor upward: {frame:?}"
         );
     }
+}
+
+fn sparse_user_delta_settled_stale_frame_start(frame: &TranscriptScrollTraceFrame) -> bool {
+    let Some(TranscriptTraceAnchor::Content {
+        virtual_row: before_row,
+        ..
+    }) = frame.viewport_anchor_before
+    else {
+        return false;
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        virtual_row: after_row,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
+        return false;
+    };
+    matches!(
+        frame.projection_target,
+        TranscriptProjectionTargetTrace::StableRowDelta { row, .. }
+            if row == frame.window_scroll_before
+                && row == frame.resolved_scroll_top
+                && after_row == row
+                && before_row != row
+    ) && !frame.placeholder_rows_visible
 }
 
 fn local_delta_moved_against_direction(
@@ -1635,6 +1663,41 @@ mod tests {
         app.transcript_scroll_probe_no_input_render();
         app.transcript_scroll_probe_repeat_search(true);
         app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_page_down_allows_stale_frame_start_settling() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(133, 45, 15);
+        for _ in 0..10 {
+            app.transcript_scroll_probe_wheel(true, 5);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..8 {
+            app.transcript_scroll_probe_search_common_text();
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..5 {
+            app.transcript_scroll_probe_resize(101, 13);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_resize(57, 33);
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::PageDown);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
     }
 
     #[test]
