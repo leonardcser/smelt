@@ -1120,7 +1120,7 @@ fn assert_record_ranges_overlap(
     let Some(edge) = state.drag_edge else {
         return;
     };
-    if viewport_anchor_preserved(frame) {
+    if viewport_anchor_preserved(frame) || sparse_user_delta_settled_stale_active_range(frame) {
         return;
     }
     let Some(before) = frame.active_record_range_before else {
@@ -1133,6 +1133,32 @@ fn assert_record_ranges_overlap(
         ranges_overlap(before, after),
         "{edge:?} drag/autoscroll jumped to disjoint record coverage: before={before:?}, after={after:?}, frame={frame:?}"
     );
+}
+
+fn sparse_user_delta_settled_stale_active_range(frame: &TranscriptScrollTraceFrame) -> bool {
+    let Some(before) = frame.active_record_range_before else {
+        return false;
+    };
+    let Some(after) = frame.active_record_range_after else {
+        return false;
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: before_record,
+        ..
+    }) = frame.viewport_anchor_before
+    else {
+        return false;
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        record_index: after_record,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
+        return false;
+    };
+    !frame.placeholder_rows_visible
+        && !record_range_contains(before, before_record)
+        && record_range_contains(after, after_record)
 }
 
 fn viewport_anchor_preserved(frame: &TranscriptScrollTraceFrame) -> bool {
@@ -1570,6 +1596,30 @@ mod tests {
         }
         app.transcript_scroll_probe_no_input_render();
         app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_bottom_drag_wheel_allows_stale_active_range_reanchor() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(486, 40, 10);
+        for _ in 0..4 {
+            app.transcript_scroll_probe_repeat_search(true);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        for _ in 0..11 {
+            app.transcript_scroll_probe_start_edge_drag(TranscriptScrollProbeEdge::Bottom);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_wheel(true, 77);
+        }
         app.transcript_scroll_probe_render();
     }
 
