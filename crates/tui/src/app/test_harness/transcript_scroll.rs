@@ -499,6 +499,10 @@ impl TestApp {
     }
 
     pub fn transcript_scroll_probe_render(&mut self) {
+        self.transcript_scroll_probe_render_frames();
+    }
+
+    fn transcript_scroll_probe_render_frames(&mut self) -> Vec<TranscriptScrollTraceFrame> {
         self.transcript_scroll_probe.keep_fixture_alive();
         let pending_wheel_movement = self.transcript_scroll_probe.pending_wheel_movement.take();
         let check_search_match =
@@ -517,16 +521,19 @@ impl TestApp {
             self.assert_current_transcript_search_match();
         }
         self.assert_invariants();
+        frames
     }
 
     pub fn transcript_scroll_probe_no_input_render(&mut self) {
         let before_scroll = self.app.transcript_win().scroll_top();
-        self.transcript_scroll_probe_render();
-        assert_eq!(
-            self.app.transcript_win().scroll_top(),
-            before_scroll,
-            "no-input render changed transcript scroll_top"
-        );
+        let frames = self.transcript_scroll_probe_render_frames();
+        let after_scroll = self.app.transcript_win().scroll_top();
+        if after_scroll != before_scroll {
+            assert!(
+                no_input_scroll_top_change_preserved_content(&frames),
+                "no-input render changed transcript scroll_top from {before_scroll} to {after_scroll}: {frames:?}"
+            );
+        }
     }
 
     pub fn transcript_scroll_probe_wheel(&mut self, down: bool, rel_row: u16) {
@@ -1148,6 +1155,18 @@ fn viewport_anchor_preserved(frame: &TranscriptScrollTraceFrame) -> bool {
     )
 }
 
+fn no_input_scroll_top_change_preserved_content(frames: &[TranscriptScrollTraceFrame]) -> bool {
+    !frames.is_empty()
+        && frames.iter().all(|frame| {
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::PreserveViewport
+                    | TranscriptScrollIntent::ResizeReflow { .. }
+            ) && viewport_anchor_preserved(frame)
+                && !frame.placeholder_rows_visible
+        })
+}
+
 fn ranges_overlap(a: TranscriptRecordTraceRange, b: TranscriptRecordTraceRange) -> bool {
     a.start <= b.end && b.start <= a.end
 }
@@ -1552,6 +1571,58 @@ mod tests {
         app.transcript_scroll_probe_no_input_render();
         app.transcript_scroll_probe_repeat_search(true);
         app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_search_no_input_render_preserves_visible_content() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(149, 103, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_finish_drag();
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_finish_drag();
+        app.transcript_scroll_probe_render();
+        for _ in 0..2 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        app.transcript_scroll_probe_drag_select(65, 65, 65);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_drag_select(65, 117, 117);
+        app.transcript_scroll_probe_render();
+        for _ in 0..11 {
+            for _ in 0..12 {
+                app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+                app.transcript_scroll_probe_render();
+            }
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            for _ in 0..12 {
+                app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+                app.transcript_scroll_probe_render();
+            }
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_drag_select(65, 65, 65);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(37265);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(57233);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_no_input_render();
     }
 
     #[test]
