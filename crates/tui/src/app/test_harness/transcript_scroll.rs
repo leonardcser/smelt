@@ -1362,7 +1362,9 @@ fn assert_preserve_frame_keeps_anchor(frame: &TranscriptScrollTraceFrame) {
     else {
         panic!("preserve/resize frame lost content anchor: {frame:?}");
     };
-    if sparse_preserve_frame_settled_pinned_projection(frame, before_record, after_record) {
+    if sparse_preserve_frame_settled_pinned_projection(frame, before_record, after_record)
+        || sparse_preserve_frame_settled_stale_resolved_anchor(frame)
+    {
         return;
     }
     assert_eq!(
@@ -1393,6 +1395,42 @@ fn sparse_preserve_frame_settled_pinned_projection(
     (before == after && !record_range_contains(after, after_record))
         || (!record_range_contains(before, before_record)
             && record_range_contains(after, after_record))
+}
+
+fn sparse_preserve_frame_settled_stale_resolved_anchor(frame: &TranscriptScrollTraceFrame) -> bool {
+    let Some(before) = frame.active_record_range_before else {
+        return false;
+    };
+    let Some(after) = frame.active_record_range_after else {
+        return false;
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        virtual_row: before_row,
+        record_index: before_record,
+        ..
+    }) = frame.viewport_anchor_before
+    else {
+        return false;
+    };
+    let Some(TranscriptTraceAnchor::Content {
+        virtual_row: after_row,
+        record_index: after_record,
+        ..
+    }) = frame.viewport_anchor_after
+    else {
+        return false;
+    };
+    matches!(
+        frame.projection_target,
+        TranscriptProjectionTargetTrace::StableRowDelta { row, delta: 0 }
+            if row == frame.window_scroll_before
+                && row == frame.resolved_scroll_top
+                && after_row == row
+                && before_row != row
+    ) && !frame.placeholder_rows_visible
+        && before == after
+        && record_range_contains(before, before_record)
+        && record_range_contains(after, after_record)
 }
 
 fn record_range_contains(range: TranscriptRecordTraceRange, record: usize) -> bool {
@@ -1596,6 +1634,68 @@ mod tests {
         }
         app.transcript_scroll_probe_no_input_render();
         app.transcript_scroll_probe_repeat_search(true);
+        app.transcript_scroll_probe_render();
+    }
+
+    #[test]
+    fn sparse_preserve_allows_stale_resolved_anchor_settling() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(502, 48, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(true, 121);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..2 {
+            app.transcript_scroll_probe_search_record(31097);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..3 {
+            app.transcript_scroll_probe_no_input_render();
+        }
+        app.transcript_scroll_probe_drag_select(65, 65, 65);
+        app.transcript_scroll_probe_render();
+        for _ in 0..12 {
+            for _ in 0..12 {
+                app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+                app.transcript_scroll_probe_render();
+            }
+        }
+        for _ in 0..3 {
+            for _ in 0..12 {
+                app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+                app.transcript_scroll_probe_render();
+            }
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::HalfPageUp);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_drag_select(65, 65, 145);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(37265);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_reveal_record(53199);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_no_input_render();
+        app.transcript_scroll_probe_reveal_record(31121);
+        app.transcript_scroll_probe_render();
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        for _ in 0..12 {
+            app.transcript_scroll_probe_command(TranscriptScrollProbeCommand::MoveUp);
+            app.transcript_scroll_probe_render();
+        }
+        app.transcript_scroll_probe_search_record(31097);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(29049);
+        app.transcript_scroll_probe_render();
+        app.transcript_scroll_probe_search_record(31097);
         app.transcript_scroll_probe_render();
     }
 
