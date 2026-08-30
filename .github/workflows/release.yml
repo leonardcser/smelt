@@ -66,7 +66,9 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install pinned Rust
-        run: rustup toolchain install --target ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
 
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
