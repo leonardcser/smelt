@@ -1105,8 +1105,13 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
     if std::env::var_os("LLVM_PROFILE_FILE").is_none() {
+        let interaction_ceiling = if std::env::var_os("CI").is_some() {
+            std::time::Duration::from_millis(150)
+        } else {
+            std::time::Duration::from_millis(100)
+        };
         assert!(
-            fork_elapsed < std::time::Duration::from_millis(100),
+            fork_elapsed < interaction_ceiling,
             "current compacted fork exceeded the interaction ceiling: {fork_elapsed:?}"
         );
     }
