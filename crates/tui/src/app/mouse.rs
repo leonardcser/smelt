@@ -331,6 +331,33 @@ impl TuiApp {
             crate::picker::sync_scrolled(self);
             return EventOutcome::Redraw;
         }
+        let virtual_transcript_scrollbar = scroll_input.as_ref().is_some_and(|input| {
+            matches!(input.target, TranscriptScrollTarget::Main)
+                && matches!(
+                    &input.intent,
+                    TranscriptScrollIntent::ScrollbarFraction { .. }
+                        | TranscriptScrollIntent::ApproximateRowSeek(_)
+                )
+        }) || matches!(
+            (me.kind, cap_before),
+            (
+                MouseEventKind::Up(MouseButton::Left),
+                Some(HitTarget::Scrollbar {
+                    owner: crate::app::TRANSCRIPT_WIN
+                })
+            )
+        );
+        if virtual_transcript_scrollbar
+            && matches!(
+                self.ui.dispatch_virtual_scrollbar_event(me),
+                crate::smelt_edit::Status::Consumed
+            )
+        {
+            if let Some(scroll_input) = scroll_input {
+                self.apply_transcript_scroll_input(scroll_input);
+            }
+            return EventOutcome::Redraw;
+        }
         if matches!(
             self.ui
                 .dispatch_event(crate::smelt_edit::Event::Mouse(me), &mut |_, _, _| {}),

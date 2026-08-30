@@ -365,6 +365,18 @@ impl ConversationRuntime {
             .resolve_position_anchor(lua, width, anchor)
     }
 
+    pub(super) fn projected_transcript_search_match_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        matched: super::transcript::TranscriptSearchMatch,
+    ) -> Option<crate::smelt_edit::RowIndex> {
+        self.document
+            .transcript
+            .projected_search_match_row(lua, width, viewport_rows, matched)
+    }
+
     pub(super) fn transcript_search_range_anchor(
         &mut self,
         matched: super::transcript::TranscriptSearchMatch,
@@ -500,6 +512,18 @@ impl ConversationRuntime {
             .trace_retained_view_frame(lua, width, viewport_rows);
     }
 
+    pub(super) fn reanchor_retained_transcript_viewport(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        scroll_top: crate::smelt_edit::RowIndex,
+    ) {
+        self.document
+            .transcript
+            .reanchor_retained_viewport(lua, width, viewport_rows, scroll_top);
+    }
+
     pub(super) fn prepare_transcript_window(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -526,6 +550,14 @@ impl ConversationRuntime {
 
     pub(super) fn transcript_hydration_is_pending(&self) -> bool {
         self.document.transcript.hydration_is_pending()
+    }
+
+    pub(super) fn pending_transcript_scrollbar_display_scroll_top(
+        &self,
+    ) -> Option<crate::smelt_edit::RowIndex> {
+        self.document
+            .transcript
+            .pending_scrollbar_display_scroll_top()
     }
 
     pub(super) fn take_pending_transcript_hydration_request(

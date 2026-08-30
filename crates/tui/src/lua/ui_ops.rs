@@ -640,6 +640,11 @@ pub(crate) fn set_cursor_row(app: &mut TuiApp, leaf: WinId, row: RowIndex) {
 
 /// Read the current cursor row of `leaf` (0-based), or `None` if the leaf doesn't exist.
 pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
+    if leaf == crate::app::TRANSCRIPT_WIN {
+        if let Some(row) = app.conversation.transcript().pending_cursor_row() {
+            return Some(row);
+        }
+    }
     app.ui.win(leaf).map(|w| w.cursor_abs_row())
 }
 

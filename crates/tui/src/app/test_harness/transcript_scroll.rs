@@ -659,7 +659,33 @@ impl TestApp {
         self.transcript_scroll_probe.drag_edge = None;
     }
 
+    pub fn transcript_scroll_probe_start_scrollbar_drag(&mut self, rel_row: u16) {
+        self.transcript_scroll_probe_scrollbar_event(
+            rel_row,
+            MouseEventKind::Down(MouseButton::Left),
+        );
+    }
+
+    pub fn transcript_scroll_probe_drag_scrollbar(&mut self, rel_row: u16) {
+        self.transcript_scroll_probe_scrollbar_event(
+            rel_row,
+            MouseEventKind::Drag(MouseButton::Left),
+        );
+    }
+
+    pub fn transcript_scroll_probe_finish_scrollbar_drag(&mut self, rel_row: u16) {
+        self.transcript_scroll_probe_scrollbar_event(
+            rel_row,
+            MouseEventKind::Up(MouseButton::Left),
+        );
+    }
+
     pub fn transcript_scroll_probe_scrollbar_click(&mut self, rel_row: u16) {
+        self.transcript_scroll_probe_start_scrollbar_drag(rel_row);
+        self.transcript_scroll_probe_finish_scrollbar_drag(rel_row);
+    }
+
+    fn transcript_scroll_probe_scrollbar_event(&mut self, rel_row: u16, kind: MouseEventKind) {
         let Some(vp) = self.app.transcript_win().viewport else {
             return;
         };
@@ -672,15 +698,7 @@ impl TestApp {
             .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1)));
         self.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
             MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                row,
-                column: scrollbar.col,
-                modifiers: KeyModifiers::empty(),
-            },
-        )));
-        self.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
-            MouseEvent {
-                kind: MouseEventKind::Up(MouseButton::Left),
+                kind,
                 row,
                 column: scrollbar.col,
                 modifiers: KeyModifiers::empty(),
@@ -1050,6 +1068,10 @@ fn assert_transcript_scroll_probe_frames(
     frames: &[TranscriptScrollTraceFrame],
 ) {
     for frame in frames {
+        assert!(
+            !frame.placeholder_rows_visible,
+            "interactive transcript viewport exposed sparse placeholders: {frame:?}"
+        );
         match &frame.scroll_intent {
             TranscriptScrollIntent::UserDelta { rows } => {
                 assert_eq!(
@@ -1073,6 +1095,7 @@ fn assert_transcript_scroll_probe_frames(
                 assert_user_delta_direction(state, *rows, frame);
             }
             TranscriptScrollIntent::SearchJump { .. }
+            | TranscriptScrollIntent::RevealPosition { .. }
             | TranscriptScrollIntent::RevealBlock { .. }
             | TranscriptScrollIntent::RevealFirstRecord { .. } => {
                 assert!(
@@ -1101,12 +1124,10 @@ fn assert_transcript_scroll_probe_frames(
             | TranscriptScrollIntent::ApproximateRowSeek(_)
             | TranscriptScrollIntent::Tail
             | TranscriptScrollIntent::PageDelta { .. } => {
-                if !frame.placeholder_rows_visible {
-                    assert!(
-                        frame.first_visible_content_anchor.is_some(),
-                        "resolved transcript frame has no visible content anchor: {frame:?}"
-                    );
-                }
+                assert!(
+                    frame.first_visible_content_anchor.is_some(),
+                    "resolved transcript frame has no visible content anchor: {frame:?}"
+                );
                 state.last_user_delta_anchor = None;
             }
         }

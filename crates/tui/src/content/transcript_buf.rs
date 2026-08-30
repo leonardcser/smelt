@@ -3099,6 +3099,26 @@ impl TranscriptProjection {
         self.resolve_exact_row_tape(lua, history, handle, width, viewport_rows)
     }
 
+    pub(crate) fn retarget_exact_row_tape(
+        &self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &BlockHistory,
+        handle: ExactRowTapeHandle,
+        width: u16,
+        viewport_rows: u16,
+        scroll_top: RowIndex,
+    ) -> Option<ExactRowTapeHandle> {
+        let mut state = self.resolve_exact_row_tape(lua, history, handle, width, viewport_rows)?;
+        if !state.rows.covers_viewport(scroll_top, viewport_rows) {
+            return None;
+        }
+        state.rows.clamped_scroll = scroll_top;
+        Some(ExactRowTapeHandle {
+            key: handle.key,
+            rows: state.rows,
+        })
+    }
+
     pub(crate) fn exact_row_tape_matches_buffer(
         &self,
         handle: ExactRowTapeHandle,
@@ -5067,6 +5087,54 @@ pub(crate) mod tests {
 
         assert!(projection
             .exact_row_tape_state(&lua, &transcript.history, handle, 80, 5)
+            .is_none());
+    }
+
+    #[test]
+    fn exact_row_tape_handle_retargets_within_materialized_rows() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        for index in 0..20 {
+            transcript.push(Block::Text {
+                content: format!("row {index}").into(),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(25), Default::default());
+        let plan = projection.plan_projection_measured(
+            &lua,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_row(5),
+            5,
+        );
+        let rows =
+            projection.project_planned(&lua, &mut buf, &mut transcript.history, &theme, plan);
+        let handle = projection
+            .exact_row_tape_handle(rows)
+            .expect("exact row tape handle");
+        let retarget_scroll = rows.clamped_scroll.saturating_add(1);
+        assert!(rows.covers_viewport(retarget_scroll, 5));
+
+        let retargeted = projection
+            .retarget_exact_row_tape(&lua, &transcript.history, handle, 80, 5, retarget_scroll)
+            .expect("retargeted exact row tape handle");
+        let state = projection
+            .exact_row_tape_state(&lua, &transcript.history, retargeted, 80, 5)
+            .expect("retargeted exact row tape state");
+
+        assert_eq!(state.rows.clamped_scroll, retarget_scroll);
+        assert!(projection
+            .retarget_exact_row_tape(
+                &lua,
+                &transcript.history,
+                handle,
+                80,
+                5,
+                rows.total_rows.saturating_add(1),
+            )
             .is_none());
     }
 

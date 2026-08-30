@@ -866,6 +866,7 @@ fn transcript_reveal_api_keeps_cursor_below_top_padding() {
     app.type_char('G');
 
     assert!(app.run_lua("smelt.win.transcript():reveal(10, { top_padding = 1 })"));
+    app.render_silent();
 
     assert_eq!(transcript_row_cursor_row(&app), 10);
     assert_eq!(app.transcript_window().scroll_top, 9);
@@ -878,6 +879,7 @@ fn transcript_reveal_api_keeps_cursor_above_bottom_padding() {
     app.type_char('g');
 
     assert!(app.run_lua("smelt.win.transcript():reveal(90, { bottom_padding = 1 })"));
+    app.render_silent();
 
     let viewport_rows = app
         .transcript_window()
@@ -904,8 +906,16 @@ fn transcript_cursor_api_reads_absolute_row_after_scroll() {
         "#
     ));
 
-    assert_eq!(transcript_row_cursor_row(&app), 90);
     assert_eq!(app.lua_int_global("transcript_cursor_row"), Some(90));
+    assert_eq!(
+        transcript_row_cursor_row(&app),
+        0,
+        "physical cursor moved before the transcript projection committed"
+    );
+
+    app.render_silent();
+
+    assert_eq!(transcript_row_cursor_row(&app), 90);
 }
 
 #[test]

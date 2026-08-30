@@ -264,6 +264,7 @@ pub struct ScrollbarState {
     pub col: u16,
     pub total_rows: RowIndex,
     pub viewport_rows: u16,
+    display_scroll_top: Option<RowIndex>,
 }
 
 impl ScrollbarState {
@@ -272,11 +273,20 @@ impl ScrollbarState {
             col,
             total_rows,
             viewport_rows,
+            display_scroll_top: None,
         })
     }
 
     pub fn metrics(&self, scroll_top: RowIndex) -> ViewportMetrics {
         ViewportMetrics::new(scroll_top, self.total_rows, self.viewport_rows)
+    }
+
+    pub fn display_metrics(&self, committed_scroll_top: RowIndex) -> ViewportMetrics {
+        self.metrics(self.display_scroll_top.unwrap_or(committed_scroll_top))
+    }
+
+    pub fn set_display_scroll_top(&mut self, scroll_top: Option<RowIndex>) {
+        self.display_scroll_top = scroll_top;
     }
 
     pub(crate) fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
@@ -1011,6 +1021,19 @@ impl Window {
 
     pub fn scroll_state(&self) -> VerticalScroll {
         self.scroll_state
+    }
+
+    /// Override only the painted scrollbar position. The committed content
+    /// viewport remains at `scroll_top`, allowing asynchronous documents to
+    /// show pointer progress without exposing unmaterialized rows.
+    pub fn set_scrollbar_display_scroll_top(&mut self, scroll_top: Option<RowIndex>) {
+        if let Some(scrollbar) = self
+            .viewport
+            .as_mut()
+            .and_then(|viewport| viewport.scrollbar.as_mut())
+        {
+            scrollbar.set_display_scroll_top(scroll_top);
+        }
     }
 
     /// Apply a resolved viewport row while preserving tail mode.
@@ -3631,7 +3654,7 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     let track_style = Style::new().bg(track.bg.or(track.fg).unwrap_or(crate::grid::Color::Reset));
     let avail = height.saturating_sub(row_offset);
     let rows = bar.viewport_rows.min(avail);
-    let metrics = bar.metrics(viewport.scroll_top);
+    let metrics = bar.display_metrics(viewport.scroll_top);
     for row in 0..rows {
         let style = if metrics.is_thumb_at(row) {
             thumb_style
@@ -4114,6 +4137,19 @@ mod tests {
         assert_eq!(bottom, 999_990);
         assert_eq!(bar.metrics(999_990).thumb_top, metrics.max_thumb_top);
         assert_eq!(bar.metrics(500_000).thumb_top, 5);
+    }
+
+    #[test]
+    fn scrollbar_display_position_is_independent_from_committed_scroll() {
+        let mut bar = ScrollbarState::new(0, 1_000, 10).expect("overflowing scrollbar");
+        let committed = bar.display_metrics(100).thumb_top;
+        bar.set_display_scroll_top(Some(700));
+        let pending = bar.display_metrics(100).thumb_top;
+
+        assert!(pending > committed);
+        assert_eq!(bar.metrics(100).thumb_top, committed);
+        bar.set_display_scroll_top(None);
+        assert_eq!(bar.display_metrics(100).thumb_top, committed);
     }
 
     #[test]

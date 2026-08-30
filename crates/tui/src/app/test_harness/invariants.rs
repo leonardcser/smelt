@@ -54,6 +54,16 @@ impl TestApp {
             let Some(viewport) = win.viewport else {
                 continue;
             };
+            if win_id == crate::app::TRANSCRIPT_WIN {
+                if let Some(materialized) = win.materialized_rows() {
+                    assert!(
+                        materialized.covers_viewport(win.scroll_top(), viewport.rect.height),
+                        "transcript viewport {:?} escaped exact backing {:?}",
+                        materialized.viewport_range(win.scroll_top(), viewport.rect.height),
+                        materialized.materialized_range(),
+                    );
+                }
+            }
             let width = viewport.content_width;
             if width < 40 {
                 continue;

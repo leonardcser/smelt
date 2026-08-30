@@ -139,6 +139,8 @@ impl TranscriptHydrationQueue {
         materialize_block_id: Option<BlockId>,
     ) {
         cache_ranges.retain(|range| range.start < range.end);
+        let previous_record = self.record.clone();
+        let previous_semantic = self.record_semantic;
         let semantic = materialize_block_id.is_some();
         let mut materialize_block_ids = materialize_block_id.into_iter().collect::<HashSet<_>>();
         let mut retain_semantic = semantic;
@@ -174,7 +176,9 @@ impl TranscriptHydrationQueue {
             materialize_block_ids,
         });
         self.record_semantic = retain_semantic;
-        self.bump_revision();
+        if self.record != previous_record || self.record_semantic != previous_semantic {
+            self.bump_revision();
+        }
     }
 
     pub(super) fn request_blocks(

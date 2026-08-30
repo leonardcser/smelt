@@ -86,12 +86,15 @@ impl TuiApp {
                 }),
             );
         }
-        let trace_before = if leaf == crate::app::TRANSCRIPT_WIN {
-            opts.transcript_scroll_intent
-                .map(|intent| (intent, self.transcript_scroll_top()))
-        } else {
-            None
-        };
+        let transcript_projection =
+            leaf == crate::app::TRANSCRIPT_WIN && opts.transcript_scroll_intent.is_some();
+        let window_scroll_before = transcript_projection.then(|| self.transcript_scroll_top());
+        let logical_scroll_top = window_scroll_before.map(|committed| {
+            self.conversation
+                .transcript()
+                .local_command_scroll_top(committed)
+        });
+        let mut projection_target = None;
         let now = self.core.clock.instant_now();
 
         {
@@ -103,53 +106,89 @@ impl TuiApp {
             let total_rows = win.scroll_row_total(buf);
             position.row = position.row.min(total_rows.saturating_sub(1));
 
-            if opts.cursor {
-                if is_row_backed {
+            if let Some(logical_scroll_top) = logical_scroll_top {
+                let target_screen_row = target_screen_row_for_reveal(
+                    logical_scroll_top,
+                    viewport_rows,
+                    position.row,
+                    opts,
+                );
+                let target_scroll = position
+                    .row
+                    .saturating_sub(target_screen_row)
+                    .min(max_scroll(total_rows, viewport_rows));
+                projection_target = Some((target_scroll, target_screen_row));
+                let target_is_materialized = win
+                    .materialized_rows()
+                    .is_some_and(|rows| rows.covers_viewport(target_scroll, viewport_rows));
+                if opts.cursor && target_is_materialized {
                     win.execute_document_view_command(
                         buf,
                         crate::smelt_edit::DocumentCommand::GotoPosition(position),
                         viewport_rows,
                         now,
                     );
-                } else {
-                    let cpos = buf.byte_at_display_byte_pos(
-                        crate::smelt_edit::row_to_usize(position.row),
-                        position.byte_col,
-                    );
-                    win.set_cpos(cpos);
-                    win.resync(buf, viewport_rows);
+                }
+                if target_is_materialized {
+                    win.pin_scroll(target_scroll);
                 }
             } else {
-                let scroll_top = crate::smelt_edit::scroll_to_show(
-                    win.scroll_top(),
+                if opts.cursor {
+                    if is_row_backed {
+                        win.execute_document_view_command(
+                            buf,
+                            crate::smelt_edit::DocumentCommand::GotoPosition(position),
+                            viewport_rows,
+                            now,
+                        );
+                    } else {
+                        let cpos = buf.byte_at_display_byte_pos(
+                            crate::smelt_edit::row_to_usize(position.row),
+                            position.byte_col,
+                        );
+                        win.set_cpos(cpos);
+                        win.resync(buf, viewport_rows);
+                    }
+                } else {
+                    let scroll_top = crate::smelt_edit::scroll_to_show(
+                        win.scroll_top(),
+                        position.row,
+                        viewport_rows,
+                    );
+                    win.pin_scroll(scroll_top.min(max_scroll(total_rows, viewport_rows)));
+                }
+
+                apply_reveal_padding(
+                    win,
+                    total_rows,
                     position.row,
                     viewport_rows,
+                    opts.top_padding,
+                    opts.bottom_padding,
                 );
-                win.pin_scroll(scroll_top.min(max_scroll(total_rows, viewport_rows)));
             }
-
-            apply_reveal_padding(
-                win,
-                total_rows,
-                position.row,
-                viewport_rows,
-                opts.top_padding,
-                opts.bottom_padding,
-            );
         }
 
-        if let Some((intent, window_scroll_before)) = trace_before {
-            let (label, scroll_intent) = match intent {
-                RevealScrollIntent::Position => {
-                    let anchor = self.conversation.transcript_trace_anchor_at_row(
-                        &self.lua,
-                        viewport_width,
-                        position.row,
-                    );
-                    ("reveal", TranscriptScrollIntent::ExactContentAnchor(anchor))
-                }
-            };
-            self.record_transcript_scroll_intent(label, scroll_intent, window_scroll_before);
+        if let (Some(window_scroll_before), Some((target_scroll, target_screen_row))) =
+            (window_scroll_before, projection_target)
+        {
+            let anchor = self.conversation.transcript_trace_anchor_at_row(
+                &self.lua,
+                viewport_width,
+                position.row,
+            );
+            self.record_transcript_scroll_intent_for_projection(
+                "reveal",
+                TranscriptScrollIntent::RevealPosition {
+                    anchor,
+                    target_screen_row,
+                    cursor_position: opts.cursor.then_some(position),
+                },
+                window_scroll_before,
+                crate::app::transcript::TranscriptProjectionRestore::default(),
+                Some(target_scroll),
+                None,
+            );
         }
 
         if trace_reveal {

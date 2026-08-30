@@ -1075,7 +1075,10 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     resumed.save_session_and_flush();
     let fork_revision = lineage_reader(&fork_id).snapshot().unwrap().revision_id;
 
-    resumed.load_session_by_id(&source_id);
+    assert!(
+        resumed.load_session_by_id(&source_id),
+        "source branch should load"
+    );
     assert_eq!(resumed.session_snapshot().id, source_id);
     assert_eq!(resumed.app.session_history_len(), 1);
     assert_eq!(
@@ -1083,7 +1086,10 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
         source_revision
     );
 
-    resumed.load_session_by_id(&fork_id);
+    assert!(
+        resumed.load_session_by_id(&fork_id),
+        "fork branch should load"
+    );
     assert_eq!(resumed.session_snapshot().id, fork_id);
     assert_eq!(resumed.app.session_history_len(), 2);
     assert_eq!(

@@ -627,6 +627,41 @@ impl MaterializedRows {
         self.materialized_range().contains(&row)
     }
 
+    pub fn viewport_range(self, scroll_top: RowIndex, viewport_rows: u16) -> Range<RowIndex> {
+        scroll_top
+            ..scroll_top
+                .saturating_add(RowIndex::from(viewport_rows))
+                .min(self.total_rows)
+    }
+
+    pub fn covers_viewport(self, scroll_top: RowIndex, viewport_rows: u16) -> bool {
+        if scroll_top > self.total_rows {
+            return false;
+        }
+        let viewport = self.viewport_range(scroll_top, viewport_rows);
+        let materialized = self.materialized_range();
+        materialized.start <= viewport.start && viewport.end <= materialized.end
+    }
+
+    pub fn nearest_backed_scroll_top(
+        self,
+        scroll_top: RowIndex,
+        viewport_rows: u16,
+    ) -> Option<RowIndex> {
+        let viewport_rows = RowIndex::from(viewport_rows);
+        let materialized = self.materialized_range();
+        let min_backed_scroll = materialized.start;
+        let max_backed_scroll = if materialized.end >= self.total_rows {
+            self.total_rows
+        } else {
+            materialized.end.checked_sub(viewport_rows)?
+        };
+        if min_backed_scroll > max_backed_scroll {
+            return None;
+        }
+        Some(scroll_top.clamp(min_backed_scroll, max_backed_scroll))
+    }
+
     pub fn local_row(self, abs: RowIndex) -> RowIndex {
         abs.saturating_sub(self.row_base)
     }
@@ -961,6 +996,30 @@ mod tests {
         assert_eq!(rows.local_row(117), 17);
         assert_eq!(rows.local_row(1), 0);
         assert_eq!(rows.absolute_row(7), 107);
+    }
+
+    #[test]
+    fn materialized_rows_validate_and_clamp_backed_viewports() {
+        let rows = MaterializedRows {
+            clamped_scroll: 110,
+            row_base: 100,
+            total_rows: 1_000,
+            materialized_rows: 40,
+        };
+
+        assert!(rows.covers_viewport(100, 20));
+        assert!(rows.covers_viewport(120, 20));
+        assert!(!rows.covers_viewport(121, 20));
+        assert_eq!(rows.nearest_backed_scroll_top(90, 20), Some(100));
+        assert_eq!(rows.nearest_backed_scroll_top(130, 20), Some(120));
+
+        let short = MaterializedRows {
+            clamped_scroll: 100,
+            row_base: 100,
+            total_rows: 1_000,
+            materialized_rows: 10,
+        };
+        assert_eq!(short.nearest_backed_scroll_top(100, 20), None);
     }
 
     #[test]

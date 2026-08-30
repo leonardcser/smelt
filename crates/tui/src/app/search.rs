@@ -925,14 +925,34 @@ impl TuiApp {
         };
         let window_scroll_before = self.transcript_scroll_top();
         let transcript_width = self.transcript_width() as u16;
+        let viewport_rows = self
+            .ui
+            .win(target)
+            .and_then(|win| win.viewport)
+            .map(|viewport| viewport.rect.height)
+            .unwrap_or(1)
+            .max(1);
+        let projected_match_row = self
+            .conversation
+            .projected_transcript_search_match_row(
+                &self.lua,
+                transcript_width,
+                viewport_rows,
+                matched,
+            )
+            .unwrap_or(matched.range.start.row);
+        let logical_scroll_top = self
+            .conversation
+            .transcript()
+            .local_command_scroll_top(window_scroll_before);
         let target_screen_row = self
             .ui
             .win(target)
             .map(|win| {
                 crate::app::reveal::target_screen_row_for_reveal(
-                    win.scroll_top(),
+                    logical_scroll_top,
                     win.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
-                    matched.range.start.row,
+                    projected_match_row,
                     crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
                 )
             })
@@ -941,10 +961,10 @@ impl TuiApp {
             width: transcript_width,
             anchor: matched.anchor,
             start_byte_col: matched.start_byte_col(),
-            row: matched.range.start.row,
+            row: projected_match_row,
             prefer_projected_row: false,
         };
-        self.record_transcript_scroll_intent_with_hint(
+        self.record_transcript_scroll_intent_for_projection(
             "search_jump",
             crate::app::transcript_scroll_trace::TranscriptScrollIntent::SearchJump {
                 anchor: matched.anchor,
@@ -953,7 +973,9 @@ impl TuiApp {
                 match_end_byte_col: matched.end_byte_col(),
             },
             window_scroll_before,
-            hint,
+            crate::app::transcript::TranscriptProjectionRestore::default(),
+            Some(projected_match_row.saturating_sub(target_screen_row)),
+            Some(hint),
         );
         self.conversation.set_transcript_search_hydration_pin(None);
     }

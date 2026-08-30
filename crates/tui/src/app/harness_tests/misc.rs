@@ -3382,7 +3382,7 @@ fn resumed_sparse_transcript_reaches_exact_bottom_while_bash_output_streams() {
         )]),
         called_at_ms: 0,
     }));
-    for line in 0..32 {
+    for line in 0..12 {
         app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
             invocation_id,
             call_id: call_id.clone(),
@@ -3397,7 +3397,7 @@ fn resumed_sparse_transcript_reaches_exact_bottom_while_bash_output_streams() {
     }
     assert!(!app.transcript_window().following_tail);
 
-    for line in 32..96 {
+    for line in 12..96 {
         wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
         app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
             invocation_id,
@@ -4860,6 +4860,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
             block_id,
             row_offset,
             screen_padding_top,
+            cursor_byte_col,
         } => {
             assert_eq!(record_index, block.record_index);
             assert_eq!(
@@ -4868,6 +4869,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
             );
             assert_eq!(row_offset, 0);
             assert_eq!(screen_padding_top, 0);
+            assert_eq!(cursor_byte_col, Some(0));
         }
         ref intent => panic!("semantic user navigation collapsed to wrong intent: {intent:?}"),
     }
@@ -4944,11 +4946,25 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
     app.set_transcript_scroll_trace_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
 
+    let cursor_before = app.transcript_window().document_view_state().cursor;
     let previous = reveal_user_block_via_lua(&mut app, "previous");
+    assert_eq!(
+        app.transcript_window().document_view_state().cursor.row,
+        cursor_before.row,
+        "pending semantic reveal exposed its cursor before projection"
+    );
     app.render_silent();
     let frames = app.take_transcript_scroll_trace_frames_for_harness();
     let frame = frames.first().expect("previous user reveal frame");
     assert_reveal_block_frame(frame, &previous);
+    let revealed_cursor = app.transcript_window().document_view_state().cursor;
+    assert_eq!(revealed_cursor.row, frame.resolved_scroll_top);
+    assert!(
+        app.transcript_window()
+            .materialized_rows()
+            .is_some_and(|rows| rows.contains_abs_row(revealed_cursor.row)),
+        "semantic reveal cursor escaped exact backing"
+    );
     let lines = transcript_viewport_lines(&app);
     let previous_marker = previous
         .first_line
@@ -5361,19 +5377,14 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         )),
         "replay did not cover scrollbar far seek"
     );
-    for frame in report
-        .frames
-        .iter()
-        .filter(|frame| frame.placeholder_rows_visible)
-    {
-        assert!(
-            matches!(
-                frame.scroll_intent,
-                TranscriptScrollIntent::ScrollbarFraction { .. }
-            ),
-            "only scrollbar far seek should be allowed to expose sparse placeholders: {frame:?}"
-        );
-    }
+    assert!(
+        report
+            .frames
+            .iter()
+            .all(|frame| !frame.placeholder_rows_visible),
+        "interactive replay exposed sparse transcript placeholders: {:?}",
+        report.frames
+    );
 
     let wheel_up_frames: Vec<_> = report
         .frames
@@ -5620,6 +5631,7 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
 
     app.set_transcript_scroll_trace_timings_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
+    let committed_scroll_before = app.transcript_window().scroll_top;
     app.type_char('g');
     app.type_char('g');
     let extent_reads = app
@@ -5631,8 +5643,8 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     }
     assert_eq!(
         app.transcript_window().scroll_top,
-        0,
-        "gg should update the document command base before the held Ctrl-D burst renders"
+        committed_scroll_before,
+        "pending gg and Ctrl-D inputs changed the exact committed viewport before rendering"
     );
 
     app.render_silent();
@@ -6223,6 +6235,145 @@ fn resumed_transcript_scrollbar_drag_is_continuous_through_exact_boundaries() {
         thumb_before_release,
         "release snapped scrollbar thumb"
     );
+}
+
+#[test]
+fn scrollbar_drag_retains_exact_viewport_while_far_seek_hydrates() {
+    let mut app = TestApp::builder().build();
+    app.install_sparse_transcript_scroll_fixture(900, 100, 40);
+    app.set_terminal_size(100, 100);
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    let viewport = app
+        .transcript_window()
+        .viewport
+        .expect("transcript viewport");
+    let scrollbar = viewport.scrollbar.expect("transcript scrollbar");
+    let start_rel_row = scrollbar
+        .metrics(app.transcript_window().scroll_top)
+        .thumb_top;
+    let mouse = |kind, rel_row: u16| {
+        SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            row: viewport.rect.top.saturating_add(rel_row),
+            column: scrollbar.col,
+            modifiers: KeyModifiers::empty(),
+        }))
+    };
+    let assert_exact_coverage = |app: &TestApp| {
+        let window = app.transcript_window();
+        let materialized = window
+            .materialized_rows()
+            .expect("transcript materialized rows");
+        assert!(
+            materialized.covers_viewport(window.scroll_top, viewport.rect.height),
+            "visible transcript range {:?} escaped exact backing {:?}",
+            materialized.viewport_range(window.scroll_top, viewport.rect.height),
+            materialized.materialized_range(),
+        );
+    };
+
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        start_rel_row,
+    ));
+    app.render_silent();
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+        50,
+    ));
+    app.render_silent();
+    app.take_transcript_scroll_trace_frames_for_harness();
+
+    let committed_scroll_top = app.transcript_window().scroll_top;
+    let committed_lines = transcript_viewport_lines(&app);
+    assert!(
+        committed_lines.iter().any(|line| line.contains("record-")),
+        "settled first seek must display exact transcript content"
+    );
+    assert_exact_coverage(&app);
+
+    for pointer_row in [73, 72, 71] {
+        app.feed_one(mouse(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            pointer_row,
+        ));
+        let frame = app.render_unsettled_silent();
+        let transcript_rows =
+            &frame.rows[usize::from(viewport.rect.top)..usize::from(viewport.rect.bottom())];
+        assert!(
+            transcript_rows.iter().any(|line| line.contains("record-")),
+            "pending far seek painted an empty transcript frame: {transcript_rows:?}"
+        );
+
+        assert!(
+            app.app.conversation.transcript_hydration_is_pending(),
+            "regression fixture must keep the far seek asynchronous"
+        );
+        let pending_window = app.transcript_window();
+        let pending_scrollbar = pending_window
+            .viewport
+            .and_then(|viewport| viewport.scrollbar)
+            .expect("pending transcript scrollbar");
+        let pending_thumb = pending_scrollbar
+            .display_metrics(pending_window.scroll_top)
+            .thumb_top;
+        assert!(
+            pending_thumb.abs_diff(pointer_row) <= 1,
+            "pending scrollbar thumb left the pointer: pointer={pointer_row}, thumb={pending_thumb}"
+        );
+        assert_eq!(
+            app.transcript_window().scroll_top,
+            committed_scroll_top,
+            "pending far seek changed the committed viewport"
+        );
+        assert_eq!(
+            transcript_viewport_lines(&app),
+            committed_lines,
+            "pending far seek exposed rows outside the committed exact viewport"
+        );
+        assert_exact_coverage(&app);
+    }
+
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        71,
+    ));
+    let released_frame = app.render_unsettled_silent();
+    let released_rows =
+        &released_frame.rows[usize::from(viewport.rect.top)..usize::from(viewport.rect.bottom())];
+    assert!(
+        released_rows.iter().any(|line| line.contains("record-")),
+        "releasing a pending seek exposed an empty transcript frame: {released_rows:?}"
+    );
+    assert_eq!(app.transcript_window().scroll_top, committed_scroll_top);
+    assert_exact_coverage(&app);
+
+    app.render_silent();
+    let frames = app.take_transcript_scroll_trace_frames_for_harness();
+    assert!(
+        frames.iter().all(|frame| !frame.placeholder_rows_visible),
+        "settled scrollbar seek exposed sparse placeholders: {frames:?}"
+    );
+    assert!(
+        transcript_viewport_lines(&app)
+            .iter()
+            .any(|line| line.contains("record-")),
+        "settled far seek must display exact transcript content"
+    );
+    let settled_window = app.transcript_window();
+    let settled_thumb = settled_window
+        .viewport
+        .and_then(|viewport| viewport.scrollbar)
+        .expect("settled transcript scrollbar")
+        .display_metrics(settled_window.scroll_top)
+        .thumb_top;
+    assert!(
+        settled_thumb.abs_diff(71) <= 1,
+        "stale hydration replaced the latest drag target: thumb={settled_thumb}"
+    );
+    assert_exact_coverage(&app);
 }
 
 #[test]

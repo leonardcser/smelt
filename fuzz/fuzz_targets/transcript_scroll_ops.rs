@@ -43,6 +43,10 @@ enum Op {
     Render,
     SearchCommon,
     RepeatSearch { reverse: bool },
+    StartScrollbarDrag { row: u8 },
+    DragScrollbar { row: u8 },
+    FinishScrollbarDrag { row: u8 },
+    UnsettledRender,
 }
 
 fn run(input: Input) {
@@ -139,6 +143,25 @@ fn run_with_app(input: Input) {
                 app.transcript_scroll_probe_reveal_record(usize::from(record));
             }
             Op::Scrollbar { row } => app.transcript_scroll_probe_scrollbar_click(u16::from(row)),
+            Op::StartScrollbarDrag { row } => {
+                app.transcript_scroll_probe_start_scrollbar_drag(u16::from(row));
+                app.render_unsettled_silent();
+                continue;
+            }
+            Op::DragScrollbar { row } => {
+                app.transcript_scroll_probe_drag_scrollbar(u16::from(row));
+                app.render_unsettled_silent();
+                continue;
+            }
+            Op::FinishScrollbarDrag { row } => {
+                app.transcript_scroll_probe_finish_scrollbar_drag(u16::from(row));
+                app.render_unsettled_silent();
+                continue;
+            }
+            Op::UnsettledRender => {
+                app.render_unsettled_silent();
+                continue;
+            }
             Op::Resize { width, height } => {
                 let width = u16::from(width % 96).saturating_add(32);
                 let height = u16::from(height % 32).saturating_add(8);

@@ -110,6 +110,16 @@ impl TestApp {
         self.assert_prompt_cursor_projection();
     }
 
+    /// Render exactly one production frame without waiting for asynchronous
+    /// transcript hydration. Tests use this to inspect the viewport users see
+    /// while a sparse seek is still pending.
+    pub fn render_unsettled_silent(&mut self) -> crate::smelt_edit::SnapshotFrame {
+        self.app.render_normal_to(&mut std::io::sink());
+        self.assert_render_layout_invariants();
+        self.assert_prompt_cursor_projection();
+        self.app.ui.flushed_snapshot()
+    }
+
     /// Render one frame and return the resulting `SnapshotFrame`. Used
     /// by the app-level storybook harness; `render_normal_to` updates the
     /// compositor snapshot buffer as a side effect of composing layers, so

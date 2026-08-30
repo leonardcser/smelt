@@ -749,10 +749,12 @@ impl TuiApp {
                             block_id: reveal.block_id,
                             row_offset: 0,
                             screen_padding_top: 0,
+                            cursor_byte_col: Some(state.cursor.byte_col),
                         }
                     } else {
                         TranscriptScrollIntent::RevealFirstRecord {
                             screen_padding_top: 0,
+                            cursor_byte_col: Some(state.cursor.byte_col),
                         }
                     }
                 } else {
@@ -775,9 +777,13 @@ impl TuiApp {
             } else {
                 None
             };
-        let defer_transcript_window_scroll = defer_local_transcript_scroll;
+        let target_viewport_is_materialized = state
+            .materialized
+            .covers_viewport(scroll_top, viewport_rows.max(1));
+        let defer_transcript_window_scroll = defer_local_transcript_scroll
+            || (transcript_scroll_intent.is_some() && !target_viewport_is_materialized);
         if defer_transcript_window_scroll {
-            if !pending_local_scroll_before {
+            if defer_local_transcript_scroll && !pending_local_scroll_before {
                 self.conversation.prime_transcript_local_scroll_base(
                     &self.lua,
                     viewport_cols.max(1),
@@ -822,8 +828,8 @@ impl TuiApp {
             }
         }
         if !defer_transcript_window_scroll {
-            self.conversation.clear_pending_transcript_local_scroll();
             if let Some((label, intent, before, restore)) = transcript_scroll_intent.as_ref() {
+                self.conversation.clear_pending_transcript_local_scroll();
                 self.record_transcript_scroll_intent_from_document_command(
                     *label,
                     intent.clone(),
@@ -865,7 +871,7 @@ fn signed_row_delta(before: RowIndex, after: RowIndex) -> isize {
     }
 }
 
-fn screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
+pub(super) fn screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
     let rel = row.checked_sub(scroll_top);
     rel.and_then(|rel| (rel < RowIndex::from(viewport_rows)).then_some(rel as u16))
         .unwrap_or_else(|| {

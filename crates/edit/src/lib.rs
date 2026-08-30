@@ -2852,6 +2852,41 @@ impl Ui {
         self.surface.theme_mut()
     }
 
+    /// Own the pointer-capture lifecycle for a virtualized scrollbar without
+    /// mutating its committed window scroll. The host resolves the pointer to
+    /// semantic content and applies the eventual exact viewport atomically.
+    pub fn dispatch_virtual_scrollbar_event(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+    ) -> Status {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(HitTarget::Scrollbar { owner }) =
+                    self.hit_test(event.row, event.column, None)
+                else {
+                    return Status::Ignored;
+                };
+                self.set_capture(HitTarget::Scrollbar { owner });
+                self.start_scrollbar_drag(owner, event.row);
+                Status::Consumed
+            }
+            MouseEventKind::Drag(MouseButton::Left)
+                if matches!(self.capture, Some(HitTarget::Scrollbar { .. })) =>
+            {
+                Status::Consumed
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if matches!(self.capture, Some(HitTarget::Scrollbar { .. })) =>
+            {
+                self.clear_capture();
+                Status::Consumed
+            }
+            _ => Status::Ignored,
+        }
+    }
+
     /// Route a terminal event. Key: fires keymaps; bare Esc/Ctrl-C on a modal dismisses it.
     /// Resize: updates terminal size. Mouse: owns scrollbar drag and chrome drag; absorbs
     /// wheel on focused overlays. Clicks outside a modal pass through to the host so
@@ -3149,7 +3184,7 @@ impl Ui {
             return;
         };
         let rel_row = row.saturating_sub(vp.rect.top);
-        let metrics = bar.metrics(win.scroll_top());
+        let metrics = bar.display_metrics(win.scroll_top());
         let thumb_grab_row = if metrics.is_thumb_at(rel_row) {
             rel_row.saturating_sub(metrics.thumb_top)
         } else {
@@ -3180,7 +3215,7 @@ impl Ui {
                 let viewport = win.viewport?;
                 let bar = viewport.scrollbar?;
                 let rel_row = row.saturating_sub(viewport.rect.top);
-                let metrics = bar.metrics(win.scroll_top());
+                let metrics = bar.display_metrics(win.scroll_top());
                 let thumb_grab_row = if metrics.is_thumb_at(rel_row) {
                     rel_row.saturating_sub(metrics.thumb_top)
                 } else {
@@ -6506,6 +6541,58 @@ mod tests {
             Some((8, 16, 100, 20)),
             "an active drag must retain its pointer-down track and extent",
         );
+    }
+
+    #[test]
+    fn virtual_scrollbar_drag_captures_without_mutating_committed_scroll() {
+        let mut ui = make_ui();
+        let win = WinId(42);
+        register_window(&mut ui, win);
+        let buf = ui.win(win).unwrap().buf;
+        ui.buf_mut(buf)
+            .unwrap()
+            .set_all_lines((0..1_000).map(|row| format!("row {row}")).collect());
+        ui.set_layout(LayoutTree::leaf(win));
+        ui.render(&mut Vec::new()).unwrap();
+        ui.win_mut(win).unwrap().set_resolved_scroll(200);
+        let viewport = ui.win(win).unwrap().viewport.expect("window viewport");
+        let bar = viewport.scrollbar.expect("overflowing scrollbar");
+        let start_row = viewport.rect.top.saturating_add(bar.metrics(200).thumb_top);
+        let drag_row = viewport.rect.top.saturating_add(15);
+
+        let event = |kind, row| crossterm::event::MouseEvent {
+            kind,
+            row,
+            column: bar.col,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert_eq!(
+            ui.dispatch_virtual_scrollbar_event(event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left,),
+                start_row,
+            )),
+            Status::Consumed
+        );
+        assert_eq!(
+            ui.dispatch_virtual_scrollbar_event(event(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left,),
+                drag_row,
+            )),
+            Status::Consumed
+        );
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 200);
+        assert!(matches!(
+            ui.capture(),
+            Some(HitTarget::Scrollbar { owner }) if owner == win
+        ));
+        assert_eq!(
+            ui.dispatch_virtual_scrollbar_event(event(
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                drag_row,
+            )),
+            Status::Consumed
+        );
+        assert!(ui.capture().is_none());
     }
 
     #[test]

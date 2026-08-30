@@ -217,6 +217,23 @@ fn sync_retained_transcript_window(
         if win.is_following_tail() {
             win.reveal_row_cursor(buf, request.rect.height);
         }
+        if let Some(materialized) = win.materialized_rows() {
+            if let Some(retained_scroll) =
+                materialized.nearest_backed_scroll_top(win.scroll_top(), request.rect.height)
+            {
+                if retained_scroll != win.scroll_top() {
+                    win.set_resolved_scroll(retained_scroll);
+                }
+            }
+            debug_assert!(
+                materialized.covers_viewport(win.scroll_top(), request.rect.height),
+                "retained transcript viewport {:?} escaped exact backing {:?} (projected_scroll={}, following_tail={})",
+                materialized.viewport_range(win.scroll_top(), request.rect.height),
+                materialized.materialized_range(),
+                materialized.clamped_scroll,
+                win.is_following_tail()
+            );
+        }
     } else {
         let text = buf.text();
         win.clamp_anchors_to_source(&text);
@@ -379,15 +396,10 @@ pub(super) fn prepare_transcript_window(
         };
         let tdata = applied.materialized_rows;
         let backing_lines_tick = buf.lines_tick();
-        debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
-        debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
         debug_assert!(
-            applied.exact_visible_range.end <= tdata.total_rows,
-            "applied transcript viewport reports an out-of-bounds visible range"
+            applied.has_exact_backing(viewport_rows),
+            "interactive transcript projection escaped exact backing"
         );
-        if applied.placeholder_rows_visible {
-            debug_assert!(applied.top_anchor.is_some());
-        }
         if let Some(win) = ui.win_mut(request.win) {
             debug_assert!(tdata.total_rows >= tdata.row_base);
             debug_assert!(
@@ -570,6 +582,26 @@ impl TuiApp {
                 })
             })
         };
+        if let Some(prepared) = prepared_transcript {
+            let adjusted_scroll = self
+                .ui
+                .win_mut(prepared.win)
+                .and_then(crate::smelt_edit::Window::sync_materialized_scroll_top);
+            if let Some(scroll_top) = adjusted_scroll {
+                self.conversation.reanchor_retained_transcript_viewport(
+                    &lua,
+                    prepared.content_width.max(1),
+                    prepared.rect.height,
+                    scroll_top,
+                );
+            }
+        }
+        let pending_scrollbar_top = self
+            .conversation
+            .pending_transcript_scrollbar_display_scroll_top();
+        if let Some(window) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            window.set_scrollbar_display_scroll_top(pending_scrollbar_top);
+        }
         let transcript_visible = prepared_transcript.is_some();
         if let Some(matched) = transcript_search_match_after_projection {
             self.overlays

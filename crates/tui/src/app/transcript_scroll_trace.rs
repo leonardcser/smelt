@@ -38,7 +38,7 @@ use serde_json::json;
 
 use crate::app::transcript::TranscriptSearchAnchor;
 use crate::content::transcript_scene::RenderNodeId;
-use crate::smelt_edit::{add_signed_row, RowIndex};
+use crate::smelt_edit::{add_signed_row, DocPosition, RowIndex};
 use smelt_core::transcript_model::BlockId;
 
 #[allow(dead_code)]
@@ -64,9 +64,11 @@ pub(crate) enum TranscriptScrollIntent {
         block_id: BlockId,
         row_offset: RowIndex,
         screen_padding_top: RowIndex,
+        cursor_byte_col: Option<usize>,
     },
     RevealFirstRecord {
         screen_padding_top: RowIndex,
+        cursor_byte_col: Option<usize>,
     },
     ResizeReflow {
         previous_width: u16,
@@ -78,6 +80,11 @@ pub(crate) enum TranscriptScrollIntent {
         viewport_rows: u16,
     },
     ApproximateRowSeek(RowIndex),
+    RevealPosition {
+        anchor: TranscriptTraceAnchor,
+        target_screen_row: RowIndex,
+        cursor_position: Option<DocPosition>,
+    },
 }
 
 impl TranscriptScrollIntent {
@@ -94,6 +101,7 @@ impl TranscriptScrollIntent {
             | Self::UserDelta { .. }
             | Self::PageDelta { .. }
             | Self::ExactContentAnchor(_)
+            | Self::RevealPosition { .. }
             | Self::SearchJump { .. }
             | Self::RevealBlock { .. }
             | Self::RevealFirstRecord { .. }

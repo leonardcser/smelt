@@ -179,8 +179,17 @@ impl TuiApp {
                     win.selection_active() && win.document_view_state().drag_endpoint.is_none()
                 })
                 .and_then(|win| {
-                    win.viewport
-                        .and_then(|v| win.cursor_screen_row(v.rect.height))
+                    let viewport_rows = win.viewport?.rect.height;
+                    let logical_scroll_top = self
+                        .conversation
+                        .transcript()
+                        .local_command_scroll_top(win.scroll_top());
+                    let cursor_row = win.document_view_state().cursor.row;
+                    Some(crate::app::document::screen_row_or_edge(
+                        cursor_row,
+                        logical_scroll_top,
+                        viewport_rows,
+                    ))
                 });
         }
         if intent.is_downward_local_delta()

@@ -579,8 +579,19 @@ preparation. The request queue merges adjacent windows and gives explicit semant
 requests priority. Worker results carry their document context and revision, so
 stale results are rejected; missing or unreadable storage returns a typed terminal
 failure instead of redispatching forever. Successful installation requests redraw
-and consumes a pending projection restore only after planning succeeds. Sparse
-prefix, scrollbar total, and row lookup share one retained width/root extent
+and consumes a pending projection restore only after planning succeeds.
+
+Scrollbar far seeks are transactional. Pointer movement updates a pending semantic
+seek and an independently painted thumb position, but it never mutates the exact
+committed content viewport. Until the latest hydration generation can resolve an
+exact source anchor and bounded row tape, rendering retains the previous committed
+viewport. The exact tape, semantic anchor, content scroll, cursor target, and
+scrollbar projection then commit together. Pending projections replace their
+superseded hydration pins instead of retaining every crossed record window. Every
+visible absolute row must be covered by the committed materialized range; sparse
+placeholder rows are not a valid interactive viewport.
+
+Sparse prefix, scrollbar total, and row lookup share one retained width/root extent
 result. Its ad hoc prefix and row-location query caches each evict after 256
 entries, while exact observations remain limited to loaded record windows.
 

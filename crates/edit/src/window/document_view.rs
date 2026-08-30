@@ -373,6 +373,17 @@ impl Window {
             .then_some(self.document_view_state_ref().materialized)
     }
 
+    /// Commit viewport motion performed while synchronizing a materialized row view.
+    pub fn sync_materialized_scroll_top(&mut self) -> Option<RowIndex> {
+        let scroll_top = self.scroll_top;
+        let state = self.document_view_state_mut();
+        if !state.active || state.materialized.clamped_scroll == scroll_top {
+            return None;
+        }
+        state.materialized.clamped_scroll = scroll_top;
+        Some(scroll_top)
+    }
+
     pub fn row_cursor(&self) -> Option<DocPosition> {
         self.document_view_state_ref()
             .active
