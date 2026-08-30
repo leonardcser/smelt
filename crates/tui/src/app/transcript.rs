@@ -234,6 +234,16 @@ impl TranscriptRecordState {
         self.active_range.as_ref()
     }
 
+    fn projection_covers_persisted_tail(&self) -> bool {
+        let Some(total) = self.total_count() else {
+            return true;
+        };
+        total == 0
+            || self
+                .active_range()
+                .is_some_and(|active| active.end.get() >= total)
+    }
+
     fn set_active_range(&mut self, range: Range<smelt_store::TranscriptRecordOffset>) {
         self.projection_start = range.start.get();
         self.active_range = Some(range);
@@ -4014,7 +4024,7 @@ impl TranscriptDocument {
         if let Some(range) = self.tail_record_window_range(width, viewport_rows) {
             let _ = self.activate_record_window_range(range);
         }
-        if self.semantic_tail_record_is_materialized() {
+        if self.persisted_tail_record_is_materialized() {
             TranscriptTailRecordWindowState::Ready
         } else if self.hydration_is_pending() {
             TranscriptTailRecordWindowState::Hydrating
@@ -4227,17 +4237,14 @@ impl TranscriptDocument {
         self.resolve_semantic_far_seek(lua, width, viewport_rows, scroll_top, total_rows)
     }
 
-    fn semantic_tail_record_is_materialized(&self) -> bool {
+    fn persisted_tail_record_is_materialized(&self) -> bool {
         let Some(total) = self.records.total_count() else {
             return true;
         };
         if total == 0 {
             return true;
         }
-        let Some(active) = self.records.active_range() else {
-            return false;
-        };
-        if active.end.get() < total {
+        if !self.records.projection_covers_persisted_tail() {
             return false;
         }
         self.records
@@ -4266,34 +4273,21 @@ impl TranscriptDocument {
         if rows.clamped_scroll.saturating_add(visible_rows) < rows.total_rows {
             return false;
         }
-        if let Some(total) = self.records.total_count() {
-            if !self.semantic_tail_record_is_materialized() {
-                return false;
-            }
-            let Some(active) = self.records.active_range() else {
-                return false;
-            };
+        if self.records.total_count().is_some() {
             let local_scroll = rows.clamped_scroll.saturating_sub(row_offset);
-            if active.end.get() < total
+            if !self.records.projection_covers_persisted_tail()
                 || local_scroll.saturating_add(visible_rows) < local_total_rows
             {
                 return false;
             }
             return (0..visible_rows).rev().any(|offset| {
-                self.content_anchor_at_row_with_offset(
+                self.row_anchor_at_row_with_offset(
                     lua,
                     width,
                     rows.clamped_scroll.saturating_add(offset),
                     row_offset,
-                    TranscriptAnchorBias::Top,
                 )
-                .is_some_and(|anchor| {
-                    anchor.record_index.saturating_add(1) == total
-                        && self
-                            .content
-                            .projection
-                            .height_suffix_is_exact(anchor.row_anchor)
-                })
+                .is_some_and(|anchor| self.content.projection.height_suffix_is_exact(anchor))
             });
         }
         let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
@@ -5064,12 +5058,8 @@ impl TranscriptDocument {
                 .clamped_scroll
                 .saturating_add(RowIndex::from(viewport_rows.max(1)))
                 >= local_rows.total_rows
-            && self
-                .records
-                .active_range()
-                .zip(self.records.total_count())
-                .is_none_or(|(active, total)| active.end.get() >= total);
-        if reaches_loaded_tail && !self.semantic_tail_record_is_materialized() {
+            && self.records.projection_covers_persisted_tail();
+        if reaches_loaded_tail && !self.persisted_tail_record_is_materialized() {
             return None;
         }
         let repin_at_semantic_tail = reaches_loaded_tail;
@@ -5458,11 +5448,7 @@ impl TranscriptDocument {
             }
         };
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
-        let active_range_reaches_tail = self
-            .records
-            .active_range()
-            .zip(self.records.sparse.total_count())
-            .is_some_and(|(range, total)| range.end.get() >= total);
+        let projection_covers_persisted_tail = self.records.projection_covers_persisted_tail();
         let requested_scroll = options
             .semantic_far_seek
             .map(|far_seek| far_seek.scroll_top)
@@ -5534,7 +5520,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
             ) => false,
         };
-        if target_reaches_tail && active_range_reaches_tail {
+        if target_reaches_tail && projection_covers_persisted_tail {
             let planned_as_tail = matches!(
                 local_target,
                 crate::content::transcript_buf::ScrollTarget::Visible(

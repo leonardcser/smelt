@@ -3363,6 +3363,93 @@ fn resumed_sparse_jump_to_bottom_after_scroll_up_renders_tail() {
     );
 }
 
+#[test]
+fn resumed_sparse_transcript_reaches_exact_bottom_while_bash_output_streams() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    let call_id = "streaming-bash-scroll".to_string();
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: call_id.clone(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::from([(
+            "command".into(),
+            serde_json::json!("cargo test --workspace"),
+        )]),
+        called_at_ms: 0,
+    }));
+    for line in 0..32 {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+            invocation_id,
+            call_id: call_id.clone(),
+            line: format!("initial streaming output line {line:02}"),
+        }));
+        app.render_silent();
+    }
+
+    for _ in 0..4 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+    assert!(!app.transcript_window().following_tail);
+
+    for line in 32..96 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+            invocation_id,
+            call_id: call_id.clone(),
+            line: format!("continued streaming output line {line:02}"),
+        }));
+        app.render_silent();
+        if app.transcript_window().following_tail {
+            break;
+        }
+    }
+
+    assert_transcript_window_at_tail(&app, "streaming bash output");
+    let before_append = app.transcript_window();
+    let before_append_total_rows = before_append
+        .viewport
+        .expect("streaming transcript viewport before append")
+        .total_rows;
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id,
+        call_id,
+        line: "output appended after reaching the tail".into(),
+    }));
+    app.render_silent();
+    assert_transcript_window_at_tail(&app, "new streaming bash output");
+
+    let after_append = app.transcript_window();
+    let viewport = after_append
+        .viewport
+        .expect("streaming transcript viewport after append");
+    assert!(
+        viewport.total_rows > before_append_total_rows,
+        "streamed output should extend the transcript after tail-follow is restored: before={before_append:#?}, after={after_append:#?}"
+    );
+    assert!(
+        after_append.scroll_top > before_append.scroll_top,
+        "tail-follow should advance with newly streamed output: before={before_append:#?}, after={after_append:#?}"
+    );
+    let metrics = viewport
+        .scrollbar
+        .expect("streaming transcript scrollbar")
+        .metrics(viewport.scroll_top);
+    assert_eq!(
+        metrics.thumb_top, metrics.max_thumb_top,
+        "streaming transcript scrollbar thumb should reach the bottom"
+    );
+    assert!(
+        app.ui_probe()
+            .named_win("smelt.scroll_pills.bottom.win")
+            .is_none(),
+        "jump-to-bottom pill should hide at the streaming transcript tail"
+    );
+}
+
 fn assert_transcript_window_at_tail(app: &TestApp, label: &str) {
     let win = app.transcript_window();
     let viewport = win.viewport.expect("transcript viewport");
@@ -3371,11 +3458,11 @@ fn assert_transcript_window_at_tail(app: &TestApp, label: &str) {
         .saturating_sub(RowIndex::from(viewport.rect.height.max(1)));
     assert!(
         win.following_tail,
-        "{label} should pin the transcript at semantic tail"
+        "{label} should pin the transcript at semantic tail: {win:#?}"
     );
     assert_eq!(
         win.scroll_top, max_scroll,
-        "{label} should resolve to the exact bottom viewport"
+        "{label} should resolve to the exact bottom viewport: {win:#?}"
     );
 }
 
@@ -6285,8 +6372,11 @@ fn resumed_transcript_app_from_records(
     width: u16,
     height: u16,
 ) -> (TestApp, tempfile::TempDir) {
+    static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
     let dir = tempfile::tempdir().expect("sessions root");
-    let session_id = "e".repeat(64);
+    let serial = NEXT_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_id = format!("e{serial:063x}");
     let mut session = smelt_core::session::Session::new(1, dir.path().to_path_buf());
     session.id = session_id.clone();
     let initial = smelt_core::session::initial_store_commit_from_session(&session)
