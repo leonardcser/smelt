@@ -2237,7 +2237,19 @@ impl BlockEntry {
     }
 
     fn is_persisted_block(&self) -> bool {
-        self.kind() != "compaction_preview" && !self.is_tool_draft()
+        match self {
+            Self::Stored(stored) => {
+                stored.kind != StoredBlockKind::CompactionPreview && !stored.tool_draft
+            }
+            Self::Live(live) => !matches!(
+                live.block,
+                Block::ToolDraft(_) | Block::CompactionPreview { .. }
+            ),
+            Self::Hydrated { block, .. } => !matches!(
+                block.as_ref(),
+                Block::ToolDraft(_) | Block::CompactionPreview { .. }
+            ),
+        }
     }
 
     fn row_estimate_text(&self) -> Option<BlockText<'_>> {
@@ -2933,6 +2945,12 @@ impl BlockHistory {
 
     pub fn is_tool_draft(&self, id: BlockId) -> bool {
         self.entries.get(&id).is_some_and(BlockEntry::is_tool_draft)
+    }
+
+    pub fn is_persisted_block(&self, id: BlockId) -> bool {
+        self.entries
+            .get(&id)
+            .is_some_and(BlockEntry::is_persisted_block)
     }
 
     pub fn process_field(&self, id: BlockId, field: &str) -> Option<String> {
@@ -4414,6 +4432,27 @@ mod tests {
             serde_json::from_value::<BlockOrigin>(encoded).unwrap(),
             origin
         );
+    }
+
+    #[test]
+    fn persisted_block_identity_excludes_transient_blocks() {
+        let mut history = BlockHistory::new();
+        let persisted = history.push(Block::Text {
+            content: "persisted".into(),
+        });
+        let preview = history.push(Block::CompactionPreview {
+            summary: "preview".into(),
+        });
+        let tool_draft = history.push(Block::ToolDraft(ToolDraft::new(
+            "stream".into(),
+            None,
+            "read_file".into(),
+        )));
+
+        assert!(history.is_persisted_block(persisted));
+        assert!(!history.is_persisted_block(preview));
+        assert!(!history.is_persisted_block(tool_draft));
+        assert!(!history.is_persisted_block(BlockId::new(u64::MAX)));
     }
 
     fn indexed_tool_state_with_content(content: &str, metadata: serde_json::Value) -> ToolState {

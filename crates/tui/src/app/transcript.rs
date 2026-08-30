@@ -344,8 +344,10 @@ enum TranscriptAnchorBias {
 struct TranscriptContentAnchor {
     record_index: usize,
     block_id: BlockId,
-    intra_block_row: RowIndex,
+    /// Durable offset within `block_id`; grouped rows use the representative block's start.
+    block_row_offset: RowIndex,
     bias: TranscriptAnchorBias,
+    /// Exact projected position while its render node remains present.
     row_anchor: TranscriptRowAnchor,
     fallback_row: RowIndex,
 }
@@ -373,7 +375,7 @@ impl From<TranscriptContentAnchor> for TranscriptSemanticAnchor {
         Self {
             record_index: anchor.record_index,
             block_id: anchor.block_id,
-            row_offset: anchor.intra_block_row,
+            row_offset: anchor.block_row_offset,
         }
     }
 }
@@ -2452,7 +2454,7 @@ impl TranscriptDocument {
                 record_index: anchor.record_index,
                 block_id: anchor.block_id,
                 node_id: anchor.row_anchor.id,
-                row_offset: anchor.intra_block_row,
+                row_offset: anchor.block_row_offset,
             },
             TranscriptScrollAnchor::EstimatedRow(row) => TranscriptTraceAnchor::EstimatedRow(row),
         }
@@ -2848,6 +2850,18 @@ impl TranscriptDocument {
         self.viewport.projection_count
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_projection_counters_for_harness(&mut self) {
+        self.content.projection.reset_counters();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn projection_counters_for_harness(
+        &self,
+    ) -> crate::content::transcript_buf::TranscriptProjectionCounters {
+        self.content.projection.counters()
+    }
+
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
         self.content.projection.set_inline_options(options);
         self.clear_transcript_layout_caches();
@@ -2997,13 +3011,12 @@ impl TranscriptDocument {
         if self.records.total_count().is_none() {
             return history.order.iter().position(|id| *id == block_id);
         }
-        if !history.is_tool_draft(block_id)
-            && history.block_kind(block_id) != Some("compaction_preview")
-        {
-            if let Some(order_index) = history.order.iter().position(|id| *id == block_id) {
-                let local_record_index = history.record_index_for_order_index(order_index);
-                return Some(self.records.global_record_index(local_record_index));
+        if let Some(order_index) = history.order.iter().position(|id| *id == block_id) {
+            if !history.is_persisted_block(block_id) {
+                return None;
             }
+            let local_record_index = history.record_index_for_order_index(order_index);
+            return Some(self.records.global_record_index(local_record_index));
         }
         self.stored_record_index_for_block_idx(block_id.get())
     }
@@ -3070,16 +3083,24 @@ impl TranscriptDocument {
         fallback_row: RowIndex,
         bias: TranscriptAnchorBias,
     ) -> Option<TranscriptContentAnchor> {
-        let block_id = row_anchor.id.as_block_id()?;
+        let (block_id, block_row_offset) = if let Some(block_id) = row_anchor.id.as_block_id() {
+            let block_row_offset = self
+                .content
+                .projection
+                .block_row_offset_for_anchor(&self.content.transcript.history, row_anchor)?;
+            (block_id, block_row_offset)
+        } else {
+            let block_id = self
+                .content
+                .projection
+                .representative_block_id_for_row_anchor(row_anchor)?;
+            (block_id, 0)
+        };
         let record_index = self.record_index_for_block_id(block_id)?;
-        let intra_block_row = self
-            .content
-            .projection
-            .block_row_offset_for_anchor(&self.content.transcript.history, row_anchor)?;
         Some(TranscriptContentAnchor {
             record_index,
             block_id,
-            intra_block_row,
+            block_row_offset,
             bias,
             row_anchor,
             fallback_row,
@@ -3192,13 +3213,20 @@ impl TranscriptDocument {
         anchor: TranscriptContentAnchor,
         row_offset: RowIndex,
     ) -> Option<RowIndex> {
+        if anchor.row_anchor.id.as_block_id().is_none() {
+            if let Some(row) =
+                self.row_for_anchor_with_offset(lua, width, anchor.row_anchor, row_offset)
+            {
+                return Some(row);
+            }
+        }
         let block_id = self.current_block_id_for_content_anchor(anchor);
         let row_anchor = self.content.projection.row_anchor_for_block(
             lua,
             &mut self.content.transcript.history,
             width,
             block_id,
-            anchor.intra_block_row,
+            anchor.block_row_offset,
         )?;
         self.row_for_anchor_with_offset(lua, width, row_anchor, row_offset)
     }
@@ -3294,42 +3322,7 @@ impl TranscriptDocument {
             }
         }
 
-        let visible_end = top_row.saturating_add(viewport_rows);
-        let (block_id, first_row, rows) = self
-            .materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
-            .into_iter()
-            .find(|(_, first_row, rows)| {
-                let end = first_row.saturating_add(*rows);
-                *first_row < visible_end && end > top_row
-            })?;
-        let record_index = self.record_index_for_block_id(block_id)?;
-        let intra_block_row = top_row
-            .saturating_sub(first_row)
-            .min(rows.saturating_sub(1));
-        let anchor_row = first_row.saturating_add(intra_block_row);
-        let offset = if anchor_row >= top_row {
-            -(anchor_row
-                .saturating_sub(top_row)
-                .min(isize::MAX as RowIndex) as isize)
-        } else {
-            top_row
-                .saturating_sub(anchor_row)
-                .min(isize::MAX as RowIndex) as isize
-        };
-        Some((
-            TranscriptContentAnchor {
-                record_index,
-                block_id,
-                intra_block_row,
-                bias: TranscriptAnchorBias::Top,
-                row_anchor: TranscriptRowAnchor {
-                    id: crate::content::transcript_scene::RenderNodeId::Block(block_id),
-                    row_offset: intra_block_row,
-                },
-                fallback_row: anchor_row,
-            },
-            offset,
-        ))
+        None
     }
 
     pub(crate) fn current_navigation_anchor(&self) -> Option<TranscriptSemanticAnchor> {
@@ -3345,7 +3338,7 @@ impl TranscriptDocument {
             return Some(TranscriptSemanticAnchor {
                 record_index: anchor.record_index,
                 block_id: anchor.block_id,
-                row_offset: anchor.intra_block_row,
+                row_offset: anchor.block_row_offset,
             });
         }
 
@@ -4164,6 +4157,17 @@ impl TranscriptDocument {
         width: u16,
         anchor: TranscriptContentAnchor,
     ) -> Option<crate::content::transcript_buf::StableRowAnchor> {
+        if anchor.row_anchor.id.as_block_id().is_none() {
+            let stable_anchor = anchor.row_anchor.into();
+            if self.content.projection.stable_anchor_is_present(
+                lua,
+                &mut self.content.transcript.history,
+                width,
+                stable_anchor,
+            ) {
+                return Some(stable_anchor);
+            }
+        }
         let block_id = self.current_block_id_for_content_anchor(anchor);
         self.content
             .projection
@@ -4172,7 +4176,7 @@ impl TranscriptDocument {
                 &mut self.content.transcript.history,
                 width,
                 block_id,
-                anchor.intra_block_row,
+                anchor.block_row_offset,
             )
             .map(Into::into)
     }
@@ -4708,25 +4712,8 @@ impl TranscriptDocument {
                 );
             }
         }
-        let reanchored_semantic_anchor = semantic_anchor.map(|anchor| {
-            let block_id = self.current_block_id_for_content_anchor(anchor);
-            self.content
-                .projection
-                .row_anchor_for_block(
-                    lua,
-                    &mut self.content.transcript.history,
-                    width,
-                    block_id,
-                    anchor.intra_block_row,
-                )
-                .map(Into::into)
-                .unwrap_or_else(|| {
-                    crate::content::transcript_buf::StableRowAnchor::rendered_block_row(
-                        block_id,
-                        anchor.intra_block_row,
-                    )
-                })
-        });
+        let reanchored_semantic_anchor = semantic_anchor
+            .and_then(|anchor| self.stable_row_anchor_for_content_anchor(lua, width, anchor));
         let content_exact_anchor = exact_anchor.filter(|anchor| anchor.block_id().is_some());
         let present_exact_anchor = content_exact_anchor.and_then(|anchor| {
             self.content
@@ -6121,6 +6108,10 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         row_offset: RowIndex,
     ) -> Option<TranscriptRowAnchor> {
+        let local_row = row.checked_sub(row_offset)?;
+        if let Some(anchor) = self.content.projection.materialized_row_anchor(local_row) {
+            return Some(anchor);
+        }
         let local_row =
             self.exact_loaded_row_for_virtual_content_row_with_offset(lua, width, row, row_offset)?;
         self.content.projection.row_anchor_at_row(
@@ -10049,7 +10040,7 @@ mod document_tests {
         };
         assert_eq!(anchor.record_index, record_index);
         assert_eq!(anchor.block_id, block_id);
-        assert_eq!(anchor.intra_block_row, 0);
+        assert_eq!(anchor.block_row_offset, 0);
         assert_eq!(anchor.bias, TranscriptAnchorBias::Top);
         assert_eq!(anchor.fallback_row, rows.clamped_scroll);
         let position_anchor = document.position_anchor(
@@ -10096,7 +10087,7 @@ mod document_tests {
         };
         assert_eq!(anchor_after.record_index, record_index);
         assert_eq!(anchor_after.block_id, block_id);
-        assert_eq!(anchor_after.intra_block_row, anchor.intra_block_row);
+        assert_eq!(anchor_after.block_row_offset, anchor.block_row_offset);
     }
 
     #[test]
@@ -11160,6 +11151,43 @@ mod tests {
             "selection range should be expressed in materialized buffer rows"
         );
         assert!(ranges.iter().all(|(line, _, _)| *line < line_count));
+    }
+
+    #[test]
+    fn grouped_content_anchor_keeps_projection_and_block_offsets_separate() {
+        let lua = smelt_core::lua::runtime::LuaRuntime::new();
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        for index in 0..2 {
+            transcript.push(smelt_core::Block::ToolCall {
+                call_id: format!("read-{index}"),
+                name: "read_file".into(),
+                summary: protocol::StyledLines::from_plain(format!("read_file src/{index}.rs")),
+                args: std::collections::HashMap::from([(
+                    "file_path".to_string(),
+                    serde_json::json!(format!("src/{index}.rs")),
+                )])
+                .into(),
+            });
+        }
+        let mut document = super::TranscriptDocument::from_transcript(transcript);
+        document.prepare_layout(&lua, 80);
+        let group = document
+            .node_metadata_at_row(&lua, 80, 0)
+            .expect("grouped transcript node");
+        assert!(matches!(
+            group.id,
+            crate::content::transcript_scene::RenderNodeId::Group(_)
+        ));
+        let row = group.first_row + group.rows - 1;
+        let row_anchor = document
+            .row_anchor_at_row(&lua, 80, row)
+            .expect("group row anchor");
+        let content_anchor = document
+            .content_anchor_for_row_anchor(row_anchor, row, super::TranscriptAnchorBias::Top)
+            .expect("persisted group content anchor");
+
+        assert!(content_anchor.row_anchor.row_offset > 0);
+        assert_eq!(content_anchor.block_row_offset, 0);
     }
 
     #[test]

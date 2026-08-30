@@ -111,6 +111,7 @@ impl Default for MeasurementIndexStore {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TranscriptProjectionCounters {
     pub full_row_builds: usize,
+    pub full_layout_materializations: usize,
     pub layout_cache: usize,
     pub exact_height_measured_blocks: usize,
     pub projection_planning_passes: usize,
@@ -804,10 +805,6 @@ impl ProjectionAnchor {
 pub(crate) struct StableRowAnchor(ProjectionAnchor);
 
 impl StableRowAnchor {
-    pub(crate) fn rendered_block_row(id: BlockId, row_offset: RowIndex) -> Self {
-        Self(ProjectionAnchor::rendered_block_row(id, row_offset))
-    }
-
     pub(crate) fn block_id(self) -> Option<BlockId> {
         match self.0 {
             ProjectionAnchor::Node { id, .. } => id.as_block_id(),
@@ -1869,17 +1866,51 @@ impl TranscriptProjection {
         row_key
     }
 
-    fn missing_node_indices(&self) -> Vec<usize> {
-        let _perf = smelt_perf::perf::begin("transcript:row_index:collect_missing");
-        (0..self.measurements.active.nodes.len())
-            .filter(|&i| {
+    fn collect_missing_node_indices(&self, indices: impl IntoIterator<Item = usize>) -> Vec<usize> {
+        indices
+            .into_iter()
+            .filter(|&index| {
                 self.measurements
                     .active
                     .nodes
-                    .get(i)
+                    .get(index)
                     .is_some_and(|node| node.exact_height.is_none())
             })
             .collect()
+    }
+
+    fn missing_node_indices(&self) -> Vec<usize> {
+        let _perf = smelt_perf::perf::begin("transcript:row_index:collect_missing");
+        self.collect_missing_node_indices(0..self.measurements.active.nodes.len())
+    }
+
+    fn measure_node_indices(
+        &mut self,
+        history: &BlockHistory,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+        indices: Vec<usize>,
+    ) -> bool {
+        if indices.is_empty() {
+            return false;
+        }
+        smelt_perf::perf::record_value(
+            "transcript:row_index:exactify_missing",
+            indices.len() as u64,
+        );
+        let mut changed = false;
+        for index in indices {
+            changed |= self.measure_cached_layout_height(
+                history,
+                index,
+                renderer_generation,
+                renderer_cache_key,
+            );
+        }
+        if changed {
+            self.measurements.active.refresh_prefix_rows();
+        }
+        changed
     }
 
     fn exactify_node_indices(
@@ -1890,37 +1921,12 @@ impl TranscriptProjection {
     ) -> bool {
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
-        let missing: Vec<usize> = indices
-            .into_iter()
-            .filter(|&i| {
-                self.measurements
-                    .active
-                    .nodes
-                    .get(i)
-                    .is_some_and(|node| node.exact_height.is_none())
-            })
-            .collect();
+        let missing = self.collect_missing_node_indices(indices);
         if missing.is_empty() {
             return false;
         }
         self.ensure_node_indices(env, history, missing.iter().copied());
-        smelt_perf::perf::record_value(
-            "transcript:row_index:exactify_missing",
-            missing.len() as u64,
-        );
-        let mut changed = false;
-        for i in missing {
-            changed |= self.measure_cached_layout_height(
-                history,
-                i,
-                renderer_generation,
-                renderer_cache_key,
-            );
-        }
-        if changed {
-            self.measurements.active.refresh_prefix_rows();
-        }
-        changed
+        self.measure_node_indices(history, renderer_generation, renderer_cache_key, missing)
     }
 
     fn exactify_node_range(
@@ -1934,6 +1940,24 @@ impl TranscriptProjection {
             return false;
         }
         self.exactify_node_indices(env, history, range.start..end)
+    }
+
+    fn ensure_projectable_node_range(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        range: std::ops::Range<usize>,
+    ) -> bool {
+        let end = range.end.min(self.measurements.active.nodes.len());
+        if range.start >= end {
+            return false;
+        }
+        let indices = range.start..end;
+        let renderer_generation = env.renderer_generation;
+        let renderer_cache_key = env.renderer_cache_key;
+        self.ensure_node_indices(env, history, indices.clone());
+        let missing = self.collect_missing_node_indices(indices);
+        self.measure_node_indices(history, renderer_generation, renderer_cache_key, missing)
     }
 
     fn stable_row_delta_hydration_range(
@@ -2454,6 +2478,20 @@ impl TranscriptProjection {
             })
     }
 
+    pub(crate) fn materialized_row_anchor(&self, row: RowIndex) -> Option<TranscriptRowAnchor> {
+        let identity = row
+            .checked_sub(self.visible.row_base)
+            .and_then(|local| usize::try_from(local).ok())
+            .and_then(|local| self.visible.row_identities.get(local))?;
+        match identity.exact {
+            ProjectionAnchor::Node { id, row_offset } => {
+                Some(TranscriptRowAnchor { id, row_offset })
+            }
+            ProjectionAnchor::RenderedBlockRow { .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { .. } => None,
+        }
+    }
+
     fn stable_materialized_row_anchor(&self, row: RowIndex) -> Option<StableRowAnchor> {
         row.checked_sub(self.visible.row_base)
             .and_then(|local| usize::try_from(local).ok())
@@ -2462,6 +2500,15 @@ impl TranscriptProjection {
     }
 
     pub(crate) fn representative_block_id_for_node_index(&self, index: usize) -> Option<BlockId> {
+        self.transcript_scene
+            .representative_block_id_for_node(index)
+    }
+
+    pub(crate) fn representative_block_id_for_row_anchor(
+        &self,
+        anchor: TranscriptRowAnchor,
+    ) -> Option<BlockId> {
+        let index = self.measurements.active.node_index(anchor.id)?;
         self.transcript_scene
             .representative_block_id_for_node(index)
     }
@@ -2539,6 +2586,7 @@ impl TranscriptProjection {
         history: &BlockHistory,
         anchor: TranscriptRowAnchor,
     ) -> Option<RowIndex> {
+        anchor.id.as_block_id()?;
         let Some(index) = self.measurements.active.node_index(anchor.id) else {
             return Some(anchor.row_offset);
         };
@@ -2890,7 +2938,8 @@ impl TranscriptProjection {
                     self.counters.projection_planning_passes.saturating_add(1);
             }
             self.pin_display_node_range(plan.node_range());
-            let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
+            let changed =
+                self.ensure_projectable_node_range(env.clone(), history, plan.node_range());
             request.key = self.project_key(
                 request.key.width,
                 env.renderer_generation,
@@ -3568,6 +3617,11 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
+        #[cfg(test)]
+        {
+            self.counters.full_layout_materializations =
+                self.counters.full_layout_materializations.saturating_add(1);
+        }
         let node_count = self.transcript_scene.len();
         self.pin_display_node_range(0..node_count);
         self.rebuild_row_index(lua, history, width);

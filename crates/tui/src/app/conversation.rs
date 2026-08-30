@@ -658,6 +658,20 @@ impl ConversationRuntime {
             .extent_store_read_count_for_harness()
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_transcript_projection_counters_for_harness(&mut self) {
+        self.document
+            .transcript
+            .reset_projection_counters_for_harness();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_projection_counters_for_harness(
+        &self,
+    ) -> crate::content::transcript_buf::TranscriptProjectionCounters {
+        self.document.transcript.projection_counters_for_harness()
+    }
+
     pub(crate) fn set_pending_transcript_projection(
         &mut self,
         intent: super::transcript_scroll_trace::TranscriptScrollIntent,

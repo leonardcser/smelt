@@ -98,6 +98,46 @@ fn compact_command_streams_preview_into_rendered_transcript() {
 }
 
 #[test]
+fn streaming_compaction_preview_keeps_sparse_projection_viewport_bounded() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    let viewport_rows = 24;
+    app.install_sparse_transcript_scroll_fixture(900, 80, viewport_rows);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.push_assistant_text("a1");
+    app.set_context_token_baseline_for_harness(Some(500));
+
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    let ask_id = app
+        .pending_ask_id()
+        .expect("/compact registered ask callback");
+    let marker = "sparse compaction projection marker";
+
+    app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: format!("# Goal\n{}\n{marker}", "streaming summary ".repeat(1_000)),
+    });
+    app.app
+        .conversation
+        .reset_transcript_projection_counters_for_harness();
+    let frame = app.render_to_frame().text();
+
+    assert!(frame.contains("compacting"), "frame: {frame}");
+    assert!(frame.contains(marker), "frame: {frame}");
+    let counters = app
+        .conversation_probe()
+        .transcript_projection_counters_for_harness();
+    assert_eq!(
+        counters.full_layout_materializations, 0,
+        "streaming a transient tail block must not materialize the full loaded transcript"
+    );
+    assert!(
+        counters.max_range_materialized_rows <= usize::from(viewport_rows) * 2,
+        "streaming projection materialized {} rows for a {viewport_rows}-row viewport",
+        counters.max_range_materialized_rows
+    );
+}
+
+#[test]
 fn compact_command_keeps_completed_block_at_compaction_position() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 12);

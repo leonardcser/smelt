@@ -6513,6 +6513,32 @@ fn transcript_drag_autoscroll_preserves_user_delta_intent() {
     );
 }
 
+#[test]
+fn resumed_grouped_tail_keeps_warm_projection_viewport_bounded() {
+    let viewport_rows = 24;
+    let (mut app, _dir) =
+        resumed_transcript_app_from_records(consecutive_tool_records(900), 80, viewport_rows);
+
+    app.app
+        .conversation
+        .reset_transcript_projection_counters_for_harness();
+    let frame = app.render_to_frame().text();
+
+    assert!(frame.contains("explore"), "frame: {frame}");
+    let counters = app
+        .conversation_probe()
+        .transcript_projection_counters_for_harness();
+    assert_eq!(
+        counters.full_layout_materializations, 0,
+        "a warm grouped viewport must not materialize the exact loaded transcript layout"
+    );
+    assert!(
+        counters.max_range_materialized_rows <= usize::from(viewport_rows) * 2,
+        "warm projection materialized {} rows for a {viewport_rows}-row viewport",
+        counters.max_range_materialized_rows
+    );
+}
+
 fn resumed_heterogeneous_transcript_app(
     count: usize,
     width: u16,
@@ -6631,6 +6657,25 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 event: None,
             }),
         };
+    }
+    source.history.block_records()
+}
+
+fn consecutive_tool_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
+    use smelt_core::transcript_model::Block;
+
+    let mut source = smelt_core::content::transcript::Transcript::new();
+    for idx in 0..count {
+        source.push(Block::ToolCall {
+            call_id: format!("read-file-{idx}"),
+            name: "read_file".into(),
+            summary: protocol::StyledLines::from_plain(format!("read_file src/{idx}.rs")),
+            args: std::collections::HashMap::from([(
+                "file_path".to_string(),
+                serde_json::json!(format!("src/{idx}.rs")),
+            )])
+            .into(),
+        });
     }
     source.history.block_records()
 }
