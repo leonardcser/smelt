@@ -167,7 +167,10 @@ fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
 #[test]
 fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse() {
     for (tool_name, pattern) in [
-        ("grep", "fn content_matches|fn content_is_prefix"),
+        (
+            "grep",
+            "FunctionTarget::Advanced.*true|Advanced,.*true|advanced_live_only",
+        ),
         ("glob", "crates/**/*.rs"),
     ] {
         let mut app = TestApp::builder().build();
