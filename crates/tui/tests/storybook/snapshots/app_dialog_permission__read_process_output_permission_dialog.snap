@@ -16,7 +16,7 @@ expression: text
   1. allow once
   2. deny
   3. allow read_process_output for this session
-  4. allow read_process_output in ~/cwd
+  4. allow read_process_output in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                       1:1 0%

@@ -28,7 +28,7 @@ expression: text
   1. allow once
   2. deny
   3. allow /tmp for this session
-  4. allow /tmp in ~/cwd
+  4. allow /tmp in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                                                         1:1 0%

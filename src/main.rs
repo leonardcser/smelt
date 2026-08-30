@@ -1358,7 +1358,11 @@ async fn async_main() {
         },
         &permission_store,
         None,
-    );
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("error: failed to load persisted permissions: {error}");
+        std::process::exit(1);
+    });
     let permissions =
         smelt_core::permissions::PermissionsHandle::from_resolution(permission_resolution);
 

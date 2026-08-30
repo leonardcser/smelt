@@ -4232,27 +4232,30 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
     let workspace_store = store::PermissionStore::new(state.path().to_path_buf());
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
-    workspace_store.save(
-        &first.path().to_string_lossy(),
-        store::PersistenceScope::Workspace,
-        &[store::Rule {
-            tool: "bash".into(),
-            patterns: vec!["git *".into()],
-        }],
-    );
+    workspace_store
+        .add_tool(
+            &first.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            "bash",
+            vec!["git *".into()],
+        )
+        .unwrap();
     let settings = crate::config::ResolvedSettings::default();
-    let handle = PermissionsHandle::from_resolution(resolve_permissions(
-        &RawPerms::default(),
-        &ToolDefaults::default(),
-        HashMap::new(),
-        &settings,
-        PermissionRuntimePaths {
-            cwd: first.path(),
-            home: first.path(),
-        },
-        &workspace_store,
-        None,
-    ));
+    let handle = PermissionsHandle::from_resolution(
+        resolve_permissions(
+            &RawPerms::default(),
+            &ToolDefaults::default(),
+            HashMap::new(),
+            &settings,
+            PermissionRuntimePaths {
+                cwd: first.path(),
+                home: first.path(),
+            },
+            &workspace_store,
+            None,
+        )
+        .unwrap(),
+    );
     handle
         .approvals()
         .write()
@@ -4264,22 +4267,329 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
         .unwrap()
         .has_pattern("bash", "git *"));
 
-    handle.apply_resolution(resolve_permissions(
-        &RawPerms::default(),
-        &ToolDefaults::default(),
-        HashMap::new(),
-        &settings,
-        PermissionRuntimePaths {
-            cwd: second.path(),
-            home: second.path(),
-        },
-        &workspace_store,
-        None,
-    ));
+    handle.apply_resolution(
+        resolve_permissions(
+            &RawPerms::default(),
+            &ToolDefaults::default(),
+            HashMap::new(),
+            &settings,
+            PermissionRuntimePaths {
+                cwd: second.path(),
+                home: second.path(),
+            },
+            &workspace_store,
+            None,
+        )
+        .unwrap(),
+    );
     let approvals = handle.approvals();
     let approvals = approvals.read().unwrap();
     assert!(!approvals.has_pattern("bash", "git *"));
     assert!(approvals.has_pattern("bash", "cargo *"));
+}
+
+#[test]
+fn active_permission_snapshot_refreshes_persisted_additions_and_removals() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = store::PermissionStore::new(state.path().to_path_buf());
+    let settings = crate::config::ResolvedSettings::default();
+    let handle = PermissionsHandle::from_resolution(
+        resolve_permissions(
+            &RawPerms::default(),
+            &ToolDefaults::default(),
+            HashMap::new(),
+            &settings,
+            PermissionRuntimePaths {
+                cwd: workspace.path(),
+                home: workspace.path(),
+            },
+            &store,
+            None,
+        )
+        .unwrap(),
+    );
+    let active_turn = handle.snapshot();
+    let args = args_with("command", "cargo test");
+    assert_eq!(
+        active_turn
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+            .decision,
+        Decision::Ask
+    );
+
+    store
+        .add_grant(
+            &workspace.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            PermissionGrant::Command {
+                tool: "bash".into(),
+                pattern: "cargo test*".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        active_turn
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+            .decision,
+        Decision::Allow
+    );
+
+    store
+        .remove(
+            &workspace.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            "bash",
+            "cargo test*",
+        )
+        .unwrap();
+    assert_eq!(
+        active_turn
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+            .decision,
+        Decision::Ask
+    );
+}
+
+#[test]
+fn persisted_refresh_error_fails_closed_without_discarding_session_grants() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = store::PermissionStore::new(state.path().to_path_buf());
+    store
+        .add_grant(
+            &workspace.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            PermissionGrant::Command {
+                tool: "bash".into(),
+                pattern: "cargo test*".into(),
+            },
+        )
+        .unwrap();
+    let handle = PermissionsHandle::from_resolution(
+        resolve_permissions(
+            &RawPerms::default(),
+            &ToolDefaults::default(),
+            HashMap::new(),
+            &crate::config::ResolvedSettings::default(),
+            PermissionRuntimePaths {
+                cwd: workspace.path(),
+                home: workspace.path(),
+            },
+            &store,
+            None,
+        )
+        .unwrap(),
+    );
+    let permission_dir = std::fs::read_dir(state.path().join("workspaces"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(permission_dir.join("permissions.json"), "{invalid").unwrap();
+    let args = args_with("command", "cargo test");
+
+    assert!(matches!(
+        handle
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+            .decision,
+        Decision::Error(_)
+    ));
+
+    handle
+        .approvals()
+        .write()
+        .unwrap()
+        .add_session_tool("bash", Vec::new());
+    assert_eq!(
+        handle
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+            .decision,
+        Decision::Allow
+    );
+}
+
+#[test]
+fn malformed_repository_scope_does_not_disable_valid_workspace_grant() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let repository = tempfile::tempdir().unwrap();
+    let store = store::PermissionStore::new(state.path().to_path_buf());
+    store
+        .add_tool(
+            &workspace.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            "bash",
+            vec!["cargo test*".into()],
+        )
+        .unwrap();
+    store
+        .add_tool(
+            &repository.path().to_string_lossy(),
+            store::PersistenceScope::Repository,
+            "bash",
+            vec!["git status".into()],
+        )
+        .unwrap();
+    let repository_file = std::fs::read_dir(state.path().join("workspaces"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("repository-permissions.json"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::fs::write(repository_file, "{invalid").unwrap();
+    let handle = PermissionsHandle::new(Permissions::from_raw_with_mode_behaviors(
+        &RawPerms::default(),
+        &ToolDefaults::default(),
+        HashMap::new(),
+    ));
+    handle
+        .approvals()
+        .write()
+        .unwrap()
+        .configure_persisted_source(
+            store,
+            workspace.path().to_path_buf(),
+            Some(repository.path().to_path_buf()),
+        );
+
+    assert_eq!(
+        handle
+            .evaluate_tool_with_approvals(
+                normal(),
+                ToolOrigin::Lua,
+                "bash",
+                &args_with("command", "cargo test"),
+            )
+            .decision,
+        Decision::Allow
+    );
+    assert!(matches!(
+        handle
+            .evaluate_tool_with_approvals(
+                normal(),
+                ToolOrigin::Lua,
+                "bash",
+                &args_with("command", "git status"),
+            )
+            .decision,
+        Decision::Error(_)
+    ));
+}
+
+#[test]
+fn malformed_workspace_scope_does_not_disable_valid_repository_grant() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let repository = tempfile::tempdir().unwrap();
+    let store = store::PermissionStore::new(state.path().to_path_buf());
+    store
+        .add_tool(
+            &workspace.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            "bash",
+            vec!["cargo test*".into()],
+        )
+        .unwrap();
+    store
+        .add_tool(
+            &repository.path().to_string_lossy(),
+            store::PersistenceScope::Repository,
+            "bash",
+            vec!["git status".into()],
+        )
+        .unwrap();
+    let workspace_file = std::fs::read_dir(state.path().join("workspaces"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("permissions.json"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::fs::write(workspace_file, "{invalid").unwrap();
+    let handle = PermissionsHandle::new(Permissions::from_raw_with_mode_behaviors(
+        &RawPerms::default(),
+        &ToolDefaults::default(),
+        HashMap::new(),
+    ));
+    handle
+        .approvals()
+        .write()
+        .unwrap()
+        .configure_persisted_source(
+            store,
+            workspace.path().to_path_buf(),
+            Some(repository.path().to_path_buf()),
+        );
+
+    assert_eq!(
+        handle
+            .evaluate_tool_with_approvals(
+                normal(),
+                ToolOrigin::Lua,
+                "bash",
+                &args_with("command", "git status"),
+            )
+            .decision,
+        Decision::Allow
+    );
+    assert!(matches!(
+        handle
+            .evaluate_tool_with_approvals(
+                normal(),
+                ToolOrigin::Lua,
+                "bash",
+                &args_with("command", "cargo test"),
+            )
+            .decision,
+        Decision::Error(_)
+    ));
+}
+
+#[test]
+fn active_mcp_permission_snapshot_refreshes_persisted_grant() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = store::PermissionStore::new(state.path().to_path_buf());
+    let handle = PermissionsHandle::from_resolution(
+        resolve_permissions(
+            &RawPerms::default(),
+            &ToolDefaults::default(),
+            HashMap::new(),
+            &crate::config::ResolvedSettings::default(),
+            PermissionRuntimePaths {
+                cwd: workspace.path(),
+                home: workspace.path(),
+            },
+            &store,
+            None,
+        )
+        .unwrap(),
+    );
+    let active_turn = handle.snapshot();
+    let args = HashMap::new();
+    assert_eq!(
+        active_turn
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Mcp, "server.tool", &args)
+            .decision,
+        Decision::Ask
+    );
+
+    store
+        .add_grant(
+            &workspace.path().to_string_lossy(),
+            store::PersistenceScope::Workspace,
+            PermissionGrant::Command {
+                tool: "mcp".into(),
+                pattern: "server.tool".into(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        active_turn
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Mcp, "server.tool", &args)
+            .decision,
+        Decision::Allow
+    );
 }
 
 #[test]
@@ -4552,11 +4862,11 @@ fn tool_perm_defaults_for_mode_falls_back_to_none_when_unset() {
     assert_eq!(defaults.for_mode(&yolo()), None);
 }
 
-// ── store.rs (backfill: into_approvals) ─────────────────────────────
+// ── store.rs (backfill: compiled approvals) ─────────────────────────
 
 #[test]
-fn store_into_approvals_separates_directory_rules_from_tools() {
-    use crate::permissions::store::{into_approvals, Rule};
+fn store_compile_rules_separates_directory_rules_from_tools() {
+    use crate::permissions::store::{compile_rules, Rule};
     let rules = vec![
         Rule {
             tool: "bash".into(),
@@ -4571,42 +4881,40 @@ fn store_into_approvals_separates_directory_rules_from_tools() {
             patterns: vec!["/var".into()],
         },
     ];
-    let (tools, dirs) = into_approvals(&rules);
-    assert_eq!(tools["bash"].len(), 2);
-    assert_eq!(dirs.len(), 2);
-    assert!(dirs.contains(&PathBuf::from("/srv")));
-    assert!(dirs.contains(&PathBuf::from("/var")));
+    let compiled = compile_rules(&rules).unwrap();
+    assert_eq!(compiled.tools["bash"].len(), 2);
+    assert_eq!(compiled.dirs.len(), 2);
+    assert!(compiled.dirs.contains(&PathBuf::from("/srv")));
+    assert!(compiled.dirs.contains(&PathBuf::from("/var")));
 }
 
 #[test]
-fn store_into_approvals_drops_wildcard_only_pattern_for_tools() {
-    use crate::permissions::store::{into_approvals, Rule};
+fn store_compile_rules_treats_wildcard_as_blanket() {
+    use crate::permissions::store::{compile_rules, Rule};
     let rules = vec![Rule {
         tool: "bash".into(),
         patterns: vec!["*".into(), "ls *".into()],
     }];
-    let (tools, _) = into_approvals(&rules);
-    assert_eq!(tools["bash"].len(), 1);
-    assert_eq!(tools["bash"][0].as_str(), "ls *");
+    let compiled = compile_rules(&rules).unwrap();
+    assert!(compiled.tools["bash"].is_empty());
 }
 
 #[test]
-fn store_into_approvals_skips_invalid_glob_patterns() {
-    use crate::permissions::store::{into_approvals, Rule};
+fn store_compile_rules_rejects_invalid_glob_patterns() {
+    use crate::permissions::store::{compile_rules, Rule};
     let rules = vec![Rule {
         tool: "bash".into(),
-        // [ without ] is an invalid glob.
         patterns: vec!["[unclosed".into(), "ls *".into()],
     }];
-    let (tools, _) = into_approvals(&rules);
-    assert_eq!(tools["bash"].len(), 1);
+    let error = compile_rules(&rules).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]
-fn store_into_approvals_handles_empty_rules() {
-    use crate::permissions::store::{into_approvals, Rule};
+fn store_compile_rules_handles_empty_rules() {
+    use crate::permissions::store::{compile_rules, Rule};
     let rules: Vec<Rule> = vec![];
-    let (tools, dirs) = into_approvals(&rules);
-    assert!(tools.is_empty());
-    assert!(dirs.is_empty());
+    let compiled = compile_rules(&rules).unwrap();
+    assert!(compiled.tools.is_empty());
+    assert!(compiled.dirs.is_empty());
 }

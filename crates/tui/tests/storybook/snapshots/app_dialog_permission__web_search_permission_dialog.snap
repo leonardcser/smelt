@@ -16,7 +16,7 @@ expression: text
   1. allow once
   2. deny
   3. allow web_search for this session
-  4. allow web_search in ~/cwd
+  4. allow web_search in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                       1:1 0%

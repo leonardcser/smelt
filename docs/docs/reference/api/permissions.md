@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-List, sync, and extend permission policy state. UiHost-only.
+Inspect, revoke, sync, and extend permission policy state. UiHost-only.
 
 ## `smelt.permissions.check`
 
@@ -52,7 +52,17 @@ fun(): smelt.permissions.ListResult
 
 Types: [`smelt.permissions.ListResult`](types.md#smeltpermissionslistresult)
 
-Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } }, repository = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace and repository entries come from their on-disk stores.
+Return current permission rules and persisted scope revisions. Pass `workspace_revision` or `repository_revision` back as the matching scope replacement revision in `smelt.permissions.sync()`.
+
+## `smelt.permissions.revoke`
+
+```lua
+fun(spec: smelt.permissions.RevokeSpec): boolean
+```
+
+Types: [`smelt.permissions.RevokeSpec`](types.md#smeltpermissionsrevokespec)
+
+Remove one exact session, workspace, or repository permission entry transactionally. Returns false when the entry no longer exists.
 
 ## `smelt.permissions.sync`
 
@@ -62,5 +72,5 @@ fun(spec: smelt.permissions.SyncSpec): nil
 
 Types: [`smelt.permissions.SyncSpec`](types.md#smeltpermissionssyncspec)
 
-Replace runtime and persisted permission entries with `spec.session`, `spec.path_grants`, `spec.workspace`, and `spec.repository`. Workspace rules apply to the exact CWD; repository rules apply to all its worktrees.
+Replace selected permission entries. Omitted fields are unchanged. Persisted replacements require the revision from `smelt.permissions.list()` and a call may replace only one of `workspace` or `repository`, so a stale snapshot cannot discard concurrent grants.
 

@@ -7,11 +7,12 @@
 use crate::app::{NotificationOperation, TuiApp};
 use scoped_tls_hkt::scoped_thread_local;
 
+#[derive(Default)]
 pub(crate) struct PermissionSnapshot {
     pub(crate) session_entries: Vec<(String, String)>,
     pub(crate) path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
-    pub(crate) workspace_rules: Vec<smelt_core::permissions::store::Rule>,
-    pub(crate) repository_rules: Vec<smelt_core::permissions::store::Rule>,
+    pub(crate) workspace: smelt_core::permissions::store::Snapshot,
+    pub(crate) repository: smelt_core::permissions::store::Snapshot,
 }
 
 pub(crate) struct SessionStatusSnapshot {
@@ -942,8 +943,29 @@ impl PlatformLuaHost<'_> {
         crate::metrics::load(self.app.core.sessions.state_root())
     }
 
-    pub(crate) fn permission_snapshot(&self) -> PermissionSnapshot {
-        PermissionSnapshot {
+    pub(crate) fn permission_snapshot(&self) -> Result<PermissionSnapshot, String> {
+        let workspace = self
+            .app
+            .core
+            .permission_store
+            .load_snapshot(
+                self.app.workspace.cwd(),
+                smelt_core::permissions::store::PersistenceScope::Workspace,
+            )
+            .map_err(|error| format!("load workspace permissions: {error}"))?;
+        let repository = match self.app.workspace.repository_permission_context() {
+            Some((key, _)) => self
+                .app
+                .core
+                .permission_store
+                .load_snapshot(
+                    &key.to_string_lossy(),
+                    smelt_core::permissions::store::PersistenceScope::Repository,
+                )
+                .map_err(|error| format!("load repository permissions: {error}"))?,
+            None => Default::default(),
+        };
+        Ok(PermissionSnapshot {
             session_entries: self
                 .app
                 .session_permission_entries()
@@ -951,37 +973,29 @@ impl PlatformLuaHost<'_> {
                 .map(|entry| (entry.tool, entry.pattern))
                 .collect(),
             path_grants: self.app.session_path_grants(),
-            workspace_rules: self.app.core.permission_store.load(
-                self.app.workspace.cwd(),
-                smelt_core::permissions::store::PersistenceScope::Workspace,
-            ),
-            repository_rules: self
-                .app
-                .workspace
-                .repository_permission_context()
-                .map(|(key, _)| {
-                    self.app.core.permission_store.load(
-                        &key.to_string_lossy(),
-                        smelt_core::permissions::store::PersistenceScope::Repository,
-                    )
-                })
-                .unwrap_or_default(),
-        }
+            workspace,
+            repository,
+        })
     }
 
     pub(crate) fn sync_permissions(
         &mut self,
-        session_entries: Vec<smelt_core::PermissionEntry>,
-        path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
-        workspace_rules: Vec<crate::permissions::store::Rule>,
-        repository_rules: Vec<crate::permissions::store::Rule>,
-    ) {
-        self.app.sync_permissions(
-            session_entries,
-            path_grants,
-            workspace_rules,
-            repository_rules,
-        );
+        session_entries: Option<Vec<smelt_core::PermissionEntry>>,
+        path_grants: Option<Vec<smelt_core::permissions::SessionPathGrant>>,
+        workspace: Option<smelt_core::permissions::store::Replacement>,
+        repository: Option<smelt_core::permissions::store::Replacement>,
+    ) -> Result<(), String> {
+        self.app
+            .sync_permissions(session_entries, path_grants, workspace, repository)
+    }
+
+    pub(crate) fn revoke_permission(
+        &mut self,
+        scope: &str,
+        tool: &str,
+        pattern: &str,
+    ) -> Result<bool, String> {
+        self.app.revoke_permission(scope, tool, pattern)
     }
 
     pub(crate) fn grant_session_path(&mut self, grant: smelt_core::permissions::SessionPathGrant) {

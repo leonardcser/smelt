@@ -75,11 +75,23 @@ impl LuaType for LuaPermissionList {
                     doc: "Workspace rules loaded from the on-disk store rooted at the current cwd.",
                 },
                 LuaClassField {
+                    name: "workspace_revision",
+                    ty: "integer".into(),
+                    optional: false,
+                    doc: "Revision required to replace the workspace rules safely.",
+                },
+                LuaClassField {
                     name: "repository",
                     ty: "smelt.permissions.WorkspaceRule[]".into(),
                     optional: false,
                     doc:
                         "Repository rules shared by all worktrees. Empty outside a Git repository.",
+                },
+                LuaClassField {
+                    name: "repository_revision",
+                    ty: "integer".into(),
+                    optional: false,
+                    doc: "Revision required to replace the repository rules safely.",
                 },
             ],
         });
@@ -102,6 +114,19 @@ fn lua_workspace_rule_to_runtime(
     }
 }
 
+fn lua_scope_replacement_to_runtime(
+    replacement: LuaPermissionScopeReplacement,
+) -> crate::permissions::store::Replacement {
+    crate::permissions::store::Replacement {
+        expected_revision: replacement.revision,
+        rules: replacement
+            .rules
+            .into_iter()
+            .map(lua_workspace_rule_to_runtime)
+            .collect(),
+    }
+}
+
 fn permission_rules_to_lua(
     lua: &Lua,
     rules: Vec<crate::permissions::store::Rule>,
@@ -120,22 +145,40 @@ fn permission_rules_to_lua(
     Ok(array)
 }
 
+/// Revision-checked replacement for one persisted permission scope.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.ScopeReplacement")]
+pub struct LuaPermissionScopeReplacement {
+    /// Revision returned by the `smelt.permissions.list()` snapshot being edited.
+    pub revision: u64,
+    /// Complete replacement rule set for this scope.
+    pub rules: Vec<LuaPermissionWorkspaceRule>,
+}
+
 /// Spec for `smelt.permissions.sync`.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.SyncSpec")]
 pub struct LuaPermissionSyncSpec {
-    /// Session entries; applied for this run only.
-    #[lua(default)]
-    pub session: Vec<LuaPermissionSessionEntry>,
-    /// Tool-specific session path grants; applied for this run only.
-    #[lua(default)]
-    pub path_grants: Vec<LuaPermissionSessionPathGrant>,
-    /// Workspace rules; persisted to disk under the current cwd.
-    #[lua(default)]
-    pub workspace: Vec<LuaPermissionWorkspaceRule>,
-    /// Repository rules; persisted under the repository root and shared by its worktrees.
-    #[lua(default)]
-    pub repository: Vec<LuaPermissionWorkspaceRule>,
+    /// Session entries to replace for this run. Omit to leave them unchanged.
+    pub session: Option<Vec<LuaPermissionSessionEntry>>,
+    /// Tool-specific session path grants to replace. Omit to leave them unchanged.
+    pub path_grants: Option<Vec<LuaPermissionSessionPathGrant>>,
+    /// Revision-checked workspace replacement. Cannot be combined with `repository`.
+    pub workspace: Option<LuaPermissionScopeReplacement>,
+    /// Revision-checked repository replacement. Cannot be combined with `workspace`.
+    pub repository: Option<LuaPermissionScopeReplacement>,
+}
+
+/// One exact permission entry to revoke transactionally.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.RevokeSpec")]
+pub struct LuaPermissionRevokeSpec {
+    /// Permission scope: `"session"`, `"workspace"`, or `"repository"`.
+    pub scope: String,
+    /// Tool name the entry applies to. Use `"directory"` for path-prefix entries.
+    pub tool: String,
+    /// Exact pattern to remove. Use `"*"` for a blanket tool approval.
+    pub pattern: String,
 }
 
 /// `allow`/`ask`/`deny` arrays accepted by permission policy sections.
@@ -237,25 +280,26 @@ pub(super) fn register(
         lua,
         smelt,
         "permissions",
-        "List, sync, and extend permission policy state. UiHost-only.",
+        "Inspect, revoke, sync, and extend permission policy state. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
         "list",
-        "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } }, repository = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace and repository entries come from their on-disk stores.",
+        "Return current permission rules and persisted scope revisions. Pass `workspace_revision` or `repository_revision` back as the matching scope replacement revision in `smelt.permissions.sync()`.",
         &[],
         |lua, ()| -> LuaResult<LuaPermissionList> {
-            let snapshot = crate::lua::try_with_platform_host(|host| host.permission_snapshot());
-            let (session_entries, path_grants, workspace_rules, repository_rules) = snapshot
-                .map(|snapshot| {
-                    (
-                        snapshot.session_entries,
-                        snapshot.path_grants,
-                        snapshot.workspace_rules,
-                        snapshot.repository_rules,
-                    )
-                })
-                .unwrap_or_default();
+            let snapshot = match crate::lua::try_with_platform_host(|host| {
+                host.permission_snapshot()
+            }) {
+                Some(snapshot) => snapshot.map_err(LuaError::external)?,
+                None => Default::default(),
+            };
+            let (session_entries, path_grants, workspace, repository) = (
+                snapshot.session_entries,
+                snapshot.path_grants,
+                snapshot.workspace,
+                snapshot.repository,
+            );
             let out = lua.create_table()?;
             let session_arr = lua.create_table()?;
             for (i, (tool, pattern)) in session_entries.into_iter().enumerate() {
@@ -278,10 +322,12 @@ pub(super) fn register(
                 path_grants_arr.set(i + 1, row)?;
             }
             out.set("path_grants", path_grants_arr)?;
-            out.set("workspace", permission_rules_to_lua(lua, workspace_rules)?)?;
+            out.set("workspace_revision", workspace.revision)?;
+            out.set("workspace", permission_rules_to_lua(lua, workspace.rules)?)?;
+            out.set("repository_revision", repository.revision)?;
             out.set(
                 "repository",
-                permission_rules_to_lua(lua, repository_rules)?,
+                permission_rules_to_lua(lua, repository.rules)?,
             )?;
             Ok(LuaPermissionList(out))
         },
@@ -289,41 +335,44 @@ pub(super) fn register(
     let sync_context = Arc::clone(&shared.core);
     m.fn_(
         "sync",
-        "Replace runtime and persisted permission entries with `spec.session`, `spec.path_grants`, `spec.workspace`, and `spec.repository`. Workspace rules apply to the exact CWD; repository rules apply to all its worktrees.",
+        "Replace selected permission entries. Omitted fields are unchanged. Persisted replacements require the revision from `smelt.permissions.list()` and a call may replace only one of `workspace` or `repository`, so a stale snapshot cannot discard concurrent grants.",
         &["spec"],
         move |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
-            let session_entries: Vec<smelt_core::PermissionEntry> = spec
-                .session
-                .into_iter()
-                .map(|e| smelt_core::PermissionEntry {
-                    tool: e.tool,
-                    pattern: e.pattern,
-                })
-                .collect();
+            let session_entries = spec.session.map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| smelt_core::PermissionEntry {
+                        tool: entry.tool,
+                        pattern: entry.pattern,
+                    })
+                    .collect()
+            });
             let session_path_grants = spec
                 .path_grants
-                .into_iter()
-                .map(|grant| lua_path_grant_to_runtime(grant, &sync_context))
-                .collect::<LuaResult<Vec<_>>>()?;
-            let workspace_rules = spec
-                .workspace
-                .into_iter()
-                .map(lua_workspace_rule_to_runtime)
-                .collect();
-            let repository_rules = spec
-                .repository
-                .into_iter()
-                .map(lua_workspace_rule_to_runtime)
-                .collect();
+                .map(|grants| {
+                    grants
+                        .into_iter()
+                        .map(|grant| lua_path_grant_to_runtime(grant, &sync_context))
+                        .collect::<LuaResult<Vec<_>>>()
+                })
+                .transpose()?;
+            let workspace = spec.workspace.map(lua_scope_replacement_to_runtime);
+            let repository = spec.repository.map(lua_scope_replacement_to_runtime);
             crate::lua::with_platform_host(|host| {
-                host.sync_permissions(
-                    session_entries,
-                    session_path_grants,
-                    workspace_rules,
-                    repository_rules,
-                )
-            });
-            Ok(())
+                host.sync_permissions(session_entries, session_path_grants, workspace, repository)
+            })
+            .map_err(LuaError::external)
+        },
+    )?;
+    m.fn_(
+        "revoke",
+        "Remove one exact session, workspace, or repository permission entry transactionally. Returns false when the entry no longer exists.",
+        &["spec"],
+        |_, spec: LuaPermissionRevokeSpec| -> LuaResult<bool> {
+            crate::lua::with_platform_host(|host| {
+                host.revoke_permission(&spec.scope, &spec.tool, &spec.pattern)
+            })
+            .map_err(LuaError::external)
         },
     )?;
     let grant_context = Arc::clone(&shared.core);

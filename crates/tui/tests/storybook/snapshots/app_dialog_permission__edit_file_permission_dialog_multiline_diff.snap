@@ -26,7 +26,7 @@ expression: frame.text()
   1. allow once
   2. deny
   3. allow edit_file for this session
-  4. allow edit_file in ~/cwd
+  4. allow edit_file in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

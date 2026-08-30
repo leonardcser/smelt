@@ -447,32 +447,66 @@ impl PermissionsHandle {
     }
 
     pub fn from_resolution(resolution: PermissionResolution) -> Self {
-        let handle = Self::new(resolution.policy);
-        handle.install_workspace_approvals(resolution.workspace_tools, resolution.workspace_dirs);
+        let PermissionResolution {
+            policy,
+            workspace_approvals,
+            repository_approvals,
+            permission_store,
+            workspace,
+            repository_key,
+        } = resolution;
+        let handle = Self::new(policy);
+        handle.install_persisted_approvals(
+            workspace_approvals,
+            repository_approvals,
+            permission_store,
+            workspace,
+            repository_key,
+        );
         handle
     }
 
-    pub fn apply_resolution(&self, mut resolution: PermissionResolution) -> Arc<Permissions> {
+    pub fn apply_resolution(&self, resolution: PermissionResolution) -> Arc<Permissions> {
+        let PermissionResolution {
+            mut policy,
+            workspace_approvals,
+            repository_approvals,
+            permission_store,
+            workspace,
+            repository_key,
+        } = resolution;
         let mut current = self
             .current
             .write()
             .unwrap_or_else(|error| error.into_inner());
-        self.install_workspace_approvals(resolution.workspace_tools, resolution.workspace_dirs);
-        resolution.policy.approvals = Arc::clone(&self.approvals);
-        let permissions = Arc::new(resolution.policy);
+        self.install_persisted_approvals(
+            workspace_approvals,
+            repository_approvals,
+            permission_store,
+            workspace,
+            repository_key,
+        );
+        policy.approvals = Arc::clone(&self.approvals);
+        let permissions = Arc::new(policy);
         *current = Arc::clone(&permissions);
         permissions
     }
 
-    fn install_workspace_approvals(
+    fn install_persisted_approvals(
         &self,
-        tools: HashMap<String, Vec<glob::Pattern>>,
-        dirs: Vec<PathBuf>,
+        workspace_approvals: store::CompiledApprovals,
+        repository_approvals: store::CompiledApprovals,
+        permission_store: store::PermissionStore,
+        workspace: PathBuf,
+        repository_key: Option<PathBuf>,
     ) {
-        self.approvals
+        let mut approvals = self
+            .approvals
             .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .load_workspace(tools, dirs);
+            .unwrap_or_else(|error| error.into_inner());
+        approvals.load_workspace(workspace_approvals.tools, workspace_approvals.dirs);
+        approvals.load_repository(repository_approvals.tools, repository_approvals.dirs);
+        approvals.configure_persisted_source(permission_store, workspace, repository_key);
     }
 }
 
@@ -480,8 +514,11 @@ impl PermissionsHandle {
 /// with it. Building this value does not mutate the active permission handle.
 pub struct PermissionResolution {
     policy: Permissions,
-    workspace_tools: HashMap<String, Vec<glob::Pattern>>,
-    workspace_dirs: Vec<PathBuf>,
+    workspace_approvals: store::CompiledApprovals,
+    repository_approvals: store::CompiledApprovals,
+    permission_store: store::PermissionStore,
+    workspace: PathBuf,
+    repository_key: Option<PathBuf>,
 }
 
 /// Runtime-owned paths used while resolving permission policy.
@@ -501,7 +538,7 @@ pub fn resolve_permissions(
     runtime_paths: PermissionRuntimePaths<'_>,
     permission_store: &store::PermissionStore,
     paths_fn: Option<Arc<PathsFn>>,
-) -> PermissionResolution {
+) -> std::io::Result<PermissionResolution> {
     let PermissionRuntimePaths { cwd, home } = runtime_paths;
     let context =
         crate::worktree::project_context(cwd, Some(std::path::Path::new(&settings.worktree_root)));
@@ -513,13 +550,24 @@ pub fn resolve_permissions(
     if let Some(paths_fn) = paths_fn {
         policy.set_paths_fn(paths_fn);
     }
-    let rules = permission_store.load_for_scopes(cwd, repository_key.as_deref());
-    let (workspace_tools, workspace_dirs) = store::into_approvals(&rules);
-    PermissionResolution {
+    let workspace_approvals = permission_store
+        .load_approvals(&cwd.to_string_lossy(), store::PersistenceScope::Workspace)?;
+    let repository_approvals = if let Some(repository_key) = repository_key.as_deref() {
+        permission_store.load_approvals(
+            &repository_key.to_string_lossy(),
+            store::PersistenceScope::Repository,
+        )?
+    } else {
+        store::CompiledApprovals::default()
+    };
+    Ok(PermissionResolution {
         policy,
-        workspace_tools,
-        workspace_dirs,
-    }
+        workspace_approvals,
+        repository_approvals,
+        permission_store: permission_store.clone(),
+        workspace: cwd.to_path_buf(),
+        repository_key,
+    })
 }
 
 impl std::fmt::Debug for Permissions {
@@ -1036,13 +1084,20 @@ impl Permissions {
             origin,
             effects: effects.clone(),
         });
-        let approvals = self.approvals.read().unwrap();
+        let mut approvals = self
+            .approvals
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let refresh_error = approvals.refresh_persisted().err();
         if outcome.decision == Decision::Ask {
             outcome.missing_requirements.retain(|req| {
                 !request_requirement_satisfied(req, &mode, tool_name, &effects, &approvals)
             });
             if outcome.missing_requirements.is_empty() {
                 outcome.decision = Decision::Allow;
+            } else if let Some(error) = refresh_error {
+                outcome.decision =
+                    Decision::Error(format!("failed to refresh persisted permissions: {error}"));
             }
         }
         outcome

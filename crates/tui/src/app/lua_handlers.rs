@@ -345,7 +345,7 @@ impl TuiApp {
         let runtime_failure =
             match self.resolve_lua_runtime_config_with(self.lua.desired(), &selections, None) {
                 Ok((mut next_runtime, next_managed_models)) => {
-                    let next_permissions = smelt_core::permissions::resolve_permissions(
+                    let next_permissions = match smelt_core::permissions::resolve_permissions(
                         &self.lua.desired().permissions.rules,
                         &self.lua.desired().permissions.tool_defaults,
                         self.lua.desired().modes.behaviors.clone(),
@@ -356,7 +356,16 @@ impl TuiApp {
                         },
                         &self.core.permission_store,
                         self.core.permissions.paths_fn(),
-                    );
+                    ) {
+                        Ok(permissions) => permissions,
+                        Err(error) => {
+                            return Some(bring_up_error(
+                                "permissions",
+                                None,
+                                format!("load persisted permissions: {error}"),
+                            ));
+                        }
+                    };
                     let auth_error = startup_auth_error(&mut next_runtime, &next_managed_models);
 
                     if let Err(error) = self.lua.activate_launch() {
@@ -505,7 +514,7 @@ impl TuiApp {
                     return Some(bring_up_error("runtime_resolution", None, error));
                 }
             };
-        let next_permissions = smelt_core::permissions::resolve_permissions(
+        let next_permissions = match smelt_core::permissions::resolve_permissions(
             &candidate.desired().permissions.rules,
             &candidate.desired().permissions.tool_defaults,
             candidate.desired().modes.behaviors.clone(),
@@ -516,7 +525,17 @@ impl TuiApp {
             },
             &self.core.permission_store,
             self.core.permissions.paths_fn(),
-        );
+        ) {
+            Ok(permissions) => permissions,
+            Err(error) => {
+                self.discard_lua_candidate_resources(candidate_id);
+                return Some(bring_up_error(
+                    "permissions",
+                    None,
+                    format!("load persisted permissions: {error}"),
+                ));
+            }
+        };
         for callback in candidate_tui
             .ui
             .finish_lua_generation(smelt_core::lua::LUA_BUF_ID_BASE)
@@ -688,7 +707,8 @@ impl TuiApp {
             },
             &self.core.permission_store,
             self.core.permissions.paths_fn(),
-        );
+        )
+        .map_err(|error| format!("load persisted permissions: {error}"))?;
         self.managed_models.replace_catalog(managed_models);
         self.commit_lua_runtime_config(next, permissions);
         self.submit_managed_model_refreshes();
@@ -740,25 +760,6 @@ impl TuiApp {
             }
         }
         Ok((runtime, managed_models))
-    }
-
-    pub(crate) fn reconcile_permissions(&mut self) {
-        let desired = self.lua.desired();
-        let permission_resolution = smelt_core::permissions::resolve_permissions(
-            &desired.permissions.rules,
-            &desired.permissions.tool_defaults,
-            desired.modes.behaviors.clone(),
-            &self.core.config.settings,
-            smelt_core::permissions::PermissionRuntimePaths {
-                cwd: &self.core.env.cwd(),
-                home: self.core.env.home(),
-            },
-            &self.core.permission_store,
-            self.core.permissions.paths_fn(),
-        );
-        self.core
-            .permissions
-            .apply_resolution(permission_resolution);
     }
 
     fn commit_lua_runtime_config(

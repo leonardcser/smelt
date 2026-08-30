@@ -16,7 +16,7 @@ expression: text
   1. allow once
   2. deny
   3. allow load_skill for this session
-  4. allow load_skill in ~/cwd
+  4. allow load_skill in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                       1:1 0%

@@ -337,14 +337,18 @@ app_story!(permissions_dialog, |ctx| {
     // workspace rules so their scope labels are visible.
     ctx.run_lua(
         r#"
+        local permissions = smelt.permissions.list()
         smelt.permissions.sync({
           session = {
             { tool = "bash", pattern = "ls/*" },
             { tool = "web_fetch", pattern = "https://example.com/*" },
           },
           workspace = {
-            { tool = "bash", patterns = { "cat/*", "cat/* /etc/*" } },
-            { tool = "write_file", patterns = { "src/**/*.rs" } },
+            revision = permissions.workspace_revision,
+            rules = {
+              { tool = "bash", patterns = { "cat/*", "cat/* /etc/*" } },
+              { tool = "write_file", patterns = { "src/**/*.rs" } },
+            },
           },
         })
         "#,

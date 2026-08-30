@@ -2,7 +2,8 @@
 
 use crate::permissions::rules::{check_ruleset, matches_rule, RuleSet};
 use crate::permissions::{
-    workspace, PathAccess, PermissionGrant, PermissionRequirement, Permissions,
+    store::PermissionStore, workspace, PathAccess, PermissionGrant, PermissionRequirement,
+    Permissions,
 };
 use protocol::AgentMode;
 use protocol::Decision;
@@ -16,8 +17,22 @@ pub struct RuntimeApprovals {
     session_dirs: Vec<PathBuf>,
     session_path_trusts: Vec<SessionPathTrust>,
     session_path_write_exceptions: Vec<SessionPathWriteException>,
-    workspace_tools: HashMap<String, ToolApprovals>,
-    workspace_dirs: Vec<PathBuf>,
+    workspace: ApprovalScope,
+    repository: ApprovalScope,
+    persisted_source: Option<PersistedApprovalSource>,
+}
+
+#[derive(Debug, Clone)]
+struct PersistedApprovalSource {
+    store: PermissionStore,
+    workspace: PathBuf,
+    repository_key: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ApprovalScope {
+    tools: HashMap<String, ToolApprovals>,
+    dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -70,7 +85,7 @@ impl RuntimeApprovals {
     /// Add workspace-scoped tool approval patterns. Empty `patterns` means blanket approval.
     /// Explicit patterns are retained alongside a blanket for opaque-command checks.
     pub fn add_workspace_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
-        add_tool_patterns(&mut self.workspace_tools, tool, patterns);
+        add_tool_patterns(&mut self.workspace.tools, tool, patterns);
     }
 
     pub fn add_session_dir(&mut self, dir: PathBuf) {
@@ -150,11 +165,12 @@ impl RuntimeApprovals {
     pub fn add_workspace_dir(&mut self, dir: PathBuf) {
         let dir = normalize_approval_dir(&dir);
         if !self
-            .workspace_dirs
+            .workspace
+            .dirs
             .iter()
             .any(|existing| workspace::paths_equivalent(existing, &dir))
         {
-            self.workspace_dirs.push(dir);
+            self.workspace.dirs.push(dir);
         }
     }
 
@@ -165,21 +181,134 @@ impl RuntimeApprovals {
         self.session_path_write_exceptions.clear();
     }
 
-    /// Load workspace approvals from pre-compiled patterns (called at startup
-    /// and after persisting new workspace rules).
+    pub fn remove_session_entry(&mut self, tool: &str, pattern: &str) -> bool {
+        if tool == "directory" {
+            let dir = normalize_approval_dir(Path::new(pattern));
+            let previous_len = self.session_dirs.len();
+            self.session_dirs
+                .retain(|existing| !workspace::paths_equivalent(existing, &dir));
+            return self.session_dirs.len() != previous_len;
+        }
+
+        let Some(approval) = self.session_tools.get_mut(tool) else {
+            return false;
+        };
+        let removed = if pattern == "*" {
+            std::mem::take(&mut approval.blanket)
+        } else {
+            let previous_len = approval.patterns.len();
+            approval
+                .patterns
+                .retain(|existing| existing.as_str() != pattern);
+            approval.patterns.len() != previous_len
+        };
+        if !approval.blanket && approval.patterns.is_empty() {
+            self.session_tools.remove(tool);
+        }
+        removed
+    }
+
+    /// Replace exact-workspace approvals without touching repository or session grants.
     pub fn load_workspace(
         &mut self,
         tools: HashMap<String, Vec<glob::Pattern>>,
         dirs: Vec<PathBuf>,
     ) {
-        self.workspace_tools = tools
-            .into_iter()
-            .map(|(tool, patterns)| (tool, ToolApprovals::from_patterns(patterns)))
-            .collect();
-        self.workspace_dirs = dirs
-            .into_iter()
-            .map(|d| normalize_approval_dir(&d))
-            .collect();
+        self.workspace = ApprovalScope::from_compiled(tools, dirs);
+    }
+
+    /// Replace project-wide approvals without touching workspace or session grants.
+    pub(super) fn load_repository(
+        &mut self,
+        tools: HashMap<String, Vec<glob::Pattern>>,
+        dirs: Vec<PathBuf>,
+    ) {
+        self.repository = ApprovalScope::from_compiled(tools, dirs);
+    }
+
+    pub(super) fn configure_persisted_source(
+        &mut self,
+        store: PermissionStore,
+        workspace: PathBuf,
+        repository_key: Option<PathBuf>,
+    ) {
+        self.persisted_source = Some(PersistedApprovalSource {
+            store,
+            workspace,
+            repository_key,
+        });
+    }
+
+    /// Reload exact-workspace and project-wide approvals independently. A failed
+    /// scope is cleared so stale disk state cannot authorize calls, while valid
+    /// approvals from the other scope and process-local grants remain available.
+    pub(crate) fn refresh_persisted(&mut self) -> std::io::Result<()> {
+        let (workspace, repository) = {
+            let Some(source) = &self.persisted_source else {
+                return Ok(());
+            };
+            let workspace = load_approval_scope(
+                &source.store,
+                &source.workspace,
+                crate::permissions::store::PersistenceScope::Workspace,
+            );
+            let repository = source.repository_key.as_ref().map(|repository_key| {
+                load_approval_scope(
+                    &source.store,
+                    repository_key,
+                    crate::permissions::store::PersistenceScope::Repository,
+                )
+            });
+            (workspace, repository)
+        };
+        let mut errors = Vec::new();
+
+        match workspace {
+            Ok(scope) => self.workspace = scope,
+            Err(error) => {
+                self.workspace = ApprovalScope::default();
+                errors.push(("workspace", error));
+            }
+        }
+
+        if let Some(repository) = repository {
+            match repository {
+                Ok(scope) => self.repository = scope,
+                Err(error) => {
+                    self.repository = ApprovalScope::default();
+                    errors.push(("repository", error));
+                }
+            }
+        } else {
+            self.repository = ApprovalScope::default();
+        }
+
+        match errors.len() {
+            0 => Ok(()),
+            1 => Err(errors.pop().expect("length checked").1),
+            _ => {
+                let kind = errors[0].1.kind();
+                let details = errors
+                    .into_iter()
+                    .map(|(scope, error)| format!("{scope}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Err(std::io::Error::new(
+                    kind,
+                    format!("refresh persisted permission scopes: {details}"),
+                ))
+            }
+        }
+    }
+
+    fn tool_approvals<'a>(&'a self, tool_name: &'a str) -> impl Iterator<Item = &'a ToolApprovals> {
+        [
+            self.session_tools.get(tool_name),
+            self.workspace.tools.get(tool_name),
+            self.repository.tools.get(tool_name),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Returns `true` when a tool call should be auto-approved based on runtime patterns.
@@ -190,24 +319,20 @@ impl RuntimeApprovals {
         desc: &str,
         config_subpatterns: Option<&RuleSet>,
     ) -> bool {
-        let session = self.session_tools.get(tool_name);
-        let workspace = self.workspace_tools.get(tool_name);
-
-        if session.is_none() && workspace.is_none() {
-            return false;
-        }
-
-        if session.is_some_and(|approval| approval.blanket)
-            || workspace.is_some_and(|approval| approval.blanket)
+        if self
+            .tool_approvals(tool_name)
+            .any(|approval| approval.blanket)
         {
             return true;
         }
 
-        let all_pats: Vec<&glob::Pattern> = session
-            .into_iter()
-            .chain(workspace)
+        let all_pats: Vec<&glob::Pattern> = self
+            .tool_approvals(tool_name)
             .flat_map(|approval| &approval.patterns)
             .collect();
+        if all_pats.is_empty() {
+            return false;
+        }
 
         super::command_patterns_satisfy(tool_name, &all_pats, desc, config_subpatterns)
     }
@@ -250,24 +375,17 @@ impl RuntimeApprovals {
 
     /// `true` when `pattern` is already approved for `tool_name`.
     pub fn has_pattern(&self, tool_name: &str, pattern: &str) -> bool {
-        self.session_tools
-            .get(tool_name)
-            .into_iter()
-            .chain(self.workspace_tools.get(tool_name))
-            .any(|approval| {
-                approval.blanket
-                    || approval
-                        .patterns
-                        .iter()
-                        .any(|existing| existing.as_str() == pattern)
-            })
+        self.tool_approvals(tool_name).any(|approval| {
+            approval.blanket
+                || approval
+                    .patterns
+                    .iter()
+                    .any(|existing| existing.as_str() == pattern)
+        })
     }
 
     pub fn has_explicit_pattern(&self, tool_name: &str, pattern: &str) -> bool {
-        self.session_tools
-            .get(tool_name)
-            .into_iter()
-            .chain(self.workspace_tools.get(tool_name))
+        self.tool_approvals(tool_name)
             .flat_map(|approval| &approval.patterns)
             .any(|existing| existing.as_str() == pattern)
     }
@@ -278,10 +396,7 @@ impl RuntimeApprovals {
         command: &str,
         config_subpatterns: Option<&RuleSet>,
     ) -> bool {
-        self.session_tools
-            .get(tool_name)
-            .into_iter()
-            .chain(self.workspace_tools.get(tool_name))
+        self.tool_approvals(tool_name)
             .flat_map(|approval| &approval.patterns)
             .any(|pattern| matches_rule(pattern, command))
             || config_subpatterns
@@ -303,13 +418,7 @@ impl RuntimeApprovals {
     pub fn requirement_satisfied(&self, requirement: &PermissionRequirement) -> bool {
         match requirement {
             PermissionRequirement::Tool { tool } => {
-                self.session_tools
-                    .get(tool)
-                    .is_some_and(|entry| entry.blanket)
-                    || self
-                        .workspace_tools
-                        .get(tool)
-                        .is_some_and(|entry| entry.blanket)
+                self.tool_approvals(tool).any(|approval| approval.blanket)
             }
             PermissionRequirement::Command { tool, command } => {
                 self.is_approved(tool, command, None)
@@ -359,13 +468,8 @@ impl RuntimeApprovals {
             .collect()
     }
 
-    /// Rebuild session state from flattened entries (used by permissions sync UI).
-    pub fn set_session(
-        &mut self,
-        tools: Vec<SessionToolApproval>,
-        dirs: Vec<PathBuf>,
-        path_grants: Vec<SessionPathGrant>,
-    ) {
+    /// Rebuild session tool and generic directory approvals from flattened entries.
+    pub fn set_session_entries(&mut self, tools: Vec<SessionToolApproval>, dirs: Vec<PathBuf>) {
         self.session_tools.clear();
         for approval in tools {
             let patterns = match approval.pattern {
@@ -381,8 +485,12 @@ impl RuntimeApprovals {
         }
         self.session_dirs = dirs
             .into_iter()
-            .map(|d| normalize_approval_dir(&d))
+            .map(|dir| normalize_approval_dir(&dir))
             .collect();
+    }
+
+    /// Rebuild tool-specific session path grants without changing other session entries.
+    pub fn set_session_path_grants(&mut self, path_grants: Vec<SessionPathGrant>) {
         self.session_path_trusts.clear();
         self.session_path_write_exceptions.clear();
         for grant in path_grants {
@@ -392,6 +500,17 @@ impl RuntimeApprovals {
                 self.add_session_path_trust(grant.tool, grant.access, grant.dir);
             }
         }
+    }
+
+    /// Rebuild all process-local approval state.
+    pub fn set_session(
+        &mut self,
+        tools: Vec<SessionToolApproval>,
+        dirs: Vec<PathBuf>,
+        path_grants: Vec<SessionPathGrant>,
+    ) {
+        self.set_session_entries(tools, dirs);
+        self.set_session_path_grants(path_grants);
     }
 
     pub fn session_path_grant_approved_for_path(
@@ -428,7 +547,8 @@ impl RuntimeApprovals {
     fn dir_approved_for_path(&self, path: &Path) -> bool {
         self.session_dirs
             .iter()
-            .chain(self.workspace_dirs.iter())
+            .chain(self.workspace.dirs.iter())
+            .chain(self.repository.dirs.iter())
             .any(|approved| workspace::path_prefix_matches(approved, path))
     }
 }
@@ -442,6 +562,30 @@ fn tool_command_text<'a>(tool_name: &str, args: &'a HashMap<String, Value>) -> O
 
 fn normalize_approval_dir(dir: &Path) -> PathBuf {
     workspace::normalize_approval_path(dir)
+}
+
+fn load_approval_scope(
+    store: &PermissionStore,
+    root: &Path,
+    scope: crate::permissions::store::PersistenceScope,
+) -> std::io::Result<ApprovalScope> {
+    let compiled = store.load_approvals(&root.to_string_lossy(), scope)?;
+    Ok(ApprovalScope::from_compiled(compiled.tools, compiled.dirs))
+}
+
+impl ApprovalScope {
+    fn from_compiled(tools: HashMap<String, Vec<glob::Pattern>>, dirs: Vec<PathBuf>) -> Self {
+        Self {
+            tools: tools
+                .into_iter()
+                .map(|(tool, patterns)| (tool, ToolApprovals::from_patterns(patterns)))
+                .collect(),
+            dirs: dirs
+                .into_iter()
+                .map(|dir| normalize_approval_dir(&dir))
+                .collect(),
+        }
+    }
 }
 
 impl ToolApprovals {

@@ -16,7 +16,7 @@ expression: text
  Allow?
   4. allow cat /var/log/smelt/projects/alpha/beta/gamma/delta/eps
      ilon/very-long-permission-target.log, /var/log/smelt/project
-     s/alpha/beta/gamma/delta/epsilon in ~/cwd
+     s/alpha/beta/gamma/delta/epsilon in workspace ~/cwd
 
 
 

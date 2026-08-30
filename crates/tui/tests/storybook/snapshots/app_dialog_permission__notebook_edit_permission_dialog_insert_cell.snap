@@ -20,7 +20,7 @@ insert cell 1 [code]
   1. allow once
   2. deny
   3. allow edit_notebook for this session
-  4. allow edit_notebook in ~/cwd
+  4. allow edit_notebook in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

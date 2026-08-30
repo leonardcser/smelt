@@ -394,7 +394,9 @@
 ---@field session smelt.permissions.SessionEntry[] Session-scoped tool/pattern approvals for this run.
 ---@field path_grants smelt.permissions.SessionPathGrant[] Session-scoped path grants for this run.
 ---@field workspace smelt.permissions.WorkspaceRule[] Workspace rules loaded from the on-disk store rooted at the current cwd.
+---@field workspace_revision integer Revision required to replace the workspace rules safely.
 ---@field repository smelt.permissions.WorkspaceRule[] Repository rules shared by all worktrees. Empty outside a Git repository.
+---@field repository_revision integer Revision required to replace the repository rules safely.
 
 --- Permission slots that apply within a single agent mode.
 ---@class smelt.permissions.ModePerms
@@ -407,11 +409,22 @@
 ---@field default? smelt.permissions.ModePerms Baseline rules applied unless a mode-specific slot overrides.
 ---@field [string] smelt.permissions.ModePerms Mode-specific rules keyed by registered mode name.
 
+--- One exact permission entry to revoke transactionally.
+---@class smelt.permissions.RevokeSpec
+---@field scope string Permission scope: `"session"`, `"workspace"`, or `"repository"`.
+---@field tool string Tool name the entry applies to. Use `"directory"` for path-prefix entries.
+---@field pattern string Exact pattern to remove. Use `"*"` for a blanket tool approval.
+
 --- `allow`/`ask`/`deny` arrays accepted by permission policy sections.
 ---@class smelt.permissions.RuleSet
 ---@field allow? string[] Patterns that auto-allow without prompting.
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
+
+--- Revision-checked replacement for one persisted permission scope.
+---@class smelt.permissions.ScopeReplacement
+---@field revision integer Revision returned by the `smelt.permissions.list()` snapshot being edited.
+---@field rules smelt.permissions.WorkspaceRule[] Complete replacement rule set for this scope.
 
 --- A single session permission entry (one approved tool/pattern pair).
 ---@class smelt.permissions.SessionEntry
@@ -428,10 +441,10 @@
 
 --- Spec for `smelt.permissions.sync`.
 ---@class smelt.permissions.SyncSpec
----@field session? smelt.permissions.SessionEntry[] Session entries; applied for this run only.
----@field path_grants? smelt.permissions.SessionPathGrant[] Tool-specific session path grants; applied for this run only.
----@field workspace? smelt.permissions.WorkspaceRule[] Workspace rules; persisted to disk under the current cwd.
----@field repository? smelt.permissions.WorkspaceRule[] Repository rules; persisted under the repository root and shared by its worktrees.
+---@field session? smelt.permissions.SessionEntry[] Session entries to replace for this run. Omit to leave them unchanged.
+---@field path_grants? smelt.permissions.SessionPathGrant[] Tool-specific session path grants to replace. Omit to leave them unchanged.
+---@field workspace? smelt.permissions.ScopeReplacement Revision-checked workspace replacement. Cannot be combined with `repository`.
+---@field repository? smelt.permissions.ScopeReplacement Revision-checked repository replacement. Cannot be combined with `workspace`.
 
 --- A workspace permission rule (one tool with N patterns, persisted to disk).
 ---@class smelt.permissions.WorkspaceRule

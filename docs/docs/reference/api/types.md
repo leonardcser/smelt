@@ -564,7 +564,9 @@ Current permission state returned by `smelt.permissions.list()`.
 | `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) | yes | Session-scoped tool/pattern approvals for this run. |
 | `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) | yes | Session-scoped path grants for this run. |
 | `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Workspace rules loaded from the on-disk store rooted at the current cwd. |
+| `workspace_revision` | `integer` | yes | Revision required to replace the workspace rules safely. |
 | `repository` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Repository rules shared by all worktrees. Empty outside a Git repository. |
+| `repository_revision` | `integer` | yes | Revision required to replace the repository rules safely. |
 
 ### `smelt.permissions.ModePerms`
 
@@ -585,6 +587,16 @@ Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
 | `default` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Baseline rules applied unless a mode-specific slot overrides. |
 | `[string]` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Mode-specific rules keyed by registered mode name. |
 
+### `smelt.permissions.RevokeSpec`
+
+One exact permission entry to revoke transactionally.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `scope` | `string` | yes | Permission scope: `"session"`, `"workspace"`, or `"repository"`. |
+| `tool` | `string` | yes | Tool name the entry applies to. Use `"directory"` for path-prefix entries. |
+| `pattern` | `string` | yes | Exact pattern to remove. Use `"*"` for a blanket tool approval. |
+
 ### `smelt.permissions.RuleSet`
 
 `allow`/`ask`/`deny` arrays accepted by permission policy sections.
@@ -594,6 +606,15 @@ Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
 | `allow` | `string[]` |  | Patterns that auto-allow without prompting. |
 | `ask` | `string[]` |  | Patterns that always prompt. |
 | `deny` | `string[]` |  | Patterns that auto-deny. |
+
+### `smelt.permissions.ScopeReplacement`
+
+Revision-checked replacement for one persisted permission scope.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `revision` | `integer` | yes | Revision returned by the `smelt.permissions.list()` snapshot being edited. |
+| `rules` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) | yes | Complete replacement rule set for this scope. |
 
 ### `smelt.permissions.SessionEntry`
 
@@ -622,10 +643,10 @@ Spec for `smelt.permissions.sync`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) |  | Session entries; applied for this run only. |
-| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Tool-specific session path grants; applied for this run only. |
-| `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) |  | Workspace rules; persisted to disk under the current cwd. |
-| `repository` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) |  | Repository rules; persisted under the repository root and shared by its worktrees. |
+| `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) |  | Session entries to replace for this run. Omit to leave them unchanged. |
+| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Tool-specific session path grants to replace. Omit to leave them unchanged. |
+| `workspace` | [smelt.permissions.ScopeReplacement](types.md#smeltpermissionsscopereplacement) |  | Revision-checked workspace replacement. Cannot be combined with `repository`. |
+| `repository` | [smelt.permissions.ScopeReplacement](types.md#smeltpermissionsscopereplacement) |  | Revision-checked repository replacement. Cannot be combined with `workspace`. |
 
 ### `smelt.permissions.WorkspaceRule`
 

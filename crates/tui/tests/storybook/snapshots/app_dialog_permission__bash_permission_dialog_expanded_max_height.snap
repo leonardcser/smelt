@@ -20,7 +20,7 @@ expression: text
   1. allow once
   2. deny
   3. allow ls * for this session
-  4. allow ls * in ~/cwd
+  4. allow ls * in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

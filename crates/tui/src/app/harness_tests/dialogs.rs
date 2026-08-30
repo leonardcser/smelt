@@ -1172,11 +1172,24 @@ fn worktree_permission_dialog_offers_repository_scope_with_main_checkout_label()
     assert_eq!(
         repository.label,
         format!(
-            "allow cargo test * in repo {}",
+            "allow cargo test * in project {} (all worktrees)",
             fixture.repository_root().display()
         )
     );
-    assert!(app.render_to_frame().text().contains("in repo"));
+    let workspace = options
+        .iter()
+        .find(|option| matches!(option.target, smelt_core::ApprovalTarget::Workspace { .. }))
+        .expect("worktree approval option");
+    assert_eq!(
+        workspace.label,
+        format!(
+            "allow cargo test * in this worktree {}",
+            fixture.feature.display()
+        )
+    );
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("in project"));
+    assert!(frame.contains("all worktrees"));
 }
 
 #[test]
@@ -1194,6 +1207,7 @@ fn repository_approval_persists_under_git_common_directory_key() {
             &fixture.feature.to_string_lossy(),
             smelt_core::permissions::store::PersistenceScope::Workspace,
         )
+        .unwrap()
         .is_empty());
     assert_eq!(
         store
@@ -1201,13 +1215,192 @@ fn repository_approval_persists_under_git_common_directory_key() {
                 &fixture.repository_key().to_string_lossy(),
                 smelt_core::permissions::store::PersistenceScope::Repository,
             )
+            .unwrap()
             .len(),
         1
     );
 }
 
 #[test]
-fn permissions_lua_lists_and_deletes_repository_rules() {
+fn running_peer_in_same_workspace_lazily_loads_new_workspace_approval() {
+    let runtime_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut granter = TestApp::builder()
+        .with_runtime_home(runtime_home.path())
+        .with_cwd(workspace.path())
+        .build();
+    let mut peer = TestApp::builder()
+        .with_runtime_home(runtime_home.path())
+        .with_cwd(workspace.path())
+        .build();
+
+    granter.start_submitted_turn("run tests");
+    request_bash_permission(&mut granter, 40, "cargo test", vec!["cargo test *"]);
+    assert!(granter.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Workspace { .. }),
+        is_cargo_test_grant,
+    ));
+
+    peer.start_submitted_turn("run tests");
+    request_bash_permission(&mut peer, 41, "cargo test", vec!["cargo test *"]);
+
+    assert_eq!(peer.pending_confirm_count(), 0);
+    assert_eq!(
+        actions_permission_decisions(peer.actions()),
+        vec![(41, true)]
+    );
+
+    granter
+        .core_probe()
+        .permission_store
+        .remove(
+            granter.cwd_str(),
+            smelt_core::permissions::store::PersistenceScope::Workspace,
+            "bash",
+            "cargo test *",
+        )
+        .unwrap();
+    request_bash_permission(&mut peer, 42, "cargo test", vec!["cargo test *"]);
+    assert_eq!(peer.pending_confirm_count(), 1);
+}
+
+#[test]
+fn persistent_permission_failure_is_reported_and_does_not_run_tool() {
+    let mut app = TestApp::builder().build();
+    app.core_probe()
+        .permission_store
+        .add_tool(
+            app.cwd_str(),
+            smelt_core::permissions::store::PersistenceScope::Workspace,
+            "bash",
+            vec!["existing command".into()],
+        )
+        .unwrap();
+    let permission_dir = std::fs::read_dir(
+        app.runtime_home()
+            .join("state")
+            .join("smelt")
+            .join("workspaces"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    let lock_path = permission_dir.join("permissions.lock");
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+
+    app.start_submitted_turn("run tests");
+    request_bash_permission(&mut app, 45, "cargo test", vec!["cargo test *"]);
+    assert!(app.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Workspace { .. }),
+        is_cargo_test_grant,
+    ));
+
+    assert_eq!(
+        actions_permission_decisions(app.actions()),
+        vec![(45, false)]
+    );
+    assert!(app.lua_messages_contain("permission was not saved:"));
+    assert_eq!(
+        app.core_probe()
+            .permission_store
+            .load(
+                app.cwd_str(),
+                smelt_core::permissions::store::PersistenceScope::Workspace,
+            )
+            .unwrap(),
+        vec![smelt_core::permissions::store::Rule {
+            tool: "bash".into(),
+            patterns: vec!["existing command".into()],
+        }]
+    );
+}
+
+#[test]
+fn successful_persistent_grant_is_approved_when_other_scope_is_malformed() {
+    let fixture = GitWorktreeFixture::new();
+    let runtime_home = tempfile::tempdir().unwrap();
+    let mut app = TestApp::builder()
+        .with_runtime_home(runtime_home.path())
+        .with_cwd(&fixture.feature)
+        .build();
+    app.core_probe()
+        .permission_store
+        .add_tool(
+            &fixture.repository_key().to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Repository,
+            "bash",
+            vec!["git status".into()],
+        )
+        .unwrap();
+    let stores_dir = runtime_home.path().join("state/smelt/workspaces");
+    let repository_permissions = std::fs::read_dir(stores_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("repository-permissions.json"))
+        .find(|path| path.is_file())
+        .unwrap();
+    app.start_submitted_turn("run tests");
+    request_bash_permission(&mut app, 46, "cargo test", vec!["cargo test *"]);
+    std::fs::write(repository_permissions, "{not json").unwrap();
+    assert!(app.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Workspace { .. }),
+        is_cargo_test_grant,
+    ));
+
+    assert_eq!(
+        actions_permission_decisions(app.actions()),
+        vec![(46, true)]
+    );
+    assert_eq!(
+        app.core_probe()
+            .permission_store
+            .load(
+                app.cwd_str(),
+                smelt_core::permissions::store::PersistenceScope::Workspace,
+            )
+            .unwrap(),
+        vec![smelt_core::permissions::store::Rule {
+            tool: "bash".into(),
+            patterns: vec!["cargo test *".into()],
+        }]
+    );
+}
+
+#[test]
+fn running_sibling_worktree_lazily_loads_new_repository_approval() {
+    let fixture = GitWorktreeFixture::new();
+    let sibling = fixture.add_sibling();
+    let runtime_home = tempfile::tempdir().unwrap();
+    let mut granter = TestApp::builder()
+        .with_runtime_home(runtime_home.path())
+        .with_cwd(&fixture.feature)
+        .build();
+    let mut peer = TestApp::builder()
+        .with_runtime_home(runtime_home.path())
+        .with_cwd(sibling)
+        .build();
+
+    granter.start_submitted_turn("run tests");
+    request_bash_permission(&mut granter, 50, "cargo test", vec!["cargo test *"]);
+    assert!(granter.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
+        is_cargo_test_grant,
+    ));
+
+    peer.start_submitted_turn("run tests");
+    request_bash_permission(&mut peer, 51, "cargo test", vec!["cargo test *"]);
+
+    assert_eq!(peer.pending_confirm_count(), 0);
+    assert_eq!(
+        actions_permission_decisions(peer.actions()),
+        vec![(51, true)]
+    );
+}
+
+#[test]
+fn permissions_lua_transactional_revoke_preserves_concurrent_rules() {
     let fixture = GitWorktreeFixture::new();
     let mut app = open_repository_permission_dialog(&fixture);
     assert!(app.resolve_first_grant_where(
@@ -1217,20 +1410,168 @@ fn permissions_lua_lists_and_deletes_repository_rules() {
 
     assert!(app.run_lua(
         r#"
-        local permissions = smelt.permissions.list()
-        assert(#permissions.repository == 1)
-        permissions.repository = {}
-        smelt.permissions.sync(permissions)
+        _G.stale_permissions = smelt.permissions.list()
+        assert(#_G.stale_permissions.repository == 1)
         "#
     ));
-    assert!(app
-        .core_probe()
+    app.core_probe()
         .permission_store
-        .load(
+        .add_tool(
             &fixture.repository_key().to_string_lossy(),
             smelt_core::permissions::store::PersistenceScope::Repository,
+            "web_fetch",
+            vec!["https://example.com/*".into()],
         )
-        .is_empty());
+        .unwrap();
+
+    assert!(app.run_lua(
+        r#"
+        local stale = _G.stale_permissions.repository[1]
+        assert(smelt.permissions.revoke({
+          scope = "repository",
+          tool = stale.tool,
+          pattern = stale.patterns[1],
+        }))
+        "#
+    ));
+    assert_eq!(
+        app.core_probe()
+            .permission_store
+            .load(
+                &fixture.repository_key().to_string_lossy(),
+                smelt_core::permissions::store::PersistenceScope::Repository,
+            )
+            .unwrap(),
+        vec![smelt_core::permissions::store::Rule {
+            tool: "web_fetch".into(),
+            patterns: vec!["https://example.com/*".into()],
+        }]
+    );
+}
+
+#[test]
+fn permissions_lua_sync_rejects_stale_repository_snapshot() {
+    let fixture = GitWorktreeFixture::new();
+    let mut app = open_repository_permission_dialog(&fixture);
+    assert!(app.resolve_first_grant_where(
+        |target| matches!(target, smelt_core::ApprovalTarget::Repository { .. }),
+        is_cargo_test_grant,
+    ));
+    assert!(app.run_lua(
+        r#"
+        _G.stale_permissions = smelt.permissions.list()
+        assert(#_G.stale_permissions.repository == 1)
+        "#
+    ));
+    app.core_probe()
+        .permission_store
+        .add_tool(
+            &fixture.repository_key().to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Repository,
+            "web_fetch",
+            vec!["https://example.com/*".into()],
+        )
+        .unwrap();
+
+    assert!(app.run_lua(
+        r#"
+        local ok, err = pcall(function()
+          smelt.permissions.sync({
+            repository = {
+              revision = _G.stale_permissions.repository_revision,
+              rules = {},
+            },
+          })
+        end)
+        assert(not ok)
+        assert(tostring(err):find("changed since it was read", 1, true))
+        "#
+    ));
+    assert_eq!(
+        app.core_probe()
+            .permission_store
+            .load(
+                &fixture.repository_key().to_string_lossy(),
+                smelt_core::permissions::store::PersistenceScope::Repository,
+            )
+            .unwrap(),
+        vec![
+            smelt_core::permissions::store::Rule {
+                tool: "bash".into(),
+                patterns: vec!["cargo test *".into()],
+            },
+            smelt_core::permissions::store::Rule {
+                tool: "web_fetch".into(),
+                patterns: vec!["https://example.com/*".into()],
+            },
+        ]
+    );
+}
+
+#[test]
+fn permissions_lua_sync_rejects_two_persisted_scopes_without_writing_either() {
+    let fixture = GitWorktreeFixture::new();
+    let mut app = TestApp::builder().with_cwd(&fixture.feature).build();
+    app.core_probe()
+        .permission_store
+        .add_tool(
+            app.cwd_str(),
+            smelt_core::permissions::store::PersistenceScope::Workspace,
+            "bash",
+            vec!["workspace command".into()],
+        )
+        .unwrap();
+    app.core_probe()
+        .permission_store
+        .add_tool(
+            &fixture.repository_key().to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Repository,
+            "bash",
+            vec!["repository command".into()],
+        )
+        .unwrap();
+
+    assert!(app.run_lua(
+        r#"
+        local permissions = smelt.permissions.list()
+        local ok, err = pcall(function()
+          smelt.permissions.sync({
+            workspace = {
+              revision = permissions.workspace_revision,
+              rules = {},
+            },
+            repository = {
+              revision = permissions.repository_revision,
+              rules = {},
+            },
+          })
+        end)
+        assert(not ok)
+        assert(tostring(err):find("one persisted permission scope", 1, true))
+        "#
+    ));
+    assert_eq!(
+        app.core_probe()
+            .permission_store
+            .load(
+                app.cwd_str(),
+                smelt_core::permissions::store::PersistenceScope::Workspace,
+            )
+            .unwrap()[0]
+            .patterns,
+        vec!["workspace command"]
+    );
+    assert_eq!(
+        app.core_probe()
+            .permission_store
+            .load(
+                &fixture.repository_key().to_string_lossy(),
+                smelt_core::permissions::store::PersistenceScope::Repository,
+            )
+            .unwrap()[0]
+            .patterns,
+        vec!["repository command"]
+    );
 }
 
 #[test]
@@ -1238,20 +1579,24 @@ fn external_sibling_worktree_inherits_repository_but_not_workspace_rules() {
     let fixture = GitWorktreeFixture::new();
     let app = TestApp::builder().with_cwd(&fixture.feature).build();
     let store = &app.core_probe().permission_store;
-    store.add_grant(
-        &fixture.repository_key().to_string_lossy(),
-        smelt_core::permissions::store::PersistenceScope::Repository,
-        smelt_core::permissions::PermissionGrant::Command {
-            tool: "bash".into(),
-            pattern: "cargo test *".into(),
-        },
-    );
-    store.add_tool(
-        &fixture.feature.to_string_lossy(),
-        smelt_core::permissions::store::PersistenceScope::Workspace,
-        "bash",
-        vec!["worktree-only *".into()],
-    );
+    store
+        .add_grant(
+            &fixture.repository_key().to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Repository,
+            smelt_core::permissions::PermissionGrant::Command {
+                tool: "bash".into(),
+                pattern: "cargo test *".into(),
+            },
+        )
+        .unwrap();
+    store
+        .add_tool(
+            &fixture.feature.to_string_lossy(),
+            smelt_core::permissions::store::PersistenceScope::Workspace,
+            "bash",
+            vec!["worktree-only *".into()],
+        )
+        .unwrap();
     let sibling = fixture.add_sibling();
 
     let resolution = smelt_core::permissions::resolve_permissions(
@@ -1266,7 +1611,8 @@ fn external_sibling_worktree_inherits_repository_but_not_workspace_rules() {
         store,
         None,
     );
-    let permissions = smelt_core::permissions::PermissionsHandle::from_resolution(resolution);
+    let permissions =
+        smelt_core::permissions::PermissionsHandle::from_resolution(resolution.unwrap());
     let approvals = permissions.approvals();
     let approvals = approvals.read().unwrap();
     assert!(approvals.has_pattern("bash", "cargo test *"));

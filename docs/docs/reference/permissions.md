@@ -172,13 +172,14 @@ too.
 When a call is gated, a confirm dialog appears with the tool summary, a preview
 (when available, for example a diff for `edit_file`), and these options:
 
-| Option                                   | Effect                                               |
-| ---------------------------------------- | ---------------------------------------------------- |
-| **allow once**                           | Approve this call only                               |
-| **deny**                                 | Deny this call (and `Esc` does the same)             |
-| **allow `<pattern>` for this session**   | Auto-approve matching calls for this session         |
-| **allow `<pattern>` in cwd**             | Same, persisted to this exact workspace              |
-| **allow `<pattern>` in repo `<path>`**   | Same, shared by every worktree for the repository    |
+| Option                                               | Effect                                            |
+| ---------------------------------------------------- | ------------------------------------------------- |
+| **allow once**                                       | Approve this call only                            |
+| **deny**                                             | Deny this call (and `Esc` does the same)          |
+| **allow `<pattern>` for this session**               | Auto-approve matching calls for this session      |
+| **allow `<pattern>` in workspace `<path>`**          | Same, persisted to this exact workspace           |
+| **allow `<pattern>` in this worktree `<path>`**      | Same, persisted to this exact Git worktree        |
+| **allow `<pattern>` in project `<root>` (all worktrees)** | Same, shared by every worktree for the project |
 
 `<pattern>` is the tool-specific approval pattern (e.g. a shell command stem
 like `git status` for `bash`, or a URL host for `web_fetch`). When the call
@@ -196,7 +197,7 @@ Approval options can apply at one of three scopes:
 | Scope          | Lifetime                              | Storage                                                   |
 | -------------- | ------------------------------------- | --------------------------------------------------------- |
 | **Session**    | Until `/clear`, `/new`, or exit       | Memory                                                    |
-| **Workspace**  | All future sessions in this exact CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](configuration.md#storage-paths) |
+| **Workspace**  | Every current and future session in this exact CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](configuration.md#storage-paths) |
 | **Repository** | Every current and future Git worktree | `repository-permissions.json` under the Git common-directory state entry |
 
 Workspace rules do not leak into sibling worktrees. Repository rules are loaded
@@ -204,14 +205,43 @@ alongside the exact CWD's rules in every worktree. Both stay narrow: approving a
 command pattern only approves matching calls, and approving an outside directory
 only approves access under that directory.
 
+Running smelt sessions refresh persisted approvals when they evaluate a tool call.
+A workspace or repository approval added or removed in one session therefore takes
+effect for the next matching tool call in every other running session with that
+scope. Repository approvals propagate across sibling Git worktrees. The two stores
+are loaded independently: if one is malformed or unreadable, that scope fails closed
+without discarding valid approvals from the other scope or from the current session.
+
 ## Managing Saved Approvals
 
 Use `/permissions` to view and remove session, workspace, and repository approvals.
-Each entry is labeled with its scope.
+Each entry is labeled with its scope. Deletions are persisted immediately and
+transactionally, so an older open dialog cannot overwrite approvals added by
+another smelt session.
+
+The Lua API applies the same protection to full replacements. `smelt.permissions.list()`
+returns a revision for each persisted scope. `smelt.permissions.sync()` requires the
+matching revision, rejects stale snapshots, and accepts at most one persisted scope
+per call. This prevents concurrent grants from being lost and prevents a failed
+second write from leaving an implicit cross-scope update half applied.
+
+```lua
+local permissions = smelt.permissions.list()
+smelt.permissions.sync({
+  workspace = {
+    revision = permissions.workspace_revision,
+    rules = permissions.workspace,
+  },
+})
+```
+
+Omit `session`, `path_grants`, `workspace`, or `repository` to leave that part of
+the permission state unchanged. Pass an empty array explicitly when you intend to
+clear session entries or path grants.
 
 - `j`/`k` to navigate
 - `dd` or `Backspace` to delete the highlighted entry
-- `Esc` to close (changes are persisted on close)
+- `Esc` to close
 
 ## Workspace Restriction
 

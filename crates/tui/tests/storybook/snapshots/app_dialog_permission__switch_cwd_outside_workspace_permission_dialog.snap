@@ -20,7 +20,7 @@ expression: frame.text()
   1. allow once
   2. deny
   3. allow /tmp/electronics for this session
-  4. allow /tmp/electronics in ~/cwd
+  4. allow /tmp/electronics in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

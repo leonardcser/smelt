@@ -1,24 +1,24 @@
--- Built-in /permissions command. Lists and deletes session/workspace/repository rules;
--- syncs on close so edits persist.
+-- Built-in /permissions command. Lists and transactionally deletes
+-- session/workspace/repository rules as each deletion is requested.
 
 local function build_items(perms)
   local items = {}
   local mapping = {}
 
-  for i, e in ipairs(perms.session or {}) do
+  for _, e in ipairs(perms.session or {}) do
     table.insert(items, { label = string.format("[session] %s: %s", e.tool, e.pattern) })
-    table.insert(mapping, { kind = "session", session_idx = i })
+    table.insert(mapping, { scope = "session", tool = e.tool, pattern = e.pattern })
   end
 
   local function append_persisted(scope)
-    for ri, rule in ipairs(perms[scope] or {}) do
+    for _, rule in ipairs(perms[scope] or {}) do
       if #(rule.patterns or {}) == 0 then
         table.insert(items, { label = string.format("[%s] %s: *", scope, rule.tool) })
-        table.insert(mapping, { kind = scope, rule_idx = ri, pattern_idx = 0 })
+        table.insert(mapping, { scope = scope, tool = rule.tool, pattern = "*" })
       else
-        for pi, p in ipairs(rule.patterns) do
+        for _, p in ipairs(rule.patterns) do
           table.insert(items, { label = string.format("[%s] %s: %s", scope, rule.tool, p) })
-          table.insert(mapping, { kind = scope, rule_idx = ri, pattern_idx = pi })
+          table.insert(mapping, { scope = scope, tool = rule.tool, pattern = p })
         end
       end
     end
@@ -28,20 +28,6 @@ local function build_items(perms)
   append_persisted("repository")
 
   return items, mapping
-end
-
-local function delete_entry(perms, m)
-  if m.kind == "session" then
-    table.remove(perms.session, m.session_idx)
-  else
-    local rules = perms[m.kind]
-    local rule = rules[m.rule_idx]
-    if #(rule.patterns or {}) <= 1 then
-      table.remove(rules, m.rule_idx)
-    else
-      table.remove(rule.patterns, m.pattern_idx)
-    end
-  end
 end
 
 smelt.cmd.register("permissions", function()
@@ -56,20 +42,15 @@ smelt.cmd.register("permissions", function()
 
     while true do
       local items, mapping = build_items(perms)
-      if #items == 0 then
-        smelt.permissions.sync(perms)
-        return
-      end
+      if #items == 0 then return end
       local labels = {}
       for _, it in ipairs(items) do table.insert(labels, it.label) end
 
-      -- Browse-then-delete: digits move the cursor and Enter is a no-op so
-      -- a stray press doesn't drop a rule. Deletion goes through bs/dd
-      -- below.
+      -- Browse-then-delete: digits move the cursor, while deletion goes
+      -- through bs/dd below.
       local options_leaf, options_ctrl = smelt.dialog.menu(labels, {
         shortcuts = "select",
-        -- Enter is a no-op so a stray press doesn't drop a rule;
-        -- delete-on-confirm goes through bs/dd below.
+        -- Enter is a no-op so a stray press doesn't drop a rule.
         on_submit = function() end,
       })
       local deleted_this_round = false
@@ -78,7 +59,8 @@ smelt.cmd.register("permissions", function()
         local idx = options_ctrl:cursor() or 1
         local m = mapping[idx]
         if m then
-          delete_entry(perms, m)
+          smelt.permissions.revoke(m)
+          perms = smelt.permissions.list()
           deleted_this_round = true
         end
         ctx.close()
@@ -101,10 +83,7 @@ smelt.cmd.register("permissions", function()
         },
       })
 
-      if not deleted_this_round then
-        smelt.permissions.sync(perms)
-        return
-      end
+      if not deleted_this_round then return end
     end
   end)
 end, { desc = "manage session permissions" })

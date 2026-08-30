@@ -1807,49 +1807,123 @@ impl TuiApp {
 
     pub(crate) fn sync_permissions(
         &mut self,
-        session_entries: Vec<PermissionEntry>,
-        session_path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
-        workspace_rules: Vec<smelt_core::permissions::store::Rule>,
-        repository_rules: Vec<smelt_core::permissions::store::Rule>,
-    ) {
-        let mut session_tools = Vec::new();
-        let mut session_dirs: Vec<PathBuf> = Vec::new();
-        for entry in session_entries {
-            if entry.tool == "directory" {
-                session_dirs.push(std::path::PathBuf::from(&entry.pattern));
-            } else {
-                session_tools.push(smelt_core::permissions::SessionToolApproval {
-                    tool: entry.tool,
-                    pattern: (entry.pattern != "*").then_some(entry.pattern),
-                });
+        session_entries: Option<Vec<PermissionEntry>>,
+        session_path_grants: Option<Vec<smelt_core::permissions::SessionPathGrant>>,
+        workspace: Option<smelt_core::permissions::store::Replacement>,
+        repository: Option<smelt_core::permissions::store::Replacement>,
+    ) -> Result<(), String> {
+        if workspace.is_some() && repository.is_some() {
+            return Err(
+                "sync one persisted permission scope at a time so each replacement is atomic"
+                    .into(),
+            );
+        }
+
+        let session_entries = session_entries
+            .map(|entries| {
+                let mut tools = Vec::new();
+                let mut dirs = Vec::new();
+                for entry in entries {
+                    if entry.tool.is_empty() {
+                        return Err("session permission tool name cannot be empty".to_string());
+                    }
+                    if entry.tool == "directory" {
+                        if entry.pattern.is_empty() {
+                            return Err("session permission directory cannot be empty".to_string());
+                        }
+                        dirs.push(PathBuf::from(entry.pattern));
+                    } else {
+                        let pattern = (entry.pattern != "*").then_some(entry.pattern);
+                        if let Some(pattern) = pattern.as_deref() {
+                            glob::Pattern::new(pattern).map_err(|error| {
+                                format!("invalid session pattern for {}: {error}", entry.tool)
+                            })?;
+                        }
+                        tools.push(smelt_core::permissions::SessionToolApproval {
+                            tool: entry.tool,
+                            pattern,
+                        });
+                    }
+                }
+                Ok((tools, dirs))
+            })
+            .transpose()?;
+
+        if let Some(replacement) = workspace {
+            self.core
+                .permission_store
+                .replace(
+                    self.workspace.cwd(),
+                    smelt_core::permissions::store::PersistenceScope::Workspace,
+                    replacement,
+                )
+                .map_err(|error| format!("replace workspace permissions: {error}"))?;
+        }
+        if let Some(replacement) = repository {
+            let repository_key = self
+                .workspace
+                .repository_permission_context()
+                .map(|(key, _)| key.to_path_buf())
+                .ok_or_else(|| "repository permissions require a Git repository".to_string())?;
+            self.core
+                .permission_store
+                .replace(
+                    &repository_key.to_string_lossy(),
+                    smelt_core::permissions::store::PersistenceScope::Repository,
+                    replacement,
+                )
+                .map_err(|error| format!("replace repository permissions: {error}"))?;
+        }
+
+        if session_entries.is_some() || session_path_grants.is_some() {
+            let approval_store = self.core.permissions.approvals();
+            let mut approvals = approval_store
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some((tools, dirs)) = session_entries {
+                approvals.set_session_entries(tools, dirs);
+            }
+            if let Some(path_grants) = session_path_grants {
+                approvals.set_session_path_grants(path_grants);
             }
         }
-
-        self.core.permission_store.save(
-            self.workspace.cwd(),
-            smelt_core::permissions::store::PersistenceScope::Workspace,
-            &workspace_rules,
-        );
-        if let Some((repository_key, _)) = self.workspace.repository_permission_context() {
-            self.core.permission_store.save(
-                &repository_key.to_string_lossy(),
-                smelt_core::permissions::store::PersistenceScope::Repository,
-                &repository_rules,
-            );
-        }
-        {
-            let approval_store = self.core.permissions.approvals();
-            approval_store.write().unwrap().set_session(
-                session_tools,
-                session_dirs,
-                session_path_grants,
-            );
-        }
-        self.reconcile_permissions();
+        Ok(())
     }
 
-    fn reload_permission_store(&mut self) {
-        self.reconcile_permissions();
+    pub(crate) fn revoke_permission(
+        &mut self,
+        scope: &str,
+        tool: &str,
+        pattern: &str,
+    ) -> Result<bool, String> {
+        if scope == "session" {
+            return Ok(self
+                .core
+                .permissions
+                .approvals()
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove_session_entry(tool, pattern));
+        }
+
+        let (root, persistence_scope) = match scope {
+            "workspace" => (
+                std::path::PathBuf::from(self.workspace.cwd()),
+                smelt_core::permissions::store::PersistenceScope::Workspace,
+            ),
+            "repository" => (
+                self.workspace
+                    .repository_permission_context()
+                    .map(|(key, _)| key.to_path_buf())
+                    .ok_or_else(|| "repository permissions require a Git repository".to_string())?,
+                smelt_core::permissions::store::PersistenceScope::Repository,
+            ),
+            _ => return Err(format!("unsupported permission scope `{scope}`")),
+        };
+        self.core
+            .permission_store
+            .remove(&root.to_string_lossy(), persistence_scope, tool, pattern)
+            .map_err(|error| format!("remove {scope} permission: {error}"))
     }
 
     pub(crate) fn clear_session_scoped_permissions_for_session_boundary(&mut self) {
@@ -1857,8 +1931,22 @@ impl TuiApp {
             .permissions
             .approvals()
             .write()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .clear_session();
+    }
+
+    fn reject_failed_persistent_permission(
+        &mut self,
+        invocation_id: protocol::InvocationId,
+        request_id: u64,
+        error: String,
+    ) -> bool {
+        let message = format!("permission was not saved: {error}");
+        self.notify_workspace_error_sticky(message.clone());
+        self.send_permission_decision(request_id, false, Some(message));
+        self.finish_tool(invocation_id, ToolStatus::Denied, None, None);
+        self.conversation.remove_pending_tool(invocation_id);
+        false
     }
 
     /// Resolves a confirm dialog choice; returns `true` if the agent should be cancelled.
@@ -1893,22 +1981,34 @@ impl TuiApp {
                         }
                     }
                     ApprovalTarget::Workspace { root } => {
-                        add_persisted_grants(
+                        let result = add_persisted_grants(
                             &self.core.permission_store,
                             &root,
                             smelt_core::permissions::store::PersistenceScope::Workspace,
-                            option.grants,
+                            &option.grants,
                         );
-                        self.reload_permission_store();
+                        if let Err(error) = result {
+                            return self.reject_failed_persistent_permission(
+                                invocation_id,
+                                request_id,
+                                error,
+                            );
+                        }
                     }
                     ApprovalTarget::Repository { key } => {
-                        add_persisted_grants(
+                        let result = add_persisted_grants(
                             &self.core.permission_store,
                             &key,
                             smelt_core::permissions::store::PersistenceScope::Repository,
-                            option.grants,
+                            &option.grants,
                         );
-                        self.reload_permission_store();
+                        if let Err(error) = result {
+                            return self.reject_failed_persistent_permission(
+                                invocation_id,
+                                request_id,
+                                error,
+                            );
+                        }
                     }
                 }
                 self.set_active_status(invocation_id, ToolStatus::Pending);
@@ -2005,7 +2105,11 @@ impl TuiApp {
                 self.resolve_confirm_by_policy(&req, false, Some(handle_id), "auto_deny", None);
                 true
             }
-            Decision::Ask | Decision::Error(_) => false,
+            Decision::Error(error) => {
+                self.notify_workspace_error_sticky(error);
+                false
+            }
+            Decision::Ask => false,
         }
     }
 
@@ -2067,7 +2171,10 @@ impl TuiApp {
                         );
                         return SessionControl::Continue;
                     }
-                    Decision::Ask | Decision::Error(_) => {}
+                    Decision::Error(ref error) => {
+                        self.notify_workspace_error_sticky(error.clone());
+                    }
+                    Decision::Ask => {}
                 }
 
                 if should_queue {
@@ -2131,7 +2238,15 @@ fn confirm_grant_options(
         });
         out.push(smelt_core::transcript_model::ConfirmApprovalOption {
             id: format!("grant_{idx}_workspace"),
-            label: format!("allow {subject} in {}", pretty_cwd(cwd, home)),
+            label: format!(
+                "allow {subject} in {} {}",
+                if repository.is_some() {
+                    "this worktree"
+                } else {
+                    "workspace"
+                },
+                pretty_cwd(cwd, home)
+            ),
             target: ApprovalTarget::Workspace {
                 root: std::path::PathBuf::from(cwd),
             },
@@ -2141,7 +2256,7 @@ fn confirm_grant_options(
             out.push(smelt_core::transcript_model::ConfirmApprovalOption {
                 id: format!("grant_{idx}_repository"),
                 label: format!(
-                    "allow {subject} in repo {}",
+                    "allow {subject} in project {} (all worktrees)",
                     pretty_path(display_root, home)
                 ),
                 target: ApprovalTarget::Repository {
@@ -2168,11 +2283,11 @@ fn add_persisted_grants(
     store: &smelt_core::permissions::store::PermissionStore,
     root: &std::path::Path,
     scope: smelt_core::permissions::store::PersistenceScope,
-    grants: Vec<smelt_core::permissions::PermissionGrant>,
-) {
-    for grant in grants {
-        store.add_grant(&root.to_string_lossy(), scope, grant);
-    }
+    grants: &[smelt_core::permissions::PermissionGrant],
+) -> Result<(), String> {
+    store
+        .add_grants(&root.to_string_lossy(), scope, grants)
+        .map_err(|error| format!("save persisted permission: {error}"))
 }
 
 fn display_safe_process_id(id: &str) -> String {

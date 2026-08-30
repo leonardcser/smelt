@@ -1498,7 +1498,7 @@ Register Lua callbacks against custom paint regions.
 
 #### `smelt.permissions`
 
-List, sync, and extend permission policy state.
+Inspect, revoke, sync, and extend permission policy state.
 
 - `smelt.permissions.check` :: `fun(mode_str: string, bucket: string, value: string): string`
   Decide a tool-specific pattern bucket (e.g.
@@ -1509,9 +1509,11 @@ List, sync, and extend permission policy state.
 - `smelt.permissions.grant_session` :: `fun(grant: smelt.permissions.SessionPathGrant): nil`
   Add one session-scoped grant.
 - `smelt.permissions.list` :: `fun(): smelt.permissions.ListResult`
-  Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } }, repository = { { tool, patterns } } }`.
+  Return current permission rules and persisted scope revisions.
+- `smelt.permissions.revoke` :: `fun(spec: smelt.permissions.RevokeSpec): boolean`
+  Remove one exact session, workspace, or repository permission entry transactionally.
 - `smelt.permissions.sync` :: `fun(spec: smelt.permissions.SyncSpec): nil`
-  Replace runtime and persisted permission entries with `spec.session`, `spec.path_grants`, `spec.workspace`, and `spec.repository`.
+  Replace selected permission entries.
 
 #### `smelt.picker`
 

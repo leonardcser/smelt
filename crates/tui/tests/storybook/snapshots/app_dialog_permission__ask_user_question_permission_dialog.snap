@@ -22,7 +22,7 @@ expression: text
   1. allow once
   2. deny
   3. allow ask_user_question for this session
-  4. allow ask_user_question in ~/cwd
+  4. allow ask_user_question in workspace ~/cwd
 
   press tab to add a reason…
  ○ normal                                                       1:1 0%

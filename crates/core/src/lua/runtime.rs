@@ -1169,6 +1169,7 @@ impl LuaRuntime {
             "smelt.os.setenv",
             "smelt.os.unsetenv",
             "smelt.permissions.grant_session",
+            "smelt.permissions.revoke",
             "smelt.permissions.sync",
             "smelt.process.detach_foreground",
             "smelt.process.kill",
