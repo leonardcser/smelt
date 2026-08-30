@@ -172,7 +172,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
-local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v2"
+local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v3"
 local transcript = smelt.transcript
 local base_renderer = transcript.__get_renderer and transcript.__get_renderer() or nil
 local base_renderer_cache_key = nil

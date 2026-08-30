@@ -21,9 +21,8 @@ end
 
 local function child_status_hl(child)
   if defaults.child_failed(child) then return "ErrorMsg" end
-  if child.status == "pending" then return "SmeltToolPending" end
-  if child.status == "confirm" then return "SmeltAccent" end
-  return "SmeltSuccess"
+  if child.status == "pending" or child.status == "drafting" then return "SmeltToolPending" end
+  return nil
 end
 
 local function aggregate_status_hl(group)
@@ -31,7 +30,7 @@ local function aggregate_status_hl(group)
   local has_confirm = false
   for _, child in ipairs(defaults.group_children(group)) do
     if defaults.child_failed(child) then return "ErrorMsg" end
-    has_pending = has_pending or child.status == "pending"
+    has_pending = has_pending or child.status == "pending" or child.status == "drafting"
     has_confirm = has_confirm or child.status == "confirm"
   end
   if has_pending then return "SmeltToolPending" end
@@ -137,9 +136,7 @@ local function render_compact_group_list(group, label)
   end
   for i = start, #children do
     local child = children[i]
-    local span = { text = tostring(label(child)) }
-    local hl = child_status_hl(child)
-    if hl == "ErrorMsg" then span.hl = hl end
+    local span = { text = tostring(label(child)), hl = child_status_hl(child) }
     lines[#lines + 1] = { span }
   end
   if #lines == 0 then return layout.empty() end
