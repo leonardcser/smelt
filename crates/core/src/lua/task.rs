@@ -47,7 +47,7 @@ pub enum TaskCompletion {
 }
 
 impl TaskCompletion {
-    fn error_label(&self, task_id: u64) -> String {
+    fn notification_label(&self, task_id: u64) -> String {
         match self {
             TaskCompletion::Command { name, .. } => format!("cmd `{name}`"),
             _ => format!("task {task_id}"),
@@ -97,7 +97,7 @@ pub enum TaskDriveOutput {
         display_content: Vec<protocol::ToolDisplayContent>,
         attachment: Option<Box<protocol::ToolAttachment>>,
     },
-    Error(String),
+    NotifyError(String),
 }
 
 pub enum TaskEvent {
@@ -365,7 +365,7 @@ pub(crate) fn step_task_owned(
 ) -> Option<LuaTask> {
     if task.timed_out(now) {
         task.cancel.cancel();
-        emit_task_failure(&task, &task.timeout_message(), outputs);
+        emit_task_timeout(&task, outputs);
         return None;
     }
 
@@ -527,10 +527,19 @@ fn cancelled_marker(lua: &Lua) -> LuaValue {
         .unwrap_or(LuaValue::Nil)
 }
 
+fn emit_task_timeout(task: &LuaTask, outputs: &mut Vec<TaskDriveOutput>) {
+    let message = task.timeout_message();
+    if matches!(&task.completion, TaskCompletion::ToolResult { .. }) {
+        fail_completion(&task.completion, &message, outputs);
+    } else {
+        emit_task_failure(task, &message, outputs);
+    }
+}
+
 fn emit_task_failure(task: &LuaTask, msg: &str, outputs: &mut Vec<TaskDriveOutput>) {
-    outputs.push(TaskDriveOutput::Error(format!(
+    outputs.push(TaskDriveOutput::NotifyError(format!(
         "{}: {msg}",
-        task.completion.error_label(task.id)
+        task.completion.notification_label(task.id)
     )));
     fail_completion(&task.completion, msg, outputs);
 }
@@ -716,8 +725,46 @@ mod tests {
 
         let out = rt.drive(&lua, t0 + Duration::from_millis(101));
         assert!(
-            matches!(out.as_slice(), [TaskDriveOutput::Error(msg)] if msg.contains("timed out"))
+            matches!(out.as_slice(), [TaskDriveOutput::NotifyError(msg)] if msg.contains("timed out"))
         );
+        assert!(rt.tasks.is_empty());
+    }
+
+    #[test]
+    fn tool_timeout_reports_only_failing_completion() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua.load("function() smelt.sleep(1000) end").eval().unwrap();
+        let t0 = Instant::now();
+        rt.spawn_scoped(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::ToolResult {
+                invocation: tool_invocation(7),
+                call_id: "slow-tool".into(),
+            },
+            TaskScope::Turn,
+            Some(TaskDeadline {
+                at: t0 + Duration::from_millis(100),
+                label_ms: 100,
+                paused_at: None,
+            }),
+        )
+        .unwrap();
+
+        assert!(rt.drive(&lua, t0).is_empty());
+        let out = rt.drive(&lua, t0 + Duration::from_millis(101));
+
+        assert!(matches!(
+            out.as_slice(),
+            [TaskDriveOutput::ToolComplete {
+                call_id,
+                content,
+                is_error: true,
+                ..
+            }] if call_id == "slow-tool" && content == "tool error: timed out after 0.1s"
+        ));
         assert!(rt.tasks.is_empty());
     }
 
@@ -922,7 +969,7 @@ mod tests {
 
         let output = runtime.drive(&lua, Instant::now());
         assert!(output.iter().any(
-            |output| matches!(output, TaskDriveOutput::Error(message) if message.contains("table cycle"))
+            |output| matches!(output, TaskDriveOutput::NotifyError(message) if message.contains("table cycle"))
         ));
         assert!(output.iter().any(|output| matches!(
             output,
@@ -965,7 +1012,7 @@ mod tests {
                     display_content,
                     ..
                 } => Some((content, is_error, metadata, display_content)),
-                TaskDriveOutput::Error(_) => None,
+                TaskDriveOutput::NotifyError(_) => None,
             })
             .unwrap();
         assert!(*completion.1);
@@ -1087,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_error_reports_task_error_and_tool_error() {
+    fn handler_error_reports_notification_and_tool_error() {
         let lua = lua_with_sleep();
         let mut rt = LuaTaskRuntime::new();
         let func: mlua::Function = lua.load(r#"function() error("bang") end"#).eval().unwrap();
@@ -1102,14 +1149,13 @@ mod tests {
         )
         .unwrap();
         let out = rt.drive(&lua, Instant::now());
-        // Error notification + failing tool completion.
-        let has_error = out
+        let has_notification = out
             .iter()
-            .any(|o| matches!(o, TaskDriveOutput::Error(m) if m.contains("bang")));
+            .any(|o| matches!(o, TaskDriveOutput::NotifyError(m) if m.contains("bang")));
         let has_tool_err = out
             .iter()
             .any(|o| matches!(o, TaskDriveOutput::ToolComplete { is_error: true, .. }));
-        assert!(has_error);
+        assert!(has_notification);
         assert!(has_tool_err);
         assert_eq!(rt.tasks.len(), 0);
     }
@@ -1341,8 +1387,9 @@ mod tests {
 
         let out = rt.drive(&lua, Instant::now());
         assert!(
-            out.iter()
-                .any(|o| matches!(o, TaskDriveOutput::Error(msg) if msg.contains("cancelled"))),
+            out.iter().any(
+                |o| matches!(o, TaskDriveOutput::NotifyError(msg) if msg.contains("cancelled"))
+            ),
             "plain user error named cancelled should be reported: {out:?}"
         );
     }

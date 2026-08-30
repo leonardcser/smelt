@@ -2042,7 +2042,7 @@ impl LuaRuntime {
         for out in outs {
             match out {
                 TaskDriveOutput::ToolComplete { .. } => forward.push(out),
-                TaskDriveOutput::Error(msg) => self.record_error(msg),
+                TaskDriveOutput::NotifyError(msg) => self.record_error(msg),
             }
         }
         forward
@@ -2968,7 +2968,7 @@ impl LuaRuntime {
                     });
                 }
                 TaskDriveOutput::ToolComplete { .. } => {}
-                TaskDriveOutput::Error(msg) => self.record_error(msg),
+                TaskDriveOutput::NotifyError(msg) => self.record_error(msg),
             }
         }
         match immediate {

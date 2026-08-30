@@ -225,7 +225,7 @@ impl TuiApp {
                         },
                     );
                 }
-                crate::lua::TaskDriveOutput::Error(msg) => {
+                crate::lua::TaskDriveOutput::NotifyError(msg) => {
                     self.notify_error(msg);
                 }
             }

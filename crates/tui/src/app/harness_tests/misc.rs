@@ -1982,6 +1982,59 @@ fn timed_notification_expires_after_ttl() {
 }
 
 #[test]
+fn lua_tool_watchdog_timeout_is_reported_only_as_tool_result() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.run_lua_result(
+        r#"
+        smelt.tools.register({
+            name = "watchdog_timeout_probe",
+            description = "wait past the tool watchdog",
+            parameters = { type = "object", properties = {} },
+            watchdog_timeout_ms = 100,
+            execute = function()
+                smelt.sleep(1000)
+                return "unexpected completion"
+            end,
+        })
+        "#,
+    )
+    .expect("register timeout probe");
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        request_id: 41,
+        invocation_id: protocol::InvocationId::new(41),
+        call_id: "watchdog-timeout".into(),
+        tool_name: "watchdog_timeout_probe".into(),
+        args: std::collections::HashMap::new(),
+    }));
+    app.feed_one(SourceEvent::Tick(101));
+    app.feed_one(SourceEvent::LuaWakeup);
+
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(command)
+            if matches!(
+                command.as_ref(),
+                protocol::UiCommand::ToolResult {
+                    request_id: 41,
+                    call_id,
+                    content,
+                    is_error: true,
+                    ..
+                } if call_id == "watchdog-timeout" && content.contains("timed out after 0.1s")
+            )
+    )));
+    assert!(
+        app.overlays_probe().notification().is_none(),
+        "tool timeout also opened a notification: {:?}",
+        app.overlays_probe()
+            .notification()
+            .map(|notification| &notification.summary)
+    );
+}
+
+#[test]
 fn sticky_notification_waits_for_escape() {
     let mut app = TestApp::builder().with_vim(false).build();
 
