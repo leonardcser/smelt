@@ -978,6 +978,8 @@ Pure path arithmetic: normalize, join, relative, expand, display, etc.
   Return the parent directory of `p`, or `nil` if `p` has no parent component.
 - `smelt.path.relative` :: `fun(base: string, target: string): string`
   Return the path of `target` expressed relative to `base`.
+- `smelt.path.resolve` :: `fun(p: string): string`
+  Resolve runtime path `p` to a normalized absolute path.
 
 #### `smelt.perf`
 

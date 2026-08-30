@@ -1613,6 +1613,26 @@ fn relative_lua_cwd_change_resolves_from_runtime_cwd() {
 }
 
 #[test]
+fn tilde_lua_cwd_change_resolves_from_runtime_home() {
+    let environment_guard = test_environment_guard();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let target = app.runtime_home().join("tilde-project");
+    std::fs::create_dir_all(&target).expect("create tilde target cwd");
+    let expected = std::fs::canonicalize(target).expect("canonical tilde target cwd");
+
+    assert!(app.run_lua(
+        r#"
+        local out = smelt.session.switch_cwd("~/tilde-project")
+        assert(out.pending == true)
+        "#,
+    ));
+    assert!(app.drain_idle_work());
+
+    assert_eq!(app.core_probe().env.cwd(), expected);
+    assert_eq!(std::env::current_dir().unwrap(), expected);
+}
+
+#[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");

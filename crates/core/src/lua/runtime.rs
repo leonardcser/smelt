@@ -24,6 +24,28 @@ use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolSta
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolWorkspacePaths {
+    Undeclared,
+    Declared(Vec<ToolPath>),
+}
+
+impl ToolWorkspacePaths {
+    pub fn as_slice(&self) -> &[ToolPath] {
+        match self {
+            Self::Undeclared => &[],
+            Self::Declared(paths) => paths,
+        }
+    }
+
+    pub fn into_paths(self) -> Vec<ToolPath> {
+        match self {
+            Self::Undeclared => Vec::new(),
+            Self::Declared(paths) => paths,
+        }
+    }
+}
+
 pub struct ShutdownHookContext<'a> {
     pub session_id: &'a str,
     pub has_messages: bool,
@@ -2140,72 +2162,117 @@ impl LuaRuntime {
         defs
     }
 
-    fn lua_value_to_tool_path(value: mlua::Value) -> Option<ToolPath> {
-        match value {
-            mlua::Value::String(s) => Some(ToolPath::unknown(s.to_string_lossy())),
-            mlua::Value::Table(t) => {
-                let path = t
+    fn lua_value_to_tool_path(value: mlua::Value) -> Result<ToolPath, String> {
+        let (path, target_kind) = match value {
+            mlua::Value::String(path) => (path.to_string_lossy(), PathTargetKind::Unknown),
+            mlua::Value::Table(table) => {
+                let path = match table
                     .get::<Option<String>>("path")
-                    .ok()
-                    .flatten()
-                    .or_else(|| t.get::<Option<String>>(1).ok().flatten())?;
-                let kind = t
+                    .map_err(|error| format!("read `path`: {error}"))?
+                {
+                    Some(path) => Some(path),
+                    None => table
+                        .get::<Option<String>>(1)
+                        .map_err(|error| format!("read positional path: {error}"))?,
+                }
+                .ok_or_else(|| "missing string `path`".to_string())?;
+                let kind = match table
                     .get::<Option<String>>("kind")
-                    .ok()
-                    .flatten()
-                    .or_else(|| t.get::<Option<String>>("target_kind").ok().flatten())
-                    .unwrap_or_else(|| "unknown".to_string())
-                    .trim()
-                    .to_ascii_lowercase();
+                    .map_err(|error| format!("read `kind`: {error}"))?
+                {
+                    Some(kind) => Some(kind),
+                    None => table
+                        .get::<Option<String>>("target_kind")
+                        .map_err(|error| format!("read `target_kind`: {error}"))?,
+                }
+                .unwrap_or_else(|| "unknown".to_string())
+                .trim()
+                .to_ascii_lowercase();
                 let target_kind = match kind.as_str() {
                     "file" => PathTargetKind::File,
                     "dir" | "directory" => PathTargetKind::Directory,
-                    _ => PathTargetKind::Unknown,
+                    "" | "unknown" => PathTargetKind::Unknown,
+                    _ => return Err(format!("unknown path kind `{kind}`")),
                 };
-                Some(ToolPath { path, target_kind })
+                (path, target_kind)
             }
-            _ => None,
+            value => {
+                return Err(format!(
+                    "expected a path string or table, got {}",
+                    value.type_name()
+                ));
+            }
+        };
+        if path.is_empty() {
+            return Err("path must not be empty".to_string());
         }
+        Ok(ToolPath { path, target_kind })
     }
 
-    /// Call a tool's `paths_for_workspace(args)` callback; returns touched paths for boundary checks.
+    fn parse_tool_workspace_paths(table: mlua::Table) -> Result<Vec<ToolPath>, String> {
+        let sequence_len = table.raw_len();
+        for pair in table.clone().pairs::<mlua::Value, mlua::Value>() {
+            let (key, _) = pair.map_err(|error| format!("read returned paths: {error}"))?;
+            let in_sequence = matches!(
+                key,
+                mlua::Value::Integer(index)
+                    if index >= 1 && usize::try_from(index).ok().is_some_and(|index| index <= sequence_len)
+            );
+            if !in_sequence {
+                return Err("expected an array of path entries".to_string());
+            }
+        }
+
+        let mut paths = Vec::with_capacity(sequence_len);
+        for index in 1..=sequence_len {
+            let value = table
+                .raw_get::<mlua::Value>(index)
+                .map_err(|error| format!("read path entry {index}: {error}"))?;
+            let path = Self::lua_value_to_tool_path(value)
+                .map_err(|error| format!("invalid path entry {index}: {error}"))?;
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+
+    fn tool_workspace_paths_error(&self, tool_name: &str, error: impl std::fmt::Display) -> String {
+        let message = format!("tool paths_for_workspace `{tool_name}` failed: {error}");
+        self.record_error(message.clone());
+        message
+    }
+
+    /// Call a tool's `paths_for_workspace(args)` callback.
+    ///
+    /// Missing callbacks are distinguished from callbacks that successfully
+    /// declare no paths. Callback, conversion, and return-shape failures are
+    /// errors so workspace restrictions cannot silently treat them as pathless.
     pub fn tool_paths_for_workspace(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-    ) -> Vec<ToolPath> {
+    ) -> Result<ToolWorkspacePaths, String> {
         let func = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(h) = handlers.get(tool_name) else {
-                return Vec::new();
+            let Some(handles) = handlers.get(tool_name) else {
+                return Ok(ToolWorkspacePaths::Undeclared);
             };
-            let Some(rh) = h.paths_for_workspace.as_ref() else {
-                return Vec::new();
+            let Some(handle) = handles.paths_for_workspace.as_ref() else {
+                return Ok(ToolWorkspacePaths::Undeclared);
             };
-            match self.lua.registry_value::<mlua::Function>(&rh.key) {
-                Ok(f) => f,
-                Err(_) => return Vec::new(),
-            }
+            self.lua
+                .registry_value::<mlua::Function>(&handle.key)
+                .map_err(|error| self.tool_workspace_paths_error(tool_name, error))?
         };
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool paths_for_workspace: build args: {e}"));
-                return Vec::new();
-            }
-        };
+        let args_table = self
+            .args_to_lua_table(args)
+            .map_err(|error| self.tool_workspace_paths_error(tool_name, error))?;
         let _perf = smelt_perf::perf::begin("lua:tool");
-        match func.call::<Option<mlua::Table>>(args_table) {
-            Ok(Some(t)) => t
-                .sequence_values::<mlua::Value>()
-                .filter_map(|r| r.ok().and_then(Self::lua_value_to_tool_path))
-                .collect(),
-            Ok(None) => Vec::new(),
-            Err(e) => {
-                self.record_error(format!("tool paths_for_workspace `{tool_name}`: {e}"));
-                Vec::new()
-            }
-        }
+        let table = func
+            .call::<mlua::Table>(args_table)
+            .map_err(|error| self.tool_workspace_paths_error(tool_name, error))?;
+        Self::parse_tool_workspace_paths(table)
+            .map(ToolWorkspacePaths::Declared)
+            .map_err(|error| self.tool_workspace_paths_error(tool_name, error))
     }
 
     pub fn tool_has_preview(&self, tool_name: &str) -> bool {

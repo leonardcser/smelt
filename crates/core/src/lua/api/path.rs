@@ -54,6 +54,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let resolve_context = Arc::clone(shared);
+    m.fn_(
+        "resolve",
+        "Resolve runtime path `p` to a normalized absolute path. Expands a leading `~` using the runtime home and resolves relative paths from the runtime cwd without touching the filesystem or expanding environment variables.",
+        &["p"],
+        move |_, p: String| {
+            Ok(to_string(crate::path::resolve_from(
+                p,
+                resolve_context.evaluation_cwd(),
+                resolve_context.runtime_home(),
+            )))
+        },
+    )?;
+
     m.fn_(
         "join",
         "Join the variadic `parts` into a single path using the platform separator.",

@@ -17,7 +17,7 @@ pub use hooks::{composite_reg, HookEntry, HookRegistry};
 pub use runtime::{
     autoload_modules, autoload_modules_filtered, ensure_builtins_extracted, init_lua_path,
     load_bootstrap_chunks, LuaLoadFailureLocation, LuaRuntime, ShutdownHookContext, ToolVisibility,
-    OPTIONAL_PLUGINS,
+    ToolWorkspacePaths, OPTIONAL_PLUGINS,
 };
 pub use shared::{
     AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, CommandBusyBehavior, DefaultShell, Hooks,

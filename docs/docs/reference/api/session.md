@@ -232,7 +232,7 @@ Return compact live status for prompt/status bars: `{ model, provider, api_base,
 fun(path: string): table
 ```
 
-Request a coherent project-context transition. Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots commit together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ cwd, pending }`.
+Request a coherent project-context transition. Relative paths resolve from the current cwd, and a leading `~` resolves from the runtime home. Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots commit together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ cwd, pending }`.
 
 ## `smelt.session.system`
 

@@ -2188,15 +2188,29 @@ impl TuiApp {
 
     /// Submit the latest cumulative document intent and wait for its exact generation.
     pub(crate) fn save_session_and_flush(&mut self) {
+        self.save_session_and_flush_with_timeout(crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
+    }
+
+    pub(crate) fn save_session_and_flush_with_timeout(&mut self, timeout: std::time::Duration) {
         self.save_session();
         if self.conversation.has_persistence() {
-            let _ = self.flush_persist();
+            let _ = self.flush_persist_until(std::time::Instant::now() + timeout);
         }
     }
 
     /// Wait for the current document generation without retrying or sleeping.
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
-        let outcome = self.conversation.flush_persistence();
+        self.flush_persist_until(
+            std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+        )
+    }
+
+    pub(crate) fn flush_persist_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> crate::persist::PersistenceFlushOutcome {
+        let outcome = self.conversation.flush_persistence_until(deadline);
         self.drain_persist_reports();
         match &outcome {
             crate::persist::PersistenceFlushOutcome::Blocked { cause, .. }

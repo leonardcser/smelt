@@ -762,7 +762,11 @@ impl TestApp {
     }
 
     pub fn save_session_and_flush(&mut self) {
-        self.app.save_session_and_flush();
+        // Harness callers immediately inspect or reopen the exact generation.
+        // Use one completion barrier that tolerates a contended test runner
+        // instead of proceeding after the production persistence deadline.
+        self.app
+            .save_session_and_flush_with_timeout(std::time::Duration::from_secs(120));
     }
 
     pub(crate) fn finalize_graceful_shutdown(&mut self) -> Result<(), String> {

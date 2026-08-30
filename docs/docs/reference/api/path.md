@@ -112,3 +112,11 @@ fun(base: string, target: string): string
 
 Return the path of `target` expressed relative to `base`.
 
+## `smelt.path.resolve`
+
+```lua
+fun(p: string): string
+```
+
+Resolve runtime path `p` to a normalized absolute path. Expands a leading `~` using the runtime home and resolves relative paths from the runtime cwd without touching the filesystem or expanding environment variables.
+

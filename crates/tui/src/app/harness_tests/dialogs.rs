@@ -994,6 +994,7 @@ fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
         tool_name: "test_tool".into(),
         args: std::collections::HashMap::new(),
         tool_paths: Vec::new(),
+        tool_paths_error: None,
         approval_candidates: Vec::new(),
         grant_options: Vec::new(),
         summary: protocol::StyledLines::from_plain("test tool"),
@@ -1471,6 +1472,41 @@ fn command_session_grant_survives_cancel_and_rewind() {
     );
 }
 
+fn evaluate_tool(
+    app: &mut TestApp,
+    request_id: u64,
+    call_id: &str,
+    tool_name: &str,
+    args: std::collections::HashMap<String, serde_json::Value>,
+    mode: protocol::AgentMode,
+) -> protocol::Decision {
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::ToolEvaluationRequest {
+            invocation_id: protocol::InvocationId::new(request_id),
+            request_id,
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            args,
+            mode,
+        },
+    ));
+
+    app.actions()
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::ToolEvaluationResponse {
+                    request_id: response_id,
+                    evaluation,
+                } if *response_id == request_id => Some(evaluation.decision.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("tool evaluation response")
+}
+
 #[test]
 fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
     let mut app = TestApp::builder().build();
@@ -1479,28 +1515,233 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
     app.set_configured_agent_mode_for_harness(protocol::AgentMode::parse("deny").unwrap());
     let _ = app.drain_engine_sends();
 
+    let decision = evaluate_tool(
+        &mut app,
+        91,
+        "call-91",
+        "test_tool",
+        std::collections::HashMap::new(),
+        protocol::AgentMode::parse("apply").unwrap(),
+    );
+    assert_eq!(decision, protocol::Decision::Allow);
+}
+
+#[test]
+fn switch_cwd_outside_workspace_requires_destination_permission() {
+    let environment_guard = test_environment_guard();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let target = app.runtime_home().join("outside-project");
+    std::fs::create_dir_all(&target).expect("create outside-workspace directory");
+    let target = std::fs::canonicalize(target).expect("canonicalize target directory");
+    let raw_target = "~/outside-project";
+    let args = std::collections::HashMap::from([(
+        "path".to_string(),
+        serde_json::Value::String(raw_target.to_string()),
+    )]);
+
+    let original_cwd = app.cwd_str().to_owned();
+    app.restrict_permissions_to_cwd();
+    app.approve_tool_for_session("switch_cwd");
+    app.start_turn(1);
+    let _ = app.drain_engine_sends();
+
+    let decision = evaluate_tool(
+        &mut app,
+        90,
+        "switch-cwd",
+        "switch_cwd",
+        args.clone(),
+        protocol::AgentMode::parse("yolo").unwrap(),
+    );
+    assert_eq!(decision, protocol::Decision::Ask);
+
     app.feed_one(SourceEvent::engine(
-        protocol::EngineEvent::ToolEvaluationRequest {
-            invocation_id: protocol::InvocationId::new(91),
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(90),
             request_id: 91,
-            call_id: "call-91".into(),
-            tool_name: "test_tool".into(),
-            args: std::collections::HashMap::new(),
-            mode: protocol::AgentMode::parse("apply").unwrap(),
+            call_id: "switch-cwd".into(),
+            tool_name: "switch_cwd".into(),
+            args: args.clone(),
+            approval_patterns: Vec::new(),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain(target.to_string_lossy()),
         },
     ));
 
-    let decision = app.actions().iter().rev().find_map(|action| match action {
-        Action::EngineSend(command) => match command.as_ref() {
-            protocol::UiCommand::ToolEvaluationResponse {
-                request_id: 91,
-                evaluation,
-            } => Some(evaluation.decision.clone()),
-            _ => None,
+    let handle_id = app
+        .first_pending_confirm()
+        .expect("outside destination opens a permission dialog");
+    let request = &app
+        .core_probe()
+        .confirms
+        .get(handle_id)
+        .expect("pending switch_cwd confirm")
+        .req;
+    assert_eq!(
+        request.tool_paths,
+        vec![smelt_core::permissions::ToolPath::directory(
+            target.to_string_lossy()
+        )]
+    );
+    assert!(request.grant_options.iter().any(|option| {
+        matches!(option.target, smelt_core::ApprovalTarget::Session)
+            && option.grants
+                == vec![smelt_core::permissions::PermissionGrant::PathPrefix {
+                    dir: target.clone(),
+                }]
+    }));
+    assert!(request.grant_options.iter().any(|option| {
+        matches!(option.target, smelt_core::ApprovalTarget::Workspace { .. })
+            && option.grants
+                == vec![smelt_core::permissions::PermissionGrant::PathPrefix {
+                    dir: target.clone(),
+                }]
+    }));
+    assert_eq!(app.cwd_str(), original_cwd);
+
+    assert!(app.resolve_first_confirm(true, None));
+    assert_eq!(app.cwd_str(), original_cwd);
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(90),
+        request_id: 92,
+        call_id: "switch-cwd".into(),
+        tool_name: "switch_cwd".into(),
+        args,
+    }));
+
+    assert_eq!(app.core_probe().env.cwd(), target);
+    assert_eq!(std::env::current_dir().unwrap(), target);
+}
+
+#[test]
+fn switch_cwd_outside_repository_offers_repository_scoped_destination_grant() {
+    let fixture = GitWorktreeFixture::new();
+    let outside = tempfile::tempdir().expect("create outside repository target");
+    let target = std::fs::canonicalize(outside.path()).expect("canonical outside target");
+    let active = std::fs::canonicalize(&fixture.feature).expect("canonical active worktree");
+    let mut app = TestApp::builder().with_cwd(active).build();
+    let mut permissions = app.core_probe().permissions.snapshot().as_ref().clone();
+    permissions.set_restrict_to_workspace(true);
+    app.replace_permissions_for_harness(permissions);
+    app.approve_tool_for_session("switch_cwd");
+    app.start_turn(1);
+    let args = std::collections::HashMap::from([(
+        "path".to_string(),
+        serde_json::Value::String(target.to_string_lossy().into_owned()),
+    )]);
+    let _ = app.drain_engine_sends();
+
+    assert_eq!(
+        evaluate_tool(
+            &mut app,
+            98,
+            "switch-outside-repository",
+            "switch_cwd",
+            args.clone(),
+            protocol::AgentMode::parse("yolo").unwrap(),
+        ),
+        protocol::Decision::Ask
+    );
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(98),
+            request_id: 99,
+            call_id: "switch-outside-repository".into(),
+            tool_name: "switch_cwd".into(),
+            args,
+            approval_patterns: Vec::new(),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain(target.to_string_lossy()),
         },
-        _ => None,
-    });
-    assert_eq!(decision, Some(protocol::Decision::Allow));
+    ));
+
+    let handle_id = app
+        .first_pending_confirm()
+        .expect("outside destination opens a permission dialog");
+    let options = &app
+        .core_probe()
+        .confirms
+        .get(handle_id)
+        .expect("switch_cwd confirm")
+        .req
+        .grant_options;
+    let repository = options
+        .iter()
+        .find(|option| matches!(option.target, smelt_core::ApprovalTarget::Repository { .. }))
+        .expect("repository-scoped switch_cwd grant");
+    assert_eq!(
+        repository.target,
+        smelt_core::ApprovalTarget::Repository {
+            key: fixture.repository_key(),
+        }
+    );
+    assert_eq!(
+        repository.grants,
+        vec![smelt_core::permissions::PermissionGrant::PathPrefix { dir: target }]
+    );
+}
+
+#[test]
+fn switch_cwd_between_repository_worktrees_remains_allowed() {
+    let fixture = GitWorktreeFixture::new();
+    let environment_guard = test_environment_guard();
+    let active = std::fs::canonicalize(&fixture.feature).expect("canonical active worktree");
+    let target = std::fs::canonicalize(fixture.repo.path()).expect("canonical main checkout");
+    let mut app = TestApp::builder()
+        .with_cwd(&active)
+        .build_with_test_environment_guard(&environment_guard);
+    let mut permissions = app.core_probe().permissions.snapshot().as_ref().clone();
+    permissions.set_restrict_to_workspace(true);
+    app.replace_permissions_for_harness(permissions);
+    app.approve_tool_for_session("switch_cwd");
+    app.start_turn(1);
+    let _ = app.drain_engine_sends();
+
+    let decision = evaluate_tool(
+        &mut app,
+        93,
+        "switch-worktree",
+        "switch_cwd",
+        std::collections::HashMap::from([(
+            "path".to_string(),
+            serde_json::Value::String(target.to_string_lossy().into_owned()),
+        )]),
+        protocol::AgentMode::parse("yolo").unwrap(),
+    );
+    assert_eq!(decision, protocol::Decision::Allow);
+}
+
+#[test]
+fn switch_cwd_relative_path_is_evaluated_from_runtime_cwd() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let active_root = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let nested = active_root.join("nested");
+    std::fs::create_dir(&nested).expect("create nested cwd");
+    let environment_guard = test_environment_guard();
+    let mut app = TestApp::builder()
+        .with_cwd(&nested)
+        .build_with_test_environment_guard(&environment_guard);
+    let mut permissions = app.core_probe().permissions.snapshot().as_ref().clone();
+    permissions.set_allowed_roots(active_root, Vec::new());
+    permissions.set_restrict_to_workspace(true);
+    app.replace_permissions_for_harness(permissions);
+    app.approve_tool_for_session("switch_cwd");
+    app.start_turn(1);
+    let _ = app.drain_engine_sends();
+
+    let decision = evaluate_tool(
+        &mut app,
+        94,
+        "switch-parent",
+        "switch_cwd",
+        std::collections::HashMap::from([(
+            "path".to_string(),
+            serde_json::Value::String("..".to_string()),
+        )]),
+        protocol::AgentMode::parse("yolo").unwrap(),
+    );
+    assert_eq!(decision, protocol::Decision::Allow);
 }
 
 #[test]
@@ -1594,6 +1835,128 @@ fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
 
     assert!(!app.resolve_open_confirm_for_current_mode(handle_id));
     assert_eq!(app.lua_int_global("path_callback_count"), Some(2));
+}
+
+#[test]
+fn tool_path_callback_failure_fails_closed_without_opening_a_dialog() {
+    let mut app = TestApp::builder().build();
+    app.restrict_permissions_to_cwd();
+    app.start_turn(1);
+    app.run_lua_result(
+        r#"
+        smelt.tools.register({
+            name = "broken_path_callback",
+            description = "broken workspace path callback",
+            parameters = { type = "object", properties = {} },
+            effect = "write",
+            permission_defaults = { yolo = "allow" },
+            paths_for_workspace = function()
+                error("path callback exploded")
+            end,
+            execute = function() return "should not run" end,
+        })
+        "#,
+    )
+    .expect("register tool with failing path callback");
+    app.approve_tool_for_session("broken_path_callback");
+    let _ = app.drain_engine_sends();
+
+    let decision = evaluate_tool(
+        &mut app,
+        95,
+        "broken-path-callback",
+        "broken_path_callback",
+        std::collections::HashMap::new(),
+        protocol::AgentMode::parse("yolo").unwrap(),
+    );
+    assert!(
+        matches!(
+            decision,
+            protocol::Decision::Error(ref error)
+                if error.contains("paths_for_workspace")
+                    && error.contains("path callback exploded")
+        ),
+        "unexpected evaluation decision: {decision:?}"
+    );
+
+    let before = app.actions().len();
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(95),
+            request_id: 96,
+            call_id: "broken-path-callback".into(),
+            tool_name: "broken_path_callback".into(),
+            args: std::collections::HashMap::new(),
+            approval_patterns: Vec::new(),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain("broken path callback"),
+        },
+    ));
+
+    assert_eq!(app.pending_confirm_count(), 0);
+    let denial = app
+        .actions_since(before)
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::PermissionDecision {
+                    request_id: 96,
+                    approved,
+                    message,
+                } => Some((*approved, message.clone())),
+                _ => None,
+            },
+            _ => None,
+        });
+    assert!(matches!(
+        denial,
+        Some((false, Some(ref message)))
+            if message.contains("paths_for_workspace")
+                && message.contains("path callback exploded")
+    ));
+}
+
+#[test]
+fn malformed_tool_path_callback_entry_fails_closed_in_yolo() {
+    let mut app = TestApp::builder().build();
+    app.restrict_permissions_to_cwd();
+    app.start_turn(1);
+    app.run_lua_result(
+        r#"
+        smelt.tools.register({
+            name = "malformed_path_callback",
+            description = "malformed workspace path callback",
+            parameters = { type = "object", properties = {} },
+            effect = "write",
+            permission_defaults = { yolo = "allow" },
+            paths_for_workspace = function()
+                return { 42 }
+            end,
+            execute = function() return "should not run" end,
+        })
+        "#,
+    )
+    .expect("register tool with malformed path callback");
+    app.approve_tool_for_session("malformed_path_callback");
+    let _ = app.drain_engine_sends();
+
+    let decision = evaluate_tool(
+        &mut app,
+        97,
+        "malformed-path-callback",
+        "malformed_path_callback",
+        std::collections::HashMap::new(),
+        protocol::AgentMode::parse("yolo").unwrap(),
+    );
+    assert!(
+        matches!(
+            decision,
+            protocol::Decision::Error(ref error)
+                if error.contains("invalid path entry 1")
+                    && error.contains("got integer")
+        ),
+        "unexpected evaluation decision: {decision:?}"
+    );
 }
 
 #[test]

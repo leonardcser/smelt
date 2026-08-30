@@ -1939,6 +1939,9 @@ impl TuiApp {
     }
 
     fn permission_decision_for_confirm(&self, req: &ConfirmRequest) -> Decision {
+        if let Some(error) = req.tool_paths_error.as_ref() {
+            return Decision::Error(error.clone());
+        }
         self.active_permissions()
             .evaluate_tool_with_paths_and_approvals(
                 self.conversation.applied_mode().clone(),
@@ -2033,6 +2036,13 @@ impl TuiApp {
                         .last()
                         .map(|p| p.name.clone())
                         .unwrap_or_default();
+                }
+                if let Some(error) = req.tool_paths_error.clone() {
+                    self.send_permission_decision(req.request_id, false, Some(error));
+                    self.finish_tool(req.invocation_id, ToolStatus::Denied, None, None);
+                    turn.pending
+                        .retain(|pending| pending.invocation_id != req.invocation_id);
+                    return SessionControl::Continue;
                 }
 
                 let outcome = turn.permissions.evaluate_tool_with_paths_and_approvals(

@@ -2493,7 +2493,10 @@ impl ConversationRuntime {
         Ok(SaveStatus::Submitted)
     }
 
-    pub(crate) fn flush_persistence(&self) -> crate::persist::PersistenceFlushOutcome {
+    pub(crate) fn flush_persistence_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> crate::persist::PersistenceFlushOutcome {
         let target = self.document.generation();
         if let Some(block) = self.persistence_preparation_block.as_ref() {
             return crate::persist::PersistenceFlushOutcome::Blocked {
@@ -2513,10 +2516,7 @@ impl ConversationRuntime {
                 ),
             };
         };
-        persistence.flush(
-            target,
-            std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
-        )
+        persistence.flush(target, deadline)
     }
 
     #[cfg(test)]

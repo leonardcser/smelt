@@ -185,7 +185,7 @@ that one shell process.
 
 | Parameter | Description |
 | --------- | ----------- |
-| `path` | Directory to enter (required) |
+| `path` | Directory to enter, absolute, relative to the current cwd, or starting with `~` (required) |
 
 ### `enter_worktree`
 

@@ -50,6 +50,9 @@ pub struct ConfirmRequest {
     pub tool_name: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
     pub tool_paths: Vec<crate::permissions::ToolPath>,
+    /// A path callback failure carried to confirmation dispatch so a stale or
+    /// synthetic permission request is denied instead of becoming pathless.
+    pub tool_paths_error: Option<String>,
     pub approval_candidates: Vec<String>,
     pub grant_options: Vec<ConfirmApprovalOption>,
     /// Styled summary of the pending call. Sole source for the dialog

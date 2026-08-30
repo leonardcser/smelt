@@ -45,6 +45,26 @@ pub(crate) fn canonical(input: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(input)
 }
 
+/// Resolve a runtime path against an explicit cwd and home directory without
+/// touching the filesystem. A leading `~` is expanded, relative paths are
+/// joined to `cwd`, and redundant components are normalized.
+pub fn resolve_from(
+    input: impl AsRef<Path>,
+    cwd: impl AsRef<Path>,
+    home: impl AsRef<Path>,
+) -> PathBuf {
+    let input = input.as_ref();
+    let expanded = input
+        .strip_prefix("~")
+        .map_or_else(|_| input.to_path_buf(), |rest| home.as_ref().join(rest));
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.as_ref().join(expanded)
+    };
+    normalize(absolute)
+}
+
 /// Compute `target` relative to `base` (pure arithmetic, no symlink resolution).
 /// Uses `..` when `target` is outside `base`. Both inputs are normalized first.
 pub(crate) fn relative(base: impl AsRef<Path>, target: impl AsRef<Path>) -> PathBuf {
@@ -135,6 +155,38 @@ mod tests {
     #[test]
     fn normalize_drops_parent_past_root_on_absolute() {
         assert_eq!(normalize("/a/../../b"), PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn resolve_runtime_path_uses_explicit_cwd_and_home() {
+        assert_eq!(
+            resolve_from(
+                "../sibling/./project",
+                "/workspace/current",
+                "/runtime/home"
+            ),
+            PathBuf::from("/workspace/sibling/project")
+        );
+        assert_eq!(
+            resolve_from("~/project/../other", "/workspace/current", "/runtime/home"),
+            PathBuf::from("/runtime/home/other")
+        );
+        assert_eq!(
+            resolve_from("/absolute/../target", "/workspace/current", "/runtime/home"),
+            PathBuf::from("/target")
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_path_only_expands_a_tilde_component() {
+        assert_eq!(
+            resolve_from("~other/project", "/workspace", "/runtime/home"),
+            PathBuf::from("/workspace/~other/project")
+        );
+        assert_eq!(
+            resolve_from("$HOME/project", "/workspace", "/runtime/home"),
+            PathBuf::from("/workspace/$HOME/project")
+        );
     }
 
     #[test]

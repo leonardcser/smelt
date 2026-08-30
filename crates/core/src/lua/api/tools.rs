@@ -109,7 +109,7 @@ pub struct LuaToolDef {
     pub approval_patterns: Option<mlua::Function>,
     /// `preflight(args, ctx) -> table?` - validation hook; nil result skips.
     pub preflight: Option<mlua::Function>,
-    /// `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
+    /// `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. Callback errors and malformed entries reject tool evaluation rather than being treated as no paths.
     pub paths_for_workspace: Option<mlua::Function>,
     /// `preview(args) -> smelt.layout` - pre-execute preview render. The
     /// confirm dialog renders it directly into the preview pane.

@@ -719,8 +719,12 @@ impl TuiApp {
                 let summary =
                     self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
                 let lua = self.lua.execution();
-                let tool_paths =
-                    crate::lua::scope_app(self, || lua.tool_paths_for_workspace(&tool_name, &args));
+                let (tool_paths, tool_paths_error) = match crate::lua::scope_app(self, || {
+                    lua.tool_paths_for_workspace(&tool_name, &args)
+                }) {
+                    Ok(paths) => (paths.into_paths(), None),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
                 self.begin_tool_block_for_engine_event(
                     pending,
                     ToolStart {
@@ -739,6 +743,7 @@ impl TuiApp {
                     tool_name,
                     args,
                     tool_paths,
+                    tool_paths_error,
                     approval_candidates: approval_patterns,
                     grant_options: Vec::new(),
                     summary,
@@ -877,18 +882,22 @@ impl TuiApp {
                     protocol::Decision::Error(err)
                 } else {
                     let lua = self.lua.execution();
-                    let tool_paths = crate::lua::scope_app(self, || {
+                    match crate::lua::scope_app(self, || {
                         lua.tool_paths_for_workspace(&tool_name, &args)
-                    });
-                    let permissions = self.active_permissions();
-                    let outcome = permissions.evaluate_tool_with_paths_and_approvals(
-                        mode,
-                        smelt_core::permissions::ToolOrigin::Lua,
-                        &tool_name,
-                        &args,
-                        &tool_paths,
-                    );
-                    outcome.decision
+                    }) {
+                        Ok(tool_paths) => {
+                            self.active_permissions()
+                                .evaluate_tool_with_paths_and_approvals(
+                                    mode,
+                                    smelt_core::permissions::ToolOrigin::Lua,
+                                    &tool_name,
+                                    &args,
+                                    tool_paths.as_slice(),
+                                )
+                                .decision
+                        }
+                        Err(error) => protocol::Decision::Error(error),
+                    }
                 };
                 let evaluation = protocol::ToolEvaluation { decision, metadata };
                 self.core

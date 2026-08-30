@@ -244,6 +244,18 @@ app_story!(bash_outside_workspace_extra_options, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(switch_cwd_outside_workspace_permission_dialog, |ctx| {
+    ctx.set_viewport(80, 22);
+    ctx.restrict_permissions_to_cwd();
+    ctx.approve_tool_for_session("switch_cwd");
+    ctx.request_permission(
+        "switch_cwd",
+        args([("path", json!("/tmp/electronics"))]),
+        vec![],
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(bash_permission_dialog_long_extra_options_wrap, |ctx| {
     ctx.set_viewport(70, 22);
     ctx.request_permission(

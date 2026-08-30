@@ -59,4 +59,8 @@ path.parent = nil
 ---@type fun(base: string, target: string): string
 path.relative = nil
 
+--- Resolve runtime path `p` to a normalized absolute path. Expands a leading `~` using the runtime home and resolves relative paths from the runtime cwd without touching the filesystem or expanding environment variables.
+---@type fun(p: string): string
+path.resolve = nil
+
 return path

@@ -217,11 +217,7 @@ impl TuiApp {
     }
 
     fn resolve_cwd_target(&self, path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
-        let path = if path.is_absolute() {
-            path
-        } else {
-            self.core.env.cwd().join(path)
-        };
+        let path = smelt_core::path::resolve_from(path, self.core.env.cwd(), self.core.env.home());
         let path = std::fs::canonicalize(&path)
             .map_err(|error| format!("resolve cwd {}: {error}", path.display()))?;
         if !path.is_dir() {

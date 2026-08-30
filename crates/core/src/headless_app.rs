@@ -64,11 +64,16 @@ impl HeadlessApp {
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
     ) -> bool {
-        let tool_paths = self.lua.as_ref().map_or_else(Vec::new, |lua| {
-            crate::host::scope_core(&mut self.core, || {
+        let tool_paths = if let Some(lua) = self.lua.as_ref() {
+            match crate::host::scope_core(&mut self.core, || {
                 lua.tool_paths_for_workspace(tool_name, args)
-            })
-        });
+            }) {
+                Ok(paths) => paths,
+                Err(_) => return false,
+            }
+        } else {
+            crate::lua::ToolWorkspacePaths::Undeclared
+        };
         let mode = self.core.config.mode.clone();
         let permissions = self.core.permissions.snapshot();
         permissions
@@ -77,7 +82,7 @@ impl HeadlessApp {
                 crate::permissions::ToolOrigin::Lua,
                 tool_name,
                 args,
-                &tool_paths,
+                tool_paths.as_slice(),
             )
             .decision
             == Decision::Allow
@@ -134,20 +139,24 @@ impl HeadlessApp {
         let decision = if let Some(err) = metadata.preflight_error.clone() {
             protocol::Decision::Error(err)
         } else {
-            let tool_paths = crate::host::scope_core(&mut self.core, || {
+            match crate::host::scope_core(&mut self.core, || {
                 lua.tool_paths_for_workspace(&tool_name, &args)
-            });
-            self.core
-                .permissions
-                .snapshot()
-                .evaluate_tool_with_paths_and_approvals(
-                    self.core.config.mode.clone(),
-                    crate::permissions::ToolOrigin::Lua,
-                    &tool_name,
-                    &args,
-                    &tool_paths,
-                )
-                .decision
+            }) {
+                Ok(tool_paths) => {
+                    self.core
+                        .permissions
+                        .snapshot()
+                        .evaluate_tool_with_paths_and_approvals(
+                            self.core.config.mode.clone(),
+                            crate::permissions::ToolOrigin::Lua,
+                            &tool_name,
+                            &args,
+                            tool_paths.as_slice(),
+                        )
+                        .decision
+                }
+                Err(error) => protocol::Decision::Error(error),
+            }
         };
         self.core.engine.send(UiCommand::ToolEvaluationResponse {
             request_id,

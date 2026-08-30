@@ -18,13 +18,17 @@ smelt.tools.register({
     properties = {
       path = {
         type = "string",
-        description = "Directory to switch Smelt into.",
+        description = "Directory to switch smelt into. May be absolute, relative to the current cwd, or start with `~`.",
       },
     },
     required = { "path" },
   },
   summary = function(args, ctx)
     return smelt.tools.path_summary(trim(args.path or ""), ctx)
+  end,
+  paths_for_workspace = function(args)
+    local path = trim(args.path or "")
+    return path ~= "" and { { path = smelt.path.resolve(path), kind = "directory" } } or {}
   end,
   execute = function(args)
     local path = trim(args.path or "")
