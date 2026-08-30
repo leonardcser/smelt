@@ -316,26 +316,24 @@ impl TuiApp {
         self.try_open_search_for_key(k)
     }
 
+    fn focused_transient_owns_printable_keys(&self) -> bool {
+        if self.ui.focused_overlay().is_none() && self.ui.focused_modal().is_none() {
+            return false;
+        }
+        let Some(win) = self.ui.focus().and_then(|win| self.ui.win(win)) else {
+            return true;
+        };
+        !win.surface().is_readonly_text()
+            || win.vim_enabled() && win.vim_mode() == crate::smelt_edit::VimMode::Insert
+    }
+
     pub(crate) fn try_open_cmdline_for_key(&mut self, k: KeyEvent) -> bool {
         if !matches!(
             (k.code, k.modifiers),
             (KeyCode::Char(':'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-        ) {
+        ) || self.focused_transient_owns_printable_keys()
+        {
             return false;
-        }
-
-        if let Some(win) = self.ui.focus() {
-            if self.ui.focused_overlay().is_some() || self.ui.focused_modal().is_some() {
-                let Some(win) = self.ui.win(win) else {
-                    return false;
-                };
-                if win.vim_enabled() && win.vim_mode() == crate::smelt_edit::VimMode::Insert {
-                    return false;
-                }
-                if !win.surface().is_readonly_text() {
-                    return false;
-                }
-            }
         }
 
         self.open_cmdline();
@@ -343,15 +341,21 @@ impl TuiApp {
     }
 
     pub(crate) fn try_open_search_for_key(&mut self, k: KeyEvent) -> bool {
-        match (k.code, k.modifiers) {
+        let direction = match (k.code, k.modifiers) {
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
-                self.open_search_input(crate::app::search::SearchDirection::Forward)
+                crate::app::search::SearchDirection::Forward
             }
             (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                self.open_search_input(crate::app::search::SearchDirection::Backward)
+                crate::app::search::SearchDirection::Backward
             }
-            _ => false,
+            _ => return false,
+        };
+
+        if self.focused_transient_owns_printable_keys() {
+            return false;
         }
+
+        self.open_search_input(direction)
     }
 
     fn dispatch_window_lua_keymap(&mut self, key: KeyEvent) -> Option<EventOutcome> {

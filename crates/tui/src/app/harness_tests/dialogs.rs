@@ -2161,6 +2161,74 @@ fn public_status_open_question_needs_attention() {
 }
 
 #[test]
+fn ask_user_question_custom_input_accepts_question_mark() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.start_turn(1);
+    app.push_user_block("Earlier transcript text");
+    app.focus_transcript();
+
+    let mut args = std::collections::HashMap::new();
+    args.insert(
+        "questions".into(),
+        serde_json::json!([{
+            "header": "Choice",
+            "question": "Pick one?",
+            "options": [
+                { "label": "One", "description": "first option" },
+                { "label": "Two", "description": "second option" }
+            ],
+            "multiSelect": false
+        }]),
+    );
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
+        invocation_id: protocol::InvocationId::new(77),
+        request_id: 77,
+        call_id: "aq-custom-input".into(),
+        tool_name: "ask_user_question".into(),
+        args,
+    }));
+    assert!(app.state().active_modal.is_some());
+
+    app.press(KeyCode::Tab);
+    app.settle_lua();
+    let input_win = app
+        .ui_probe()
+        .focus()
+        .expect("custom input should be focused");
+    let input = app.ui_probe().win(input_win).expect("custom input window");
+    assert!(
+        !input.surface().is_readonly_text(),
+        "Tab should focus the editable custom input"
+    );
+    let input_buf = input.buf;
+
+    app.type_text("why");
+    assert_eq!(
+        app.ui_probe()
+            .buf(input_buf)
+            .expect("custom input buffer")
+            .get_line(0),
+        Some("why")
+    );
+
+    app.press_mod(KeyCode::Char('?'), KeyModifiers::SHIFT);
+
+    assert_eq!(
+        app.ui_probe()
+            .buf(input_buf)
+            .expect("custom input buffer")
+            .get_line(0),
+        Some("why?")
+    );
+    assert_eq!(app.ui_probe().focus(), Some(input_win));
+    assert!(
+        !app.state().cmdline_open,
+        "question mark must not open search"
+    );
+}
+
+#[test]
 fn ask_user_question_multiple_questions_wakes_between_dialogs() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
