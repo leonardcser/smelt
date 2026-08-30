@@ -352,15 +352,23 @@ mod tests {
             .start_shell_escape_with_sink(&command, ShellSink::Overlay)
             .expect("shell command starts");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !pid_file.exists() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .expect("shell writes pid")
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "shell did not write its pid: {:?}",
+                std::fs::read_to_string(&pid_file)
+            )
+        });
         handle.kill.cancel();
 
         let done = tokio::time::timeout(Duration::from_secs(5), async {
