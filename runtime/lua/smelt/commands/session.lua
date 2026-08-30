@@ -174,6 +174,14 @@ smelt.cmd.register("session", function()
   })
 end, { desc = "show current session metadata" })
 
+smelt.cmd.register("retry-save", function()
+  if smelt.session.retry_persistence() then
+    smelt.notify.info("retrying session persistence")
+  else
+    smelt.notify.info("session persistence is not blocked")
+  end
+end, { desc = "retry blocked session persistence" })
+
 smelt.cmd.register("clear", function()
   smelt.session.reset()
 end, { desc = "start new conversation" })

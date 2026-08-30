@@ -2216,9 +2216,9 @@ impl TuiApp {
             crate::persist::PersistenceFlushOutcome::Blocked { cause, .. }
             | crate::persist::PersistenceFlushOutcome::OwnershipLost { cause, .. }
             | crate::persist::PersistenceFlushOutcome::Stopped { cause, .. } => {
-                self.notify_session_save_failure(
+                self.notify_session_persistence_failure(
                     &self.conversation.session().id.clone(),
-                    &cause.message,
+                    cause,
                 );
             }
             crate::persist::PersistenceFlushOutcome::Deadline { .. } => {

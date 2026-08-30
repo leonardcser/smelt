@@ -1620,7 +1620,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.reset` :: `fun(): nil`
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.retry_persistence` :: `fun(): boolean`
-  Explicitly retry the latest unsaved generation after session persistence becomes blocked.
+  Explicitly reconcile and retry blocked session persistence.
 - `smelt.session.rewind_to` :: `fun(history_idx: integer?, opts: table?): nil`
   Rewind the session to a prior user turn.
 - `smelt.session.set_fast_mode` :: `fun(enabled: boolean): nil`

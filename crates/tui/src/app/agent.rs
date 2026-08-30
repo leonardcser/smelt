@@ -774,7 +774,7 @@ impl TuiApp {
         }
         self.platform.set_sleep_inhibited(false);
         self.working.finish(TurnOutcome::Errored);
-        self.notify_session_save_failure(&self.conversation.session().id.clone(), &cause.message);
+        self.notify_session_persistence_failure(&self.conversation.session().id.clone(), cause);
     }
 
     fn finish_prepared_turn_dispatch(
@@ -869,9 +869,9 @@ impl TuiApp {
                 smelt_store::TurnState::Running,
                 None,
             ) {
-                self.notify_session_save_failure(
+                self.notify_session_persistence_failure(
                     &self.conversation.session().id.clone(),
-                    &cause.message,
+                    &cause,
                 );
             }
         }
@@ -956,9 +956,9 @@ impl TuiApp {
                 smelt_store::TurnState::Cancelled,
                 Some("user_cancelled".into()),
             ) {
-                self.notify_session_save_failure(
+                self.notify_session_persistence_failure(
                     &self.conversation.session().id.clone(),
-                    &cause.message,
+                    &cause,
                 );
             }
             return true;
@@ -1349,9 +1349,9 @@ impl TuiApp {
                 TerminalCommitStatus::Deferred
             }
             Err(cause) => {
-                self.notify_session_save_failure(
+                self.notify_session_persistence_failure(
                     &self.conversation.session().id.clone(),
-                    &cause.message,
+                    &cause,
                 );
                 TerminalCommitStatus::Deferred
             }
@@ -1391,9 +1391,9 @@ impl TuiApp {
                     smelt_store::TurnState::Cancelled,
                     Some("user_cancelled".into()),
                 ) {
-                    self.notify_session_save_failure(
+                    self.notify_session_persistence_failure(
                         &self.conversation.session().id.clone(),
-                        &cause.message,
+                        &cause,
                     );
                 }
             }
@@ -3973,7 +3973,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_ready_turn_is_interrupted_after_receipt_publication_failure() {
+    fn committed_ready_turn_resumes_after_receipt_publication_retry() {
         let runtime = tempfile::tempdir().expect("create shared runtime root");
         let session_id;
         let sessions_root;
@@ -3995,6 +3995,8 @@ mod tests {
             app.press(crossterm::event::KeyCode::Enter);
 
             assert!(!app.state().agent_running);
+            assert!(app.app.turn_submission_is_pending());
+            assert!(!app.app.conversation.is_read_only());
             assert!(app.actions().iter().all(|action| !matches!(
                 action,
                 crate::app::test_harness::Action::EngineSend(command)
@@ -4005,24 +4007,27 @@ mod tests {
                 reader.turns().unwrap()[0].state,
                 smelt_store::TurnState::Ready
             );
-            assert!(app.app.conversation.is_read_only());
-            let staged_history_len = app.app.session_history_len();
-            let staged_transcript_len = app.app.conversation.transcript().history().order.len();
             app.clear_actions();
 
-            app.press(crossterm::event::KeyCode::Enter);
+            assert!(app.app.retry_blocked_persistence());
+            let _ = app.app.flush_persist();
 
-            assert_eq!(app.app.session_history_len(), staged_history_len);
+            assert!(app.state().agent_running);
+            assert!(!app.app.turn_submission_is_pending());
+            assert!(!app.app.conversation.is_read_only());
             assert_eq!(
-                app.app.conversation.transcript().history().order.len(),
-                staged_transcript_len
+                app.drain_engine_sends()
+                    .iter()
+                    .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
+                    .count(),
+                1
             );
-            assert!(app.actions().iter().all(|action| !matches!(
-                action,
-                crate::app::test_harness::Action::EngineSend(command)
-                    if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
-            )));
+            let _ = app.app.flush_persist();
             assert_eq!(reader.turns().unwrap().len(), 1);
+            assert_eq!(
+                reader.turns().unwrap()[0].state,
+                smelt_store::TurnState::Running
+            );
         }
 
         let writer = smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &session_id)

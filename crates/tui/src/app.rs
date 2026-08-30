@@ -2733,7 +2733,7 @@ impl TuiApp {
                 crate::app::conversation::PersistenceFailureTarget::None => true,
             };
             if notify {
-                self.notify_session_save_failure(&failure.session_id, &failure.cause.message);
+                self.notify_session_persistence_failure(&failure.session_id, &failure.cause);
             }
         }
         if let Some(warning) = report.audit_warning {
@@ -2768,9 +2768,9 @@ impl TuiApp {
                 if !self.fail_pending_turn_submission(Some(command_id), &cause) {
                     self.conversation.confirm_canonical_completion(command_id);
                 }
-                self.notify_session_save_failure(
+                self.notify_session_persistence_failure(
                     &self.conversation.session().id.clone(),
-                    &cause.message,
+                    &cause,
                 );
             }
         }
@@ -2801,9 +2801,9 @@ impl TuiApp {
                         cause,
                     } => {
                         self.fail_pending_turn_submission(Some(command_id), &cause);
-                        self.notify_session_save_failure(
+                        self.notify_session_persistence_failure(
                             &self.conversation.session().id.clone(),
-                            &cause.message,
+                            &cause,
                         );
                     }
                 }
@@ -2965,6 +2965,21 @@ impl TuiApp {
                 session_id.to_string(),
             )),
         );
+    }
+
+    pub(crate) fn notify_session_persistence_failure(
+        &mut self,
+        session_id: &str,
+        cause: &crate::persist::PersistenceCause,
+    ) {
+        let message = match cause.recovery_action() {
+            Some(crate::persist::PersistenceRecoveryAction::Retry) => format!(
+                "{}; fix the storage problem, then run /retry-save to continue this session",
+                cause.message
+            ),
+            None => cause.message.clone(),
+        };
+        self.notify_session_save_failure(session_id, &message);
     }
 
     #[allow(dead_code)] // Only reachable via the Lua surface today.

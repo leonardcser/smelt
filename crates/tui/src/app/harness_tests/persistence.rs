@@ -751,6 +751,169 @@ fn environmental_failures_remain_dirty_until_explicit_retry() {
 }
 
 #[test]
+fn blocked_environmental_save_retains_submitted_turn_until_retry() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.save_session_and_flush();
+
+    for _ in 0..2 {
+        app.inject_commit_failure(smelt_store::SessionCommitFailure::Sqlite {
+            message: "database or disk is full".into(),
+        });
+    }
+    app.session_append_history(HistoryItem::user(Content::text("unsaved before Enter")));
+    app.save_session_and_flush();
+    assert!(app.session_document_has_unflushed_work());
+
+    app.drain_engine_sends();
+    app.type_text("submit after freeing space");
+    app.press(KeyCode::Enter);
+
+    assert!(app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    assert!(!app.session_is_read_only());
+    assert_eq!(app.state().prompt_text, "");
+    assert_eq!(
+        app.session_snapshot()
+            .history
+            .iter()
+            .filter(|item| matches!(
+                item,
+                HistoryItem::User { content, .. }
+                    if content.text_content() == "submit after freeing space"
+            ))
+            .count(),
+        1
+    );
+    app.set_session_title("Still writable".into(), "still-writable".into(), None);
+    assert_eq!(
+        app.session_snapshot().title.as_deref(),
+        Some("Still writable")
+    );
+    assert!(app.drain_engine_sends().iter().all(|command| !matches!(
+        command,
+        protocol::UiCommand::StartTurn(payload)
+            if payload.input.provider_content().text_content() == "submit after freeing space"
+    )));
+    assert_eq!(loaded_session(&app, &session_id).history.len(), 1);
+
+    assert!(retry_persistence_via_lua(&mut app));
+    let outcome = app.flush_persist();
+
+    assert!(matches!(
+        outcome,
+        crate::persist::PersistenceFlushOutcome::Durable { .. }
+    ));
+    assert!(!app.app.turn_submission_is_pending());
+    assert!(app.agent_running());
+    assert!(!app.session_is_read_only());
+    let submitted = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter(|command| {
+            matches!(
+                command,
+                protocol::UiCommand::StartTurn(payload)
+                    if payload.input.provider_content().text_content()
+                        == "submit after freeing space"
+            )
+        })
+        .count();
+    assert_eq!(submitted, 1);
+    let loaded = loaded_session(&app, &session_id);
+    assert_eq!(loaded.title.as_deref(), Some("Still writable"));
+    for expected in [
+        "baseline",
+        "unsaved before Enter",
+        "submit after freeing space",
+    ] {
+        let matching_rows = loaded
+            .history
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    HistoryItem::User { content, .. } if content.text_content() == expected
+                )
+            })
+            .count();
+        assert_eq!(
+            matching_rows, 1,
+            "unexpected durable history: {:#?}",
+            loaded.history
+        );
+    }
+}
+
+#[test]
+fn failed_canonical_submit_dispatches_once_after_explicit_retry() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.session_snapshot().id.clone();
+    app.session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.save_session_and_flush();
+
+    for _ in 0..2 {
+        app.inject_commit_failure(smelt_store::SessionCommitFailure::Sqlite {
+            message: "database or disk is full".into(),
+        });
+    }
+    app.drain_engine_sends();
+    app.type_text("retry this exact turn");
+    app.press(KeyCode::Enter);
+
+    assert!(app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    assert!(!app.session_is_read_only());
+    assert!(app.drain_engine_sends().iter().all(|command| !matches!(
+        command,
+        protocol::UiCommand::StartTurn(payload)
+            if payload.input.provider_content().text_content() == "retry this exact turn"
+    )));
+    app.app.drain_persist_reports();
+    assert!(app
+        .overlays_probe()
+        .notification()
+        .is_some_and(|notification| notification.summary.contains("/retry-save")));
+
+    app.type_text("/retry-save");
+    app.press(KeyCode::Enter);
+    assert!(matches!(
+        app.flush_persist(),
+        crate::persist::PersistenceFlushOutcome::Durable { .. }
+    ));
+
+    assert!(!app.app.turn_submission_is_pending());
+    assert!(app.agent_running());
+    assert!(!app.session_is_read_only());
+    let submitted = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter(|command| {
+            matches!(
+                command,
+                protocol::UiCommand::StartTurn(payload)
+                    if payload.input.provider_content().text_content() == "retry this exact turn"
+            )
+        })
+        .count();
+    assert_eq!(submitted, 1);
+    assert_eq!(
+        loaded_session(&app, &session_id)
+            .history
+            .iter()
+            .filter(|item| matches!(
+                item,
+                HistoryItem::User { content, .. } if content.text_content() == "retry this exact turn"
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn lua_delete_returns_actionable_error_for_malicious_id() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);

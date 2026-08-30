@@ -99,7 +99,7 @@ session.render_preview_into = nil
 ---@type fun(): nil
 session.reset = nil
 
---- Explicitly retry the latest unsaved generation after session persistence becomes blocked. Returns true when the retry request is accepted. No automatic retry timer is used.
+--- Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.
 ---@type fun(): boolean
 session.retry_persistence = nil
 

@@ -54,11 +54,17 @@ enum CanonicalCommitStatus {
     Committed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PersistenceRecoveryAction {
+    Retry,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PersistenceCause {
     pub(crate) class: PersistenceFailureClass,
     pub(crate) message: String,
     canonical_commit: CanonicalCommitStatus,
+    recovery_action: Option<PersistenceRecoveryAction>,
 }
 
 impl PersistenceCause {
@@ -67,6 +73,7 @@ impl PersistenceCause {
             class,
             message: message.into(),
             canonical_commit: CanonicalCommitStatus::NotCommitted,
+            recovery_action: None,
         }
     }
 
@@ -88,6 +95,24 @@ impl PersistenceCause {
 
     pub(crate) fn requires_reopen(&self) -> bool {
         self.canonical_commit != CanonicalCommitStatus::NotCommitted
+    }
+
+    fn supports_explicit_retry(&self) -> bool {
+        matches!(
+            self.class,
+            PersistenceFailureClass::Environment | PersistenceFailureClass::Unavailable
+        )
+    }
+
+    fn with_explicit_retry(mut self) -> Self {
+        if self.supports_explicit_retry() {
+            self.recovery_action = Some(PersistenceRecoveryAction::Retry);
+        }
+        self
+    }
+
+    pub(crate) fn recovery_action(&self) -> Option<PersistenceRecoveryAction> {
+        self.recovery_action
     }
 
     pub(crate) fn unavailable(message: impl Into<String>) -> Self {
@@ -720,52 +745,6 @@ impl SessionPersistence {
         Ok(())
     }
 
-    fn supersede_queued_intent(
-        &self,
-        generation: PersistenceGeneration,
-    ) -> Result<Option<Arc<PreparedSessionBatch>>, PersistenceCause> {
-        let mut latest = self
-            .latest
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if !latest.accepting {
-            return Err(PersistenceCause::unavailable(
-                "persistence actor is not accepting canonical commands",
-            ));
-        }
-        if let Some(queued) = latest.desired.as_ref() {
-            if queued.generation > generation {
-                return Err(PersistenceCause::invariant(format!(
-                    "canonical command generation {} is older than queued generation {}",
-                    generation.get(),
-                    queued.generation.get()
-                )));
-            }
-        }
-        let superseded = latest.desired.take();
-        if superseded.is_some() {
-            smelt_perf::perf::record_value("persist:pending_batch:superseded_by_turn", 1);
-        }
-        Ok(superseded)
-    }
-
-    fn restore_superseded_intent(&self, superseded: Option<Arc<PreparedSessionBatch>>) {
-        let Some(superseded) = superseded else {
-            return;
-        };
-        let mut latest = self
-            .latest
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if latest
-            .desired
-            .as_ref()
-            .is_none_or(|current| current.generation <= superseded.generation)
-        {
-            latest.desired = Some(superseded);
-        }
-    }
-
     pub(crate) fn submit_turn(
         &self,
         intent: SubmitTurnIntent,
@@ -779,9 +758,7 @@ impl SessionPersistence {
         }
         let command_id = intent.command_id;
         let generation = intent.session.generation;
-        let superseded = self.supersede_queued_intent(generation)?;
         let Some(control) = &self.control else {
-            self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(
                 "persistence actor control lane is closed",
             ));
@@ -796,7 +773,6 @@ impl SessionPersistence {
             },
             deadline,
         ) {
-            self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(match error {
                 ControlSendError::Deadline => {
                     "persistence deadline elapsed before turn submission was queued"
@@ -813,6 +789,10 @@ impl SessionPersistence {
             });
         };
         match result.recv_timeout(remaining) {
+            Ok(Err(cause)) if cause.supports_explicit_retry() => Ok(SubmitTurnOutcome::Pending {
+                command_id,
+                generation,
+            }),
             Ok(result) => {
                 self.confirm_canonical_completion(command_id);
                 result.map(|acknowledgement| SubmitTurnOutcome::Durable(Box::new(acknowledgement)))
@@ -838,9 +818,7 @@ impl SessionPersistence {
                 intent.session.identity.id, self.session_id
             )));
         }
-        let superseded = self.supersede_queued_intent(intent.session.generation)?;
         let Some(control) = &self.control else {
-            self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(
                 "persistence actor control lane is closed",
             ));
@@ -851,13 +829,10 @@ impl SessionPersistence {
             reply: None,
         }) {
             Ok(()) => Ok(()),
-            Err(error) => {
-                self.restore_superseded_intent(superseded);
-                Err(PersistenceCause::unavailable(match error {
-                    TrySendError::Full(_) => "persistence actor control lane is full",
-                    TrySendError::Disconnected(_) => "persistence actor control lane disconnected",
-                }))
-            }
+            Err(error) => Err(PersistenceCause::unavailable(match error {
+                TrySendError::Full(_) => "persistence actor control lane is full",
+                TrySendError::Disconnected(_) => "persistence actor control lane disconnected",
+            })),
         }
     }
 
@@ -874,9 +849,7 @@ impl SessionPersistence {
         }
         let command_id = intent.command_id;
         let generation = intent.session.generation;
-        let superseded = self.supersede_queued_intent(generation)?;
         let Some(control) = &self.control else {
-            self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(
                 "persistence actor control lane is closed",
             ));
@@ -891,7 +864,6 @@ impl SessionPersistence {
             },
             deadline,
         ) {
-            self.restore_superseded_intent(superseded);
             return Err(PersistenceCause::unavailable(match error {
                 ControlSendError::Deadline => {
                     "persistence deadline elapsed before turn transition was queued"
@@ -908,6 +880,12 @@ impl SessionPersistence {
             });
         };
         match result.recv_timeout(remaining) {
+            Ok(Err(cause)) if cause.supports_explicit_retry() => {
+                Ok(TurnTransitionOutcome::Pending {
+                    command_id,
+                    generation,
+                })
+            }
             Ok(result) => {
                 self.confirm_canonical_completion(command_id);
                 result.map(|acknowledgement| {
@@ -1668,6 +1646,65 @@ impl StatusPublisher {
     }
 }
 
+enum RetainedCanonicalOperation {
+    Submit(Box<SubmitTurnIntent>),
+    Transition(Box<TurnTransitionIntent>),
+}
+
+impl RetainedCanonicalOperation {
+    fn command_id(&self) -> CanonicalCommandId {
+        match self {
+            Self::Submit(intent) => intent.command_id,
+            Self::Transition(intent) => intent.command_id,
+        }
+    }
+
+    fn generation(&self) -> PersistenceGeneration {
+        match self {
+            Self::Submit(intent) => intent.session.generation,
+            Self::Transition(intent) => intent.session.generation,
+        }
+    }
+}
+
+struct PersistenceBlock {
+    cause: PersistenceCause,
+    retained_canonical_operation: Option<RetainedCanonicalOperation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalAttempt {
+    Initial,
+    Reconcile,
+}
+
+impl CanonicalAttempt {
+    fn reconciles(self) -> bool {
+        self == Self::Reconcile
+    }
+
+    fn qualify_failure(self, cause: PersistenceCause) -> PersistenceCause {
+        if self.reconciles() {
+            cause.with_unknown_commit()
+        } else {
+            cause
+        }
+    }
+}
+
+fn verify_canonical_head(
+    expected: smelt_store::StoreHead,
+    actual: smelt_store::StoreHead,
+    attempt: CanonicalAttempt,
+) -> Result<(), PersistenceCause> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(attempt.qualify_failure(PersistenceCause::invariant(format!(
+        "session store advanced unexpectedly: actor head {expected:?}, store head {actual:?}",
+    ))))
+}
+
 struct PersistenceActor {
     sessions: smelt_core::session::SessionStorage,
     session_id: smelt_core::session_id::SessionId,
@@ -1680,7 +1717,7 @@ struct PersistenceActor {
     head: smelt_store::StoreHead,
     durable: PersistenceGeneration,
     last_receipt: Option<smelt_store::SaveReceipt>,
-    blocked: Option<(PersistenceGeneration, PersistenceCause)>,
+    blocked: Option<PersistenceBlock>,
     audits: VecDeque<QueuedAudit>,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
@@ -1896,7 +1933,7 @@ impl PersistenceActor {
                     }
                 }
                 PersistenceControl::RetryBlocked => {
-                    self.blocked = None;
+                    self.retry_blocked_operation();
                 }
                 PersistenceControl::RequestSearchProjection => {
                     self.search_projection_requested = true;
@@ -1913,12 +1950,18 @@ impl PersistenceActor {
                         "persist:submit_turn:queue_wait_ms",
                         queued_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                     );
-                    let command_id = intent.command_id;
-                    let generation = intent.session.generation;
-                    let result = self.submit_turn_intent(&intent);
-                    if let Err(cause) = &result {
-                        self.block_canonical_command(command_id, generation, cause.clone());
+                    let result = if self.blocked.is_some() {
+                        self.submit_turn_intent(&intent, CanonicalAttempt::Initial)
+                    } else {
+                        self.supersede_pending_batch_through(intent.session.generation);
+                        self.submit_turn_intent(&intent, CanonicalAttempt::Initial)
                     }
+                    .map_err(|cause| {
+                        self.handle_canonical_failure(
+                            RetainedCanonicalOperation::Submit(intent),
+                            cause,
+                        )
+                    });
                     let _ = reply.send(result);
                 }
                 PersistenceControl::TransitionTurn {
@@ -1930,12 +1973,18 @@ impl PersistenceActor {
                         "persist:turn_transition:queue_wait_ms",
                         queued_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                     );
-                    let command_id = intent.command_id;
-                    let generation = intent.session.generation;
-                    let result = self.transition_turn_intent(&intent);
-                    if let Err(cause) = &result {
-                        self.block_canonical_command(command_id, generation, cause.clone());
+                    let result = if self.blocked.is_some() {
+                        self.transition_turn_intent(&intent, CanonicalAttempt::Initial)
+                    } else {
+                        self.supersede_pending_batch_through(intent.session.generation);
+                        self.transition_turn_intent(&intent, CanonicalAttempt::Initial)
                     }
+                    .map_err(|cause| {
+                        self.handle_canonical_failure(
+                            RetainedCanonicalOperation::Transition(intent),
+                            cause,
+                        )
+                    });
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                     }
@@ -1989,7 +2038,7 @@ impl PersistenceActor {
                                         target.get()
                                     ))
                                 },
-                                |(_, cause)| cause.clone(),
+                                |blocked| blocked.cause.clone(),
                             )
                         }
                     });
@@ -2129,19 +2178,118 @@ impl PersistenceActor {
         latest.desired.clone()
     }
 
+    fn supersede_pending_batch_through(&self, generation: PersistenceGeneration) {
+        let mut latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let superseded = latest
+            .desired
+            .as_ref()
+            .is_some_and(|queued| queued.generation <= generation);
+        if superseded {
+            latest.desired = None;
+            smelt_perf::perf::record_value("persist:pending_batch:superseded_by_turn", 1);
+        }
+    }
+
+    fn retry_blocked_operation(&mut self) {
+        let retained_operation = self
+            .blocked
+            .take()
+            .and_then(|blocked| blocked.retained_canonical_operation);
+        let Some(operation) = retained_operation else {
+            self.drive_pending_batch();
+            return;
+        };
+        let retained_generation = operation.generation();
+        if self
+            .latest_generation()
+            .is_some_and(|pending| pending < retained_generation && pending > self.durable)
+        {
+            self.drive_pending_batch();
+            if let Some(blocked) = self.blocked.as_mut() {
+                if blocked.cause.supports_explicit_retry() {
+                    blocked.retained_canonical_operation = Some(operation);
+                } else {
+                    let cause = blocked.cause.clone();
+                    self.handle_canonical_failure(operation, cause);
+                }
+                return;
+            }
+        }
+        self.supersede_pending_batch_through(retained_generation);
+        match operation {
+            RetainedCanonicalOperation::Submit(intent) => {
+                if let Err(cause) = self.submit_turn_intent(&intent, CanonicalAttempt::Reconcile) {
+                    self.handle_canonical_failure(
+                        RetainedCanonicalOperation::Submit(intent),
+                        cause,
+                    );
+                }
+            }
+            RetainedCanonicalOperation::Transition(intent) => {
+                if let Err(cause) =
+                    self.transition_turn_intent(&intent, CanonicalAttempt::Reconcile)
+                {
+                    self.handle_canonical_failure(
+                        RetainedCanonicalOperation::Transition(intent),
+                        cause,
+                    );
+                }
+            }
+        }
+    }
+
+    fn handle_canonical_failure(
+        &mut self,
+        operation: RetainedCanonicalOperation,
+        cause: PersistenceCause,
+    ) -> PersistenceCause {
+        let command_id = operation.command_id();
+        let generation = operation.generation();
+        if self
+            .blocked
+            .as_ref()
+            .is_some_and(|blocked| blocked.retained_canonical_operation.is_some())
+        {
+            let cause = PersistenceCause::invariant(
+                "another canonical session operation is already waiting for persistence retry",
+            );
+            self.publisher
+                .publish_command_failure(command_id, generation, cause.clone());
+            return cause;
+        }
+        if cause.supports_explicit_retry() {
+            self.block_persistence(generation, cause.clone(), Some(operation));
+            return cause;
+        }
+        self.block_canonical_command(command_id, generation, cause.clone());
+        cause
+    }
+
     fn block_canonical_command(
         &mut self,
         command_id: CanonicalCommandId,
         desired: PersistenceGeneration,
         cause: PersistenceCause,
     ) {
-        self.block_canonical(desired, cause.clone());
+        self.block_persistence(desired, cause.clone(), None);
         self.publisher
             .publish_command_failure(command_id, desired, cause);
     }
 
-    fn block_canonical(&mut self, desired: PersistenceGeneration, cause: PersistenceCause) {
-        self.blocked = Some((desired, cause.clone()));
+    fn block_persistence(
+        &mut self,
+        desired: PersistenceGeneration,
+        cause: PersistenceCause,
+        retained_canonical_operation: Option<RetainedCanonicalOperation>,
+    ) {
+        let cause = cause.with_explicit_retry();
+        self.blocked = Some(PersistenceBlock {
+            cause: cause.clone(),
+            retained_canonical_operation,
+        });
         let state = if cause.class == PersistenceFailureClass::Ownership {
             record_failure_transition("persist:ownership_lost:transitions", cause.class);
             PersistenceState::OwnershipLost {
@@ -2184,7 +2332,7 @@ impl PersistenceActor {
                     None,
                 );
             }
-            Err(cause) => self.block_canonical(intent.generation, cause),
+            Err(cause) => self.block_persistence(intent.generation, cause, None),
         }
     }
 
@@ -2251,12 +2399,7 @@ impl PersistenceActor {
                             error,
                         );
                         let desired = self.latest_generation().unwrap_or(self.durable);
-                        self.blocked = Some((desired, cause.clone()));
-                        self.publisher.publish_state(PersistenceState::Blocked {
-                            desired,
-                            durable: self.durable,
-                            cause,
-                        });
+                        self.block_persistence(desired, cause, None);
                         return false;
                     }
                 }
@@ -2299,7 +2442,7 @@ impl PersistenceActor {
                     target.get()
                 ))
             },
-            |(_, cause)| cause.clone(),
+            |blocked| blocked.cause.clone(),
         );
         if cause.class == PersistenceFailureClass::Ownership {
             PersistenceFlushOutcome::OwnershipLost {
@@ -2415,56 +2558,78 @@ impl PersistenceActor {
     fn submit_turn_intent(
         &mut self,
         intent: &SubmitTurnIntent,
+        attempt: CanonicalAttempt,
     ) -> Result<SubmitTurnAcknowledgement, PersistenceCause> {
-        if let Some((_, cause)) = self.blocked.as_ref() {
-            return Err(cause.clone());
+        if let Some(blocked) = self.blocked.as_ref() {
+            return Err(blocked.cause.clone());
         }
         let command = smelt_store::SubmitTurn {
-            session: self.session_command(&intent.session)?,
+            session: self
+                .session_command(&intent.session)
+                .map_err(|cause| attempt.qualify_failure(cause))?,
             turn: intent.turn.clone(),
         };
         self.writer
             .as_mut()
             .expect("actor writer")
             .reopen_connection()
-            .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
-        let actual_head = self
-            .writer
-            .as_ref()
-            .expect("actor writer")
-            .store_head()
-            .map_err(|error| PersistenceCause::from_store("read session store head", error))?;
-        if actual_head != command.session.expected {
-            return Err(PersistenceCause::invariant(format!(
-                "session store advanced unexpectedly: actor head {:?}, store head {:?}",
-                command.session.expected, actual_head
-            )));
-        }
+            .map_err(|error| {
+                attempt
+                    .qualify_failure(PersistenceCause::from_store("reopen session writer", error))
+            })?;
+        let recovered = if attempt.reconciles() {
+            self.writer
+                .as_mut()
+                .expect("actor writer")
+                .recover_submit_turn(&command)
+                .map_err(|failure| {
+                    attempt.qualify_failure(PersistenceCause::from_commit(&failure))
+                })?
+        } else {
+            None
+        };
+        let receipt = if let Some(receipt) = recovered {
+            smelt_perf::perf::record_value("persist:recovery:submit_turn_matches", 1);
+            receipt
+        } else {
+            let actual_head = self
+                .writer
+                .as_ref()
+                .expect("actor writer")
+                .store_head()
+                .map_err(|error| {
+                    attempt.qualify_failure(PersistenceCause::from_store(
+                        "read session store head",
+                        error,
+                    ))
+                })?;
+            verify_canonical_head(command.session.expected, actual_head, attempt)?;
 
-        #[cfg(test)]
-        if let Some((started, release)) = self.commit_barrier.take() {
-            let _ = started.send(());
-            let _ = release.recv();
-        }
+            #[cfg(test)]
+            if let Some((started, release)) = self.commit_barrier.take() {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
 
-        let commit_perf = smelt_perf::perf::begin("persist:submit_turn");
-        let result = self.commit_submit_turn(&command);
-        drop(commit_perf);
-        let receipt = match result {
-            Ok(receipt) => receipt,
-            Err(failure) => {
-                let cause = PersistenceCause::from_commit(&failure);
-                if cause.class != PersistenceFailureClass::Environment {
-                    return Err(cause);
+            let commit_perf = smelt_perf::perf::begin("persist:submit_turn");
+            let result = self.commit_submit_turn(&command);
+            drop(commit_perf);
+            match result {
+                Ok(receipt) => receipt,
+                Err(failure) => {
+                    let cause = PersistenceCause::from_commit(&failure);
+                    if cause.class != PersistenceFailureClass::Environment {
+                        return Err(attempt.qualify_failure(cause));
+                    }
+                    self.recover_ambiguous_submit_turn(&command, cause)
+                        .map_err(PersistenceCause::with_unknown_commit)?
                 }
-                self.recover_ambiguous_submit_turn(&command, cause)
-                    .map_err(PersistenceCause::with_unknown_commit)?
             }
         };
         if receipt.turn_id.get() == 0 {
-            return Err(PersistenceCause::invariant(
-                "turn submission returned turn ID zero",
-            ));
+            return Err(
+                PersistenceCause::invariant("turn submission returned turn ID zero").after_commit(),
+            );
         }
         let session_receipt = self
             .complete_commit(&command.session, receipt.session.clone())
@@ -2542,12 +2707,15 @@ impl PersistenceActor {
     fn transition_turn_intent(
         &mut self,
         intent: &TurnTransitionIntent,
+        attempt: CanonicalAttempt,
     ) -> Result<TurnTransitionAcknowledgement, PersistenceCause> {
-        if let Some((_, cause)) = self.blocked.as_ref() {
-            return Err(cause.clone());
+        if let Some(blocked) = self.blocked.as_ref() {
+            return Err(blocked.cause.clone());
         }
         let command = smelt_store::TurnTransition {
-            session: self.session_command(&intent.session)?,
+            session: self
+                .session_command(&intent.session)
+                .map_err(|cause| attempt.qualify_failure(cause))?,
             turn_id: intent.turn_id,
             state: intent.state,
             at_ms: intent.at_ms,
@@ -2557,37 +2725,57 @@ impl PersistenceActor {
             .as_mut()
             .expect("actor writer")
             .reopen_connection()
-            .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
-        let actual_head = self
-            .writer
-            .as_ref()
-            .expect("actor writer")
-            .store_head()
-            .map_err(|error| PersistenceCause::from_store("read session store head", error))?;
-        if actual_head != command.session.expected {
-            return Err(PersistenceCause::invariant(format!(
-                "session store advanced unexpectedly: actor head {:?}, store head {:?}",
-                command.session.expected, actual_head
-            )));
-        }
-        let commit_perf = smelt_perf::perf::begin("persist:turn_transition");
-        let result = self.commit_turn_transition(&command);
-        drop(commit_perf);
-        let receipt = match result {
-            Ok(receipt) => receipt,
-            Err(failure) => {
-                let cause = PersistenceCause::from_commit(&failure);
-                if cause.class != PersistenceFailureClass::Environment {
-                    return Err(cause);
+            .map_err(|error| {
+                attempt
+                    .qualify_failure(PersistenceCause::from_store("reopen session writer", error))
+            })?;
+        let recovered = if attempt.reconciles() {
+            self.writer
+                .as_mut()
+                .expect("actor writer")
+                .recover_turn_transition(&command)
+                .map_err(|failure| {
+                    attempt.qualify_failure(PersistenceCause::from_commit(&failure))
+                })?
+        } else {
+            None
+        };
+        let receipt = if let Some(receipt) = recovered {
+            smelt_perf::perf::record_value("persist:recovery:turn_transition_matches", 1);
+            receipt
+        } else {
+            let actual_head = self
+                .writer
+                .as_ref()
+                .expect("actor writer")
+                .store_head()
+                .map_err(|error| {
+                    attempt.qualify_failure(PersistenceCause::from_store(
+                        "read session store head",
+                        error,
+                    ))
+                })?;
+            verify_canonical_head(command.session.expected, actual_head, attempt)?;
+            let commit_perf = smelt_perf::perf::begin("persist:turn_transition");
+            let result = self.commit_turn_transition(&command);
+            drop(commit_perf);
+            match result {
+                Ok(receipt) => receipt,
+                Err(failure) => {
+                    let cause = PersistenceCause::from_commit(&failure);
+                    if cause.class != PersistenceFailureClass::Environment {
+                        return Err(attempt.qualify_failure(cause));
+                    }
+                    self.recover_ambiguous_turn_transition(&command, cause)
+                        .map_err(PersistenceCause::with_unknown_commit)?
                 }
-                self.recover_ambiguous_turn_transition(&command, cause)
-                    .map_err(PersistenceCause::with_unknown_commit)?
             }
         };
         if receipt.turn_id != command.turn_id || receipt.state != command.state {
             return Err(PersistenceCause::invariant(
                 "turn transition receipt does not match its command",
-            ));
+            )
+            .after_commit());
         }
         let session_receipt = self
             .complete_commit(&command.session, receipt.session.clone())
@@ -3480,27 +3668,34 @@ mod tests {
     }
 
     #[test]
-    fn submit_turn_supersedes_a_queued_not_started_save() {
+    fn submit_turn_precedes_a_queued_not_started_save() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
         let release = actor.pause();
         actor.submit(intent(1, &["queued"])).unwrap();
+        let (reply, result) = mpsc::channel();
+        actor
+            .control
+            .as_ref()
+            .expect("persistence actor control")
+            .send(PersistenceControl::SubmitTurn {
+                intent: Box::new(submit_intent(1, &["queued"])),
+                queued_at: Instant::now(),
+                reply,
+            })
+            .unwrap();
+        assert!(actor
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .desired
+            .is_some());
 
-        let acknowledgement = thread::scope(|scope| {
-            let submit =
-                scope.spawn(|| actor.submit_turn(submit_intent(1, &["queued"]), deadline()));
-            while actor
-                .latest
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .desired
-                .is_some()
-            {
-                thread::yield_now();
-            }
-            release.send(()).unwrap();
-            durable_submit(submit.join().unwrap().unwrap())
-        });
+        release.send(()).unwrap();
+        let acknowledgement = result
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
         assert_eq!(acknowledgement.receipt.session.current.revision.get(), 1);
@@ -3508,6 +3703,49 @@ mod tests {
         assert_eq!(reader.turns().unwrap().len(), 1);
         let _ = actor.close(
             PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn canonical_turn_preserves_a_newer_queued_save() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+        let (reply, result) = mpsc::channel();
+        actor
+            .control
+            .as_ref()
+            .expect("persistence actor control")
+            .send(PersistenceControl::SubmitTurn {
+                intent: Box::new(submit_intent(1, &["canonical"])),
+                queued_at: Instant::now(),
+                reply,
+            })
+            .unwrap();
+        actor.submit(intent(2, &["canonical", "newer"])).unwrap();
+
+        release.send(()).unwrap();
+        let acknowledgement = result
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(acknowledgement.receipt.session.current.revision.get(), 1);
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable {
+                durable,
+                receipt: Some(ref receipt),
+                ..
+            } if durable == PersistenceGeneration::new(2)
+                && receipt.current.revision.get() == 2
+                && receipt.current.history_len == smelt_store::HistoryLen::new(2)
+        ));
+        assert_eq!(lineage_reader().turns().unwrap().len(), 1);
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
             deadline(),
             ClosePolicy::RequireDurable,
         );
@@ -3554,6 +3792,179 @@ mod tests {
             deadline(),
             ClosePolicy::RequireDurable,
         );
+    }
+
+    #[test]
+    fn explicit_retry_recovers_a_submit_committed_by_the_exact_repeat() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let actor = actor();
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::Io {
+            message: "injected ambiguous first submission".into(),
+        });
+        actor.inject_submit_receipt_failure();
+
+        let outcome = actor
+            .submit_turn(submit_intent(1, &["committed by repeat"]), deadline())
+            .expect("environmental submission failure remains pending");
+
+        assert!(matches!(
+            outcome,
+            SubmitTurnOutcome::Pending {
+                command_id,
+                generation,
+            } if command_id == CanonicalCommandId::new(1)
+                && generation == PersistenceGeneration::new(1)
+        ));
+        assert!(matches!(
+            actor.status().state,
+            PersistenceState::Blocked {
+                desired,
+                ref cause,
+                ..
+            } if desired == PersistenceGeneration::new(1)
+                && cause.recovery_action() == Some(PersistenceRecoveryAction::Retry)
+                && !cause.message.contains("/retry-save")
+        ));
+        assert!(actor
+            .status()
+            .canonical_completions
+            .iter()
+            .all(|completion| !matches!(completion, CanonicalCommandCompletion::Failed { .. })));
+
+        actor.retry_blocked().unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let status = actor.take_status();
+        assert!(status
+            .canonical_completions
+            .iter()
+            .any(|completion| matches!(
+                completion,
+                CanonicalCommandCompletion::Submit(acknowledgement)
+                    if acknowledgement.command_id == CanonicalCommandId::new(1)
+                        && acknowledgement.receipt.turn_id == smelt_store::TurnId::new(1)
+            )));
+        assert_eq!(lineage_reader().turns().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retry_commit_failure_requires_reopen() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        for _ in 0..2 {
+            actor.inject_commit_failure(smelt_store::SessionCommitFailure::Io {
+                message: "database or disk is full".into(),
+            });
+        }
+        let outcome = actor
+            .submit_turn(submit_intent(1, &["retry race"]), deadline())
+            .expect("environmental submission failure remains pending");
+        assert!(matches!(outcome, SubmitTurnOutcome::Pending { .. }));
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::StaleBase {
+            expected: smelt_store::StoreHead::default(),
+            current: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(1),
+                ..smelt_store::StoreHead::default()
+            },
+        });
+
+        actor.retry_blocked().unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Blocked {
+                durable,
+                ref cause,
+                ..
+            } if durable == PersistenceGeneration::ZERO
+                && cause.class == PersistenceFailureClass::Invariant
+                && cause.requires_reopen()
+                && cause.recovery_action().is_none()
+        ));
+        let status = actor.take_status();
+        assert!(status
+            .canonical_completions
+            .iter()
+            .any(|completion| matches!(
+                completion,
+                CanonicalCommandCompletion::Failed {
+                    command_id,
+                    generation,
+                    cause,
+                } if *command_id == CanonicalCommandId::new(1)
+                    && *generation == PersistenceGeneration::new(1)
+                    && cause.requires_reopen()
+            )));
+        let closed = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::AllowUnsaved,
+        );
+        assert_eq!(closed.omitted, Some(PersistenceGeneration::new(1)));
+    }
+
+    #[test]
+    fn terminal_prefix_failure_fails_the_retained_canonical_operation() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        for _ in 0..2 {
+            actor.inject_commit_failure(smelt_store::SessionCommitFailure::Io {
+                message: "database or disk is full".into(),
+            });
+        }
+        actor.submit(intent(1, &["blocked prefix"])).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Blocked { durable, .. }
+                if durable == PersistenceGeneration::ZERO
+        ));
+
+        let outcome = actor
+            .submit_turn(
+                submit_intent(2, &["blocked prefix", "retained turn"]),
+                deadline(),
+            )
+            .expect("environmentally blocked turn remains pending");
+        assert!(matches!(outcome, SubmitTurnOutcome::Pending { .. }));
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::UnsupportedSchema {
+            found: i32::MAX,
+            expected: 0,
+        });
+
+        actor.retry_blocked().unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Blocked {
+                durable,
+                ref cause,
+                ..
+            } if durable == PersistenceGeneration::ZERO
+                && cause.class == PersistenceFailureClass::Unsupported
+                && cause.recovery_action().is_none()
+        ));
+        let status = actor.take_status();
+        assert!(status
+            .canonical_completions
+            .iter()
+            .any(|completion| matches!(
+                completion,
+                CanonicalCommandCompletion::Failed {
+                    command_id,
+                    generation,
+                    cause,
+                } if *command_id == CanonicalCommandId::new(2)
+                    && *generation == PersistenceGeneration::new(2)
+                    && cause.class == PersistenceFailureClass::Unsupported
+                    && cause.recovery_action().is_none()
+            )));
+        let closed = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::AllowUnsaved,
+        );
+        assert_eq!(closed.omitted, Some(PersistenceGeneration::new(2)));
     }
 
     #[test]
@@ -3686,6 +4097,69 @@ mod tests {
             Some(CanonicalCommandCompletion::Submit(acknowledgement))
                 if acknowledgement.command_id == CanonicalCommandId::new(3)
         ));
+    }
+
+    #[test]
+    fn environmental_turn_transition_retries_with_its_command_identity() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let actor = actor();
+        let submitted = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["transition retry"]), deadline())
+                .unwrap(),
+        );
+        for _ in 0..2 {
+            actor.inject_commit_failure(smelt_store::SessionCommitFailure::Io {
+                message: "database or disk is full".into(),
+            });
+        }
+
+        let outcome = actor
+            .transition_turn(
+                transition_intent(
+                    2,
+                    &["transition retry"],
+                    submitted.receipt.turn_id,
+                    smelt_store::TurnState::Running,
+                ),
+                deadline(),
+            )
+            .expect("environmental transition failure remains pending");
+
+        assert_eq!(
+            outcome,
+            TurnTransitionOutcome::Pending {
+                command_id: CanonicalCommandId::new(2),
+                generation: PersistenceGeneration::new(2),
+            }
+        );
+        assert!(actor
+            .status()
+            .canonical_completions
+            .iter()
+            .all(|completion| !matches!(completion, CanonicalCommandCompletion::Failed { .. })));
+
+        actor.retry_blocked().unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(2)
+        ));
+        let status = actor.take_status();
+        assert!(status
+            .canonical_completions
+            .iter()
+            .any(|completion| matches!(
+                completion,
+                CanonicalCommandCompletion::Transition(acknowledgement)
+                    if acknowledgement.command_id == CanonicalCommandId::new(2)
+                        && acknowledgement.receipt.turn_id == submitted.receipt.turn_id
+                        && acknowledgement.receipt.state == smelt_store::TurnState::Running
+            )));
+        assert_eq!(
+            lineage_turn(&lineage_reader(), submitted.receipt.turn_id).state,
+            smelt_store::TurnState::Running
+        );
     }
 
     #[test]
@@ -4235,6 +4709,30 @@ mod tests {
         assert_eq!(actor.durable_generation(), PersistenceGeneration::ZERO);
         assert_eq!(actor.pending_audits.load(Ordering::Acquire), 0);
         assert_eq!(actor.pending_full_audit_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn retry_reconciliation_rejects_head_divergence_as_unknown() {
+        let expected = smelt_store::StoreHead::default();
+        assert!(verify_canonical_head(expected, expected, CanonicalAttempt::Reconcile).is_ok());
+
+        let actual = smelt_store::StoreHead {
+            revision: smelt_store::Revision::new(1),
+            ..expected
+        };
+        let initial = verify_canonical_head(expected, actual, CanonicalAttempt::Initial)
+            .expect_err("initial head divergence must reject the command");
+        assert!(initial.definitely_not_committed());
+
+        let cause = verify_canonical_head(expected, actual, CanonicalAttempt::Reconcile)
+            .expect_err("diverged reconciliation head must not execute the retained command");
+
+        assert_eq!(cause.class, PersistenceFailureClass::Invariant);
+        assert!(cause.requires_reopen());
+        assert_eq!(cause.recovery_action(), None);
+        assert!(cause
+            .message
+            .contains("session store advanced unexpectedly"));
     }
 
     #[test]
