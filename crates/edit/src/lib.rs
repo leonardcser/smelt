@@ -2394,7 +2394,9 @@ impl Ui {
     where
         P: FnMut(&mut Ui, MaterializeRequest),
     {
-        let win = self.wins.get(&win_id)?;
+        let follow_tail = self.should_follow_tail(win_id);
+        let win = self.wins.get_mut(&win_id)?;
+        win.begin_viewport_prepare();
         let buf_id = win.buf;
         let document_handle = win.document_handle();
         let gutter_width = self
@@ -2407,7 +2409,6 @@ impl Ui {
             .config
             .gutters
             .content_width_with_gutter(rect.width, gutter_width);
-        let follow_tail = self.should_follow_tail(win_id);
         let request = MaterializeRequest {
             win: win_id,
             buf: buf_id,
@@ -2445,21 +2446,29 @@ impl Ui {
             _ => 0,
         };
         if let Some(win) = self.wins.get_mut(&win_id) {
-            if win.pending_scroll_to_cursor && rect.height > 0 {
+            let viewport_height = win
+                .prepared_viewport_height()
+                .unwrap_or(rect.height)
+                .min(rect.height);
+            let viewport_rect = Rect {
+                height: viewport_height,
+                ..rect
+            };
+            if win.pending_scroll_to_cursor && viewport_height > 0 {
                 if let Some(buf) = self.bufs.get(&buf_id) {
-                    win.keep_cursor_visible(buf, total_rows, rect.height, content_width);
+                    win.keep_cursor_visible(buf, total_rows, viewport_height, content_width);
                 }
                 win.pending_scroll_to_cursor = false;
             }
             let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
                 let bar_col = rect.left + rect.width.saturating_sub(1);
-                window::ScrollbarState::new(bar_col, total_rows, rect.height)
+                window::ScrollbarState::new(bar_col, total_rows, viewport_height)
             } else {
                 None
             };
             win.viewport = Some(
                 window::WindowViewport::new(
-                    rect,
+                    viewport_rect,
                     content_width,
                     total_rows,
                     win.scroll_top(),
@@ -2468,11 +2477,13 @@ impl Ui {
                 .with_gutter_width(gutter_width),
             );
         }
+        let viewport_rect = self.wins.get(&win_id)?.viewport?.rect;
         Some(PreparedWindowRequest {
             win: win_id,
             buf: buf_id,
             document_handle,
             rect,
+            viewport_rect,
             gutter_width,
             content_width,
         })
@@ -2501,6 +2512,9 @@ impl Ui {
             && request.buf == win.buf
             && request.document_handle == win.document_handle()
             && request.rect == rect
+            && win
+                .viewport
+                .is_some_and(|viewport| viewport.rect == request.viewport_rect)
             && request.gutter_width == gutter_width
             && request.content_width == content_width
     }

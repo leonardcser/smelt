@@ -688,7 +688,10 @@ pub struct PreparedWindowRequest {
     pub win: WinId,
     pub buf: BufId,
     pub document_handle: Option<DocumentHandle>,
+    /// Resolved layout area used to validate reuse against the current split.
     pub rect: Rect,
+    /// Committed interactive viewport, which may retain a smaller exact row window.
+    pub viewport_rect: Rect,
     pub gutter_width: u16,
     pub content_width: u16,
 }

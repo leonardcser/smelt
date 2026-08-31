@@ -1572,6 +1572,47 @@ mod tests {
     }
 
     #[test]
+    fn sparse_search_candidate_resize_retains_exact_viewport_during_hydration() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.install_sparse_transcript_scroll_fixture(150, 40, 10);
+        for _ in 0..8 {
+            app.transcript_scroll_probe_wheel(false, 0);
+            app.transcript_scroll_probe_render();
+        }
+        for record in [31097, 31097, 43385, 31097] {
+            app.transcript_scroll_probe_reveal_record(record);
+            app.transcript_scroll_probe_render();
+        }
+
+        let retained_height = app
+            .transcript_window()
+            .viewport
+            .expect("settled transcript viewport")
+            .rect
+            .height;
+        app.transcript_scroll_probe_resize(57, 23);
+        app.render_unsettled_silent();
+        assert_eq!(
+            app.transcript_window()
+                .viewport
+                .expect("retained transcript viewport")
+                .rect
+                .height,
+            retained_height
+        );
+
+        app.render_silent();
+        assert!(
+            app.transcript_window()
+                .viewport
+                .expect("expanded transcript viewport")
+                .rect
+                .height
+                > retained_height
+        );
+    }
+
+    #[test]
     fn sparse_search_follow_tail_after_deferred_match_settles() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.install_sparse_transcript_scroll_fixture(380, 40, 10);

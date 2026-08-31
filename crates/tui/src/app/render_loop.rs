@@ -213,22 +213,36 @@ fn sync_retained_transcript_window(
         return;
     };
     if win.has_materialized_rows() {
-        win.sync_yank_flash_layer(buf, request.rect.height, render_now);
+        let viewport_rows = win
+            .materialized_rows()
+            .map_or(request.rect.height, |materialized| {
+                if materialized
+                    .nearest_backed_scroll_top(win.scroll_top(), request.rect.height)
+                    .is_some()
+                {
+                    request.rect.height
+                } else {
+                    win.retain_prepared_viewport_height()
+                        .unwrap_or(request.rect.height)
+                        .min(request.rect.height)
+                }
+            });
+        win.sync_yank_flash_layer(buf, viewport_rows, render_now);
         if win.is_following_tail() {
-            win.reveal_row_cursor(buf, request.rect.height);
+            win.reveal_row_cursor(buf, viewport_rows);
         }
         if let Some(materialized) = win.materialized_rows() {
             if let Some(retained_scroll) =
-                materialized.nearest_backed_scroll_top(win.scroll_top(), request.rect.height)
+                materialized.nearest_backed_scroll_top(win.scroll_top(), viewport_rows)
             {
                 if retained_scroll != win.scroll_top() {
                     win.set_resolved_scroll(retained_scroll);
                 }
             }
             debug_assert!(
-                materialized.covers_viewport(win.scroll_top(), request.rect.height),
+                materialized.covers_viewport(win.scroll_top(), viewport_rows),
                 "retained transcript viewport {:?} escaped exact backing {:?} (projected_scroll={}, following_tail={})",
-                materialized.viewport_range(win.scroll_top(), request.rect.height),
+                materialized.viewport_range(win.scroll_top(), viewport_rows),
                 materialized.materialized_range(),
                 materialized.clamped_scroll,
                 win.is_following_tail()
@@ -591,7 +605,7 @@ impl TuiApp {
                 self.conversation.reanchor_retained_transcript_viewport(
                     &lua,
                     prepared.content_width.max(1),
-                    prepared.rect.height,
+                    prepared.viewport_rect.height,
                     scroll_top,
                 );
             }
@@ -1090,13 +1104,13 @@ impl TuiApp {
                         return;
                     };
                     if !win.has_materialized_rows() {
-                        win.sync_yank_flash_layer(buf, request.rect.height, render_now);
+                        win.sync_yank_flash_layer(buf, request.viewport_rect.height, render_now);
                     }
                     win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
                     if let Some(search) =
                         search_session.as_ref().filter(|s| s.target == request.win)
                     {
-                        search.apply_to_window(win, buf, request.rect.height);
+                        search.apply_to_window(win, buf, request.viewport_rect.height);
                     }
                 },
             )

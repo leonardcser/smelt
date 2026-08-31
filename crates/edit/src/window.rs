@@ -643,6 +643,9 @@ pub struct Window {
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
+    /// One-frame height override used when an asynchronous row document must retain
+    /// its previously committed viewport until a larger exact projection is ready.
+    prepared_viewport_height: Option<u16>,
 
     scroll_top: RowIndex,
     /// Logical anchor for `scroll_top` - `(changedtick, logical_row, byte_offset)`
@@ -695,6 +698,7 @@ impl Window {
             document_handle: None,
             range_layers: WindowRangeLayers::default(),
             viewport: None,
+            prepared_viewport_height: None,
             scroll_top: 0,
             scroll_anchor: None,
             scroll_state: VerticalScroll::Pinned,
@@ -1021,6 +1025,22 @@ impl Window {
 
     pub fn scroll_state(&self) -> VerticalScroll {
         self.scroll_state
+    }
+
+    pub(crate) fn begin_viewport_prepare(&mut self) {
+        self.prepared_viewport_height = None;
+    }
+
+    /// Keep the current viewport height for this preparation pass. Asynchronous
+    /// row documents use this when an enlarged exact viewport is not ready yet.
+    pub fn retain_prepared_viewport_height(&mut self) -> Option<u16> {
+        let height = self.viewport?.rect.height;
+        self.prepared_viewport_height = Some(height);
+        Some(height)
+    }
+
+    pub(crate) fn prepared_viewport_height(&self) -> Option<u16> {
+        self.prepared_viewport_height
     }
 
     /// Override only the painted scrollbar position. The committed content
@@ -3141,6 +3161,7 @@ impl Window {
 
         let width = slice.width();
         let height = slice.height();
+        let viewport_height = self.prepared_viewport_height.unwrap_or(height).min(height);
         let scroll = row_to_usize(self.local_scroll_top());
         let gutter_width = self.gutter_width(buf).min(width);
         let pad_left = self
@@ -3180,7 +3201,8 @@ impl Window {
         // drives cursor-anchored row highlights and gates `on_cursor_row`
         // extmark painting so selection-aware spans always work.
         let cursor_abs_row = self.absolute_row(self.effective_cursor_row(buf));
-        let cursor_screen_row = Self::screen_row_at(cursor_abs_row, self.scroll_top, height);
+        let cursor_screen_row =
+            Self::screen_row_at(cursor_abs_row, self.scroll_top, viewport_height);
         let normal_style = ctx.theme.get("Normal");
         // Buffer override wins; fall back to window anchors.
         let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
@@ -3199,6 +3221,12 @@ impl Window {
         let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
         let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
         for row in 0..height {
+            if row >= viewport_height {
+                for col in 0..width {
+                    slice.set(col, row, ' ', normal_style);
+                }
+                continue;
+            }
             let visual_row = scroll + row as usize;
             let absolute_visual_row = self.absolute_row(visual_row as RowIndex);
             // Map visual → logical for extmark lookup. `chunk_cell_offset` is how
@@ -3484,7 +3512,7 @@ impl Window {
                     .map(|(lr, _)| lr)
                     .unwrap_or_else(|| row_to_usize(row));
                 let col = resolve_cursor_col(buf, logical_row, col);
-                Self::screen_row_at(self.absolute_row(row), self.scroll_top, height)
+                Self::screen_row_at(self.absolute_row(row), self.scroll_top, viewport_height)
                     .map(|screen_row| (col, screen_row))
             });
             if let Some((col, screen_row)) = resolved {
@@ -5288,6 +5316,23 @@ mod tests {
         assert_eq!(grid.cell(4, 0).symbol, 'o');
         assert_eq!(grid.cell(0, 1).symbol, 'c');
         assert_eq!(grid.cell(6, 1).symbol, 'e');
+    }
+
+    #[test]
+    fn render_blanks_rows_below_retained_viewport() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "bravo".into(), "charlie".into()]);
+        let mut w = make_win();
+        w.viewport = Some(WindowViewport::new(Rect::new(0, 0, 10, 1), 10, 3, 0, None));
+        assert_eq!(w.retain_prepared_viewport_height(), Some(1));
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+
+        w.render(&buf, &mut slice, &ctx());
+
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(0, 1).symbol, ' ');
+        assert_eq!(grid.cell(0, 2).symbol, ' ');
     }
 
     #[test]
