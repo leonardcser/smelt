@@ -11,7 +11,16 @@ mod bench_transcript_layout;
 mod fuzz;
 mod gen_file_icons;
 mod gen_lua_docs;
+mod prepare_release;
 mod synth;
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("xtask is at crates/xtask/")
+        .to_path_buf()
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -23,6 +32,7 @@ fn main() {
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
         Some("gen-file-icons") => gen_file_icons::run(args.collect()),
         Some("gen-lua-docs") => gen_lua_docs::run(),
+        Some("prepare-release") => prepare_release::run(args.collect()),
         Some("synth") => synth::run(),
         Some("fuzz") => fuzz::run(args.collect()),
         Some(other) => {
@@ -55,6 +65,7 @@ fn print_usage() {
     );
     eprintln!("  gen-file-icons [DEVICONS_DIR]          regenerate nvim-web-devicons registry");
     eprintln!("  gen-lua-docs                          regenerate Lua API stubs + reference docs");
+    eprintln!("  prepare-release VERSION               materialize a tag version in this checkout");
     eprintln!(
         "  synth                                 generate a synthetic session for perf testing"
     );

@@ -20,9 +20,9 @@ encoded with a `-beta` suffix.
   consistent and covered end to end.
 - Build documentation in strict mode and resolve warnings and broken links.
 
-`smelt.api_version == "2"` remains the alpha API identifier. Breaking alpha
+`smelt.api_version == "1"` remains the alpha API identifier. Breaking alpha
 cleanup updates declarations and generated artifacts in place rather than
-creating version 3 or maintaining a cross-base inventory.
+incrementing the API version or maintaining a cross-base inventory.
 
 ## Before 1.0
 

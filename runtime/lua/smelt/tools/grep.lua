@@ -177,7 +177,7 @@ smelt.transcript.register_tool("grep", {
   compact = grep_collapsed_detail,
 })
 
-smelt.tools.register(smelt.tools._with_watchdog({
+smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "grep",
   description = "A powerful search tool built on ripgrep. Supports full regex syntax, file type filtering, glob filtering, and multiple output modes.",
   override = true,
@@ -236,8 +236,8 @@ smelt.tools.register(smelt.tools._with_watchdog({
       end
     end
 
-    local combined = smelt.tools._compact_cwd_prefix_lines(combine_streams(out.stdout, out.stderr))
-    local count_source = smelt.tools._compact_cwd_prefix_lines(out.stdout or combined)
+    local combined = __smelt_internal.tools.compact_cwd_prefix_lines(combine_streams(out.stdout, out.stderr))
+    local count_source = __smelt_internal.tools.compact_cwd_prefix_lines(out.stdout or combined)
     if out.timed_out then
       local secs = math.floor(((args.timeout_ms or 30000) / 1000) + 0.5)
       return {

@@ -17,7 +17,8 @@ fn prompt_picker_ctrl_c_dismisses_before_idle_quit() {
             _G.prompt_picker_dismissed = false
             _G.prompt_picker_on_dismiss = 0
             smelt.spawn(function()
-                local result = smelt.prompt.open_picker({
+                local result = smelt.picker.open({
+                    placement = "prompt_docked",
                     items = {
                         { label = "alpha" },
                         { label = "beta" },
@@ -62,7 +63,8 @@ fn prompt_picker_esc_fires_on_dismiss() {
             _G.prompt_picker_esc_dismissed = false
             _G.prompt_picker_esc_on_dismiss = 0
             smelt.spawn(function()
-                local result = smelt.prompt.open_picker({
+                local result = smelt.picker.open({
+                    placement = "prompt_docked",
                     items = {
                         { label = "alpha" },
                         { label = "beta" },
@@ -98,6 +100,7 @@ fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
     assert!(app.run_lua(
         r#"
             _G.floating_picker_dismissed = false
+            _G.floating_picker_on_dismiss = 0
             smelt.spawn(function()
                 local result = smelt.picker.open({
                     items = {
@@ -105,6 +108,9 @@ fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
                         { label = "beta" },
                     },
                     placement = "center",
+                    on_dismiss = function()
+                        _G.floating_picker_on_dismiss = _G.floating_picker_on_dismiss + 1
+                    end,
                 })
                 _G.floating_picker_dismissed = result == nil
             end)
@@ -125,12 +131,49 @@ fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
         "first Ctrl-C should dismiss picker"
     );
     assert!(app.run_lua(r#"assert(_G.floating_picker_dismissed == true)"#));
+    assert!(app.run_lua(r#"assert(_G.floating_picker_on_dismiss == 1)"#));
 
     app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(
         app.quit_requested(),
         "second Ctrl-C after dismissal should quit"
     );
+}
+
+#[test]
+fn floating_picker_accepts_original_string_item_and_reports_selection() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+            _G.floating_picker_selected = {}
+            _G.floating_picker_result = nil
+            smelt.spawn(function()
+                _G.floating_picker_result = smelt.picker.open({
+                    items = { "alpha", "beta" },
+                    placement = "center",
+                    on_select = function(item)
+                        table.insert(_G.floating_picker_selected, item)
+                    end,
+                })
+            end)
+        "#,
+    ));
+    drive_lua_tasks(&mut app);
+    assert!(app.run_lua(r#"assert(_G.floating_picker_selected[1] == "alpha")"#));
+
+    app.press(KeyCode::Down);
+    drive_lua_tasks(&mut app);
+    assert!(app.run_lua(r#"assert(_G.floating_picker_selected[2] == "beta")"#));
+
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    assert!(app.run_lua(
+        r#"
+            assert(_G.floating_picker_result.index == 2)
+            assert(_G.floating_picker_result.item == "beta")
+            assert(_G.floating_picker_result.action == "enter")
+        "#,
+    ));
 }
 
 #[test]
@@ -354,7 +397,7 @@ fn theme_picker_confirms_selection_without_callback_error() {
     drive_lua_tasks(&mut app);
 
     assert!(app.lua_messages_contain("theme preview selected for this session:"));
-    assert!(!app.lua_messages_contain("cmd.picker on_enter:"));
+    assert!(!app.lua_messages_contain("cmd.register_picker on_enter:"));
 }
 
 #[test]
@@ -365,7 +408,8 @@ fn prompt_picker_custom_rank_uses_returned_indices() {
             _G.prompt_picker_rank_result = nil
             _G.prompt_picker_rank_calls = 0
             smelt.spawn(function()
-                local result = smelt.prompt.open_picker({
+                local result = smelt.picker.open({
+                    placement = "prompt_docked",
                     items = {
                         { label = "alpha" },
                         { label = "beta" },

@@ -2,7 +2,7 @@
 -- followed by non-whitespace bytes, or just `@` itself). Selecting an entry
 -- inserts `@path ` (or `@"quoted path" ` when the label contains a space).
 
-if not (smelt.prompt and smelt.prompt.completer and smelt.files) then return end
+if not (smelt.prompt and smelt.prompt.register_completer and smelt.files) then return end
 
 local path_format = require("smelt.completers.path_format")
 
@@ -34,7 +34,7 @@ local function query_at(anchor, text, cpos)
   return ""
 end
 
-smelt.prompt.completer({
+smelt.prompt.register_completer({
   limit = 200,
   detect = function(text, cpos)
     return cursor_in_at_zone(text, cpos)

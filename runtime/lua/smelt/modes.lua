@@ -12,9 +12,30 @@ end
 local registry = {}
 local order = {}
 
-local function note_for(name)
-  local mode = registry[name]
-  return mode and mode.note or ("now in " .. name .. " mode")
+---@class smelt.mode.Mode
+---@field name string
+---@field label string
+---@field icon string
+---@field hl_group string
+---@field note string
+---@field permissions table
+
+local function copy_permissions(permissions)
+  local out = {}
+  for key, value in pairs(permissions or {}) do out[key] = value end
+  return out
+end
+
+local function copy_mode(mode)
+  if not mode then return nil end
+  return {
+    name = mode.name,
+    label = mode.label,
+    icon = mode.icon,
+    hl_group = mode.hl_group,
+    note = mode.note,
+    permissions = copy_permissions(mode.permissions),
+  }
 end
 
 local function normalize(spec)
@@ -27,7 +48,7 @@ local function normalize(spec)
     icon = spec.icon or "",
     hl_group = spec.hl_group or "SmeltModeDefault",
     note = spec.note or ("now in " .. spec.name .. " mode"),
-    permissions = spec.permissions or {},
+    permissions = copy_permissions(spec.permissions),
   }
   return mode
 end
@@ -55,62 +76,18 @@ smelt.mode.register = function(spec)
   registry[mode.name] = mode
 end
 
--- Return the registered mode definition for `name`, or `nil` when unknown.
----@type fun(name: string): table|nil
+-- Return a copy of the registered mode definition for `name`, or `nil` when unknown.
+---@type fun(name: string): smelt.mode.Mode?
 smelt.mode.get = function(name)
-  return registry[name]
+  return copy_mode(registry[name])
 end
 
--- Return registered mode definitions in registration order.
----@type fun(): table[]
+-- Return copies of registered mode definitions in registration order.
+---@type fun(): smelt.mode.Mode[]
 smelt.mode.list = function()
   local out = {}
   for _, name in ipairs(order) do
-    out[#out + 1] = registry[name]
-  end
-  return out
-end
-
--- Return the icon for `name`, or `""` when the mode is unknown.
----@type fun(name: string): string
-smelt.mode.icon = function(name)
-  local mode = registry[name]
-  return mode and mode.icon or ""
-end
-
--- Set a mode's icon. An unknown name is registered with the default mode
--- fields and the supplied icon.
----@type fun(name: string, icon: string): nil
-smelt.mode.set_icon = function(name, icon)
-  local mode = registry[name]
-  if not mode then
-    smelt.mode.register({ name = name, icon = icon })
-  else
-    mode.icon = icon
-  end
-end
-
--- Return `{ hl_group = string }` for `name`. Unknown modes use
--- `"SmeltModeDefault"`.
----@type fun(name: string): table
-smelt.mode.style = function(name)
-  local mode = registry[name]
-  return { hl_group = mode and mode.hl_group or "SmeltModeDefault" }
-end
-
--- Return the status note for `name`, falling back to `"now in <name> mode"`.
----@type fun(name: string): string
-smelt.mode.note = function(name)
-  return note_for(name)
-end
-
--- Return a map from every registered mode name to its permission behavior
--- table. Modes without explicit behaviors map to an empty table.
----@type fun(): table<string, table>
-smelt.mode.permission_behaviors = function()
-  local out = {}
-  for name, mode in pairs(registry) do
-    out[name] = mode.permissions or {}
+    out[#out + 1] = copy_mode(registry[name])
   end
   return out
 end

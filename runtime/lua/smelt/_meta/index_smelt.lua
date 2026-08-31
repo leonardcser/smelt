@@ -21,22 +21,22 @@ smelt.ns = nil
 --- Tier: Host - Available in every runtime, including headless mode.
 --- Promote the current loader frame to plugin scope `name` and return a
 --- small handle exposing the plugin's per-cycle state slot:
---- 
+---
 ---   local M = smelt.plugin("banner")
 ---   M.state.fires = 0          -- M.state is smelt.state.get("banner")
 ---   M.name == "banner"
---- 
+---
 --- After this call, bare `smelt.state.get()` also resolves to the named
 --- slot and unnamed resource constructors auto-name keyed by `name`.
 --- Idempotent within a single module body run: counters reset on every
 --- promotion so declaration order is what matters.
---- 
+---
 --- The handle deliberately doesn't wrap `smelt.signal` / `smelt.cmd` /
 --- `smelt.keymap` / `smelt.lifecycle.*` - those calls would not be
 --- scope-aware (signal/cmd names are global), so a method facade would
 --- imply encapsulation it can't deliver. Call them directly through
 --- `smelt.*` and namespace your signal/cmd names explicitly.
---- 
+---
 --- Must be called from a module body (or init.lua). Outside a loader
 --- frame (e.g. from an event callback) it raises immediately.
 ---@see smelt.state.get

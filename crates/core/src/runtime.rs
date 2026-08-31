@@ -122,6 +122,18 @@ impl Core {
         }
     }
 
+    /// Read live session approvals and both persisted scopes as one coherent
+    /// permission view for frontends and headless callers.
+    pub fn permission_snapshot(&self) -> Result<crate::permissions::PermissionSnapshot, String> {
+        let cwd = self.env.cwd();
+        crate::permissions::read_snapshot(
+            &self.permissions,
+            &self.permission_store,
+            &cwd,
+            Some(std::path::Path::new(&self.config.settings.worktree_root)),
+        )
+    }
+
     /// Swap the clipboard sink to match the `system_clipboard` setting. Off
     /// installs a [`NullSink`] for the TUI so the kill ring stays purely
     /// internal (no OS clipboard read/write); on restores the frontend's

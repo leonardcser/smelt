@@ -16,8 +16,8 @@
 
 local function report_picker_error(event, err)
   local msg = tostring(err)
-  smelt.log.error("cmd.picker_callback_failed", { event = event, error = msg })
-  smelt.notify.error("cmd.picker " .. event .. ": " .. msg)
+  smelt.log.error("cmd.register_picker_callback_failed", { event = event, error = msg })
+  smelt.notify.error("cmd.register_picker " .. event .. ": " .. msg)
 end
 
 local function safe_dismiss(fn)
@@ -32,7 +32,8 @@ local function run_picker(opts)
       -- Persistent mode: the picker itself owns the lifecycle and re-evaluates
       -- `opts.items` (function form) after each on_enter, so the cursor stays
       -- on the row the user just acted on instead of resetting.
-      smelt.prompt.open_picker({
+      smelt.picker.open({
+        placement  = "prompt_docked",
         items     = opts.items,
         on_select = opts.on_select,
         on_enter  = function(item, idx)
@@ -54,7 +55,8 @@ local function run_picker(opts)
       safe_dismiss(opts.on_dismiss)
       return
     end
-    local r = smelt.prompt.open_picker({
+    local r = smelt.picker.open({
+      placement = "prompt_docked",
       items     = items,
       on_select = opts.on_select,
     })
@@ -79,7 +81,7 @@ end
 -- re-evaluated after each Enter action. Returns nothing; the command lives
 -- until `/reload`.
 ---@type fun(name: string, opts: table?): nil
-function smelt.cmd.picker(name, opts)
+function smelt.cmd.register_picker(name, opts)
   opts = opts or {}
 
   local args = opts.args

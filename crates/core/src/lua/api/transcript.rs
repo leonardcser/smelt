@@ -30,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     record_module_doc(
         "smelt.transcript.defaults",
-        "Bundled default transcript renderers. These are ordinary Lua helpers used by the default root renderer and available for user renderers to call or compose.",
+        "Bundled default transcript entry points for rendering semantic blocks and raw tool output.",
         ApiClassification::Advanced,
     );
     record_module_doc(

@@ -1,4 +1,4 @@
--- `smelt.prompt.open_picker(opts)` - prompt-docked picker.
+-- Prompt-docked implementation used by `smelt.picker.open(opts)`.
 -- Up/Down navigate, Tab inserts the label, Esc/Ctrl-C dismiss.
 --
 -- Two modes, distinguished by whether `on_enter` is supplied:
@@ -61,7 +61,8 @@ end
 
 local function stamp(original)
   local all = {}
-  for i, it in ipairs(original) do
+  for i, item in ipairs(original) do
+    local it = type(item) == "string" and { label = item } or item
     all[i] = {
       label        = it.label,
       description  = it.description,
@@ -86,63 +87,42 @@ local function resolve_items(items)
   return type(items) == "function" and items() or items
 end
 
---- Picker entry shown in the prompt-docked dropdown. `label` and the
---- optional flavour fields mirror what the fuzzy ranker renders; the
---- caller is free to attach extra fields and read them back from
---- `on_select` / `on_enter`.
----@class smelt.prompt.PickerItem
----@field label string Primary text rendered for the row.
----@field description? string Secondary text shown dimmed after the label.
----@field ansi_color? any ANSI color spec used for the prefix glyph.
----@field label_color? any Override the label's color.
----@field prefix? string Glyph rendered before the label.
----@field search_terms? string Extra haystack tokens for the fuzzy match.
-
---- Options accepted by `smelt.prompt.open_picker`. Passing `on_enter`
---- switches the picker to persistent mode (stays open across selects);
---- omit it for single-shot behaviour.
----@class smelt.prompt.PickerOpts
----@field items? smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
----@field provider? fun(query: string, limit: integer): table Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`.
+--- High-level picker options. Static floating pickers accept `items` and
+--- `placement`. Prompt-docked pickers also support ranking, providers, and
+--- persistent `on_enter` handling.
+---@class smelt.picker.OpenOpts
+---@field items? (string|smelt.picker.Item)[] | fun(): (string|smelt.picker.Item)[] Eager list or lazy producer.
+---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Ranking, providers, and persistent mode use `prompt_docked`.
+---@field provider? fun(query: string, limit: integer): table Async provider returning `{ items, searching?, scanning?, message?, status? }`.
 ---@field limit? integer Maximum rows requested from `provider`; defaults to 200.
 ---@field poll_ms? integer Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`.
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
 ---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
----@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
----@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
----@field rank? fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order.
+---@field on_select? fun(item: string|smelt.picker.Item): nil Fires on every cursor move.
+---@field on_enter? fun(item: string|smelt.picker.Item, idx: integer): nil Persistent-mode accept handler.
+---@field rank? fun(items: table[], query: string, original: (string|smelt.picker.Item)[]): integer[] Custom filter/ranker. Return 1-based row indices in display order.
 ---@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
--- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
--- the current prompt buffer on every keystroke, ranked by `opts.rank` or
--- `smelt.fuzzy.rank`; alternatively `opts.provider(query, limit)` may return
--- the shared provider result shape `{ items, searching?, scanning?, message?,
--- status? }`. Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
--- to switch to persistent mode (the picker stays open across selections
--- until Esc). Returns `{ action, item, index }` on accept or `nil` on
--- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
----@type fun(opts: smelt.prompt.PickerOpts): table?
-function smelt.prompt.open_picker(opts)
+function __smelt_internal.picker.open_prompt(opts)
   if not coroutine.isyieldable() then
-    error("smelt.prompt.open_picker: call from inside smelt.spawn(fn) or tool.execute", 2)
+    error("smelt.picker.open: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
   if type(opts) ~= "table" then
-    error("smelt.prompt.open_picker: expected table of options", 2)
+    error("smelt.picker.open: expected table of options", 2)
   end
 
   local on_select = opts.on_select
   local on_enter = opts.on_enter
-  local on_dismiss = opts.on_dismiss
   local rank = opts.rank
   if rank ~= nil and type(rank) ~= "function" then
-    error("smelt.prompt.open_picker: opts.rank must be a function", 2)
+    error("smelt.picker.open: opts.rank must be a function", 2)
   end
   local provider_fn = opts.provider
   if provider_fn ~= nil and type(provider_fn) ~= "function" then
-    error("smelt.prompt.open_picker: opts.provider must be a function", 2)
+    error("smelt.picker.open: opts.provider must be a function", 2)
   end
   if provider_fn == nil and opts.items == nil then
-    error("smelt.prompt.open_picker: opts.items or opts.provider required", 2)
+    error("smelt.picker.open: opts.items or opts.provider required", 2)
   end
   local persistent = type(on_enter) == "function"
 
@@ -174,7 +154,7 @@ function smelt.prompt.open_picker(opts)
 
   local original, initial_provider_state = resolve_initial()
   if type(original) ~= "table" or #original == 0 then
-    error("smelt.prompt.open_picker: opts.items or opts.provider must resolve to a non-empty table", 2)
+    error("smelt.picker.open: opts.items or opts.provider must resolve to a non-empty table", 2)
   end
 
   provider_state = initial_provider_state
@@ -190,41 +170,16 @@ function smelt.prompt.open_picker(opts)
   -- Claim modal ownership of the prompt so auto-completers (slash / @file /
   -- arg) stay quiet while this picker uses the prompt as its filter input.
   local lock_reg = smelt.prompt.acquire and smelt.prompt.acquire() or nil
-
-  local task_id = smelt.task.alloc()
-  local regs = {}
+  local lifecycle = __smelt_internal.picker.new_lifecycle(picker, opts)
+  lifecycle:add(lock_reg)
 
   local function fire_on_select()
-    if on_select and current[selected] and not current[selected]._synthetic then
+    if current[selected] and not current[selected]._synthetic then
       local orig = original[current[selected]._idx]
-      local ok, err = pcall(on_select, orig)
-      if not ok then
-        smelt.notify.error("prompt picker on_select: " .. tostring(err))
-      end
+      lifecycle:call("on_select", on_select, orig)
     end
   end
   fire_on_select()
-
-  local function teardown()
-    for _, reg in ipairs(regs) do reg:remove() end
-    picker:close()
-    if lock_reg then lock_reg:remove() end
-  end
-
-  local function close_with(result)
-    teardown()
-    smelt.task.resume(task_id, result)
-  end
-
-  local function dismiss()
-    if on_dismiss then
-      local ok, err = pcall(on_dismiss)
-      if not ok then
-        smelt.notify.error("prompt picker on_dismiss: " .. tostring(err))
-      end
-    end
-    close_with(nil)
-  end
 
   local function move(delta)
     local n = #current
@@ -248,12 +203,12 @@ function smelt.prompt.open_picker(opts)
   local ensure_provider_poll
 
   local function stop_provider_poll()
-    if provider_poll_reg then provider_poll_reg:remove() end
+    lifecycle:remove(provider_poll_reg)
     provider_poll_reg = nil
   end
 
   local function apply_provider_result(rows, normalized, reset_to_top)
-    if smelt.provider._should_keep_stale_rows(normalized, rows, current) then
+    if __smelt_internal.provider.should_keep_stale_rows(normalized, rows, current) then
       provider_state = normalized
       ensure_provider_poll()
       return
@@ -269,7 +224,7 @@ function smelt.prompt.open_picker(opts)
       selected = 1
     else
       local fallback = reset_to_top and 1 or math.min(selected, #current)
-      selected = smelt.provider._select_row(current, old_key, not reset_to_top, fallback)
+      selected = __smelt_internal.provider.select_row(current, old_key, not reset_to_top, fallback)
     end
 
     picker:items(to_picker_items(current), selected - 1)
@@ -294,7 +249,7 @@ function smelt.prompt.open_picker(opts)
       local rows, normalized = read_provider(true)
       apply_provider_result(rows, normalized, false)
     end)
-    regs[#regs + 1] = provider_poll_reg
+    lifecycle:add(provider_poll_reg)
   end
 
   local function apply_provider_rows(show_message, reset_to_top)
@@ -332,34 +287,32 @@ function smelt.prompt.open_picker(opts)
   local function accept(action, picked, item)
     picked = picked or current[selected]
     if not picked then
-      close_with(nil)
+      lifecycle:close(nil)
       return true
     end
     if picked._synthetic then
       return false
     end
     local idx = picked._idx
-    close_with({ action = action, index = idx, item = item or original[idx] })
+    lifecycle:close({ action = action, index = idx, item = item or original[idx] })
     return true
   end
 
   -- Picker renders reversed: index 0 is at the bottom (closest to prompt).
   -- Up moves toward worse matches; Down toward better (closer to prompt).
-  regs[#regs + 1] = prompt:key("up",    function() move(1)  end)
-  regs[#regs + 1] = prompt:key("down",  function() move(-1) end)
-  regs[#regs + 1] = prompt:key("c-k",   function() move(1)  end)
-  regs[#regs + 1] = prompt:key("c-j",   function() move(-1) end)
-  regs[#regs + 1] = prompt:key("c-p",   function() move(1)  end)
-  regs[#regs + 1] = prompt:key("c-n",   function() move(-1) end)
-  regs[#regs + 1] = prompt:key("enter", function()
+  lifecycle:add(prompt:key("up",    function() move(1)  end))
+  lifecycle:add(prompt:key("down",  function() move(-1) end))
+  lifecycle:add(prompt:key("c-k",   function() move(1)  end))
+  lifecycle:add(prompt:key("c-j",   function() move(-1) end))
+  lifecycle:add(prompt:key("c-p",   function() move(1)  end))
+  lifecycle:add(prompt:key("c-n",   function() move(-1) end))
+  lifecycle:add(prompt:key("enter", function()
     if persistent then
       local picked = current[selected]
       if not picked or picked._synthetic then return end
       local orig = original[picked._idx]
-      local ok, err = pcall(on_enter, orig, picked._idx)
-      if not ok then
-        smelt.notify.error("prompt picker on_enter: " .. tostring(err))
-        close_with(nil)
+      if not lifecycle:call("on_enter", on_enter, orig, picked._idx) then
+        lifecycle:close(nil)
         return
       end
       refresh()
@@ -370,18 +323,18 @@ function smelt.prompt.open_picker(opts)
       if picked then smelt.prompt.set_text("") end
       accept("enter", picked, item)
     end
-  end)
-  regs[#regs + 1] = prompt:key("tab",   function()
+  end))
+  lifecycle:add(prompt:key("tab", function()
     local picked = current[selected]
     if picked and picked._synthetic then return end
     local item = picked and original[picked._idx] or nil
     if picked then smelt.prompt.set_text(picked.label) end
     accept("tab", picked, item)
-  end)
-  regs[#regs + 1] = prompt:key("esc",   function() dismiss() end)
-  regs[#regs + 1] = prompt:key("c-c",   function() dismiss() end)
+  end))
+  lifecycle:add(prompt:key("esc", function() lifecycle:dismiss() end))
+  lifecycle:add(prompt:key("c-c", function() lifecycle:dismiss() end))
 
-  regs[#regs + 1] = prompt:on("text_changed", function(ctx)
+  lifecycle:add(prompt:on("text_changed", function(ctx)
     query = ctx.text or ""
     if provider_fn then
       apply_provider_rows(false, true)
@@ -394,7 +347,7 @@ function smelt.prompt.open_picker(opts)
     selected = 1
     picker:items(to_picker_items(current), 0)
     fire_on_select()
-  end)
+  end))
 
-  return smelt.task.wait(task_id)
+  return lifecycle:wait()
 end

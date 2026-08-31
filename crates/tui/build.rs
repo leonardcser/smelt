@@ -13,15 +13,15 @@
 //!     for a dev build, `v{CARGO_PKG_VERSION}` when git is unavailable.
 //!
 //! The git lookups go through `git rev-parse` / `git show` / `git describe`,
-//! so they work for ordinary checkouts and worktrees alike. When the source
-//! tree isn't a git repo (e.g. someone tar-extracted the crate) we fall
-//! back to `CARGO_PKG_VERSION` (and "unknown" for the git-only fields)
-//! without failing the build.
+//! so they work for ordinary checkouts and worktrees alike. Release runners
+//! set `SMELT_RELEASE_TAG` after materializing the matching package version;
+//! this preserves the exact tag identity despite runner-local manifest edits.
+//! When Git is unavailable, the display falls back to `CARGO_PKG_VERSION`.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-mod build_pathspecs;
+mod build_support;
 
 fn main() {
     let sha = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
@@ -32,30 +32,25 @@ fn main() {
     let described = git(&[
         "describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*",
     ]);
-    let (tag, commits, dirty, display) = match described.as_deref() {
-        Some(d) => parse_describe(d, pkg_version),
-        None => (
-            "unknown".into(),
-            "0".into(),
-            "0".into(),
-            format!("v{pkg_version}"),
-        ),
-    };
+    let release_tag = std::env::var("SMELT_RELEASE_TAG").ok();
+    let identity =
+        build_support::resolve_identity(described.as_deref(), pkg_version, release_tag.as_deref())
+            .unwrap_or_else(|error| panic!("{error}"));
 
     println!("cargo:rustc-env=SMELT_BUILD_SHA={sha}");
     println!("cargo:rustc-env=SMELT_BUILD_DATE={date}");
     println!("cargo:rustc-env=SMELT_TARGET={target}");
-    println!("cargo:rustc-env=SMELT_BUILD_TAG={tag}");
-    println!("cargo:rustc-env=SMELT_BUILD_COMMITS={commits}");
-    println!("cargo:rustc-env=SMELT_BUILD_DIRTY={dirty}");
-    println!("cargo:rustc-env=SMELT_DISPLAY={display}");
+    println!("cargo:rustc-env=SMELT_BUILD_TAG={}", identity.tag);
+    println!("cargo:rustc-env=SMELT_BUILD_COMMITS={}", identity.commits);
+    println!("cargo:rustc-env=SMELT_BUILD_DIRTY={}", identity.dirty);
+    println!("cargo:rustc-env=SMELT_DISPLAY={}", identity.display);
 
     // Rebuild when HEAD moves. `.git/HEAD` only contains the current ref for
     // normal branch checkouts, so also watch the resolved branch ref where the
     // commit actually changes when new commits are added.
-    for pathspec in build_pathspecs::git_pathspecs(
-        git(&["rev-parse", "--symbolic-full-name", "HEAD"]).as_deref(),
-    ) {
+    for pathspec in
+        build_support::git_pathspecs(git(&["rev-parse", "--symbolic-full-name", "HEAD"]).as_deref())
+    {
         rerun_if_git_path(pathspec);
     }
     // The dirty flag depends on tracked working-tree contents, not just git
@@ -65,58 +60,14 @@ fn main() {
         (git(&["rev-parse", "--show-toplevel"]), git(&["ls-files"]))
     {
         let repo_root = PathBuf::from(repo_root);
-        for path in build_pathspecs::tracked_file_paths(&repo_root, &tracked_files) {
+        for path in build_support::tracked_file_paths(&repo_root, &tracked_files) {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=build_pathspecs.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
+    println!("cargo:rerun-if-env-changed=SMELT_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=TARGET");
-}
-
-/// Split a `git describe --tags --long --dirty --match 'v[0-9]*'` result like
-/// `v0.5.0-alpha.2-80-g827e6646-dirty` into `(tag, commits, dirty, display)`.
-/// `display` is the canonical user-facing identity: `{tag}` on a clean
-/// tagged build (commits == 0, not dirty), otherwise
-/// `{tag}-{commits}-{sha}[-dirty]`. A missing or unparseable result
-/// falls back to `v{pkg_version}`.
-fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String, String) {
-    let (core, dirty_flag) = match described.strip_suffix("-dirty") {
-        Some(rest) => (rest, "1"),
-        None => (described, "0"),
-    };
-    // `core` looks like `<tag>-<commits>-g<sha>`. Tags may themselves
-    // contain `-` (e.g. `v0.5.0-alpha.2`), so split from the right.
-    let parts: Vec<&str> = core.rsplitn(3, '-').collect();
-    let (tag, commits, sha) = if parts.len() == 3 && parts[0].starts_with('g') {
-        (
-            parts[2].to_string(),
-            parts[1].to_string(),
-            parts[0].trim_start_matches('g').to_string(),
-        )
-    } else {
-        return (
-            "unknown".into(),
-            "0".into(),
-            dirty_flag.into(),
-            format!("v{pkg_version}"),
-        );
-    };
-    let tag_with_v = if tag.starts_with('v') {
-        tag.clone()
-    } else {
-        format!("v{tag}")
-    };
-    let display = if commits == "0" && dirty_flag == "0" {
-        tag_with_v
-    } else {
-        let mut display = format!("{tag_with_v}-{commits}-{sha}");
-        if dirty_flag == "1" {
-            display.push_str("-dirty");
-        }
-        display
-    };
-    (tag, commits, dirty_flag.into(), display)
 }
 
 fn rerun_if_git_path(pathspec: &str) {

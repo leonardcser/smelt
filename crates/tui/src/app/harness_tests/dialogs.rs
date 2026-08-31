@@ -4,7 +4,7 @@ fn open_root_test_dialog(app: &mut TestApp) {
     assert!(app.run_lua(
         r#"
         local leaf = smelt.dialog.content({ text = "Review this action" })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           panels = { { leaf = leaf, height = "fit" } },
           blocks_agent = true,
         })
@@ -107,7 +107,7 @@ fn dialog_input_edits_and_renders_unicode_by_grapheme() {
         r#"
         local leaf, buf = smelt.dialog.input("custom answer", { wrap = true })
         _G.__unicode_answer_buf = buf
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "question",
           focus = leaf,
           panels = { { leaf = leaf, height = "fit" } },
@@ -287,7 +287,7 @@ fn failed_root_dialog_open_does_not_pollute_dialog_stack() {
         r#"
         local leaf = smelt.dialog.content({ text = "Review this action" })
         local ok = pcall(function()
-          smelt.dialog.open_handle({
+          smelt.dialog.new({
             panels = { { leaf = leaf, height = "fit" } },
             min_height = "invalid",
           })
@@ -305,7 +305,7 @@ fn root_dialog_can_disable_top_edge_resize() {
     assert!(app.run_lua(
         r#"
         local leaf = smelt.dialog.content({ text = "Fixed dialog" })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           panels = { { leaf = leaf, height = "fit" } },
           resizable = false,
         })
@@ -431,7 +431,7 @@ fn expanding_root_dialog_preserves_focused_panel() {
         r#"
         local first = smelt.dialog.content({ text = "First panel", interactive = true })
         local second = smelt.dialog.content({ text = "Second panel", interactive = true })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           panels = {
             { leaf = first, height = "fit" },
             { leaf = second, height = "fit" },
@@ -558,7 +558,7 @@ fn readonly_dialog_arrows_move_without_vim() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha", "bravo", "charlie" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -592,7 +592,7 @@ fn vim_readonly_dialog_arrows_and_vim_motions_move_cursor() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha one", "bravo two", "charlie three", "delta four", "echo five", "foxtrot six" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -635,7 +635,7 @@ fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma", "delta" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -737,7 +737,7 @@ fn vim_visual_viewer_owned_keys_preempt_dialog_keymaps() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -782,7 +782,7 @@ fn vim_visual_global_keymap_overrides_viewer_default() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -811,7 +811,7 @@ fn vim_pending_viewer_sequence_preempts_dialog_keymap() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -860,7 +860,7 @@ fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },
@@ -910,7 +910,7 @@ fn vim_readonly_dialog_visual_selection_is_painted() {
         local buf = smelt.buf.new({ readonly = true })
         buf:lines({ "alpha beta", "gamma" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-        smelt.dialog.open_handle({
+        smelt.dialog.new({
           title = "viewer",
           height = 4,
           panels = { { leaf = leaf, height = "fill" } },

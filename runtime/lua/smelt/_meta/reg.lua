@@ -13,7 +13,7 @@ local reg = {}
 --- include `nil` (skipped) so call sites don't need to filter. Returns a
 --- `Reg`. Typical use: a plugin that owns several reactive subscriptions
 --- returns one composed Reg to its caller.
---- 
+---
 --- ```lua
 --- return smelt.reg.compose(
 ---   smelt.keymap.set("n", "<leader>x", handler),

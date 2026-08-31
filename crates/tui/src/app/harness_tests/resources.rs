@@ -89,7 +89,6 @@ fn no_model_state_is_explicit_and_blocks_dispatch() {
             assert(smelt.config.api_base() == nil)
             assert(smelt.config.api_key_env() == nil)
             assert(smelt.config.model_config() == nil)
-            assert(smelt.model.transport() == nil)
             assert(smelt.model.capabilities() == nil)
         "#,
     ));

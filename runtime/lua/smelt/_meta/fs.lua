@@ -97,10 +97,6 @@ fs.rename = nil
 ---@type fun(p: string): integer?, string?
 fs.size = nil
 
---- Acquire an exclusive non-blocking advisory lock for `p`. Returns a lock handle on success or an error string when the file is already locked or cannot be opened.
----@type fun(p: string): smelt.fs.Flock?, string?
-fs.try_flock = nil
-
 --- Filesystem watcher. Calls `handler(event)` for each event, where
 --- `event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
 --- `detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).

@@ -39,13 +39,15 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
 }
 
 #[test]
-fn custom_mode_without_highlight_group_uses_default_style() {
+fn custom_mode_get_returns_a_copy_with_default_style() {
     let mut app = TestApp::builder().build();
     let group: String = app
         .eval_lua(
             r#"
             smelt.mode.register({ name = "review" })
-            return smelt.mode.style("review").hl_group
+            local copy = smelt.mode.get("review")
+            copy.hl_group = "Changed"
+            return smelt.mode.get("review").hl_group
             "#,
         )
         .expect("custom mode highlight group");

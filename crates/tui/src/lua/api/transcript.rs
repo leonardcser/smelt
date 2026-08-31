@@ -414,8 +414,7 @@ fn node_snapshot_table(
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript: mlua::Table = smelt.get("transcript")?;
-    let m = LuaMod::extend_supported(lua, transcript.clone(), "smelt.transcript", Tier::UiHost);
-    let host = LuaMod::extend_supported(lua, transcript, "smelt.transcript", Tier::Host);
+    let m = LuaMod::extend_supported(lua, transcript, "smelt.transcript", Tier::UiHost);
     let _ = LuaTranscriptStreamOpts::lua_type();
     let navigation_opts_type = LuaTranscriptNavigationOpts::lua_type();
     let _ = LuaTranscriptRevealOpts::lua_type();
@@ -625,7 +624,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .flatten())
         },
     )?;
-    host.fn_(
+    m.fn_(
         "watch_view",
         "Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.",
         &["callback"],

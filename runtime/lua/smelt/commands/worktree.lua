@@ -154,8 +154,9 @@ local function switch_to(path)
 end
 
 local function open_picker()
-  local result = smelt.prompt.open_picker({
+  local result = smelt.picker.open({
     items = picker_items,
+    placement = "prompt_docked",
   })
   if not result or result.action ~= "enter" then return end
 

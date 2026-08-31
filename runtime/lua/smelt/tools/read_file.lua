@@ -114,10 +114,10 @@ local function unsupported_image_format_result(path, mime)
 end
 
 local function active_transport_supports_tool_results(modality)
-  if not smelt.model or not smelt.model.transport then return false end
-  local transport = smelt.model.transport()
-  if not transport then return false end
-  return transport[modality .. "_tool_results"] == true
+  if not smelt.model or not smelt.model.capabilities then return false end
+  local capabilities = smelt.model.capabilities()
+  local transport = capabilities and capabilities.transport
+  return transport and transport[modality .. "_tool_results"] == true or false
 end
 
 local function active_model_supports(modality)
@@ -194,7 +194,7 @@ smelt.transcript.register_tool("read_file", {
   end,
 })
 
-smelt.tools.register(smelt.tools._with_watchdog({
+smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "read_file",
   description = "Reads a file from the local filesystem. Supports text files, provider-compatible image files (png, jpg/jpeg, gif, webp), SVG as text, and PDFs when the active model/provider can accept them.",
   override = true,

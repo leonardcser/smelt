@@ -24,19 +24,6 @@ pop while the caller owns the screen. Returns a `Reg` whose
 `:remove()` releases the lock; the last release re-runs the
 recompute pass. Idempotent - multiple acquirers stack.
 
-## `smelt.prompt.completer`
-
-```lua
-fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
-```
-
-Types: [`smelt.prompt.CompleterSpec`](types.md#smeltpromptcompleterspec), [`smelt.prompt.MatchesCompleterSpec`](types.md#smeltpromptmatchescompleterspec), [`smelt.Reg`](types.md#smeltreg)
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
-completer and closes the picker if it was active.
-
 ## `smelt.prompt.cursor`
 
 ```lua
@@ -69,25 +56,6 @@ True while at least one `smelt.prompt.acquire()` lock is outstanding.
 Plugins read this to skip non-blocking work that would race the
 modal owner.
 
-## `smelt.prompt.open_picker`
-
-```lua
-fun(opts: smelt.prompt.PickerOpts): table?
-```
-
-Types: [`smelt.prompt.PickerOpts`](types.md#smeltpromptpickeropts)
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
-the current prompt buffer on every keystroke, ranked by `opts.rank` or
-`smelt.fuzzy.rank`; alternatively `opts.provider(query, limit)` may return
-the shared provider result shape `{ items, searching?, scanning?, message?,
-status? }`. Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
-to switch to persistent mode (the picker stays open across selections
-until Esc). Returns `{ action, item, index }` on accept or `nil` on
-dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
-
 ## `smelt.prompt.queued`
 
 ```lua
@@ -107,6 +75,19 @@ fun(): table[]
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return queued prompt rows as `{ text, kind }` tables. `kind` is `request` for rows added to the current turn's next request, or `turn` for rows waiting for the next turn.
+
+## `smelt.prompt.register_completer`
+
+```lua
+fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
+```
+
+Types: [`smelt.prompt.CompleterSpec`](types.md#smeltpromptcompleterspec), [`smelt.prompt.MatchesCompleterSpec`](types.md#smeltpromptmatchescompleterspec), [`smelt.Reg`](types.md#smeltreg)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
+completer and closes the picker if it was active.
 
 ## `smelt.prompt.replace_range`
 
@@ -146,7 +127,7 @@ fun(): smelt.win.Win
 
 Types: [`smelt.win.Win`](types.md#smeltwinwin)
 
-**Tier:** `Host` - Available in every runtime, including headless mode.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.
 

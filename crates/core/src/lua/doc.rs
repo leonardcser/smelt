@@ -15,7 +15,7 @@
 //! fills the registry; the closures themselves are never fired) and
 //! emits LuaCATS stubs + Markdown reference pages.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MaybeSend};
@@ -38,9 +38,36 @@ pub enum Tier {
 #[derive(Clone, Copy)]
 struct UiHostAvailability(fn() -> bool);
 
+struct UiHostDeclarationContext(AtomicUsize);
+
 /// Install the frontend-owned availability check applied to every UiHost binding.
 pub fn install_ui_host_availability(lua: &Lua, available: fn() -> bool) {
     lua.set_app_data(UiHostAvailability(available));
+}
+
+/// Allow bundled declarations to construct inert UiHost handles without
+/// claiming that a live terminal is available. Runtime calls remain gated by
+/// the frontend-owned availability check.
+pub fn with_ui_host_declarations<R>(lua: &Lua, body: impl FnOnce() -> R) -> R {
+    if lua.app_data_ref::<UiHostDeclarationContext>().is_none() {
+        lua.set_app_data(UiHostDeclarationContext(AtomicUsize::new(0)));
+    }
+    lua.app_data_ref::<UiHostDeclarationContext>()
+        .expect("declaration context installed")
+        .0
+        .fetch_add(1, Ordering::AcqRel);
+
+    struct Restore<'lua>(&'lua Lua);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            if let Some(context) = self.0.app_data_ref::<UiHostDeclarationContext>() {
+                context.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    let _restore = Restore(lua);
+    body()
 }
 
 fn ui_host_available(lua: &Lua) -> bool {
@@ -48,8 +75,13 @@ fn ui_host_available(lua: &Lua) -> bool {
         .is_some_and(|available| (available.0)())
 }
 
+fn ui_host_declarations_active(lua: &Lua) -> bool {
+    lua.app_data_ref::<UiHostDeclarationContext>()
+        .is_some_and(|context| context.0.load(Ordering::Acquire) > 0)
+}
+
 pub(crate) fn require_ui_host(lua: &Lua, api: &str) -> mlua::Result<()> {
-    if ui_host_available(lua) {
+    if ui_host_available(lua) || ui_host_declarations_active(lua) {
         Ok(())
     } else {
         Err(mlua::Error::RuntimeError(format!(
@@ -370,12 +402,28 @@ mod tests {
 
         let visible: mlua::Function = module.tbl.get("visible").unwrap();
         assert!(visible.call::<String>(()).is_err());
+        assert_eq!(
+            with_ui_host_declarations(&lua, || visible.call::<String>(()).unwrap()),
+            "visible"
+        );
+        assert!(visible.call::<String>(()).is_err());
         assert!(matches!(
             module.tbl.raw_get::<mlua::Value>("hidden").unwrap(),
             mlua::Value::Nil
         ));
         let hidden =
             crate::lua::module::internal_api_function(&lua, "smelt.ui_test", "hidden").unwrap();
+        assert!(
+            crate::lua::module::internal_api_function(&lua, "smelt.missing", "hidden")
+                .unwrap_err()
+                .to_string()
+                .contains("Internal Lua API module is not registered: smelt.missing")
+        );
+        let internal = crate::lua::module::internal_api_root(&lua).unwrap();
+        assert!(matches!(
+            internal.raw_get::<mlua::Value>("missing").unwrap(),
+            mlua::Value::Nil
+        ));
         install_ui_host_availability(&lua, || true);
         assert_eq!(hidden.call::<String>(()).unwrap(), "hidden");
         assert!(matches!(

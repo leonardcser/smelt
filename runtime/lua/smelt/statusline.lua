@@ -100,10 +100,10 @@ local function core_compose()
   local mode = status.mode or {}
   local mode_name = mode.name or signal("agent_mode")
   if mode_name and mode_name ~= "" then
-    local icon = smelt.mode.icon and smelt.mode.icon(mode_name) or ""
+    local spec = smelt.mode.get(mode_name) or {}
     items[#items + 1] = {
-      text = " " .. icon .. mode_name .. (mode.marker or "") .. " ",
-      style = smelt.mode.style and smelt.mode.style(mode_name) or { hl_group = "SmeltModeDefault" },
+      text = " " .. (spec.icon or "") .. mode_name .. (mode.marker or "") .. " ",
+      style = { hl_group = spec.hl_group or "SmeltModeDefault" },
       priority = 1,
     }
   end

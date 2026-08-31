@@ -8,51 +8,6 @@
 
 Register, unregister, and resolve plugin tools for the engine.
 
-## `smelt.tools._compact_cwd_path`
-
-```lua
-fun(path: any): any
-```
-
-**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
-
-Compact repeated absolute cwd prefixes in model-facing tool output. This is
-display-only policy for structured path outputs, not a filesystem primitive.
-
-## `smelt.tools._compact_cwd_paths`
-
-```lua
-fun(paths: any): any
-```
-
-**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
-
-Apply `_compact_cwd_path` to each path in an array, preserving order.
-Returns an empty array when `paths` is `nil`.
-
-## `smelt.tools._compact_cwd_prefix_lines`
-
-```lua
-fun(content: any): any
-```
-
-**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
-
-Remove the active working-directory prefix from the start of each line in
-model-facing text while preserving line endings. Returns `""` for `nil`.
-
-## `smelt.tools._with_watchdog`
-
-```lua
-fun(def: any, opts: any): any
-```
-
-**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
-
-Attach an outer watchdog to a tool definition. This is intentionally
-separate from the tool's own timeout handling: builtins use a small grace
-period so their domain-specific timeout result wins before the watchdog fires.
-
 ## `smelt.tools.call`
 
 ```lua
@@ -77,21 +32,6 @@ fun(): table
 ```
 
 Return the names of every registered plugin tool, sorted.
-
-## `smelt.tools.middleware`
-
-```lua
-fun(name: string, mw: table): smelt.Reg
-```
-
-Types: [`smelt.Reg`](types.md#smeltreg)
-
-Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
-
-- `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
-- `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
-
-Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
 
 ## `smelt.tools.patch`
 
@@ -122,14 +62,6 @@ fun(def: smelt.tools.ToolDef): smelt.Reg
 Types: [`smelt.tools.ToolDef`](types.md#smelttoolstooldef), [`smelt.Reg`](types.md#smeltreg)
 
 Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required. Returns a `Reg` whose `:remove()` unregisters the tool.
-
-## `smelt.tools.resolve`
-
-```lua
-fun(request_id: integer, call_id: string, result: table): nil
-```
-
-Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.
 
 ## `smelt.tools.unregister`
 

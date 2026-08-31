@@ -1,12 +1,13 @@
 # Release
 
-Releases are built and published from immutable, already-versioned tags. The
-workflows validate the tagged source and never edit `main`, create commits, or
-move tags.
+Releases are built and published from immutable tags. Committed Cargo versions
+remain development versions; the release workflow derives the agent version
+from the tag and materializes it only in each runner checkout. The workflow
+never edits `main`, creates commits, pushes generated changes, or moves tags.
 
 ## Rules
 
-- Prepare the version bump in a normal pull request and merge it before tagging.
+- Do not prepare or commit an agent version bump. CI owns release versioning.
 - Every `0.x` agent release is beta-quality, but uses a normal SemVer version
   such as `0.6.0`, a `v0.6.0` tag, and a non-prerelease GitHub release. Do not
   append a `-beta` prerelease suffix.
@@ -17,11 +18,9 @@ move tags.
 
 ## Agent binary
 
-1. Update the root package and every non-library workspace crate to the same
-   version, then refresh `Cargo.lock` and `fuzz/Cargo.lock`. Internal path
-   dependencies inherit workspace paths and do not carry duplicate version
-   requirements.
-2. Run the full validation suite:
+1. Choose the next normal SemVer version. Do not edit Cargo manifests or
+   lockfiles for the agent release.
+2. Run the full validation suite on the exact source commit:
 
    ```bash
    cargo fmt -- --check
@@ -31,7 +30,7 @@ move tags.
    git diff --exit-code
    ```
 
-3. Merge the version bump and confirm CI passed on that exact commit.
+3. Confirm CI passed on that exact commit.
 4. Create and push the immutable tag:
 
    ```bash
@@ -42,10 +41,13 @@ move tags.
    git push origin v<X.Y.Z>
    ```
 
-The release workflow rejects prerelease suffixes on `0.x` agent tags, checks
-that the tag version matches every agent workspace package, builds all artifacts
-from the tagged commit, smoke-tests the native Linux binary identity, and
-publishes SHA-256 checksums.
+The release workflow rejects prerelease suffixes on `0.x` agent tags, verifies
+the immutable source commit, and runs `cargo xtask prepare-release <version>` in
+each ephemeral build checkout. That command updates non-independent package
+versions, internal path dependency requirements, and both lockfiles without
+committing or pushing them. CI then checks the materialized package versions,
+builds all artifacts from the tagged source, smoke-tests the native Linux binary
+identity, and publishes SHA-256 checksums.
 
 ### Agent artifact verification
 
@@ -83,8 +85,8 @@ canonical allowlist used by CI and the publication workflows.
    git switch main
    git pull --ff-only
    test -z "$(git status --porcelain)"
-   git tag smelt-<crate>-v<X.Y.Z>
-   git push origin smelt-<crate>-v<X.Y.Z>
+   git tag <crate>-v<X.Y.Z>
+   git push origin <crate>-v<X.Y.Z>
    ```
 
 When publishing multiple crates, publish dependencies before dependents.

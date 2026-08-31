@@ -1761,25 +1761,7 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
-        let approvals = self.core.permissions.approvals();
-        let rt = approvals.read().unwrap();
-        let mut entries = Vec::new();
-        for approval in rt.session_tool_approvals() {
-            entries.push(PermissionEntry {
-                tool: approval.tool,
-                pattern: approval.pattern.unwrap_or_else(|| "*".into()),
-            });
-        }
-        for dir in rt.session_dirs() {
-            entries.push(PermissionEntry {
-                tool: "directory".into(),
-                pattern: dir.display().to_string(),
-            });
-        }
-        entries
-    }
-
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
         self.core
             .permissions

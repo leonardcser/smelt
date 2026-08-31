@@ -556,7 +556,7 @@ local function open_usage()
     end,
   })
 
-  local handle = smelt.dialog.open_handle({
+  local handle = smelt.dialog.new({
     title = "usage",
     wrap = false,
     max_height = "50%",

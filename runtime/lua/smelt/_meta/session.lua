@@ -8,11 +8,11 @@
 ---@class smelt.session
 local session = {}
 
---- Tier: Host - Available in every runtime, including headless mode.
 --- Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.
 ---@type fun(): string
 session.artifact_dir = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.
 ---@see smelt.work.guard
 ---@see smelt.session.model_messages
@@ -60,6 +60,7 @@ session.enter_worktree = nil
 ---@type fun(): nil
 session.fork = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.
 ---@type fun(opts: table?): table
 session.history = nil
@@ -84,10 +85,12 @@ session.list = nil
 ---@type fun(id: string): nil
 session.load = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.
 ---@type fun(): table
 session.model_messages = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Bind persisted session `id` to `opts.buf` and `opts.win` as a virtualized transcript preview. `opts.width` controls wrapping; `opts.height` is the viewport height; a new binding opens at the tail while resize refreshes preserve its viewport; `opts.updated_at_ms` identifies cached session revisions. Once bound, wheel and scrollbar navigation use the same stateful viewport projection as the open transcript. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'pending' }` while the background preview service reads or hydrates persisted content, or `{ status = 'unavailable', reason }` when persisted content cannot be hydrated.
 ---@type fun(id: string, opts: table): table?
 session.render_preview_into = nil
@@ -96,6 +99,7 @@ session.render_preview_into = nil
 ---@type fun(): nil
 session.reset = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.
 ---@type fun(): boolean
 session.retry_persistence = nil
@@ -108,6 +112,7 @@ session.rewind_to = nil
 ---@type fun(enabled: boolean): nil
 session.set_fast_mode = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
 ---@type fun(title: string, slug: string, history_len: integer): nil
 session.set_title_for_history = nil
@@ -124,10 +129,12 @@ session.switch_cwd = nil
 ---@type fun(): string
 session.system = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
 ---@type fun(id: string): string?
 session.text = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.
 ---@type fun(ids: string[]): table
 session.texts = nil
@@ -136,6 +143,7 @@ session.texts = nil
 ---@type fun(): table
 session.tokens = nil
 
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Arrange a flat list of session entries (as returned by `smelt.session.list`)
 --- into a DFS-ordered tree by `parent_id`. Each returned entry is a shallow
 --- copy with tree metadata:
@@ -144,7 +152,7 @@ session.tokens = nil
 ---   * `tree_is_last` - true when this entry is the last sibling
 ---   * `tree_has_children` - true when this entry has visible children
 ---   * `tree_sort_value` - max `opts.sort_by` value in this entry's subtree
---- 
+---
 --- Families sort by the newest descendant, so a resumed fork pulls its root
 --- conversation next to it instead of leaving the root behind in strict
 --- root-updated order. `opts.order = "asc"` is useful for bottom-anchored lists:

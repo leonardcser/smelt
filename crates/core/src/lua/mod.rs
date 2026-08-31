@@ -13,7 +13,7 @@ pub mod watchers;
 
 pub use reg::LuaReg;
 
-pub use hooks::{composite_reg, HookEntry, HookRegistry};
+pub use hooks::{HookEntry, HookRegistry};
 pub use runtime::{
     autoload_modules, autoload_modules_filtered, ensure_builtins_extracted, init_lua_path,
     load_bootstrap_chunks, LuaLoadFailureLocation, LuaRuntime, ShutdownHookContext, ToolVisibility,

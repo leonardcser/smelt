@@ -300,6 +300,14 @@ pub struct LuaPermissionPolicySpec {
     pub modes: std::collections::HashMap<String, LuaModePerms>,
 }
 
+fn permission_decision_label(decision: protocol::Decision) -> &'static str {
+    match decision {
+        protocol::Decision::Allow => "allow",
+        protocol::Decision::Ask | protocol::Decision::Error(_) => "ask",
+        protocol::Decision::Deny => "deny",
+    }
+}
+
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
@@ -318,29 +326,29 @@ pub(super) fn register(
         "Return current permission rules and persisted scope revisions. Pass `workspace_revision` or `repository_revision` back as the matching scope replacement revision in `smelt.permissions.sync()`.",
         &[],
         |lua, ()| -> LuaResult<LuaPermissionList> {
-            let snapshot = match crate::lua::try_with_platform_host(|host| {
-                host.permission_snapshot()
-            }) {
-                Some(snapshot) => snapshot.map_err(LuaError::external)?,
-                None => Default::default(),
-            };
-            let (session_entries, path_grants, workspace, repository) = (
-                snapshot.session_entries,
-                snapshot.path_grants,
-                snapshot.workspace,
-                snapshot.repository,
-            );
+            let snapshot = smelt_core::host::try_with_core(|core| core.permission_snapshot())
+                .unwrap_or_else(|| Ok(Default::default()))
+                .map_err(LuaError::external)?;
             let out = lua.create_table()?;
             let session_arr = lua.create_table()?;
-            for (i, (tool, pattern)) in session_entries.into_iter().enumerate() {
+            let mut session_index = 1;
+            for approval in snapshot.session_tools {
                 let row = lua.create_table()?;
-                row.set("tool", tool)?;
-                row.set("pattern", pattern)?;
-                session_arr.set(i + 1, row)?;
+                row.set("tool", approval.tool)?;
+                row.set("pattern", approval.pattern.unwrap_or_else(|| "*".to_string()))?;
+                session_arr.set(session_index, row)?;
+                session_index += 1;
+            }
+            for directory in snapshot.session_dirs {
+                let row = lua.create_table()?;
+                row.set("tool", "directory")?;
+                row.set("pattern", directory.display().to_string())?;
+                session_arr.set(session_index, row)?;
+                session_index += 1;
             }
             out.set("session", session_arr)?;
             let path_grants_arr = lua.create_table()?;
-            for (i, grant) in path_grants.into_iter().enumerate() {
+            for (i, grant) in snapshot.session_path_grants.into_iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("kind", "path")?;
                 if let Some(mode) = grant.mode.as_ref() {
@@ -352,12 +360,15 @@ pub(super) fn register(
                 path_grants_arr.set(i + 1, row)?;
             }
             out.set("path_grants", path_grants_arr)?;
-            out.set("workspace_revision", workspace.revision)?;
-            out.set("workspace", permission_rules_to_lua(lua, workspace.rules)?)?;
-            out.set("repository_revision", repository.revision)?;
+            out.set("workspace_revision", snapshot.workspace.revision)?;
+            out.set(
+                "workspace",
+                permission_rules_to_lua(lua, snapshot.workspace.rules)?,
+            )?;
+            out.set("repository_revision", snapshot.repository.revision)?;
             out.set(
                 "repository",
-                permission_rules_to_lua(lua, repository.rules)?,
+                permission_rules_to_lua(lua, snapshot.repository.rules)?,
             )?;
             Ok(LuaPermissionList(out))
         },
@@ -446,8 +457,9 @@ pub(super) fn register(
         "Decision primitives for tool `decide` callbacks. Returns \"allow\"/\"ask\"/\"deny\".",
         &["mode_str", "name"],
         |_, (mode_str, name): (String, String)| -> LuaResult<String> {
-            Ok(crate::lua::try_with_platform_host(|host| {
-                host.check_tool_permission(&mode_str, &name).to_string()
+            let mode = protocol::AgentMode::parse(&mode_str).unwrap_or_default();
+            Ok(smelt_core::host::try_with_core(|core| {
+                permission_decision_label(core.permissions.check_tool(mode, &name)).to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
         },
@@ -457,9 +469,12 @@ pub(super) fn register(
         "Decide a tool-specific pattern bucket (e.g. `(\"normal\", \"bash\", \"git status\")`) against the current policy. Returns `\"allow\"`, `\"ask\"`, or `\"deny\"`; defaults to `\"ask\"` when no app context is available.",
         &["mode_str", "bucket", "value"],
         |_, (mode_str, bucket, value): (String, String, String)| -> LuaResult<String> {
-            Ok(crate::lua::try_with_platform_host(|host| {
-                host.check_subcommand_permission(&mode_str, &bucket, &value)
-                    .to_string()
+            let mode = protocol::AgentMode::parse(&mode_str).unwrap_or_default();
+            Ok(smelt_core::host::try_with_core(|core| {
+                permission_decision_label(
+                    core.permissions.check_subcommand(mode, &bucket, &value),
+                )
+                .to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
         },

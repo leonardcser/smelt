@@ -125,7 +125,7 @@
 ---@field wrap_width? integer Initial wrap width used before the first resize event.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
---- Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
+--- Options accepted by `smelt.dialog.open` / `smelt.dialog.new`.
 --- Dialogs fit their content by default while preserving transcript context.
 --- Integer `height` values are body-relative and gain
 --- the top chrome row automatically. Pick one of `height` or `max_height`;
@@ -145,7 +145,7 @@
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field close_with_q? boolean Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input.
----@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
+---@field on_submit? fun(ctx: any): any Handler invoked on Enter. Without a handler, Enter leaves the dialog open.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
 ---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
 
@@ -262,11 +262,6 @@
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
 
---- Exclusive advisory file lock returned by `smelt.fs.try_flock`. The lock is also released when this handle is garbage-collected.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.fs.Flock
----@field release fun(): nil Release the lock immediately. No-op if it is already released.
-
 --- Single-line input handle returned by `smelt.input.new(opts)`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.input.Input
@@ -347,6 +342,15 @@
 ---@field env? table<string, string> Extra environment variables to set on the child process.
 ---@field timeout? integer Request timeout in milliseconds. Defaults to `30000`.
 ---@field enabled? boolean Whether the server is enabled. Defaults to `true`.
+
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.mode.Mode
+---@field name string
+---@field label string
+---@field icon string
+---@field hl_group string
+---@field note string
+---@field permissions table
 
 --- Source-bound notify handle returned by `smelt.notify.scoped`.
 --- Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
@@ -513,20 +517,6 @@
 ---@field tool string Tool name the rule applies to.
 ---@field patterns string[] Patterns granted for this tool.
 
---- Options for the yielding fuzzy-picker convenience facade.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.picker.FuzzyOpts
----@field items (string|smelt.picker.Item)[] Items to filter.
----@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Defaults to "prompt_docked" for this wrapper.
----@field on_select? fun(item: smelt.picker.Item) Live selection callback.
-
---- Accepted fuzzy-picker value; dismissal returns `nil` instead.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.picker.FuzzyResult
----@field index integer 1-based accepted item index.
----@field item smelt.picker.Item Accepted normalized item.
----@field action string Accept action reported by the prompt picker.
-
 --- Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.Item
@@ -535,22 +525,40 @@
 ---@field prefix? string Small prefix rendered before the label.
 ---@field ansi_color? integer ANSI color slot for the prefix.
 ---@field label_color? integer ANSI color slot for the label.
----@field search_terms? string[] Extra strings considered by fuzzy pickers.
+---@field search_terms? string Extra text considered by fuzzy pickers.
 
 --- Options for the low-level non-blocking picker handle constructor.
---- Classification: Supported - Primary alpha facade for user config and plugins.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.picker.NewOpts
 ---@field items (string | smelt.picker.Item)[] Initial picker rows. Must be non-empty.
 ---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Where to place the picker. Defaults to `center`.
+
+--- High-level picker options. Static floating pickers accept `items` and
+--- `placement`. Prompt-docked pickers also support ranking, providers, and
+--- persistent `on_enter` handling.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.picker.OpenOpts
+---@field items? (string|smelt.picker.Item)[] | fun(): (string|smelt.picker.Item)[] Eager list or lazy producer.
+---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Ranking, providers, and persistent mode use `prompt_docked`.
+---@field provider? fun(query: string, limit: integer): table Async provider returning `{ items, searching?, scanning?, message?, status? }`.
+---@field limit? integer Maximum rows requested from `provider`; defaults to 200.
+---@field poll_ms? integer Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`.
+---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
+---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
+---@field on_select? fun(item: string|smelt.picker.Item): nil Fires on every cursor move.
+---@field on_enter? fun(item: string|smelt.picker.Item, idx: integer): nil Persistent-mode accept handler.
+---@field rank? fun(items: table[], query: string, original: (string|smelt.picker.Item)[]): integer[] Custom filter/ranker. Return 1-based row indices in display order.
+---@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
 --- Accepted value returned by `smelt.picker.open`; dismissal returns `nil`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.picker.OpenResult
 ---@field index integer 1-based accepted item index.
 ---@field item any Original item from `opts.items`.
+---@field action "enter"|"tab" Accept action. Floating pickers return `"enter"`.
 
 --- Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.
---- Classification: Supported - Primary alpha facade for user config and plugins.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.picker.Picker
 ---@field win fun(): smelt.win.Win Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).
 ---@field close fun(): nil Close the picker overlay. No-op if already closed.
@@ -558,7 +566,7 @@
 ---@field selected fun(idx: integer?): any Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining.
 ---@field move fun(delta: integer): smelt.picker.Picker Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.
 
---- Completer specification handed to `smelt.prompt.completer` for full candidate
+--- Completer specification handed to `smelt.prompt.register_completer` for full candidate
 --- sets ranked in Lua.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt.CompleterSpec
@@ -571,7 +579,7 @@
 ---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field on_select? fun(item: table): nil Live selection callback.
 
---- Completer specification handed to `smelt.prompt.completer` for bounded,
+--- Completer specification handed to `smelt.prompt.register_completer` for bounded,
 --- already-ranked providers.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.prompt.MatchesCompleterSpec
@@ -587,35 +595,6 @@
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
 ---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
 ---@field on_select? fun(item: table): nil Live selection callback.
-
---- Picker entry shown in the prompt-docked dropdown. `label` and the
---- optional flavour fields mirror what the fuzzy ranker renders; the
---- caller is free to attach extra fields and read them back from
---- `on_select` / `on_enter`.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.prompt.PickerItem
----@field label string Primary text rendered for the row.
----@field description? string Secondary text shown dimmed after the label.
----@field ansi_color? any ANSI color spec used for the prefix glyph.
----@field label_color? any Override the label's color.
----@field prefix? string Glyph rendered before the label.
----@field search_terms? string Extra haystack tokens for the fuzzy match.
-
---- Options accepted by `smelt.prompt.open_picker`. Passing `on_enter`
---- switches the picker to persistent mode (stays open across selects);
---- omit it for single-shot behaviour.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.prompt.PickerOpts
----@field items? smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
----@field provider? fun(query: string, limit: integer): table Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`.
----@field limit? integer Maximum rows requested from `provider`; defaults to 200.
----@field poll_ms? integer Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`.
----@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
----@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
----@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
----@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
----@field rank? fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order.
----@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
 --- Spec accepted by `smelt.provider.register`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

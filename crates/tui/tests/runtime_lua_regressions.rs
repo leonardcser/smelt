@@ -60,7 +60,6 @@ fn bootstrap_fixture_environment(lua: &mlua::Lua, path: &'static str) -> mlua::T
             .any(|chunk| chunk.path == path),
         "missing bootstrap manifest entry for {path}"
     );
-    smelt_core::lua::doc::install_ui_host_availability(lua, || true);
     smelt_core::lua::module::bootstrap_chunk_environment(lua, true)
         .unwrap_or_else(|error| panic!("build bootstrap fixture environment for {path}: {error}"))
 }
@@ -89,6 +88,30 @@ fn load_transcript_defaults(lua: &mlua::Lua) {
         .set_environment(environment)
         .exec()
         .expect("load transcript defaults");
+}
+
+fn load_web_fetch(lua: &mlua::Lua) {
+    let environment = smelt_core::lua::module::bootstrap_chunk_environment(lua, true)
+        .expect("build web_fetch fixture environment");
+    let internal: mlua::Table = environment
+        .raw_get("__smelt_internal")
+        .expect("trusted web_fetch fixture capabilities");
+    let tools = lua.create_table().expect("web_fetch tool capabilities");
+    tools
+        .set(
+            "with_watchdog",
+            lua.create_function(|_, tool: mlua::Table| Ok(tool))
+                .expect("web_fetch watchdog fixture"),
+        )
+        .expect("install web_fetch watchdog fixture");
+    internal
+        .set("tools", tools)
+        .expect("install web_fetch tool capabilities");
+    lua.load(WEB_FETCH_LUA)
+        .set_name("tools/web_fetch.lua")
+        .set_environment(environment)
+        .exec()
+        .expect("load web_fetch");
 }
 
 fn install_notifications_preload(lua: &mlua::Lua) {
@@ -177,7 +200,7 @@ fn usage_command_renders_codex_reset_times_in_local_time() {
           dialog = {
             content = function(opts) return { buf = opts.buf, on = function() end } end,
             menu = function() return { on = function() end }, { set_items = function() end } end,
-            open_handle = function()
+            new = function()
               return { win = { on = function() end } }
             end,
           },
@@ -636,7 +659,6 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
             code = function(content, opts) return { kind = "code", content = content, opts = opts or {} } end,
           },
           tools = {
-            _with_watchdog = function(tool) return tool end,
             register = function(tool) smelt.__registered_tool = tool end,
           },
         }
@@ -646,7 +668,7 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     .exec()
     .expect("install fake smelt api");
     load_transcript_defaults(&lua);
-    lua.load(WEB_FETCH_LUA).exec().expect("load web_fetch");
+    load_web_fetch(&lua);
 
     let (body_kind, output_kind, child_kind, format, dim, rows): (
         String,
@@ -693,7 +715,6 @@ fn web_fetch_auto_renders_spa_shell_with_installed_browser() {
           transcript = { register_tool = function() end },
           layout = { text = function() return {} end, vbox = function() return {} end },
           tools = {
-            _with_watchdog = function(tool) return tool end,
             register = function(tool) smelt.__tool = tool end,
           },
           http = {
@@ -764,7 +785,7 @@ fn web_fetch_auto_renders_spa_shell_with_installed_browser() {
     )
     .exec()
     .expect("install web fetch fixtures");
-    lua.load(WEB_FETCH_LUA).exec().expect("load web_fetch");
+    load_web_fetch(&lua);
 
     let (
         output,
@@ -845,7 +866,8 @@ fn structured_tool_output_uses_shared_code_content() {
     let (node_kind, child_kind, format, lang): (String, String, String, String) = lua
         .load(
             r#"
-            local node = smelt.transcript.defaults.render_tool_output_tail({
+            local defaults = require("smelt.transcript.defaults")
+            local node = defaults.render_tool_output_tail({
               content_id = 42,
               content_lines = 3,
               metadata = { syntax = "json" },

@@ -772,7 +772,7 @@ fn prompt_docked_picker_does_not_get_tail_clobbered_on_first_render() {
     std::fs::write(
         &init,
         r#"
-            smelt.cmd.picker("pick", {
+            smelt.cmd.register_picker("pick", {
               items = (function()
                 local out = {}
                 for i = 1, 12 do out[i] = { label = "item" .. i } end

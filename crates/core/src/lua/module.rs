@@ -17,6 +17,18 @@ use super::lua_type::{LuaType, LuaTypeTuple};
 
 const INTERNAL_API_REGISTRY: &str = "__smelt_internal_api";
 
+fn internal_api_suffix(path: &str) -> mlua::Result<&str> {
+    if path == "smelt" {
+        Ok("")
+    } else if let Some(suffix) = path.strip_prefix("smelt.") {
+        Ok(suffix)
+    } else {
+        Err(mlua::Error::external(format!(
+            "Internal Lua API path must be `smelt` or start with `smelt.`: {path}"
+        )))
+    }
+}
+
 /// Return the VM-private root that mirrors the public `smelt` namespace for
 /// bundled implementation capabilities. The table lives only in the registry;
 /// ordinary config and plugin chunks never receive a reference to it.
@@ -38,16 +50,10 @@ pub fn internal_api_root(lua: &Lua) -> mlua::Result<mlua::Table> {
 /// Resolve or create an Internal module table for a canonical `smelt.*` path.
 pub fn internal_api_table(lua: &Lua, path: &str) -> mlua::Result<mlua::Table> {
     let mut table = internal_api_root(lua)?;
-    let suffix = if path == "smelt" {
-        ""
-    } else if let Some(suffix) = path.strip_prefix("smelt.") {
-        suffix
-    } else {
-        return Err(mlua::Error::external(format!(
-            "Internal Lua API path must be `smelt` or start with `smelt.`: {path}"
-        )));
-    };
-    for part in suffix.split('.').filter(|part| !part.is_empty()) {
+    for part in internal_api_suffix(path)?
+        .split('.')
+        .filter(|part| !part.is_empty())
+    {
         let value = table.raw_get::<mlua::Value>(part)?;
         table = match value {
             mlua::Value::Nil => {
@@ -67,9 +73,44 @@ pub fn internal_api_table(lua: &Lua, path: &str) -> mlua::Result<mlua::Table> {
     Ok(table)
 }
 
-/// Resolve one callable from the VM-private Internal capability tree.
+fn find_internal_api_table(lua: &Lua, path: &str) -> mlua::Result<Option<mlua::Table>> {
+    let mut table = match lua.named_registry_value::<mlua::Value>(INTERNAL_API_REGISTRY)? {
+        mlua::Value::Table(root) => root,
+        mlua::Value::Nil => return Ok(None),
+        other => {
+            return Err(mlua::Error::external(format!(
+                "Internal Lua API registry is {}, expected table",
+                other.type_name()
+            )))
+        }
+    };
+    for part in internal_api_suffix(path)?
+        .split('.')
+        .filter(|part| !part.is_empty())
+    {
+        table = match table.raw_get::<mlua::Value>(part)? {
+            mlua::Value::Table(child) => child,
+            mlua::Value::Nil => return Ok(None),
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "Internal Lua API path component `{part}` is {}, expected table",
+                    other.type_name()
+                )))
+            }
+        };
+    }
+    Ok(Some(table))
+}
+
+/// Resolve one callable from the VM-private Internal capability tree without
+/// creating missing module tables.
 pub fn internal_api_function(lua: &Lua, module: &str, name: &str) -> mlua::Result<mlua::Function> {
-    internal_api_table(lua, module)?.raw_get(name)
+    let table = find_internal_api_table(lua, module)?.ok_or_else(|| {
+        mlua::Error::external(format!(
+            "Internal Lua API module is not registered: {module}"
+        ))
+    })?;
+    table.raw_get(name)
 }
 
 fn chunk_environment(lua: &Lua) -> mlua::Result<mlua::Table> {
@@ -110,6 +151,14 @@ pub struct LuaMod<'a> {
     path: &'static str,
     tier: Tier,
     classification: ApiClassification,
+}
+
+#[derive(Clone, Copy)]
+enum FunctionTarget {
+    Facade,
+    Advanced,
+    Private,
+    Metamethod,
 }
 
 impl<'a> LuaMod<'a> {
@@ -219,6 +268,43 @@ impl<'a> LuaMod<'a> {
         })
     }
 
+    fn register<F, A, R>(
+        &self,
+        target: FunctionTarget,
+        name: &'static str,
+        doc: &'static str,
+        params: &[&'static str],
+        live_only: bool,
+        f: F,
+    ) -> mlua::Result<()>
+    where
+        F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
+        A: FromLuaMulti + LuaTypeTuple,
+        R: IntoLuaMulti + LuaType,
+    {
+        let (table, classification) = match target {
+            FunctionTarget::Facade => (self.tbl.clone(), self.classification),
+            FunctionTarget::Advanced => (self.tbl.clone(), ApiClassification::Advanced),
+            FunctionTarget::Private => (
+                internal_api_table(self.lua, self.path)?,
+                ApiClassification::Internal,
+            ),
+            FunctionTarget::Metamethod => (self.tbl.clone(), ApiClassification::Internal),
+        };
+        register_fn_inner(
+            &table,
+            self.path,
+            name,
+            doc,
+            params,
+            self.lua,
+            f,
+            self.tier,
+            classification,
+            live_only,
+        )
+    }
+
     /// Register a Lua function at `<self.path>.<name>`. Trait bounds derive the
     /// LuaCATS signature from the Rust types, so signature drift becomes a
     /// compile error.
@@ -234,18 +320,7 @@ impl<'a> LuaMod<'a> {
         A: FromLuaMulti + LuaTypeTuple,
         R: IntoLuaMulti + LuaType,
     {
-        register_fn_inner(
-            &self.tbl,
-            self.path,
-            name,
-            doc,
-            params,
-            self.lua,
-            f,
-            self.tier,
-            self.classification,
-            false,
-        )
+        self.register(FunctionTarget::Facade, name, doc, params, false, f)
     }
 
     pub fn advanced_fn<F, A, R>(
@@ -260,18 +335,24 @@ impl<'a> LuaMod<'a> {
         A: FromLuaMulti + LuaTypeTuple,
         R: IntoLuaMulti + LuaType,
     {
-        register_fn_inner(
-            &self.tbl,
-            self.path,
-            name,
-            doc,
-            params,
-            self.lua,
-            f,
-            self.tier,
-            ApiClassification::Advanced,
-            false,
-        )
+        self.register(FunctionTarget::Advanced, name, doc, params, false, f)
+    }
+
+    /// Register an Advanced direct effect that is unavailable while a
+    /// replacement Lua generation is being evaluated.
+    pub fn advanced_live_only_fn<F, A, R>(
+        &self,
+        name: &'static str,
+        doc: &'static str,
+        params: &[&'static str],
+        f: F,
+    ) -> mlua::Result<()>
+    where
+        F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
+        A: FromLuaMulti + LuaTypeTuple,
+        R: IntoLuaMulti + LuaType,
+    {
+        self.register(FunctionTarget::Advanced, name, doc, params, true, f)
     }
 
     /// Register a direct effect that is unavailable while a replacement Lua
@@ -288,18 +369,7 @@ impl<'a> LuaMod<'a> {
         A: FromLuaMulti + LuaTypeTuple,
         R: IntoLuaMulti + LuaType,
     {
-        register_fn_inner(
-            &self.tbl,
-            self.path,
-            name,
-            doc,
-            params,
-            self.lua,
-            f,
-            self.tier,
-            self.classification,
-            true,
-        )
+        self.register(FunctionTarget::Facade, name, doc, params, true, f)
     }
 
     /// Register an Internal implementation hook consumed by bundled Lua. The
@@ -315,17 +385,13 @@ impl<'a> LuaMod<'a> {
         A: FromLuaMulti + LuaTypeTuple,
         R: IntoLuaMulti + LuaType,
     {
-        register_fn_inner(
-            &internal_api_table(self.lua, self.path)?,
-            self.path,
+        self.register(
+            FunctionTarget::Private,
             name,
             "Bundled runtime implementation hook.",
             params,
-            self.lua,
-            f,
-            self.tier,
-            ApiClassification::Internal,
             false,
+            f,
         )
     }
 
@@ -340,17 +406,13 @@ impl<'a> LuaMod<'a> {
         A: FromLuaMulti + LuaTypeTuple,
         R: IntoLuaMulti + LuaType,
     {
-        register_fn_inner(
-            &internal_api_table(self.lua, self.path)?,
-            self.path,
+        self.register(
+            FunctionTarget::Private,
             name,
             "Bundled runtime implementation hook.",
             params,
-            self.lua,
-            f,
-            self.tier,
-            ApiClassification::Internal,
             true,
+            f,
         )
     }
 
@@ -368,17 +430,13 @@ impl<'a> LuaMod<'a> {
         A: FromLuaMulti + LuaTypeTuple,
         R: IntoLuaMulti + LuaType,
     {
-        register_fn_inner(
-            &self.tbl,
-            self.path,
+        self.register(
+            FunctionTarget::Metamethod,
             name,
             "Internal metatable implementation.",
             params,
-            self.lua,
-            f,
-            self.tier,
-            ApiClassification::Internal,
             false,
+            f,
         )
     }
 }

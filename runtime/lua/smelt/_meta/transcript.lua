@@ -126,6 +126,7 @@ transcript.view = nil
 ---@type fun(): table
 transcript.visible_blocks = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
 ---@type fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
 transcript.watch_view = nil

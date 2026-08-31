@@ -59,53 +59,38 @@ static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/l
 /// built-in skills have real on-disk locations for `/skills` and `load_skill`.
 static EMBEDDED_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/skills");
 
-/// One bundled bootstrap chunk and the environments that load it.
-///
-/// The array order is the only bootstrap order. Host and incremental UI loads
-/// filter this manifest instead of maintaining parallel file lists.
+/// One bundled bootstrap chunk. Full bootstrap loads every chunk; Host
+/// bootstrap filters this manifest through `loads_in_host`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootstrapChunk {
     pub path: &'static str,
-    pub load_in_host: bool,
-    pub load_in_ui: bool,
+    loads_in_host: bool,
     pub default_tier: crate::lua::doc::Tier,
 }
 
 impl BootstrapChunk {
     const fn host(path: &'static str) -> Self {
+        Self::host_with_tier(path, crate::lua::doc::Tier::Host)
+    }
+
+    const fn host_with_tier(path: &'static str, default_tier: crate::lua::doc::Tier) -> Self {
         Self {
             path,
-            load_in_host: true,
-            load_in_ui: false,
-            default_tier: crate::lua::doc::Tier::Host,
+            loads_in_host: true,
+            default_tier,
         }
     }
 
     const fn ui(path: &'static str) -> Self {
         Self {
             path,
-            load_in_host: false,
-            load_in_ui: true,
+            loads_in_host: false,
             default_tier: crate::lua::doc::Tier::UiHost,
         }
     }
 
-    const fn shared(path: &'static str, default_tier: crate::lua::doc::Tier) -> Self {
-        Self {
-            path,
-            load_in_host: true,
-            load_in_ui: true,
-            default_tier,
-        }
-    }
-
-    const fn full_only(path: &'static str, default_tier: crate::lua::doc::Tier) -> Self {
-        Self {
-            path,
-            load_in_host: false,
-            load_in_ui: false,
-            default_tier,
-        }
+    pub const fn loads_in_host(self) -> bool {
+        self.loads_in_host
     }
 }
 
@@ -118,10 +103,10 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::ui("list.lua"),
     BootstrapChunk::ui("session.lua"),
     BootstrapChunk::ui("widgets/picker.lua"),
-    BootstrapChunk::shared("widgets/completer.lua", crate::lua::doc::Tier::UiHost),
+    BootstrapChunk::host_with_tier("widgets/completer.lua", crate::lua::doc::Tier::UiHost),
     BootstrapChunk::ui("widgets/prompt_picker.lua"),
     BootstrapChunk::host("cmd.lua"),
-    BootstrapChunk::full_only("label_value.lua", crate::lua::doc::Tier::UiHost),
+    BootstrapChunk::ui("label_value.lua"),
     BootstrapChunk::ui("dialogs/confirm.lua"),
     BootstrapChunk::ui("_bar.lua"),
     BootstrapChunk::ui("tips.lua"),
@@ -214,20 +199,9 @@ enum BootstrapMode {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BootstrapSelection {
-    Host,
-    Ui,
-    Full,
-}
-
-impl BootstrapSelection {
+impl BootstrapMode {
     fn includes(self, chunk: &BootstrapChunk) -> bool {
-        match self {
-            Self::Host => chunk.load_in_host,
-            Self::Ui => chunk.load_in_ui,
-            Self::Full => true,
-        }
+        self == Self::Full || chunk.loads_in_host()
     }
 }
 
@@ -680,14 +654,10 @@ impl LuaRuntime {
         if self.load_error.is_some() {
             return;
         }
-        let selection = match self.bootstrap_mode {
-            BootstrapMode::Host => BootstrapSelection::Host,
-            BootstrapMode::Full => BootstrapSelection::Full,
-        };
         let roots = self.load_paths.module_overlay_roots();
         let result = load_bootstrap_group_with_roots(
             &self.lua,
-            selection,
+            self.bootstrap_mode,
             &roots,
             self.load_paths.development_runtime.as_deref(),
             Some(&self.loaded_files),
@@ -2671,99 +2641,6 @@ impl LuaRuntime {
         (timeout_ms > 0).then(|| timeout_ms.min(max_ms))
     }
 
-    /// Run all `tools.middleware{before=...}` hooks for `tool_name`, in
-    /// registration order. Hooks registered with `name = ""` match every
-    /// tool. Each handler receives `(args, ctx)`; returning a table
-    /// replaces `args`; returning `{ deny = true, reason }` short-circuits
-    /// with an error result. Returns `Some(deny_result)` on deny; `None`
-    /// otherwise (and `args` is rewritten in-place when applicable).
-    fn run_before_hooks(
-        &self,
-        tool_name: &str,
-        args: &mut mlua::Table,
-        ctx: &mlua::Table,
-    ) -> Option<ToolExecResult> {
-        let funcs = self
-            .shared
-            .hooks
-            .tool_before
-            .snapshot_for(&self.lua, tool_name);
-        for func in funcs {
-            let result: mlua::Result<mlua::Value> = func.call((args.clone(), ctx.clone()));
-            match result {
-                Ok(mlua::Value::Table(t)) => {
-                    let deny: bool = t.get("deny").unwrap_or(false);
-                    if deny {
-                        let reason: String = t
-                            .get("reason")
-                            .unwrap_or_else(|_| format!("tool `{tool_name}` denied by middleware"));
-                        return Some(ToolExecResult::Immediate {
-                            content: reason,
-                            is_error: true,
-                            metadata: None,
-                            display_content: Vec::new(),
-                            attachment: None,
-                        });
-                    }
-                    *args = t;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    self.record_error(format!("tools.middleware before `{tool_name}`: {e}"));
-                }
-            }
-        }
-        None
-    }
-
-    /// Run all `tools.middleware{after=...}` hooks for `tool_name` against
-    /// a synchronous tool result. Each handler receives `(args, ctx, result)`
-    /// where `result` is `{ content, is_error }`. A returned table replaces
-    /// the result. Pending/yielding tools currently bypass this path -
-    /// only Immediate results go through `run_after_hooks`.
-    fn run_after_hooks(
-        &self,
-        tool_name: &str,
-        args: &mlua::Table,
-        ctx: &mlua::Table,
-        content: &mut String,
-        is_error: &mut bool,
-    ) {
-        let funcs = self
-            .shared
-            .hooks
-            .tool_after
-            .snapshot_for(&self.lua, tool_name);
-        if funcs.is_empty() {
-            return;
-        }
-        let Ok(result_tbl) = self.lua.create_table() else {
-            return;
-        };
-        let _ = result_tbl.set("content", content.as_str());
-        let _ = result_tbl.set("is_error", *is_error);
-        let mut current = result_tbl;
-        for func in funcs {
-            let res: mlua::Result<mlua::Value> =
-                func.call((args.clone(), ctx.clone(), current.clone()));
-            match res {
-                Ok(mlua::Value::Table(t)) => {
-                    current = t;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    self.record_error(format!("tools.middleware after `{tool_name}`: {e}"));
-                }
-            }
-        }
-        if let Ok(c) = current.get::<String>("content") {
-            *content = c;
-        }
-        if let Ok(e) = current.get::<bool>("is_error") {
-            *is_error = e;
-        }
-    }
-
     fn tool_invocation_context(
         &self,
         tool_name: &str,
@@ -2855,7 +2732,7 @@ impl LuaRuntime {
             }
         };
 
-        let mut args_table = match self.args_to_lua_table(args) {
+        let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
                 return ToolExecResult::Immediate {
@@ -2887,16 +2764,6 @@ impl LuaRuntime {
                 };
             }
         };
-
-        if let Some(result) = self.run_before_hooks(tool_name, &mut args_table, &ctx_table) {
-            return result;
-        }
-
-        // Keep clones for `run_after_hooks` - `mlua::Table` is Rc-backed
-        // internally, so this is cheap and the originals are consumed by
-        // the task-spawn MultiValue below.
-        let args_for_after = args_table.clone();
-        let ctx_for_after = ctx_table.clone();
 
         let mut initial = mlua::MultiValue::new();
         initial.push_back(mlua::Value::Table(args_table));
@@ -2989,27 +2856,18 @@ impl LuaRuntime {
         }
         match immediate {
             Some(LuaToolResultParts {
-                mut content,
-                mut is_error,
+                content,
+                is_error,
                 metadata,
                 display_content,
                 attachment,
-            }) => {
-                self.run_after_hooks(
-                    tool_name,
-                    &args_for_after,
-                    &ctx_for_after,
-                    &mut content,
-                    &mut is_error,
-                );
-                ToolExecResult::Immediate {
-                    content,
-                    is_error,
-                    metadata,
-                    display_content,
-                    attachment: attachment.map(Box::new),
-                }
-            }
+            }) => ToolExecResult::Immediate {
+                content,
+                is_error,
+                metadata,
+                display_content,
+                attachment: attachment.map(Box::new),
+            },
             None => ToolExecResult::Pending,
         }
     }
@@ -4052,25 +3910,18 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
 }
 
 pub fn load_host_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    load_bootstrap_chunks_from_process(lua, BootstrapSelection::Host)
-}
-
-pub fn load_ui_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    load_bootstrap_chunks_from_process(lua, BootstrapSelection::Ui)
+    load_bootstrap_chunks_from_process(lua, BootstrapMode::Host)
 }
 
 pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    load_bootstrap_chunks_from_process(lua, BootstrapSelection::Full)
+    load_bootstrap_chunks_from_process(lua, BootstrapMode::Full)
 }
 
-fn load_bootstrap_chunks_from_process(
-    lua: &Lua,
-    selection: BootstrapSelection,
-) -> mlua::Result<()> {
+fn load_bootstrap_chunks_from_process(lua: &Lua, mode: BootstrapMode) -> mlua::Result<()> {
     let paths = LuaLoadPaths::from_process();
     load_bootstrap_group_with_roots(
         lua,
-        selection,
+        mode,
         &paths.module_overlay_roots(),
         paths.development_runtime.as_deref(),
         None,
@@ -4079,15 +3930,12 @@ fn load_bootstrap_chunks_from_process(
 
 fn load_bootstrap_group_with_roots(
     lua: &Lua,
-    selection: BootstrapSelection,
+    mode: BootstrapMode,
     roots: &[PathBuf],
     trusted_root: Option<&std::path::Path>,
     loaded_files: Option<&Arc<Mutex<Vec<PathBuf>>>>,
 ) -> mlua::Result<()> {
-    for chunk in BOOTSTRAP_CHUNKS
-        .iter()
-        .filter(|chunk| selection.includes(chunk))
-    {
+    for chunk in BOOTSTRAP_CHUNKS.iter().filter(|chunk| mode.includes(chunk)) {
         let rel = chunk.path;
         let (source, name, path, trusted) =
             read_bootstrap_source_from_roots(rel, roots, trusted_root)?;
@@ -4597,8 +4445,24 @@ mod tests {
             .filter(|chunk| chunk.path == "widgets/completer.lua")
             .collect::<Vec<_>>();
         assert_eq!(completer.len(), 1);
-        assert!(completer[0].load_in_host);
-        assert!(completer[0].load_in_ui);
+        assert!(completer[0].loads_in_host());
+    }
+
+    #[test]
+    fn bundled_lua_does_not_read_private_hooks_from_the_public_facade() {
+        for (module, source) in embedded_lua_modules() {
+            for (index, line) in source.lines().enumerate() {
+                let has_public_private_lookup = line
+                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')))
+                    .filter(|token| token.starts_with("smelt."))
+                    .any(|token| token.split('.').skip(1).any(|part| part.starts_with("__")));
+                assert!(
+                    !has_public_private_lookup,
+                    "{module}:{} reads a private hook through the public smelt facade: {line}",
+                    index + 1
+                );
+            }
+        }
     }
 
     #[test]
@@ -4910,13 +4774,16 @@ mod tests {
             .lua
             .load(
                 r#"
+                local default_count = 0
+                for _ in pairs(smelt.transcript.defaults) do
+                  default_count = default_count + 1
+                end
                 return type(smelt.transcript.set_renderer) == "function"
                   and type(smelt.transcript.extend_renderer) == "function"
                   and type(smelt.transcript.groups.register) == "function"
                   and type(smelt.transcript.defaults.render) == "function"
-                  and type(smelt.transcript.defaults.render_group_child_list) == "function"
-                  and type(smelt.transcript.defaults.render_group_children) == "function"
-                  and type(smelt.transcript.defaults.group_failure_counts) == "function"
+                  and type(smelt.transcript.defaults.render_tool_output) == "function"
+                  and default_count == 2
                   and smelt.transcript.get_renderer() ~= nil
             "#,
             )
@@ -5209,7 +5076,6 @@ mod tests {
             .load(
                 r#"
                 smelt.cmd.register("plug_cmd", function() end)
-                smelt.tools.middleware("bash", { before = function(ctx) return ctx end })
                 smelt.lifecycle.on_ready(function() end)
                 smelt.transcript.groups.register({
                   name = "batch",
@@ -5220,7 +5086,6 @@ mod tests {
             .exec()
             .expect("register");
         assert!(rt.shared.commands.lock().unwrap().contains_key("plug_cmd"));
-        assert!(!rt.shared.hooks.tool_before.is_empty());
         assert!(!rt.shared.hooks.lifecycle.is_empty());
         let specs = rt.transcript_group_specs();
         assert_eq!(specs.len(), baseline_groups + 1);
@@ -5228,7 +5093,6 @@ mod tests {
 
         rt.shared.clear_lua_handles();
         assert!(rt.shared.commands.lock().unwrap().is_empty());
-        assert!(rt.shared.hooks.tool_before.is_empty());
         assert!(rt.shared.hooks.lifecycle.is_empty());
         assert!(rt.transcript_group_specs().is_empty());
     }

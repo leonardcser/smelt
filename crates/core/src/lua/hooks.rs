@@ -1,7 +1,6 @@
 //! Generic hook registry - the storage and lifecycle pattern shared by
-//! tool middleware (`smelt.tools.middleware`), provider middleware
-//! (`smelt.provider.middleware`), and any future "register a callback
-//! list" surface. Each registered hook gets a monotonic id from the
+//! provider middleware, engine callbacks, and lifecycle callbacks. Each
+//! registered hook gets a monotonic id from the
 //! owning registry; `off()` removes by id, so plugins composing
 //! interleaved registrations never accidentally remove each other's
 //! handlers.
@@ -44,10 +43,7 @@ impl HookRegistry {
     }
 
     /// Push a Lua function under `name`. Returns the freshly-minted id
-    /// for use with [`reg_for`] or [`remove`]. The caller is responsible
-    /// for stashing the returned id when constructing composite `Reg`
-    /// handles (e.g. `tools.middleware` registers in two registries
-    /// under one user-visible handle).
+    /// for use with [`reg_for`] or [`remove`].
     pub fn register(
         &self,
         lua: &Lua,
@@ -151,17 +147,4 @@ impl HookRegistry {
             }
         }
     }
-}
-
-/// Build a composite [`LuaReg`] that removes one id from each of several
-/// registries. Used by surfaces (like `smelt.tools.middleware`) whose
-/// user-visible handle straddles multiple registries.
-pub fn composite_reg(parts: Vec<(Arc<HookRegistry>, u64)>) -> super::reg::LuaReg {
-    super::reg::LuaReg::new(move || {
-        let mut any = false;
-        for (reg, id) in &parts {
-            any |= reg.remove(*id);
-        }
-        any
-    })
 }

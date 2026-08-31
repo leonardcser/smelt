@@ -14,3 +14,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 smelt-perf.workspace = true
+toml_edit = "0.25.13"
+semver = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

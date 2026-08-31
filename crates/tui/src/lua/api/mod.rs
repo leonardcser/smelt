@@ -42,7 +42,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Identifier for the current alpha Lua API, exposed as `smelt.api_version`.
-pub const API_VERSION: &str = "2";
+pub const API_VERSION: &str = "1";
 
 /// Build identity, exposed as `smelt.build`. `version` is sourced from
 /// `CARGO_PKG_VERSION` (for programmatic semver comparison); the rest come
@@ -209,7 +209,11 @@ impl LuaRuntime {
                 Ok(())
             },
         )?;
-        LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host).advanced_fn(
+        let host_root = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host);
+        host_root.private_fn("__ui_host_available", &[], |_, ()| {
+            Ok(crate::lua::app_ref::ui_host_available())
+        })?;
+        host_root.advanced_fn(
             "ns",
             "Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.",
             &["name"],

@@ -2,7 +2,6 @@
 
 use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::doc::Tier;
-use crate::lua::hooks::composite_reg;
 use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
@@ -412,63 +411,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?;
     }
-    {
-        let s = shared.clone();
-        m.fn_(
-            "middleware",
-            "Register middleware for tool `name`. Pass `\"\"` (empty string) as `name` to match every tool. \
-`mw` is a table of `{ before = fn?, after = fn? }`:\n\n\
-- `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = \"...\" }` to short-circuit with an error result. Any other return is no-op.\n\
-- `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.\n\n\
-Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.",
-            &["name", "mw"],
-            move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<LuaReg> {
-                let before_fn: Option<mlua::Function> = mw.get("before").ok();
-                let after_fn: Option<mlua::Function> = mw.get("after").ok();
-                if before_fn.is_none() && after_fn.is_none() {
-                    return Err(LuaError::RuntimeError(
-                        "tools.middleware: at least one of `before` or `after` is required"
-                            .to_string(),
-                    ));
-                }
-                let mut parts = Vec::with_capacity(2);
-                if let Some(f) = before_fn {
-                    let id = s.hooks.tool_before.register(lua, f, name.clone())?;
-                    parts.push((Arc::clone(&s.hooks.tool_before), id));
-                }
-                if let Some(f) = after_fn {
-                    let id = s.hooks.tool_after.register(lua, f, name.clone())?;
-                    parts.push((Arc::clone(&s.hooks.tool_after), id));
-                }
-                Ok(composite_reg(parts))
-            },
-        )?;
-    }
-    m.live_only_fn(
-        "resolve",
-        "Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.",
-        &["request_id", "call_id", "result"],
-        |lua, (request_id, call_id, result): (u64, String, mlua::Table)| -> LuaResult<()> {
-            let invocation_id = crate::lua::current_tool_invocation()
-                .map(|invocation| invocation.invocation_id)
-                .ok_or_else(|| mlua::Error::external("tools.resolve: no active tool invocation"))?;
-            let result = crate::lua::tool_result_from_lua_table(lua, &result)
-                .map_err(|error| mlua::Error::external(format!("tools.resolve: {error}")))?;
-            crate::host::with_core(|core| {
-                core.engine.send(protocol::UiCommand::ToolResult {
-                    request_id,
-                    invocation_id,
-                    call_id,
-                    content: result.content,
-                    is_error: result.is_error,
-                    metadata: result.metadata,
-                    display_content: result.display_content,
-                    attachment: result.attachment,
-                })
-            });
-            Ok(())
-        },
-    )?;
     let summary_context = Arc::clone(shared);
     m.fn_(
         "default_summary",

@@ -28,17 +28,25 @@ jobs:
           test "$RELEASE_TAG" = "v$VERSION"
           test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
           git tag --points-at HEAD | grep -Fx "$RELEASE_TAG"
+          test -z "$(git status --porcelain)"
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Materialize release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          cargo xtask prepare-release "$VERSION"
           cargo metadata --locked --no-deps --format-version 1 > /tmp/cargo-metadata.json
+          cargo metadata --locked --no-deps --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
           python3 - "$VERSION" <<'PY'
           import json
           import sys
 
           expected = sys.argv[1]
-          if expected.startswith("0.") and "-" in expected:
-              raise SystemExit(
-                  "0.x releases are beta-quality normal releases; "
-                  "remove the prerelease suffix"
-              )
           with open("/tmp/cargo-metadata.json", encoding="utf-8") as metadata_file:
               metadata = json.load(metadata_file)
           independent = set(
@@ -51,14 +59,10 @@ jobs:
           ]
           if mismatches:
               raise SystemExit(
-                  f"tag version {expected} does not match workspace packages: "
+                  f"runner version {expected} does not match workspace packages: "
                   + ", ".join(mismatches)
               )
           PY
-          git diff --exit-code
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -113,10 +117,12 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: Verify build source
+        shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse HEAD)"
           git tag --points-at HEAD | grep -Fx "$GITHUB_REF_NAME"
+          test -z "$(git status --porcelain)"
 
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -130,7 +136,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Materialize release version
+        shell: bash
+        run: cargo xtask prepare-release "${GITHUB_REF_NAME#v}"
+
       - name: Build release binary
+        env:
+          SMELT_RELEASE_TAG: ${{ github.ref_name }}
         run: cargo build --locked --profile dist --bin smelt --target ${{ matrix.target }}
 
       - name: Smoke-test native binary identity
@@ -233,11 +245,7 @@ jobs:
             echo ""
             echo "## Install"
             echo ""
-            echo '```bash'
-            echo "cargo install --git https://github.com/leonardcser/smelt.git --tag ${GITHUB_REF_NAME} smelt-agent"
-            echo '```'
-            echo ""
-            echo "Or download a prebuilt binary below."
+            echo "Download the prebuilt archive for your platform below and verify it with SHA256SUMS."
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

@@ -22,7 +22,7 @@ for _, m in ipairs(models_list()) do
   model_keys[#model_keys + 1] = m.key
 end
 
-smelt.cmd.picker("model", {
+smelt.cmd.register_picker("model", {
   desc     = "switch model",
   args     = model_keys,
   items    = build_items,

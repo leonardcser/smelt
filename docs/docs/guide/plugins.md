@@ -653,18 +653,19 @@ work differs by kind:
 
 ## Pickers
 
-`smelt.picker.fuzzy(opts)` is the high-level entry point for choose-one prompts.
+`smelt.picker.open(opts)` is the high-level entry point for choose-one prompts.
 Items can be plain strings or `{ label, description, ansi_color, search_terms }`
-records; ranking is delegated to `smelt.fuzzy.rank`. Returns
-`{ index, item, action }` on accept or `nil` on dismiss.
+records. Set `placement = "prompt_docked"` to filter them through the prompt with
+`smelt.fuzzy.rank`. The call returns `{ index, item, action }` on accept or `nil`
+on dismiss.
 
 ```lua
 smelt.spawn(function()
-  local choice = smelt.picker.fuzzy({
+  local choice = smelt.picker.open({
     items = { "first", "second", "third" },
-    placeholder = "pick one",
+    placement = "prompt_docked",
   })
-  if choice then smelt.log.info("picked " .. choice.item.label) end
+  if choice then smelt.log.info("picked " .. choice.item) end
 end)
 ```
 
@@ -699,7 +700,6 @@ resulting semantic group node through ordinary root-renderer middleware.
 
 ```lua
 local layout = smelt.layout
-local defaults = require("smelt.transcript.defaults")
 
 smelt.transcript.groups.register({
   name = "cargo-test-batch",
@@ -721,7 +721,7 @@ smelt.transcript.extend_renderer("my.cargo-test-batch", function(next, node, ctx
 
   local summary = layout.text("ran " .. tostring(node.child_count) .. " test commands")
   if ctx.view_state ~= "expanded" then return summary end
-  return layout.vbox({ summary, defaults.render_group_children(node, ctx) })
+  return layout.vbox({ summary, layout.group_children() })
 end, { cache_key = "my.cargo-test-batch-renderer:v1" })
 ```
 

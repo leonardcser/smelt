@@ -179,7 +179,7 @@ function smelt.confirm.open(handle_id)
   -- the reason input.
   local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
 
-  local handle = smelt.dialog.open_handle({
+  local handle = smelt.dialog.new({
     blocks_agent = true,
     max_height   = "fill",
     min_height   = 0,

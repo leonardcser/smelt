@@ -123,7 +123,7 @@ smelt.transcript.register_tool("bash", {
   end,
 })
 
-smelt.tools.register(smelt.tools._with_watchdog({
+smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "bash",
   override = true,
   default_allow = DEFAULT_ALLOW,

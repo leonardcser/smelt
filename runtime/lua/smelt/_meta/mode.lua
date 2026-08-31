@@ -23,26 +23,13 @@ mode.cycle = nil
 ---@type fun(): string[]
 mode.cycle_list = nil
 
---- Return the registered mode definition for `name`, or `nil` when unknown.
----@type fun(name: string): table|nil
+--- Return a copy of the registered mode definition for `name`, or `nil` when unknown.
+---@type fun(name: string): smelt.mode.Mode?
 mode.get = nil
 
---- Return the icon for `name`, or `""` when the mode is unknown.
----@type fun(name: string): string
-mode.icon = nil
-
---- Return registered mode definitions in registration order.
----@type fun(): table[]
+--- Return copies of registered mode definitions in registration order.
+---@type fun(): smelt.mode.Mode[]
 mode.list = nil
-
---- Return the status note for `name`, falling back to `"now in <name> mode"`.
----@type fun(name: string): string
-mode.note = nil
-
---- Return a map from every registered mode name to its permission behavior
---- table. Modes without explicit behaviors map to an empty table.
----@type fun(): table<string, table>
-mode.permission_behaviors = nil
 
 --- Register an agent mode from `{ name, label?, icon?, hl_group?, note?,
 --- permissions?, after? }`. Registering a new name appends it, or inserts it
@@ -55,15 +42,5 @@ mode.register = nil
 --- Set the active agent mode. The change is applied immediately to the UI and persisted according to the active remember policy.
 ---@type fun(mode: string): nil
 mode.set = nil
-
---- Set a mode's icon. An unknown name is registered with the default mode
---- fields and the supplied icon.
----@type fun(name: string, icon: string): nil
-mode.set_icon = nil
-
---- Return `{ hl_group = string }` for `name`. Unknown modes use
---- `"SmeltModeDefault"`.
----@type fun(name: string): table
-mode.style = nil
 
 return mode

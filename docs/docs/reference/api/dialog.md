@@ -88,6 +88,19 @@ Build a selectable menu and return `(leaf, controller)`. The controller uses
 default, submitting resolves the active dialog with `{ index, item }`;
 `opts.on_submit` can replace that behavior.
 
+## `smelt.dialog.new`
+
+```lua
+fun(opts: smelt.dialog.Opts): table
+```
+
+Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
+
+Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
+The consumer drives the lifecycle via `on_submit` / `on_dismiss`
+callbacks and tears down with `handle:close()`. No value flows back
+- use `smelt.dialog.open` when you need to read the result.
+
 ## `smelt.dialog.open`
 
 ```lua
@@ -101,19 +114,6 @@ Coroutine-blocking dialog opener. Builds the root dialog from `opts.panels`
 caller until a handler calls `ctx.resolve(value)`. Must run inside a
 `smelt.spawn` (or tool execute) frame; returns the resolved value or
 `nil` on dismiss.
-
-## `smelt.dialog.open_handle`
-
-```lua
-fun(opts: smelt.dialog.Opts): table
-```
-
-Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
-
-Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
-The consumer drives the lifecycle via `on_submit` / `on_dismiss`
-callbacks and tears down with `handle:close()`. No value flows back
-- use `smelt.dialog.open` when you need to read the result.
 
 ## `smelt.dialog.picker`
 

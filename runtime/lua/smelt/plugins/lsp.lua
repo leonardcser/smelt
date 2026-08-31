@@ -451,8 +451,7 @@ local function configure_transcript_defaults()
     end
   end
 
-  local defaults = smelt.transcript and smelt.transcript.defaults
-  if not defaults then return end
+  local defaults = require("smelt.transcript.defaults")
   for _, name in ipairs(COLLAPSED_TOOLS) do
     add_reg(smelt.transcript.register_tool(name, {
       cache_key = "smelt.plugin.lsp." .. name .. ":v1",
@@ -471,7 +470,7 @@ local function register_tool(name, description, properties, required)
     properties = properties,
   }
   if required and #required > 0 then parameters.required = required end
-  add_reg(smelt.tools.register(smelt.tools._with_watchdog({
+  add_reg(smelt.tools.register(__smelt_internal.tools.with_watchdog({
     name = name,
     description = description,
     permission_defaults = { normal = "allow", plan = "allow", apply = name == "rename_symbol" and "ask" or "allow" },

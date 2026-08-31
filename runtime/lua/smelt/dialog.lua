@@ -21,7 +21,7 @@
 --   - Ctrl-O toggles the dialog between its context-preserving height and an
 --     expanded review layout.
 --   - To scope a key to a specific panel, install it directly on that leaf via
---     `leaf:key(key, fn)` after `open_handle` returns. Example:
+--     `leaf:key(key, fn)` after `new` returns. Example:
 --     the confirm dialog binds `tab` only on the options leaf (jump into the
 --     reason input) and `esc` only on the reason leaf (pop focus back to the
 --     options leaf instead of dismissing the dialog).
@@ -114,7 +114,7 @@ local GUTTER = 1
 ---@field hint? string Optional one-line hint surfaced in the dialog footer.
 ---@field on_press fun(ctx: any): any Handler invoked when the key fires.
 
---- Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
+--- Options accepted by `smelt.dialog.open` / `smelt.dialog.new`.
 --- Dialogs fit their content by default while preserving transcript context.
 --- Integer `height` values are body-relative and gain
 --- the top chrome row automatically. Pick one of `height` or `max_height`;
@@ -133,7 +133,7 @@ local GUTTER = 1
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field close_with_q? boolean Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input.
----@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
+---@field on_submit? fun(ctx: any): any Handler invoked on Enter. Without a handler, Enter leaves the dialog open.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
 ---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
 
@@ -669,7 +669,7 @@ function smelt.dialog.viewer(opts)
   local panel = { leaf = leaf, height = opts.panel_height }
   local max_height = opts.max_height
   if opts.height == nil and max_height == nil then max_height = "50%" end
-  local handle = smelt.dialog.open_handle({
+  local handle = smelt.dialog.new({
     title      = opts.title,
     height     = opts.height,
     max_height = max_height,
@@ -783,7 +783,7 @@ local function build_dialog(opts)
 end
 
 -- Wire dialog-level keymaps, focus, events, and the resolve handle. Shared between
--- `open` (coroutine) and `open_handle` (sync).
+-- `open` (coroutine) and `new` (sync).
 local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
   local root = leaves[1]
 
@@ -1103,9 +1103,9 @@ end
 -- callbacks and tears down with `handle:close()`. No value flows back
 -- - use `smelt.dialog.open` when you need to read the result.
 ---@type fun(opts: smelt.dialog.Opts): table
-function smelt.dialog.open_handle(opts)
+function smelt.dialog.new(opts)
   if type(opts) ~= "table" then
-    error("smelt.dialog.open_handle: expected table of options", 2)
+    error("smelt.dialog.new: expected table of options", 2)
   end
   local _, leaves, layout, height = build_dialog(opts)
   local resolve, root = setup_lifecycle(opts, leaves, layout, height, function(_) end)

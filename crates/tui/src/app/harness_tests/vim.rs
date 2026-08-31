@@ -33,6 +33,24 @@ fn insert_image(app: &mut TestApp, label: &str, data_url: &str) {
 }
 
 #[test]
+fn vim_insert_double_esc_is_quiet_without_rewindable_turns() {
+    let mut app = TestApp::builder().with_vim(true).build();
+
+    app.press(KeyCode::Esc);
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+
+    let state = app.state();
+    assert!(state.active_modal.is_none());
+    assert!(
+        state.notification.is_none(),
+        "Esc-Esc should do nothing when there are no turns to rewind"
+    );
+}
+
+#[test]
 fn vim_insert_double_esc_opens_rewind_dialog_when_idle() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.push_user_block("write the parser");

@@ -16,18 +16,10 @@ model.capabilities = nil
 ---@type fun(): string?
 model.current = nil
 
---- Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.
----@type fun(): table?
-model.input_modalities = nil
-
 --- Tier: Host - Available in every runtime, including headless mode.
 --- Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.
 ---@type fun(): table
 model.list = nil
-
---- Resolved maximum output tokens for the active model. Returns the config override if set, otherwise falls back to the models.dev catalog value, then to the provider default. Returns `nil` when no limit is known.
----@type fun(): integer?
-model.max_tokens = nil
 
 --- Tier: Host - Available in every runtime, including headless mode.
 --- Read or update a named model preference. With only `name`, returns the
@@ -52,9 +44,5 @@ model.status = nil
 --- Return whether the active model supports the named input modality, for example `image` or `pdf`.
 ---@type fun(modality: string): boolean?
 model.supports_input = nil
-
---- Return `{ provider_type, api_base, api_key_env, multimodal_tool_results, image_tool_results, pdf_tool_results }` for the active model transport. Prefer the modality-specific fields; `multimodal_tool_results` is their aggregate. `api_key_env` is the environment variable name, never its value.
----@type fun(): table?
-model.transport = nil
 
 return model

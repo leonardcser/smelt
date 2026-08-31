@@ -13,12 +13,12 @@ local tick = {}
 --- `fn` at most once every `secs` seconds. `fn` runs inside a fresh
 --- `smelt.spawn`, so it may yield (HTTP, processes, sleeps) without
 --- blocking the cell pump.
---- 
+---
 --- Unlike `smelt.timer.every`, this idiom is safe to call from a
 --- plugin's module body: cell subscriptions are wiped on `/reload` and
 --- re-armed when the body re-runs, so no Reg juggling is required for
 --- hot-reload survival.
---- 
+---
 --- Returns a `Reg` whose `:remove()` unsubscribes.
 ---@see smelt.timer.every
 ---@type fun(secs: integer, fn: fun()): smelt.Reg

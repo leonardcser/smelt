@@ -1,6 +1,6 @@
 # Lua API Boundary
 
-This document defines the alpha Lua boundary behind `smelt.api_version == "2"`.
+This document defines the alpha Lua boundary behind `smelt.api_version == "1"`.
 Rust declarations and bundled Lua annotations generate the reference docs,
 LuaCATS stubs, and completion data. They describe the current API, not a frozen
 compatibility inventory.
@@ -31,7 +31,7 @@ such as raw facade bridges, lifecycle sweep hooks, and candidate scope state.
 | Commands and input actions | `smelt.cmd`, `smelt.keymap`, `smelt.events`, `smelt.lifecycle` | command modules and `plugins/esc_chord.lua` | direct window key/event methods |
 | State and reload-safe work | `smelt.state`, `smelt.reg`, `smelt.tick`, `smelt.timer`, `smelt.signal` | model preferences, title, prediction, and status refresh | direct signal construction and low-level timers |
 | Async I/O and cancellation | `smelt.spawn`, `smelt.task`, `smelt.fs`, `smelt.http`, `smelt.process` | LSP startup, compact requests, and filesystem tools | raw task and process control where documented |
-| Providers, tools, and permissions | `smelt.provider`, `smelt.tools`, `smelt.permissions`, `smelt.engine` hooks | compact middleware and bundled edit/write/notebook tools | provider row helpers and tool watchdog/compaction helpers |
+| Providers, tools, and permissions | `smelt.provider`, `smelt.tools`, `smelt.permissions`, `smelt.engine` hooks | compaction and bundled edit/write/notebook tools | provider middleware and low-level tool registration |
 | Composable terminal UI | `smelt.dialog`, `smelt.input`, `smelt.list`, `smelt.picker`, `smelt.ui.layout`, `smelt.render` | confirm, picker, completer, and inspect UI | `smelt.buf`, `smelt.win`, `smelt.overlay`, `smelt.paint`, and `smelt.confirm.open` |
 | Transcript presentation | semantic `smelt.transcript` views, targets, renderer extensions, groups, and tool presentation | default transcript renderer and inspect views | direct buffer/window rendering primitives |
 | Session and user configuration | `smelt.settings`, `smelt.session`, `smelt.model`, `smelt.mode`, `smelt.reasoning` | bundled mode, title, predict, and compact plugins | low-level config/runtime status snapshots |
@@ -109,9 +109,9 @@ results, and stale callbacks are not invoked.
 
 ## Alpha version policy
 
-Version 2 is the greenfield alpha API. Breaking alpha cleanup updates the current
+Version 1 is the greenfield alpha API. Breaking alpha cleanup updates the current
 declarations and generated artifacts in place. Supported and Advanced guide API
 review, but neither classification freezes the current surface or requires a
-cross-base compatibility check. Do not create version 3 solely to record
+cross-base compatibility check. Do not increment the API version solely to record
 pre-beta iteration. A future beta policy can define a narrower compatibility
 promise and release-note process.

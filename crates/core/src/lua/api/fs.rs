@@ -1,14 +1,11 @@
 //! `smelt.fs` - sync filesystem primitives. Errors use `(value, err_string)` convention.
 
-use crate::fs::FlockGuard;
-use crate::lua::doc::{classification_for_type, record_class, Tier};
-use crate::lua::lua_type::{LuaClassDecl, LuaType};
+use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
 use crate::lua::watchers::WatcherEntry;
 use crate::lua::LuaShared;
 use mlua::prelude::*;
 use notify::RecursiveMode;
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -367,20 +364,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         ) {
             Ok(ms) => Ok((Some(ms), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
-        },
-    )?;
-
-    let flock_context = Arc::clone(shared);
-    fs.live_only_fn(
-        "try_flock",
-        "Acquire an exclusive non-blocking advisory lock for `p`. Returns a lock handle on success or an error string when the file is already locked or cannot be opened.",
-        &["p"],
-        move |_, p: String| -> LuaResult<(Option<FlockHandle>, Option<String>)> {
-            let path = flock_context.resolve_project_path(p);
-            match crate::fs::try_flock(&path.to_string_lossy()) {
-                Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
-                Err(err) => Ok((None, Some(err))),
-            }
         },
     )?;
 
@@ -788,37 +771,6 @@ fn classify_file_sample(sample: &[u8], has_more: bool) -> &'static str {
             Err(err) if has_more && err.error_len().is_none() => "text",
             Err(_) => "binary",
         }
-    }
-}
-
-struct FlockHandle(RefCell<Option<FlockGuard>>);
-
-impl FlockHandle {
-    fn new(guard: FlockGuard) -> Self {
-        Self(RefCell::new(Some(guard)))
-    }
-}
-
-impl LuaType for FlockHandle {
-    fn lua_type() -> String {
-        record_class(LuaClassDecl {
-            name: "smelt.fs.Flock",
-            doc: "Exclusive advisory file lock returned by `smelt.fs.try_flock`. The lock is also released when this handle is garbage-collected.",
-            classification: classification_for_type("smelt.fs.Flock"),
-            fields: crate::class_methods! {
-                "release" => fn() -> (), "Release the lock immediately. No-op if it is already released.",
-            },
-        });
-        "smelt.fs.Flock".into()
-    }
-}
-
-impl LuaUserData for FlockHandle {
-    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("release", |_, this, ()| {
-            this.0.borrow_mut().take();
-            Ok(())
-        });
     }
 }
 

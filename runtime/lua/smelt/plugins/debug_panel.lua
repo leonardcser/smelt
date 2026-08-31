@@ -136,7 +136,7 @@ local function compose_lines(win)
 		ctx_str = "nil"
 	end
 	add_kv(lines, spans, "context", ctx_str, width)
-	local max_tok = caps.max_tokens or smelt.model.max_tokens()
+	local max_tok = caps.max_tokens
 	add_kv(lines, spans, "max_tokens", max_tok and fmt_num(max_tok) or "default", width)
 	add_kv(lines, spans, "modalities", join_array(caps.input_modalities, ","), width)
 	local cap_parts = {}

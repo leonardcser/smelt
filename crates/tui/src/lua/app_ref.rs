@@ -7,14 +7,6 @@
 use crate::app::{NotificationOperation, TuiApp};
 use scoped_tls_hkt::scoped_thread_local;
 
-#[derive(Default)]
-pub(crate) struct PermissionSnapshot {
-    pub(crate) session_entries: Vec<(String, String)>,
-    pub(crate) path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
-    pub(crate) workspace: smelt_core::permissions::store::Snapshot,
-    pub(crate) repository: smelt_core::permissions::store::Snapshot,
-}
-
 pub(crate) struct SessionStatusSnapshot {
     pub(crate) active_model: Option<smelt_core::runtime_state::ActiveModel>,
     pub(crate) cost: f64,
@@ -149,10 +141,6 @@ impl RuntimeLuaHost<'_> {
 
     pub(crate) fn context_window(&self) -> Option<u32> {
         self.app.core.config.context_window
-    }
-
-    pub(crate) fn available_models(&self) -> Vec<smelt_core::config::ResolvedModel> {
-        self.app.core.config.available_models.clone()
     }
 
     pub(crate) fn active_model(&self) -> Option<smelt_core::runtime_state::ActiveModel> {
@@ -939,41 +927,6 @@ impl PlatformLuaHost<'_> {
         crate::metrics::load(self.app.core.sessions.state_root())
     }
 
-    pub(crate) fn permission_snapshot(&self) -> Result<PermissionSnapshot, String> {
-        let workspace = self
-            .app
-            .core
-            .permission_store
-            .load_snapshot(
-                self.app.workspace.cwd(),
-                smelt_core::permissions::store::PersistenceScope::Workspace,
-            )
-            .map_err(|error| format!("load workspace permissions: {error}"))?;
-        let repository = match self.app.workspace.repository_permission_context() {
-            Some((key, _)) => self
-                .app
-                .core
-                .permission_store
-                .load_snapshot(
-                    &key.to_string_lossy(),
-                    smelt_core::permissions::store::PersistenceScope::Repository,
-                )
-                .map_err(|error| format!("load repository permissions: {error}"))?,
-            None => Default::default(),
-        };
-        Ok(PermissionSnapshot {
-            session_entries: self
-                .app
-                .session_permission_entries()
-                .into_iter()
-                .map(|entry| (entry.tool, entry.pattern))
-                .collect(),
-            path_grants: self.app.session_path_grants(),
-            workspace,
-            repository,
-        })
-    }
-
     pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Option<Vec<smelt_core::PermissionEntry>>,
@@ -997,36 +950,6 @@ impl PlatformLuaHost<'_> {
     pub(crate) fn grant_session_path(&mut self, grant: smelt_core::permissions::SessionPathGrant) {
         self.app
             .grant_session_path(grant.mode, grant.tool, grant.access, grant.dir);
-    }
-
-    pub(crate) fn check_tool_permission(&self, mode: &str, tool: &str) -> &'static str {
-        let mode = protocol::AgentMode::parse(mode).unwrap_or_default();
-        match self.app.core.permissions.check_tool(mode, tool) {
-            protocol::Decision::Allow => "allow",
-            protocol::Decision::Ask => "ask",
-            protocol::Decision::Deny => "deny",
-            protocol::Decision::Error(_) => "ask",
-        }
-    }
-
-    pub(crate) fn check_subcommand_permission(
-        &self,
-        mode: &str,
-        bucket: &str,
-        value: &str,
-    ) -> &'static str {
-        let mode = protocol::AgentMode::parse(mode).unwrap_or_default();
-        match self
-            .app
-            .core
-            .permissions
-            .check_subcommand(mode, bucket, value)
-        {
-            protocol::Decision::Allow => "allow",
-            protocol::Decision::Ask => "ask",
-            protocol::Decision::Deny => "deny",
-            protocol::Decision::Error(_) => "ask",
-        }
     }
 }
 

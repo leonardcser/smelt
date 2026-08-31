@@ -2701,8 +2701,9 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
             assert(type(pricing.cache_read) == "number")
             assert(type(pricing.cache_write) == "number")
             assert(type(pricing.source) == "string")
-            local max_tokens = smelt.model.max_tokens()
-            assert(max_tokens == nil or type(max_tokens) == "number")
+            local capabilities = smelt.model.capabilities()
+            assert(type(capabilities) == "table")
+            assert(capabilities.max_tokens == nil or type(capabilities.max_tokens) == "number")
             assert(smelt.model.preferred("coverage") == nil)
             assert(smelt.model.preferred("coverage", "test-model") == "test-model")
             assert(smelt.model.preferred("coverage") == "test-model")
@@ -3936,7 +3937,6 @@ fn reload_clears_every_lua_surface() {
                 command = { "seed-mcp" },
                 enabled = false,
             })
-            smelt.tools.middleware("", { before = function() end })
             smelt.provider.middleware({ on_response = function() end })
 
             -- core::timers (Lua-side)
@@ -4000,7 +4000,6 @@ fn reload_clears_every_lua_surface() {
         .iter()
         .any(|p| p.name.as_deref() == Some("seed_provider")));
     assert!(shared.mcp_configs.lock().unwrap().contains_key("seed_mcp"));
-    assert!(!shared.hooks.tool_before.is_empty());
     assert!(!shared.hooks.provider_response.is_empty());
     assert!(!app.core_probe().timers.is_empty());
     assert!(!shared.tasks.lock().unwrap().is_empty());
@@ -4066,10 +4065,6 @@ fn reload_clears_every_lua_surface() {
     assert!(
         !shared.mcp_configs.lock().unwrap().contains_key("seed_mcp"),
         "MCP registry cleared"
-    );
-    assert!(
-        shared.hooks.tool_before.is_empty(),
-        "tool middleware cleared"
     );
     assert!(
         shared.hooks.provider_response.is_empty(),

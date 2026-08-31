@@ -6,22 +6,7 @@
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
-
-## `smelt.picker.fuzzy`
-
-```lua
-fun(opts: smelt.picker.FuzzyOpts): smelt.picker.FuzzyResult?
-```
-
-Types: [`smelt.picker.FuzzyOpts`](types.md#smeltpickerfuzzyopts), [`smelt.picker.FuzzyResult`](types.md#smeltpickerfuzzyresult)
-
-Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
-keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
-`{ label, description?, ansi_color?, search_terms? }` records. Returns
-`{ index, item, action }` on accept or `nil` on dismiss.
-  • `opts.on_select(item)` - fires on navigation
-  • `opts.placement` - defaults to "prompt_docked"
+Picker facade. Use `smelt.picker.open(opts)` for normal yielding selection and `smelt.picker.new(opts)` only when directly managing a non-blocking picker handle.
 
 ## `smelt.picker.new`
 
@@ -31,19 +16,19 @@ fun(opts: smelt.picker.NewOpts): smelt.picker.Picker
 
 Types: [`smelt.picker.NewOpts`](types.md#smeltpickernewopts), [`smelt.picker.Picker`](types.md#smeltpickerpicker)
 
-Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Open a picker overlay and return a non-blocking `Picker` userdata for direct lifecycle and keybinding control. Prefer `smelt.picker.open(opts)` for normal selection.
 
 ## `smelt.picker.open`
 
 ```lua
-fun(opts: smelt.picker.NewOpts): smelt.picker.OpenResult?
+fun(opts: smelt.picker.OpenOpts): smelt.picker.OpenResult?
 ```
 
-Types: [`smelt.picker.NewOpts`](types.md#smeltpickernewopts), [`smelt.picker.OpenResult`](types.md#smeltpickeropenresult)
+Types: [`smelt.picker.OpenOpts`](types.md#smeltpickeropenopts), [`smelt.picker.OpenResult`](types.md#smeltpickeropenresult)
 
-Open a floating picker over `opts.items` and yield until the user
-accepts or dismisses. `opts` is forwarded to `smelt.picker.new` for
-placement / styling; up/down/ctrl-j/k/p/n navigate, Enter resolves,
-Esc/Ctrl-C dismisses. Returns `{ index, item }` on accept or `nil` on
-dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
+Open a picker and yield until the user accepts or dismisses. Static pickers
+use any low-level placement. Prompt-docked pickers additionally support
+fuzzy ranking, async providers, lazy items, and persistent `on_enter`.
 

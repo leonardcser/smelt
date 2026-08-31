@@ -34,7 +34,7 @@ local function apply(ansi)
 end
 
 local original
-smelt.cmd.picker("color", {
+smelt.cmd.register_picker("color", {
   desc       = "set session color",
   args       = preset_names,
   items      = items,

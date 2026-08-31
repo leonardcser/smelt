@@ -16,7 +16,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.",
         Tier::UiHost,
     )?;
-    LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.prompt", Tier::Host).fn_(
+    m.fn_(
         "win",
         "Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.",
         &[],

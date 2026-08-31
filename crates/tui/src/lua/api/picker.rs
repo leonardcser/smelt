@@ -1,9 +1,7 @@
 //! `smelt.picker` - Picker handle. UiHost-only.
 //!
-//! `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker`
-//! userdata whose methods drive selection and item replacement. The
-//! yield-until-pick wrapper lives in pure Lua (see
-//! `runtime/lua/smelt/picker.lua`).
+//! `smelt.picker.new(opts)` is the low-level non-blocking handle constructor.
+//! The yielding `smelt.picker.open(opts)` facade lives in bundled Lua.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
@@ -25,12 +23,12 @@ impl LuaType for LuaPickerNewOpts {
                 LuaClassField { name: "prefix", ty: "string".into(), optional: true, doc: "Small prefix rendered before the label." },
                 LuaClassField { name: "ansi_color", ty: "integer".into(), optional: true, doc: "ANSI color slot for the prefix." },
                 LuaClassField { name: "label_color", ty: "integer".into(), optional: true, doc: "ANSI color slot for the label." },
-                LuaClassField { name: "search_terms", ty: "string[]".into(), optional: true, doc: "Extra strings considered by fuzzy pickers." },
+                LuaClassField { name: "search_terms", ty: "string".into(), optional: true, doc: "Extra text considered by fuzzy pickers." },
             ],
         });
         record_class(LuaClassDecl {
             name: "smelt.picker.NewOpts",
-            classification: smelt_core::lua::doc::classification_for_type("smelt.picker.NewOpts"),
+            classification: smelt_core::lua::doc::ApiClassification::Advanced,
             doc: "Options for the low-level non-blocking picker handle constructor.",
             fields: vec![
                 LuaClassField {
@@ -144,14 +142,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "picker",
-        "Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. \
-The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.",
+        "Picker facade. Use `smelt.picker.open(opts)` for normal yielding selection and `smelt.picker.new(opts)` only when directly managing a non-blocking picker handle.",
         Tier::UiHost,
     )?;
 
     record_class(LuaClassDecl {
         name: "smelt.picker.Picker",
-        classification: smelt_core::lua::doc::classification_for_type("smelt.picker.Picker"),
+        classification: smelt_core::lua::doc::ApiClassification::Advanced,
         doc: "Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
             "win" => fn() -> super::win::LuaWin, "Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).",
@@ -162,9 +159,9 @@ The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `s
         },
     });
 
-    m.fn_(
+    m.advanced_fn(
         "new",
-        "Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.",
+        "Open a picker overlay and return a non-blocking `Picker` userdata for direct lifecycle and keybinding control. Prefer `smelt.picker.open(opts)` for normal selection.",
         &["opts"],
         |_, (opts,): (LuaPickerNewOpts,)| -> LuaResult<LuaPicker> {
             let win = crate::lua::with_ui_host(|host| host.open_picker(opts.0))

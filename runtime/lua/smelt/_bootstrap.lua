@@ -118,15 +118,12 @@ end
 
 -- Compact repeated absolute cwd prefixes in model-facing tool output. This is
 -- display-only policy for structured path outputs, not a filesystem primitive.
----@advanced
-function smelt.tools._compact_cwd_path(path)
+function internal.tools.compact_cwd_path(path)
   return compact_cwd_path(path, cwd_prefixes())
 end
 
--- Apply `_compact_cwd_path` to each path in an array, preserving order.
--- Returns an empty array when `paths` is `nil`.
----@advanced
-function smelt.tools._compact_cwd_paths(paths)
+-- Compact each path in an array while preserving order.
+function internal.tools.compact_cwd_paths(paths)
   local prefixes = cwd_prefixes()
   if #prefixes == 0 then return paths or {} end
   local out = {}
@@ -138,8 +135,7 @@ end
 
 -- Remove the active working-directory prefix from the start of each line in
 -- model-facing text while preserving line endings. Returns `""` for `nil`.
----@advanced
-function smelt.tools._compact_cwd_prefix_lines(content)
+function internal.tools.compact_cwd_prefix_lines(content)
   if not content or content == "" then return content or "" end
   local prefixes = cwd_prefixes()
   if #prefixes == 0 then return content end
@@ -164,8 +160,7 @@ end
 -- Attach an outer watchdog to a tool definition. This is intentionally
 -- separate from the tool's own timeout handling: builtins use a small grace
 -- period so their domain-specific timeout result wins before the watchdog fires.
----@advanced
-function smelt.tools._with_watchdog(def, opts)
+function internal.tools.with_watchdog(def, opts)
   opts = opts or {}
   local default_ms = opts.default_ms or 30000
   local max_ms = opts.max_ms or 600000
@@ -182,6 +177,7 @@ end
 -- prompt pickers return `{ items, searching?, scanning?, message?, status? }`.
 -- Loading messages are caller-controlled so UIs can delay them or keep stale rows.
 smelt.provider = smelt.provider or {}
+internal.provider = internal.provider or {}
 
 --- Provider rows and loading state returned by `smelt.provider.normalize`.
 ---@class smelt.provider.NormalizedResult
@@ -234,19 +230,17 @@ function smelt.provider.synthetic_only(rows)
   return #list == 1 and list[1]._synthetic == true
 end
 
--- Advanced UI helper: keep stale rows visible while a provider is loading an
--- empty/synthetic refresh, instead of flashing to a status row.
----@advanced
-function smelt.provider._should_keep_stale_rows(result, rows, current_rows)
+-- Keep stale rows visible while a provider is loading an empty or synthetic
+-- refresh, instead of flashing to a status row.
+function internal.provider.should_keep_stale_rows(result, rows, current_rows)
   local list = rows or {}
   return smelt.provider.is_loading(result)
     and (#list == 0 or smelt.provider.synthetic_only(list))
     and smelt.provider.has_real_rows(current_rows)
 end
 
--- Advanced UI helper: 1-based row position for a stable item key.
----@advanced
-function smelt.provider._position_of_key(rows, key)
+-- Return the 1-based row position for a stable item key.
+function internal.provider.position_of_key(rows, key)
   if not key then return nil end
   for i, item in ipairs(rows or {}) do
     if smelt.provider.item_key(item) == key then return i end
@@ -254,12 +248,11 @@ function smelt.provider._position_of_key(rows, key)
   return nil
 end
 
--- Advanced UI helper: select the fallback row unless stable-key preservation succeeds.
----@advanced
-function smelt.provider._select_row(rows, old_key, preserve, fallback)
+-- Select the fallback row unless stable-key preservation succeeds.
+function internal.provider.select_row(rows, old_key, preserve, fallback)
   fallback = fallback or 1
   if preserve then
-    return smelt.provider._position_of_key(rows, old_key) or fallback
+    return internal.provider.position_of_key(rows, old_key) or fallback
   end
   return fallback
 end
@@ -532,47 +525,6 @@ smelt.tools.register = function(def)
   return raw_tools_register(def)
 end
 
--- The body resolves `smelt.prompt.open_picker` only when invoked, after the
--- remaining UI bootstrap chunks have installed it.
-if smelt.picker and smelt.prompt then
-  --- Options for the yielding fuzzy-picker convenience facade.
-  ---@class smelt.picker.FuzzyOpts
-  ---@field items (string|smelt.picker.Item)[] Items to filter.
-  ---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Defaults to "prompt_docked" for this wrapper.
-  ---@field on_select? fun(item: smelt.picker.Item) Live selection callback.
-
-  --- Accepted fuzzy-picker value; dismissal returns `nil` instead.
-  ---@class smelt.picker.FuzzyResult
-  ---@field index integer 1-based accepted item index.
-  ---@field item smelt.picker.Item Accepted normalized item.
-  ---@field action string Accept action reported by the prompt picker.
-
-  -- Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
-  -- keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
-  -- `{ label, description?, ansi_color?, search_terms? }` records. Returns
-  -- `{ index, item, action }` on accept or `nil` on dismiss.
-  --   • `opts.on_select(item)` - fires on navigation
-  --   • `opts.placement` - defaults to "prompt_docked"
-  ---@tier ui_host
-  ---@type fun(opts: smelt.picker.FuzzyOpts): smelt.picker.FuzzyResult?
-  function smelt.picker.fuzzy(opts)
-    if type(opts) ~= "table" then
-      error("smelt.picker.fuzzy: expected table of options", 2)
-    end
-    if type(opts.items) ~= "table" then
-      error("smelt.picker.fuzzy: opts.items must be a table", 2)
-    end
-    local normalized = {}
-    for i, it in ipairs(opts.items) do
-      normalized[i] = type(it) == "string" and { label = it } or it
-    end
-    local merged = {}
-    for k, v in pairs(opts) do merged[k] = v end
-    merged.items = normalized
-    return smelt.prompt.open_picker(merged)
-  end
-end
-
 local function external_or_err(start)
   local result = smelt.task.external(start)
   if result.err ~= nil then return nil, result.err end
@@ -665,7 +617,7 @@ end
 ---@type fun(command: string): string
 function smelt.process.spawn_bg(command)
   local result = smelt.task.external(function(id)
-    smelt.process.__start_spawn_bg(id, command)
+    internal.process.__start_spawn_bg(id, command)
   end)
   if result.err ~= nil then error(result.err, 2) end
   return result.id

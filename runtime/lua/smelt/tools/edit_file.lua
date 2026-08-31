@@ -83,7 +83,7 @@ local function draft_preview(args, block)
   if not (block and block.draft_finished) then
     return nil
   end
-  if smelt.fs.__validate_edit_file(edit_fields(args)) then
+  if __smelt_internal.fs.__validate_edit_file(edit_fields(args)) then
     return nil
   end
 
@@ -163,7 +163,7 @@ smelt.tools.register({
     return smelt.tools.path_summary(args.file_path or "", ctx)
   end,
   preflight = function(args)
-    return smelt.fs.__validate_edit_file(edit_fields(args))
+    return __smelt_internal.fs.__validate_edit_file(edit_fields(args))
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

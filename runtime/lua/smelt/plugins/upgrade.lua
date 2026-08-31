@@ -729,7 +729,7 @@ local function open_changelog_dialog(refreshing)
     end)
   end
 
-  local handle = smelt.dialog.open_handle({
+  local handle = smelt.dialog.new({
     title      = "changelog",
     min_height = "30%",
     max_height = "70%",

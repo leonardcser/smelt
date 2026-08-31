@@ -37,7 +37,7 @@ local function apply(name)
   return true
 end
 
-smelt.cmd.picker("theme", {
+smelt.cmd.register_picker("theme", {
   desc = "preview UI and syntax themes",
   args = names,
   items = items,

@@ -266,7 +266,7 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
               return next(node, ctx)
             end
             if node.view_state == "expanded" then
-              return smelt.transcript.defaults.render_group_children(node, ctx)
+              return smelt.layout.group_children()
             end
             return smelt.layout.text("fuzz tools " .. tostring(node.child_count))
           end, { cache_key = "v1" })

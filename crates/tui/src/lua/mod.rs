@@ -598,6 +598,14 @@ impl LuaRuntime {
         Self::with_shared(Arc::new(LuaShared::default()))
     }
 
+    /// Load bundled declarations in an isolated fixture. UI listeners remain
+    /// detached because no terminal host is active in this runtime.
+    #[cfg(test)]
+    fn load_autoload(&mut self) {
+        let lua = self.core.lua.clone();
+        smelt_core::lua::doc::with_ui_host_declarations(&lua, || self.core.load_autoload());
+    }
+
     pub fn new_for_runtime(
         env: &engine::env::RuntimeEnv,
         config_dir: Option<std::path::PathBuf>,
@@ -634,15 +642,10 @@ impl LuaRuntime {
         }
         if core.load_error.is_none() {
             if load_bootstrap {
-                // The isolated fixture has no TuiApp to lend during bundled
-                // declaration setup. Restore the real availability check before
-                // returning it to callers.
-                smelt_core::lua::doc::install_ui_host_availability(&core.lua, || true);
-                core.load_full_bootstrap();
-                smelt_core::lua::doc::install_ui_host_availability(
-                    &core.lua,
-                    crate::lua::app_ref::ui_host_available,
-                );
+                let lua = core.lua.clone();
+                smelt_core::lua::doc::with_ui_host_declarations(&lua, || {
+                    core.load_full_bootstrap()
+                });
             } else {
                 core.enable_ui_bootstrap();
             }
@@ -683,8 +686,8 @@ impl LuaRuntime {
         let shared = Arc::new(LuaShared::default());
         let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
         Self::register_api(&core.lua, &shared, core.state_root(), core.cache_root())?;
-        smelt_core::lua::doc::install_ui_host_availability(&core.lua, || true);
-        core.load_full_bootstrap();
+        let lua = core.lua.clone();
+        smelt_core::lua::doc::with_ui_host_declarations(&lua, || core.load_full_bootstrap());
         if let Some(error) = core.load_error() {
             return Err(mlua::Error::external(error.to_string()));
         }
@@ -814,11 +817,13 @@ fn mode_behaviors(
     > = (|| {
         let smelt: mlua::Table = core.lua.globals().get("smelt")?;
         let mode: mlua::Table = smelt.get("mode")?;
-        let behaviors: mlua::Function = mode.get("permission_behaviors")?;
-        let table: mlua::Table = behaviors.call(())?;
+        let list: mlua::Function = mode.get("list")?;
+        let rows: mlua::Table = list.call(())?;
         let mut out = std::collections::HashMap::new();
-        for pair in table.pairs::<String, mlua::Table>() {
-            let (name, spec) = pair?;
+        for row in rows.sequence_values::<mlua::Table>() {
+            let row = row?;
+            let name = row.get::<String>("name")?;
+            let spec = row.get::<mlua::Table>("permissions")?;
             let default_decision = match spec.get::<Option<String>>("default_decision")?.as_deref()
             {
                 Some("allow") => protocol::Decision::Allow,
@@ -1056,13 +1061,17 @@ fn invoke_confirm_open(core: &smelt_core::lua::LuaRuntime, handle_id: u64) {
 }
 
 fn mode_note(core: &smelt_core::lua::LuaRuntime, name: &str) -> String {
+    let fallback = || format!("now in {name} mode");
     let result: mlua::Result<String> = (|| {
         let smelt: mlua::Table = core.lua.globals().get("smelt")?;
         let mode: mlua::Table = smelt.get("mode")?;
-        let note: mlua::Function = mode.get("note")?;
-        note.call(name.to_string())
+        let get: mlua::Function = mode.get("get")?;
+        let Some(info) = get.call::<Option<mlua::Table>>(name.to_string())? else {
+            return Ok(fallback());
+        };
+        Ok(info.get::<Option<String>>("note")?.unwrap_or_else(fallback))
     })();
-    result.unwrap_or_else(|_| format!("now in {name} mode"))
+    result.unwrap_or_else(|_| fallback())
 }
 
 pub(crate) fn mode_block(
@@ -1228,13 +1237,8 @@ mod tests {
     }
 
     fn reload_fixture(rt: &mut LuaRuntime, cwd: Option<&std::path::Path>) -> Option<String> {
-        smelt_core::lua::doc::install_ui_host_availability(&rt.lua, || true);
-        let error = rt.reload(cwd);
-        smelt_core::lua::doc::install_ui_host_availability(
-            &rt.lua,
-            crate::lua::app_ref::ui_host_available,
-        );
-        error
+        let lua = rt.lua.clone();
+        smelt_core::lua::doc::with_ui_host_declarations(&lua, || rt.reload(cwd))
     }
 
     fn test_env() -> ToolEnv<'static> {
@@ -1450,7 +1454,7 @@ mod tests {
             .load("return smelt.api_version")
             .eval()
             .expect("eval");
-        assert_eq!(api, crate::lua::api::API_VERSION);
+        assert_eq!(api, "1");
         let app: String = rt
             .lua
             .load("return smelt.build.version")
@@ -1467,6 +1471,44 @@ mod tests {
             .eval()
             .expect("eval");
         assert!(!target.is_empty(), "smelt.build.target should be non-empty");
+    }
+
+    #[test]
+    fn mode_registry_records_are_isolated_and_preserve_registered_notes() {
+        let runtime = LuaRuntime::new();
+        let (note, decision, label): (String, String, String) = runtime
+            .lua
+            .load(
+                r#"
+                local permissions = { default_decision = "deny" }
+                smelt.mode.register({
+                    name = "review",
+                    label = "Review",
+                    note = "review carefully",
+                    permissions = permissions,
+                })
+                permissions.default_decision = "allow"
+
+                local record = smelt.mode.get("review")
+                record.note = "mutated"
+                record.permissions.default_decision = "ask"
+
+                local listed = smelt.mode.list()
+                for _, mode in ipairs(listed) do
+                    if mode.name == "review" then mode.label = "mutated" end
+                end
+
+                local current = smelt.mode.get("review")
+                return current.note, current.permissions.default_decision, current.label
+                "#,
+            )
+            .eval()
+            .expect("mode records remain isolated from callers");
+
+        assert_eq!(note, "review carefully");
+        assert_eq!(decision, "deny");
+        assert_eq!(label, "Review");
+        assert_eq!(runtime.execution().mode_note("review"), "review carefully");
     }
 
     #[test]
@@ -1511,7 +1553,7 @@ mod tests {
         assert_eq!(preferred, None);
         runtime
             .lua
-            .load("smelt.cmd.picker('headless_probe', { items = {} })")
+            .load("smelt.cmd.register_picker('headless_probe', { items = {} })")
             .exec()
             .expect("command picker declarations remain available without a terminal UI entry");
         runtime
@@ -1523,7 +1565,7 @@ mod tests {
             .lua
             .load(
                 r#"
-                local reg = smelt.prompt.completer({
+                local reg = smelt.prompt.register_completer({
                     detect = function() return nil end,
                     items = function() return {} end,
                     query = function() return "" end,
@@ -1557,6 +1599,15 @@ mod tests {
         for (call, api) in [
             ("return smelt.model.current()", "smelt.model.current"),
             ("return smelt.mode.set('normal')", "smelt.mode.set"),
+            ("return smelt.prompt.win()", "smelt.prompt.win"),
+            (
+                "return smelt.transcript.watch_view(function() end)",
+                "smelt.transcript.watch_view",
+            ),
+            (
+                "return smelt.session.artifact_dir()",
+                "smelt.session.artifact_dir",
+            ),
             ("return smelt.buf.new()", "smelt.buf.new"),
             ("return smelt.quit()", "smelt.quit"),
         ] {
@@ -1665,6 +1716,32 @@ mod tests {
             env,
         );
 
+        core.permissions
+            .approvals()
+            .write()
+            .unwrap()
+            .add_session_tool("headless_probe", Vec::new());
+        let (model_count, permission_listed): (usize, bool) =
+            smelt_core::host::scope_core(&mut core, || {
+                runtime
+                    .lua
+                    .load(
+                        r#"
+                        local listed = false
+                        for _, entry in ipairs(smelt.permissions.list().session) do
+                            if entry.tool == "headless_probe" and entry.pattern == "*" then
+                                listed = true
+                            end
+                        end
+                        return #smelt.model.list(), listed
+                        "#,
+                    )
+                    .eval()
+                    .expect("inspect runtime state from the headless Core host")
+            });
+        assert_eq!(model_count, 1);
+        assert!(permission_listed);
+
         // Mirror the end-user flow: read_file records the notebook before the
         // write tool's staleness preflight permits an edit.
         let observed = std::fs::read_to_string(&notebook_path).expect("observe notebook");
@@ -1695,7 +1772,7 @@ mod tests {
                 smelt_core::lua::ToolEnv {
                     mode: protocol::AgentMode::parse("apply").unwrap(),
                     session_id: "headless-test",
-                    session_dir: root.path(),
+                    artifact_dir: root.path(),
                 },
                 std::time::Instant::now(),
             )

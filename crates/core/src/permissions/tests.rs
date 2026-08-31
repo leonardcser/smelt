@@ -4289,6 +4289,71 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
 }
 
 #[test]
+fn permission_snapshot_combines_session_workspace_and_repository_state() {
+    let state = tempfile::tempdir().unwrap();
+    let repository = tempfile::tempdir().unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repository.path())
+        .status()
+        .unwrap()
+        .success());
+
+    let store = store::PermissionStore::new(state.path().to_path_buf());
+    let workspace_key = repository.path().to_string_lossy();
+    store
+        .add_tool(
+            workspace_key.as_ref(),
+            store::PersistenceScope::Workspace,
+            "bash",
+            vec!["cargo *".into()],
+        )
+        .unwrap();
+    let project = crate::worktree::project_context(repository.path(), None);
+    let repository_key = project.repository_key.unwrap();
+    store
+        .add_tool(
+            repository_key.to_string_lossy().as_ref(),
+            store::PersistenceScope::Repository,
+            "read_file",
+            vec!["**".into()],
+        )
+        .unwrap();
+
+    let handle = PermissionsHandle::new(Permissions::load());
+    let approvals = handle.approvals();
+    let mut approvals = approvals.write().unwrap();
+    approvals.add_session_tool("bash", vec![pat("git *")]);
+    approvals.add_session_dir(repository.path().join("trusted"));
+    approvals.add_session_path_grant(
+        plan(),
+        "edit_file",
+        PathAccess::Write,
+        repository.path().join("plans"),
+    );
+    drop(approvals);
+
+    let snapshot = read_snapshot(&handle, &store, repository.path(), None).unwrap();
+    assert_eq!(
+        snapshot.session_tools,
+        vec![SessionToolApproval {
+            tool: "bash".into(),
+            pattern: Some("git *".into()),
+        }]
+    );
+    assert_eq!(
+        snapshot.session_dirs,
+        vec![repository.path().join("trusted")]
+    );
+    assert_eq!(snapshot.session_path_grants.len(), 1);
+    assert_eq!(snapshot.session_path_grants[0].tool, "edit_file");
+    assert_eq!(snapshot.workspace.revision, 1);
+    assert_eq!(snapshot.workspace.rules[0].tool, "bash");
+    assert_eq!(snapshot.repository.revision, 1);
+    assert_eq!(snapshot.repository.rules[0].tool, "read_file");
+}
+
+#[test]
 fn active_permission_snapshot_refreshes_persisted_additions_and_removals() {
     let state = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

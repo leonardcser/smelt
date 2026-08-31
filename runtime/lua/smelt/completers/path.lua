@@ -2,7 +2,7 @@
 -- cursor. It is manual-only and directory-scoped, matching shell completion
 -- rather than workspace fuzzy search.
 
-if not (smelt.prompt and smelt.prompt.completer and smelt.fs and smelt.path) then return end
+if not (smelt.prompt and smelt.prompt.register_completer and smelt.fs and smelt.path) then return end
 
 local path_format = require("smelt.completers.path_format")
 
@@ -77,7 +77,7 @@ local function query_at(anchor, text, cpos)
   return token
 end
 
-smelt.prompt.completer({
+smelt.prompt.register_completer({
   manual = true,
   auto = false,
   accept_single = true,

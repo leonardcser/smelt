@@ -28,16 +28,6 @@ fun(): string?
 
 Return the active model key, or `nil` when no active model exists.
 
-## `smelt.model.input_modalities`
-
-```lua
-fun(): table?
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.
-
 ## `smelt.model.list`
 
 ```lua
@@ -47,16 +37,6 @@ fun(): table
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.
-
-## `smelt.model.max_tokens`
-
-```lua
-fun(): integer?
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Resolved maximum output tokens for the active model. Returns the config override if set, otherwise falls back to the models.dev catalog value, then to the provider default. Returns `nil` when no limit is known.
 
 ## `smelt.model.preferred`
 
@@ -110,14 +90,4 @@ fun(modality: string): boolean?
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return whether the active model supports the named input modality, for example `image` or `pdf`.
-
-## `smelt.model.transport`
-
-```lua
-fun(): table?
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Return `{ provider_type, api_base, api_key_env, multimodal_tool_results, image_tool_results, pdf_tool_results }` for the active model transport. Prefer the modality-specific fields; `multimodal_tool_results` is their aggregate. `api_key_env` is the environment variable name, never its value.
 

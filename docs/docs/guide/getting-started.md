@@ -27,7 +27,7 @@
 === "From Source"
 
     ```bash
-    cargo install --git https://github.com/leonardcser/smelt.git smelt-agent
+    cargo install --locked --git https://github.com/leonardcser/smelt.git smelt-agent
     ```
 
 ## Run

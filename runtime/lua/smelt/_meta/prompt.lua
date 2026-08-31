@@ -16,12 +16,6 @@ local prompt = {}
 ---@type fun(): smelt.Reg
 prompt.acquire = nil
 
---- Tier: Host - Available in every runtime, including headless mode.
---- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
---- completer and closes the picker if it was active.
----@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
-prompt.completer = nil
-
 --- Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
 ---@type fun(pos: integer?): integer
 prompt.cursor = nil
@@ -37,18 +31,6 @@ prompt.has_stash = nil
 ---@type fun(): boolean
 prompt.is_modal = nil
 
---- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
---- the current prompt buffer on every keystroke, ranked by `opts.rank` or
---- `smelt.fuzzy.rank`; alternatively `opts.provider(query, limit)` may return
---- the shared provider result shape `{ items, searching?, scanning?, message?,
---- status? }`. Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
---- to switch to persistent mode (the picker stays open across selections
---- until Esc). Returns `{ action, item, index }` on accept or `nil` on
---- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
----@see smelt.fuzzy.rank
----@type fun(opts: smelt.prompt.PickerOpts): table?
-prompt.open_picker = nil
-
 --- Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. Queue changes invalidate the retained top bar so waiting messages appear above the input.
 ---@type fun(): string[]
 prompt.queued = nil
@@ -56,6 +38,12 @@ prompt.queued = nil
 --- Return queued prompt rows as `{ text, kind }` tables. `kind` is `request` for rows added to the current turn's next request, or `turn` for rows waiting for the next turn.
 ---@type fun(): table[]
 prompt.queued_rows = nil
+
+--- Tier: Host - Available in every runtime, including headless mode.
+--- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
+--- completer and closes the picker if it was active.
+---@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
+prompt.register_completer = nil
 
 --- UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.
 ---@type fun(start: integer, end: integer, text: string): integer
@@ -69,7 +57,6 @@ prompt.set_text = nil
 ---@type fun(): string
 prompt.text = nil
 
---- Tier: Host - Available in every runtime, including headless mode.
 --- Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.
 ---@type fun(): smelt.win.Win
 prompt.win = nil

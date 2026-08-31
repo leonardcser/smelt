@@ -359,7 +359,7 @@ smelt.transcript.register_tool("web_fetch", {
   end,
 })
 
-smelt.tools.register(smelt.tools._with_watchdog({
+smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "web_fetch",
   description = "Fetch a URL and extract relevant content using the given prompt. "
     .. "The page is fetched, converted to markdown, then an isolated LLM call "

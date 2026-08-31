@@ -602,7 +602,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.time` - Wall-clock time parsing and formatting.
 - `smelt.timer` - One-shot and recurring timer callbacks.
 - `smelt.tools` - Register, unregister, and resolve plugin tools for the engine.
-- `smelt.transcript.defaults` - Bundled default transcript renderers.
+- `smelt.transcript.defaults` - Bundled default transcript entry points for rendering semantic blocks and raw tool output.
 - `smelt.transcript.groups` - Declarative transcript display grouping.
 - `smelt.trust` - Query and mutate the per-project content trust store.
 
@@ -620,9 +620,10 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.metrics.perf` - Perf instrumentation toggle, clear, and snapshot.
 - `smelt.overlay` - Overlay handle constructor.
 - `smelt.paint` - Register Lua callbacks against custom paint regions.
-- `smelt.picker` - Picker handle constructor.
+- `smelt.picker` - Picker facade.
 - `smelt.render` - Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 - `smelt.search` - Search controls for the active UI session.
+- `smelt.session` - Current session metadata, turn list, message snapshots, rewind, and persisted session management.
 - `smelt.session.messages` - Session messages.
 - `smelt.session.slug` - Session slug.
 - `smelt.session.title` - Session title.
@@ -645,7 +646,6 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.permissions` - Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants.
 - `smelt.prompt` - The main editable input surface: win handle, text get/set, and cursor control.
 - `smelt.reasoning` - Reasoning-effort selector.
-- `smelt.session` - Current session metadata, turn list, message snapshots, rewind, and persisted session management.
 - `smelt.theme` - List bundled colorschemes, or apply, read, and override the active one.
 - `smelt.transcript` - Transcript display policy and rendered transcript inspection.
 

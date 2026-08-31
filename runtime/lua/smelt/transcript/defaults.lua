@@ -1,7 +1,7 @@
 smelt.transcript = smelt.transcript or {}
-smelt.transcript.defaults = smelt.transcript.defaults or {}
+smelt.transcript.defaults = {}
 
-local M = smelt.transcript.defaults
+local M = {}
 
 local layout = smelt.layout
 local is_layout_node = __smelt_internal.layout.__is_node
@@ -95,7 +95,7 @@ end
 
 --- Render any semantic transcript block with the bundled default policy.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render(block, ctx)
+function M.render(block, ctx)
   block = block or {}
   if block.kind == "group" then
     return require("smelt.transcript.builtins").render(block, ctx)
@@ -125,7 +125,7 @@ end
 
 --- Render a tool block for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_tool(block, ctx)
+function M.render_tool(block, ctx)
   local presentation = tool_presentation(block)
   if presentation.render then
     local rendered = presentation.render(block, ctx, presentation)
@@ -153,7 +153,7 @@ end
 
 --- Render a compact tool summary: header plus an optional detail line.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_summary(block, ctx, presentation)
+function M.render_tool_summary(block, ctx, presentation)
   presentation = tool_presentation(block, presentation)
   local output = block.output
   if not presentation.compact and output and output.is_error then
@@ -176,7 +176,7 @@ end
 --- Render a full tool block using the current generic primitives and explicit item
 --- construction.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_full(block, ctx, presentation)
+function M.render_tool_full(block, ctx, presentation)
   presentation = tool_presentation(block, presentation)
   local items = {}
   items[#items + 1] = M.render_tool_header(block, ctx, nil, presentation)
@@ -253,7 +253,7 @@ end
 
 --- Render the default one-line tool header.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolHeaderOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_header(block, ctx, opts, presentation)
+function M.render_tool_header(block, ctx, opts, presentation)
   ctx = ctx or {}
   opts = opts or {}
   presentation = tool_presentation(block, presentation)
@@ -428,7 +428,7 @@ end
 
 --- Return a compact tool detail for collapsed tool blocks.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): string|smelt.layout.Node|nil
-function smelt.transcript.defaults.tool_collapsed_detail(block, ctx, presentation)
+function M.tool_collapsed_detail(block, ctx, presentation)
   presentation = tool_presentation(block, presentation)
   if not presentation.compact then return nil end
   local detail = presentation.compact(block, ctx)
@@ -441,7 +441,7 @@ end
 --- Render a tool body. Drafts can provide an explicit best-effort preview;
 --- completed tools fall back to raw output or their structured body renderer.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil
-function smelt.transcript.defaults.render_tool_body(block, ctx, opts, presentation)
+function M.render_tool_body(block, ctx, opts, presentation)
   opts = opts or {}
   presentation = tool_presentation(block, presentation)
   local renderer = presentation.body
@@ -492,7 +492,7 @@ end
 --- Render raw tool output without gutter using generic layout primitives: text/runs and
 --- a rendered-row cap. Body renderers use this for expanded/tail previews.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
+function M.render_tool_output_tail(output, ctx, opts)
   opts = opts or {}
   ctx = ctx or {}
   local limits = ctx.limits or {}
@@ -531,7 +531,7 @@ end
 --- rendered-row cap. Error output uses `ErrorMsg`; success output remains dimmed
 --- by the text primitive's no-highlight fallback.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
-function smelt.transcript.defaults.render_tool_output(output, ctx, opts)
+function M.render_tool_output(output, ctx, opts)
   opts = opts or {}
   return layout.gutter(
     M.render_tool_output_tail(output, ctx, opts),
@@ -543,7 +543,7 @@ end
 --- annotations; the bundled default keeps the same full-width prompt chrome as
 --- the Rust renderer while leaving the content policy in Lua.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_user(block, ctx)
+function M.render_user(block, ctx)
   return layout.panel(M.render_user_text(block, ctx), {
     hl = "SmeltUserBg",
     padding = 1,
@@ -552,20 +552,20 @@ end
 
 --- Render user text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_user_text(block, ctx)
+function M.render_user_text(block, ctx)
   local _ = ctx
   return layout.runs(block.user_lines or block.text or "")
 end
 
 --- Render LLM-authored Markdown with the shared transcript Markdown path.
 ---@type fun(content: string?, opts: table?): smelt.layout.Node
-function smelt.transcript.defaults.render_llm_markdown(content, opts)
+function M.render_llm_markdown(content, opts)
   return layout.markdown(content or "", opts or {})
 end
 
 --- Render capped LLM-authored Markdown for tool bodies and other long outputs.
 ---@type fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
-function smelt.transcript.defaults.render_llm_markdown_tail(content, ctx, opts)
+function M.render_llm_markdown_tail(content, ctx, opts)
   opts = opts or {}
   ctx = ctx or {}
   local limits = ctx.limits or {}
@@ -587,7 +587,7 @@ end
 
 --- Render assistant text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_assistant(block, ctx)
+function M.render_assistant(block, ctx)
   local _ = ctx
   if block.content_id then
     return layout.content(block.content_id, { format = "markdown" })
@@ -597,7 +597,7 @@ end
 
 --- Render thinking for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_thinking(block, ctx)
+function M.render_thinking(block, ctx)
   if ctx and ctx.view_state == "collapsed" then
     return M.render_thinking_summary(block, ctx)
   elseif ctx and ctx.view_state == "peek" then
@@ -632,7 +632,7 @@ end
 
 --- Render the full thinking block with the current gutter.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_thinking_full(block, ctx)
+function M.render_thinking_full(block, ctx)
   local _ = ctx
   return layout.gutter(
     thinking_content_layout(block, true),
@@ -642,7 +642,7 @@ end
 
 --- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_thinking_peek(block, ctx)
+function M.render_thinking_peek(block, ctx)
   return layout.gutter(
     layout.cap(thinking_content_layout(block, false), {
       rows = (ctx and ctx.limits and ctx.limits.thinking_peek_rows) or 4,
@@ -657,7 +657,7 @@ end
 
 --- Render a compact thinking summary.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_thinking_summary(block, ctx)
+function M.render_thinking_summary(block, ctx)
   local _ = ctx
   return layout.gutter(
     layout.style(
@@ -675,7 +675,7 @@ end
 
 --- Render an exec block.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_exec(block, ctx)
+function M.render_exec(block, ctx)
   ctx = ctx or {}
   local items = {}
   local command_spans = block.command_spans or {
@@ -706,7 +706,7 @@ end
 
 --- Render a mode note.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_mode(block, ctx)
+function M.render_mode(block, ctx)
   local _ = ctx
   local hl = block.hl_group or "SmeltModeDefault"
   return layout.line({
@@ -717,7 +717,7 @@ end
 
 --- Render a process-status note.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_process_status(block, ctx)
+function M.render_process_status(block, ctx)
   local _ = ctx
   local hl = block.hl_group or "SmeltProcess"
   return layout.runs({ {
@@ -746,46 +746,28 @@ end
 
 --- Render a compacted-history marker.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_compacted(block, ctx)
+function M.render_compacted(block, ctx)
   return render_compaction_summary(" compacted ", block, ctx)
 end
 
 --- Render an in-flight compaction summary preview.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_compaction_preview(block, ctx)
+function M.render_compaction_preview(block, ctx)
   return render_compaction_summary(" compacting ", block, ctx)
 end
 
 --- Render a code block with syntax highlighting.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_code(block, ctx)
+function M.render_code(block, ctx)
   local _ = ctx
   return layout.code(block.content or "", { lang = block.lang or "" })
 end
 
 --- Render unknown block kinds without failing the transcript.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_unknown(block, ctx)
+function M.render_unknown(block, ctx)
   local _ = ctx
   return layout.text(block.content or block.text or block.summary or "")
-end
-
-local function field_path_value(item, field)
-  if type(field) == "string" then
-    local path = {}
-    for part in string.gmatch(field, "[^.]+") do
-      path[#path + 1] = part
-    end
-    field = path
-  end
-  if type(field) ~= "table" then return nil end
-  local value = item
-  for _, key in ipairs(field) do
-    if type(value) ~= "table" then return nil end
-    value = value[key]
-    if value == nil then return nil end
-  end
-  return value
 end
 
 --- Semantic transcript group snapshot passed to default renderer helpers.
@@ -798,13 +780,13 @@ end
 
 --- Return bounded child presentation metadata for a transcript group.
 ---@type fun(group: smelt.transcript.Group): smelt.transcript.GroupChild[]
-function smelt.transcript.defaults.group_children(group)
+function M.group_children(group)
   return group.children or {}
 end
 
 --- True when a grouped child represents a failed or denied tool result.
 ---@type fun(child: smelt.transcript.GroupChild): boolean
-function smelt.transcript.defaults.child_failed(child)
+function M.child_failed(child)
   return child.status == "err"
     or child.status == "denied"
     or (child.output and child.output.is_error == true)
@@ -812,7 +794,7 @@ end
 
 --- Count failed and denied tool children in a transcript group.
 ---@type fun(group: smelt.transcript.Group): integer, integer
-function smelt.transcript.defaults.group_failure_counts(group)
+function M.group_failure_counts(group)
   local errors = 0
   local denied = 0
   for _, child in ipairs(M.group_children(group)) do
@@ -827,38 +809,22 @@ end
 
 --- Compose independently retained child layouts for an expanded group.
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_group_children(group, ctx)
+function M.render_group_children(group, ctx)
   local _ = group
   local _ctx = ctx
   return layout.group_children()
 end
 
---- Render a compact ordered child list for collapsed group nodes. Failed children
---- stay in place and use a plain error highlight; expand the group for details.
----@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
-function smelt.transcript.defaults.render_group_child_list(group, ctx, opts)
-  local _ = ctx
-  opts = opts or {}
-  local children = M.group_children(group)
-  local max = opts.max or #children
-  local lines = {}
-  for i, child in ipairs(children) do
-    if i > max then break end
-    local value = field_path_value(child, opts.field) or child.summary_text or child.name or child.text or child.content or ""
-    local text = tostring(value)
-    local span = { text = (opts.prefix or "  ") .. text }
-    if M.child_failed(child) then
-      span.hl = opts.error_hl or "ErrorMsg"
-      span.dim = opts.error_dim ~= false
-    elseif opts.dim ~= false then
-      span.dim = true
-    end
-    lines[#lines + 1] = { span }
-  end
-  if #children > max then
-    lines[#lines + 1] = { { text = (opts.prefix or "  ") .. "… " .. tostring(#children - max) .. " more", dim = true, selectable = false } }
-  end
-  return layout.runs(lines)
+--- Render any semantic transcript block with the bundled default policy.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function smelt.transcript.defaults.render(block, ctx)
+  return M.render(block, ctx)
+end
+
+--- Render raw tool output with the default gutter and rendered-row cap.
+---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
+function smelt.transcript.defaults.render_tool_output(output, ctx, opts)
+  return M.render_tool_output(output, ctx, opts)
 end
 
 package.loaded["smelt.transcript.defaults"] = M

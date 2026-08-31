@@ -313,7 +313,6 @@ pub(super) fn register(
         "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.",
         Tier::UiHost,
     )?;
-    let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.session", Tier::Host);
     let title = m.sub(
         "title",
         "Session title. Use `smelt.session.title.get()` to read the current title and `smelt.session.title.set(title, slug?)` to write it. Writes update the task label and save the session.",
@@ -338,7 +337,7 @@ pub(super) fn register(
             Ok(())
         },
     )?;
-    m.live_only_fn(
+    m.advanced_live_only_fn(
         "set_title_for_history",
         "Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.",
         &["title", "slug", "history_len"],
@@ -629,7 +628,7 @@ pub(super) fn register(
         &[],
         |_, ()| Ok(crate::lua::try_with_session_host(|host| host.session_id()).unwrap_or_default()),
     )?;
-    host.fn_(
+    m.fn_(
         "artifact_dir",
         "Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
         &[],
@@ -640,7 +639,7 @@ pub(super) fn register(
             )
         },
     )?;
-    m.live_only_fn(
+    m.advanced_live_only_fn(
         "checkpoint",
         "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.",
         &["spec"],
@@ -728,7 +727,7 @@ pub(super) fn register(
             messages_to_lua(lua, &filtered)
         },
     )?;
-    m.fn_(
+    m.advanced_fn(
         "model_messages",
         "Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.",
         &[],
@@ -749,7 +748,7 @@ pub(super) fn register(
             )
         },
     )?;
-    m.fn_(
+    m.advanced_fn(
         "history",
         "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.",
         &["opts"],
@@ -924,7 +923,7 @@ pub(super) fn register(
             Ok(result)
         },
     )?;
-    m.live_only_fn(
+    m.advanced_live_only_fn(
         "retry_persistence",
         "Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.",
         &[],
@@ -948,7 +947,7 @@ pub(super) fn register(
         crate::lua::with_session_host(|host| host.load_session_by_id_now(&id));
         Ok(())
     })?;
-    m.fn_(
+    m.advanced_fn(
         "text",
         "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
         &["id"],
@@ -956,7 +955,7 @@ pub(super) fn register(
             Ok(crate::lua::with_session_host(|host| host.session_search_blob(&id)))
         },
     )?;
-    m.fn_(
+    m.advanced_fn(
         "texts",
         "Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.",
         &["ids"],
@@ -969,7 +968,7 @@ pub(super) fn register(
             Ok(out)
         },
     )?;
-    m.fn_(
+    m.advanced_fn(
         "render_preview_into",
         "Bind persisted session `id` to `opts.buf` and `opts.win` as a virtualized transcript preview. `opts.width` controls wrapping; `opts.height` is the viewport height; a new binding opens at the tail while resize refreshes preserve its viewport; `opts.updated_at_ms` identifies cached session revisions. Once bound, wheel and scrollbar navigation use the same stateful viewport projection as the open transcript. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'pending' }` while the background preview service reads or hydrates persisted content, or `{ status = 'unavailable', reason }` when persisted content cannot be hydrated.",
         &["id", "opts"],

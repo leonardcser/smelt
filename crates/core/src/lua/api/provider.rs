@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::lua::doc::Tier;
-use crate::lua::hooks::composite_reg;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
@@ -281,8 +280,9 @@ For streaming observation use `smelt.events.on(\"stream_delta\", ...)` - synchro
                         "provider.middleware: on_response function is required".to_string(),
                     )
                 })?;
-                let id = s.hooks.provider_response.register(lua, on_response, "")?;
-                Ok(composite_reg(vec![(Arc::clone(&s.hooks.provider_response), id)]))
+                let registry = Arc::clone(&s.hooks.provider_response);
+                let id = registry.register(lua, on_response, "")?;
+                Ok(registry.reg_for(id))
             },
         )?;
     }

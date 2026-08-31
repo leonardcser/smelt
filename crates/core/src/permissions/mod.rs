@@ -344,6 +344,16 @@ pub struct PermissionsHandle {
     approvals: Arc<RwLock<RuntimeApprovals>>,
 }
 
+/// Complete read model for the current session and persisted permission scopes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionSnapshot {
+    pub session_tools: Vec<SessionToolApproval>,
+    pub session_dirs: Vec<PathBuf>,
+    pub session_path_grants: Vec<SessionPathGrant>,
+    pub workspace: store::Snapshot,
+    pub repository: store::Snapshot,
+}
+
 impl std::fmt::Debug for PermissionsHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PermissionsHandle")
@@ -508,6 +518,46 @@ impl PermissionsHandle {
         approvals.load_repository(repository_approvals.tools, repository_approvals.dirs);
         approvals.configure_persisted_source(permission_store, workspace, repository_key);
     }
+}
+
+pub(crate) fn read_snapshot(
+    permissions: &PermissionsHandle,
+    permission_store: &store::PermissionStore,
+    cwd: &Path,
+    worktree_root: Option<&Path>,
+) -> Result<PermissionSnapshot, String> {
+    let (session_tools, session_dirs, session_path_grants) = {
+        let approvals = permissions.approvals();
+        let approvals = approvals.read().unwrap_or_else(|error| error.into_inner());
+        (
+            approvals.session_tool_approvals(),
+            approvals.session_dirs().to_vec(),
+            approvals.session_path_grants(),
+        )
+    };
+
+    let workspace_key = cwd.to_string_lossy();
+    let workspace = permission_store
+        .load_snapshot(workspace_key.as_ref(), store::PersistenceScope::Workspace)
+        .map_err(|error| format!("load workspace permissions: {error}"))?;
+    let project = crate::worktree::project_context(cwd, worktree_root);
+    let repository = match project.repository_key.as_deref() {
+        Some(key) => permission_store
+            .load_snapshot(
+                key.to_string_lossy().as_ref(),
+                store::PersistenceScope::Repository,
+            )
+            .map_err(|error| format!("load repository permissions: {error}"))?,
+        None => Default::default(),
+    };
+
+    Ok(PermissionSnapshot {
+        session_tools,
+        session_dirs,
+        session_path_grants,
+        workspace,
+        repository,
+    })
 }
 
 /// A fully resolved static policy plus the workspace grants that become live

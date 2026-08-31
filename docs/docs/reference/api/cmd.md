@@ -18,7 +18,19 @@ fun(): table
 
 Return every registered slash command as a Lua array of `{ name, desc, args, busy, startup_ok, hidden }` rows. Sorted by name.
 
-## `smelt.cmd.picker`
+## `smelt.cmd.register`
+
+```lua
+fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
+```
+
+Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](types.md#smeltreg)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+
+## `smelt.cmd.register_picker`
 
 ```lua
 fun(name: string, opts: table?): nil
@@ -33,18 +45,6 @@ one. `opts` accepts `desc`, `args`, `items` (an array or producer function),
 `busy`, and `startup_ok`. With `stay_open = true`, the item producer is
 re-evaluated after each Enter action. Returns nothing; the command lives
 until `/reload`.
-
-## `smelt.cmd.register`
-
-```lua
-fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
-```
-
-Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](types.md#smeltreg)
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 
 ## `smelt.cmd.run`
 

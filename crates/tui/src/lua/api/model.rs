@@ -61,8 +61,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            let models =
-                crate::lua::try_with_runtime_host(|host| host.available_models()).unwrap_or_default();
+            let models = smelt_core::host::try_with_core(|core| {
+                core.config.available_models.clone()
+            })
+            .unwrap_or_default();
             for (index, model) in models.into_iter().enumerate() {
                 let entry = lua.create_table()?;
                 entry.set("key", model.key)?;
@@ -103,39 +105,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     m.fn_(
-        "max_tokens",
-        "Resolved maximum output tokens for the active model. Returns the config override if set, otherwise falls back to the models.dev catalog value, then to the provider default. Returns `nil` when no limit is known.",
-        &[],
-        |_, ()| -> LuaResult<Option<u32>> {
-            Ok(crate::lua::try_with_runtime_host(|host| host.active_model())
-                .flatten()
-                .and_then(|active| {
-                    active.config.max_tokens.or_else(|| {
-                        smelt_provider::catalog::output_tokens(
-                            &active.provider_type,
-                            &active.api_base,
-                            &active.model_name,
-                        )
-                    })
-                }))
-        },
-    )?;
-
-    m.fn_(
-        "input_modalities",
-        "Resolved input modalities for the active model as an array such as `{ \"text\", \"image\", \"pdf\" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.",
-        &[],
-        |lua, ()| -> LuaResult<Option<mlua::Table>> {
-            let Some(active) = crate::lua::try_with_runtime_host(|host| host.active_model()).flatten()
-            else {
-                return Ok(None);
-            };
-            let values = resolved_input_modalities(&active);
-            Ok(Some(modalities_table(lua, &values)?))
-        },
-    )?;
-
-    m.fn_(
         "supports_input",
         "Return whether the active model supports the named input modality, for example `image` or `pdf`.",
         &["modality"],
@@ -144,31 +113,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(crate::lua::try_with_runtime_host(|host| host.active_model())
                 .flatten()
                 .map(|active| has_modality(&resolved_input_modalities(&active), &want)))
-        },
-    )?;
-
-    m.fn_(
-        "transport",
-        "Return `{ provider_type, api_base, api_key_env, multimodal_tool_results, image_tool_results, pdf_tool_results }` for the active model transport. Prefer the modality-specific fields; `multimodal_tool_results` is their aggregate. `api_key_env` is the environment variable name, never its value.",
-        &[],
-        |lua, ()| -> LuaResult<Option<mlua::Table>> {
-            let Some(active) = crate::lua::try_with_runtime_host(|host| host.active_model()).flatten()
-            else {
-                return Ok(None);
-            };
-            let (image_tool_results, pdf_tool_results) =
-                tool_result_capabilities(&active.provider_type, &active.api_base);
-            let out = lua.create_table()?;
-            out.set("provider_type", active.provider_type)?;
-            out.set("api_base", active.api_base)?;
-            out.set("api_key_env", active.api_key_env)?;
-            out.set(
-                "multimodal_tool_results",
-                image_tool_results || pdf_tool_results,
-            )?;
-            out.set("image_tool_results", image_tool_results)?;
-            out.set("pdf_tool_results", pdf_tool_results)?;
-            Ok(Some(out))
         },
     )?;
 

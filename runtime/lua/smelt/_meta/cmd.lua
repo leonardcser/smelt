@@ -12,6 +12,10 @@ local cmd = {}
 ---@type fun(): table
 cmd.list = nil
 
+--- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+---@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
+cmd.register = nil
+
 --- Register a slash command `name` that opens a prompt-docked picker when
 --- called without arguments, or invokes `opts.apply(arg)` directly when given
 --- one. `opts` accepts `desc`, `args`, `items` (an array or producer function),
@@ -20,11 +24,7 @@ cmd.list = nil
 --- re-evaluated after each Enter action. Returns nothing; the command lives
 --- until `/reload`.
 ---@type fun(name: string, opts: table?): nil
-cmd.picker = nil
-
---- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `busy` (`run`, `reject`, `queue_request`, or `queue_command`; default `run`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
----@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
-cmd.register = nil
+cmd.register_picker = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Schedule the slash-command line `line` (with or without leading `/`) as if the user had typed it. The app executes it after the current Lua callback returns. Errors are surfaced as in-app notifications.

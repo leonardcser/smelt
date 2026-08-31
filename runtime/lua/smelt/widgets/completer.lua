@@ -310,7 +310,7 @@ local function open_for(spec, anchor)
 end
 
 local function apply_provider_result(cur, view, result, next_query_key, old_key)
-  if provider._should_keep_stale_rows(result, view, cur.view) then
+  if __smelt_internal.provider.should_keep_stale_rows(result, view, cur.view) then
     cur.result = result
     ensure_poll(cur)
     return
@@ -326,7 +326,7 @@ local function apply_provider_result(cur, view, result, next_query_key, old_key)
   end
   ensure_poll(cur)
 
-  cur.selected = provider._select_row(cur.view, old_key, preserve)
+  cur.selected = __smelt_internal.provider.select_row(cur.view, old_key, preserve)
   cur.picker:items(prepare_picker_items(cur.view, cur.spec), cur.selected - 1)
   fire_on_select()
 end
@@ -352,7 +352,7 @@ local function refilter_body()
     local preserve = next_query_key == cur.query_key
     cur.view = rank_items(cur.items, query)
     cur.query_key = next_query_key
-    cur.selected = provider._select_row(cur.view, old_key, preserve)
+    cur.selected = __smelt_internal.provider.select_row(cur.view, old_key, preserve)
     cur.picker:items(prepare_picker_items(cur.view, cur.spec), cur.selected - 1)
     fire_on_select()
   end
@@ -424,12 +424,13 @@ function M._tab()
 end
 
 -- This mixed-tier file participates in Host bootstrap so headless user config can
--- declare `smelt.prompt.completer(...)`. The prompt event subscription is owned by
--- the Lua generation and does not require an active terminal UI; live picker and
--- prompt operations remain UiHost-guarded when their callbacks eventually run.
-smelt.prompt.win():on("text_changed", function() M._recompute() end)
+-- declare `smelt.prompt.register_completer(...)`. Attach the listener only when this chunk
+-- is running inside an active terminal UI scope.
+if __smelt_internal.__ui_host_available() then
+  smelt.prompt.win():on("text_changed", function() M._recompute() end)
+end
 
---- Completer specification handed to `smelt.prompt.completer` for full candidate
+--- Completer specification handed to `smelt.prompt.register_completer` for full candidate
 --- sets ranked in Lua.
 ---@class smelt.prompt.CompleterSpec
 ---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
@@ -441,7 +442,7 @@ smelt.prompt.win():on("text_changed", function() M._recompute() end)
 ---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field on_select? fun(item: table): nil Live selection callback.
 
---- Completer specification handed to `smelt.prompt.completer` for bounded,
+--- Completer specification handed to `smelt.prompt.register_completer` for bounded,
 --- already-ranked providers.
 ---@class smelt.prompt.MatchesCompleterSpec
 ---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
@@ -461,8 +462,8 @@ smelt.prompt.win():on("text_changed", function() M._recompute() end)
 -- completer and closes the picker if it was active.
 ---@tier host
 ---@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
-function smelt.prompt.completer(spec)
-  assert(type(spec) == "table", "smelt.prompt.completer: expected table")
+function smelt.prompt.register_completer(spec)
+  assert(type(spec) == "table", "smelt.prompt.register_completer: expected table")
   assert(type(spec.detect) == "function", "spec.detect required")
   assert(type(spec.items) == "function" or type(spec.matches) == "function", "spec.items or spec.matches required")
   if spec.items then assert(type(spec.query) == "function", "spec.query required with spec.items") end

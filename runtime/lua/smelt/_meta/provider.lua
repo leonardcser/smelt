@@ -8,22 +8,6 @@
 ---@class smelt.provider
 local provider = {}
 
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Advanced UI helper: 1-based row position for a stable item key.
----@type fun(rows: any, key: any): any
-provider._position_of_key = nil
-
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Advanced UI helper: select the fallback row unless stable-key preservation succeeds.
----@type fun(rows: any, old_key: any, preserve: any, fallback: any): any
-provider._select_row = nil
-
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Advanced UI helper: keep stale rows visible while a provider is loading an
---- empty/synthetic refresh, instead of flashing to a status row.
----@type fun(result: any, rows: any, current_rows: any): any
-provider._should_keep_stale_rows = nil
-
 --- Return true when the row list contains at least one non-synthetic row.
 ---@type fun(rows: table[]?): boolean
 provider.has_real_rows = nil
@@ -41,11 +25,11 @@ provider.item_key = nil
 provider.list = nil
 
 --- Register provider middleware. `mw` is a table of `{ on_response = fn }`:
---- 
+---
 --- - `on_response(message)` - runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = "assistant", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.
---- 
+---
 --- Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.
---- 
+---
 --- For streaming observation use `smelt.events.on("stream_delta", ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 ---@type fun(mw: table): smelt.Reg
 provider.middleware = nil

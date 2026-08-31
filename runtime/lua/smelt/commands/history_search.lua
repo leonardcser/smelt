@@ -57,7 +57,11 @@ local function open()
   end
   smelt.spawn(function()
     local ok, r = pcall(function()
-      return smelt.prompt.open_picker({ items = build_items(), rank = rank_history })
+      return smelt.picker.open({
+        items = build_items(),
+        placement = "prompt_docked",
+        rank = rank_history,
+      })
     end)
     if ok and r and r.action == "enter" then
       smelt.prompt.set_text(r.item._entry or "")

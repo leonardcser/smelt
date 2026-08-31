@@ -240,10 +240,8 @@ pub struct LuaShared {
     /// CLI flag *values* parsed from argv after `early.lua` declared them.
     /// Populated by the main binary; read by `smelt.cli.get(name)`.
     pub cli_flag_values: Mutex<HashMap<String, CliFlagValue>>,
-    /// Every middleware/callback-list surface, grouped under one struct
-    /// so the registry pattern is centralized and surfaces like
-    /// `tools.middleware` / `provider.middleware` just allocate ids on
-    /// the relevant `Arc<HookRegistry>`.
+    /// Every callback-list surface, grouped under one struct so registration
+    /// and cleanup use one shared pattern.
     pub hooks: Hooks,
     /// Default shell + argv for `smelt.process.run`/`run_streaming` when no
     /// explicit shell is given. `None` means hardcoded `sh -c`.
@@ -276,19 +274,10 @@ pub struct AskCallbacks {
     pub delta: Option<LuaHandle>,
 }
 
-/// Every hook-registry surface bundled into one struct. New middleware
-/// streams (e.g. an `agent.middleware`) get a field here rather than a
-/// fresh `Mutex<Vec<HookEntry>>` on `LuaShared`. Cheap to clone the
-/// inner `Arc`s; consumers grab `Arc::clone(&shared.hooks.tool_before)`
-/// when they need a long-lived handle.
+/// Every hook-registry surface bundled into one struct. New callback streams
+/// get a field here rather than a fresh `Mutex<Vec<HookEntry>>` on `LuaShared`.
 #[derive(Default)]
 pub struct Hooks {
-    /// `tools.middleware{before=...}` registry. Per-tool name; `""`
-    /// matches every tool.
-    pub tool_before: Arc<HookRegistry>,
-    /// `tools.middleware{after=...}` registry. Per-tool name; `""`
-    /// matches every tool.
-    pub tool_after: Arc<HookRegistry>,
     /// `provider.middleware{on_response=...}` registry.
     pub provider_response: Arc<HookRegistry>,
     /// `smelt.engine.on_context_limit(fn)` registry. Engine consults
@@ -678,8 +667,6 @@ impl LuaShared {
         if let Ok(mut m) = self.ask_callbacks.lock() {
             m.clear();
         }
-        self.hooks.tool_before.clear();
-        self.hooks.tool_after.clear();
         self.hooks.provider_response.clear();
         self.hooks.context_limit.clear();
         self.hooks.prepare_request.clear();

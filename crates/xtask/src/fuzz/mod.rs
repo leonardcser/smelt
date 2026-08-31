@@ -9,6 +9,8 @@ mod triage;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub(super) use crate::repo_root;
+
 pub fn run(args: Vec<String>) {
     let mut it = args.into_iter();
     let sub = it.next();
@@ -130,14 +132,6 @@ pub(super) fn die(msg: &str) -> ! {
 pub(super) fn die_with_status(msg: &str, code: Option<i32>) -> ! {
     eprintln!("xtask fuzz: {msg}");
     std::process::exit(code.unwrap_or(1));
-}
-
-pub(super) fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("xtask is at crates/xtask/")
-        .to_path_buf()
 }
 
 pub(super) fn nightly_host() -> Option<String> {

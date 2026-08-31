@@ -83,7 +83,7 @@ app_story!(prompt_modal_picker_overlays_tip, |ctx| {
     ctx.set_viewport(50, 10);
     ctx.run_lua(
         r#"
-      smelt.cmd.picker("tipless", {
+      smelt.cmd.register_picker("tipless", {
         items = {
           { label = "alpha", description = "first" },
           { label = "beta", description = "second" },

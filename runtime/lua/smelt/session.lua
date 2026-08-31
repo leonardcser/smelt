@@ -20,6 +20,7 @@ smelt.session = smelt.session or {}
 -- old families render first, recent families end up at the bottom, while each
 -- parent still renders before its children. Entries whose `parent_id` references
 -- an id not present in `entries` are treated as roots.
+---@advanced
 ---@type fun(entries: table[], opts: table?): table[]
 function smelt.session.tree(entries, opts)
   opts = opts or {}

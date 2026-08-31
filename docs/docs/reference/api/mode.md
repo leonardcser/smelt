@@ -42,53 +42,26 @@ Return the configured agent-mode cycle; falls back to the built-in default when 
 ## `smelt.mode.get`
 
 ```lua
-fun(name: string): table|nil
+fun(name: string): smelt.mode.Mode?
 ```
+
+Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return the registered mode definition for `name`, or `nil` when unknown.
-
-## `smelt.mode.icon`
-
-```lua
-fun(name: string): string
-```
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Return the icon for `name`, or `""` when the mode is unknown.
+Return a copy of the registered mode definition for `name`, or `nil` when unknown.
 
 ## `smelt.mode.list`
 
 ```lua
-fun(): table[]
+fun(): smelt.mode.Mode[]
 ```
+
+Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return registered mode definitions in registration order.
-
-## `smelt.mode.note`
-
-```lua
-fun(name: string): string
-```
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Return the status note for `name`, falling back to `"now in <name> mode"`.
-
-## `smelt.mode.permission_behaviors`
-
-```lua
-fun(): table<string, table>
-```
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Return a map from every registered mode name to its permission behavior
-table. Modes without explicit behaviors map to an empty table.
+Return copies of registered mode definitions in registration order.
 
 ## `smelt.mode.register`
 
@@ -112,26 +85,4 @@ fun(mode: string): nil
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Set the active agent mode. The change is applied immediately to the UI and persisted according to the active remember policy.
-
-## `smelt.mode.set_icon`
-
-```lua
-fun(name: string, icon: string): nil
-```
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Set a mode's icon. An unknown name is registered with the default mode
-fields and the supplied icon.
-
-## `smelt.mode.style`
-
-```lua
-fun(name: string): table
-```
-
-**Tier:** `Host` - Available in every runtime, including headless mode.
-
-Return `{ hl_group = string }` for `name`. Unknown modes use
-`"SmeltModeDefault"`.
 

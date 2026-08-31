@@ -175,16 +175,6 @@ fun(p: string): integer?, string?
 
 Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.
 
-## `smelt.fs.try_flock`
-
-```lua
-fun(p: string): smelt.fs.Flock?, string?
-```
-
-Types: [`smelt.fs.Flock`](types.md#smeltfsflock)
-
-Acquire an exclusive non-blocking advisory lock for `p`. Returns a lock handle on success or an error string when the file is already locked or cannot be opened.
-
 ## `smelt.fs.watch`
 
 ```lua

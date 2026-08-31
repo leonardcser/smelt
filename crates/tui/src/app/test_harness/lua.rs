@@ -330,8 +330,6 @@ impl TestApp {
                 check(&format!("{reg_label}[{id} name={name:?}]"), h);
             });
         };
-        check_reg("hooks.tool_before", &hooks.tool_before);
-        check_reg("hooks.tool_after", &hooks.tool_after);
         check_reg("hooks.provider_response", &hooks.provider_response);
         check_reg("hooks.context_limit", &hooks.context_limit);
         check_reg("hooks.lifecycle", &hooks.lifecycle);

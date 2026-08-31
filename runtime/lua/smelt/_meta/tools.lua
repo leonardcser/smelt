@@ -8,31 +8,6 @@
 ---@class smelt.tools
 local tools = {}
 
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Compact repeated absolute cwd prefixes in model-facing tool output. This is
---- display-only policy for structured path outputs, not a filesystem primitive.
----@type fun(path: any): any
-tools._compact_cwd_path = nil
-
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Apply `_compact_cwd_path` to each path in an array, preserving order.
---- Returns an empty array when `paths` is `nil`.
----@type fun(paths: any): any
-tools._compact_cwd_paths = nil
-
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Remove the active working-directory prefix from the start of each line in
---- model-facing text while preserving line endings. Returns `""` for `nil`.
----@type fun(content: any): any
-tools._compact_cwd_prefix_lines = nil
-
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Attach an outer watchdog to a tool definition. This is intentionally
---- separate from the tool's own timeout handling: builtins use a small grace
---- period so their domain-specific timeout result wins before the watchdog fires.
----@type fun(def: any, opts: any): any
-tools._with_watchdog = nil
-
 --- Call another tool from within `execute`. Pass `parent_call_id` so streamed
 --- output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
 ---@type fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
@@ -46,15 +21,6 @@ tools.default_summary = nil
 --- Return the names of every registered plugin tool, sorted.
 ---@type fun(): table
 tools.list = nil
-
---- Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
---- 
---- - `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
---- - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
---- 
---- Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
----@type fun(name: string, mw: table): smelt.Reg
-tools.middleware = nil
 
 --- Patch metadata for an already-registered tool without replacing its handler. Supports `description` and `parameters`. Returns a `Reg` whose `:remove()` restores the previous metadata.
 ---@type fun(name: string, patch: table): smelt.Reg
@@ -71,10 +37,6 @@ tools.path_summary = nil
 ---@see smelt.tools.ToolDef
 ---@type fun(def: smelt.tools.ToolDef): smelt.Reg
 tools.register = nil
-
---- Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.
----@type fun(request_id: integer, call_id: string, result: table): nil
-tools.resolve = nil
 
 --- Unregister a previously-registered tool by `name`. Returns `true` if a tool was removed, `false` otherwise.
 ---@type fun(name: string): boolean

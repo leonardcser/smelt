@@ -15,7 +15,7 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
     return
   end
 
-  if smelt.session.turns() == 0 then
+  if #smelt.session.turns() == 0 then
     return
   end
 

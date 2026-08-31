@@ -3,14 +3,14 @@
 -- accepts the name + trailing space (which shows the dim arg placeholder
 -- when the command declared `args`).
 
-if not (smelt.prompt and smelt.prompt.completer) then return end
+if not (smelt.prompt and smelt.prompt.register_completer) then return end
 
 local function accent_ansi()
   local accent = smelt.theme.get("SmeltAccent")
   return accent and accent.fg and accent.fg.ansi
 end
 
-smelt.prompt.completer({
+smelt.prompt.register_completer({
   prefix = "/",
   detect = function(text, cpos)
     if text == "" then return nil end
@@ -47,7 +47,7 @@ smelt.prompt.completer({
     end
     -- Enter: dispatch the command and clear the prompt. Lua-registered
     -- commands without args run inline; arg-taking commands open their own
-    -- picker via `smelt.cmd.picker`.
+    -- picker via `smelt.cmd.register_picker`.
     smelt.prompt.set_text("")
     smelt.cmd.run("/" .. item.label)
   end,

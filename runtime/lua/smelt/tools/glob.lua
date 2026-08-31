@@ -33,7 +33,7 @@ smelt.transcript.register_tool("glob", {
   compact = glob_collapsed_detail,
 })
 
-smelt.tools.register(smelt.tools._with_watchdog({
+smelt.tools.register(__smelt_internal.tools.with_watchdog({
   name = "glob",
   description = "Fast file pattern matching tool that works with any codebase size. Returns matching file paths sorted by modification time.",
   override = true,
@@ -80,7 +80,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     if err then
       return { content = err, is_error = true }
     end
-    local paths = smelt.tools._compact_cwd_paths(results and results.paths or {})
+    local paths = __smelt_internal.tools.compact_cwd_paths(results and results.paths or {})
     if results and results.timed_out then
       return {
         content = string.format(
