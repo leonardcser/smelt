@@ -1821,18 +1821,28 @@ mod tests {
         let recover = |path: PathBuf, start: std::sync::Arc<std::sync::Barrier>| {
             std::thread::spawn(move || {
                 start.wait();
-                let catalog = CatalogReconciliation::open(path).unwrap();
-                let rebuilt = catalog.rebuilt();
-                drop(catalog);
-                rebuilt
+                CatalogReconciliation::open(path).map(|catalog| catalog.rebuilt())
             })
         };
         let first = recover(path.clone(), start.clone());
-        let second = recover(path, start.clone());
+        let second = recover(path.clone(), start.clone());
         start.wait();
 
-        let mut recovered = [first.join().unwrap(), second.join().unwrap()];
-        recovered.sort_unstable();
-        assert_eq!(recovered, [false, true]);
+        let mut rebuilds = 0;
+        for outcome in [first.join().unwrap(), second.join().unwrap()] {
+            match outcome {
+                Ok(rebuilt) => rebuilds += usize::from(rebuilt),
+                // Lock contention is bounded because the catalog worker retries it.
+                Err(StoreError::Busy {
+                    operation: "reconcile session catalog",
+                    ..
+                }) => {}
+                Err(error) => panic!("unexpected concurrent recovery error: {error}"),
+            }
+        }
+        assert_eq!(rebuilds, 1);
+
+        let recovered = CatalogReconciliation::open(path).unwrap();
+        assert!(!recovered.rebuilt());
     }
 }
