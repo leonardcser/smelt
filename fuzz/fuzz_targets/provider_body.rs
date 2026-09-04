@@ -70,9 +70,11 @@ fn run(input: Input) {
         &input.model
     };
 
-    let anthropic = fuzz_build_anthropic_body(&messages, &tools, model, effort, &cfg, &cache);
-    let chat = fuzz_build_chat_completions_body(&messages, &tools, model, effort, &cfg);
-    let openai = fuzz_build_openai_body(&messages, &tools, model, effort, &cfg, &cache);
+    let anthropic =
+        fuzz_build_anthropic_body(&messages, &tools, model, effort.clone(), &cfg, &cache);
+    let chat =
+        fuzz_build_chat_completions_body(&messages, &tools, model, effort.clone(), &cfg);
+    let openai = fuzz_build_openai_body(&messages, &tools, model, effort.clone(), &cfg, &cache);
 
     let expected = ExpectedBodySchema {
         model,

@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::types::Value;
-use rusqlite::{named_params, params, params_from_iter, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    named_params, params, params_from_iter, Connection, OpenFlags, OptionalExtension,
+    TransactionBehavior,
+};
 
 use crate::filesystem::{
     ensure_private_directory, ensure_private_directory_all, reject_symlink, sync_directory,
@@ -832,12 +835,19 @@ impl CatalogMarkerLock {
 }
 
 fn open_catalog_connection(path: &Path) -> Result<Connection> {
+    // SQLite can return SQLITE_BUSY immediately when connections race to enable WAL.
+    let _initialization_lock = FileLock::acquire(
+        &sqlite_companion_path(path, ".open.lock"),
+        "initialize session catalog",
+        CATALOG_WRITE_BUSY_TIMEOUT,
+    )?;
     let mut conn = Connection::open(path)?;
     set_private_file_permissions(path)?;
     conn.busy_timeout(CATALOG_WRITE_BUSY_TIMEOUT)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    let tx = conn.transaction()?;
+    // Avoid a deferred read-to-write upgrade, which SQLite cannot safely wait on.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(CATALOG_SCHEMA)?;
     tx.execute(
         "INSERT OR IGNORE INTO catalog_meta
@@ -1129,6 +1139,61 @@ mod tests {
                 .to_ascii_lowercase(),
             "wal"
         );
+    }
+
+    #[test]
+    fn concurrent_catalog_opens_initialize_once() {
+        const OPENERS: usize = 8;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(OPENERS + 1));
+        let openers = (0..OPENERS)
+            .map(|_| {
+                let path = path.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    Catalog::open(path)
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+
+        for opener in openers {
+            let catalog = opener.join().unwrap().unwrap();
+            assert_eq!(catalog.metadata().unwrap().next_scan_id, 1);
+        }
+    }
+
+    #[test]
+    fn catalog_open_waits_for_an_active_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        let tx = catalog
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO sessions (id, status, last_seen_scan) VALUES ('held', 'available', 0)",
+            [],
+        )
+        .unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let open_path = path.clone();
+        let open_start = start.clone();
+        let opener = std::thread::spawn(move || {
+            open_start.wait();
+            Catalog::open(open_path)
+        });
+        start.wait();
+        std::thread::sleep(Duration::from_millis(50));
+        tx.commit().unwrap();
+
+        let reopened = opener.join().unwrap().unwrap();
+        assert!(query_session(&reopened.conn, "held").unwrap().is_some());
     }
 
     #[test]
