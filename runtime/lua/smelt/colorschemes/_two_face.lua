@@ -74,6 +74,7 @@ local function build(p)
   local del = p.light and mix(p.error, bg0, 0.78) or mix(p.error, bg0, 0.82)
   local add_inline = p.light and mix(p.success, bg0, 0.55) or mix(p.success, bg0, 0.65)
   local del_inline = p.light and mix(p.error, bg0, 0.60) or mix(p.error, bg0, 0.65)
+  local ultra = p.light and rgb(145, 35, 140) or rgb(218, 112, 214)
   local groups = {
     Normal              = fg(color(fg0)),
     Comment             = fg(color(p.muted), { italic = true }),
@@ -111,6 +112,7 @@ local function build(p)
     SmeltReasonMedium   = fg(color(p.warn)),
     SmeltReasonHigh     = fg(color(p.accent)),
     SmeltReasonMax      = fg(color(p.error), { bold = true }),
+    SmeltReasonUltra    = fg(ultra),
 
     SmeltVimNormal      = { fg = color(p.link), bg = surface },
     SmeltVimInsert      = { fg = color(p.success), bg = surface },

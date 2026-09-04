@@ -41,6 +41,7 @@ return {
   { name = "SmeltReasonMedium", role = "foreground", owner = "prompt", description = "Medium reasoning effort." },
   { name = "SmeltReasonHigh", role = "foreground", owner = "prompt", description = "High reasoning effort." },
   { name = "SmeltReasonMax", role = "foreground", owner = "prompt", description = "Maximum reasoning effort." },
+  { name = "SmeltReasonUltra", role = "foreground", owner = "prompt", description = "Ultra reasoning effort." },
 
   { name = "SmeltVimNormal", role = "style", owner = "statusline", description = "Vim normal mode pill." },
   { name = "SmeltVimInsert", role = "style", owner = "statusline", description = "Vim insert mode pill." },

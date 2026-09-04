@@ -300,7 +300,8 @@ local function reasoning_color_group(effort)
   if effort == "low" then return "SmeltReasonLow"
   elseif effort == "medium" then return "SmeltReasonMedium"
   elseif effort == "high" then return "SmeltReasonHigh"
-  elseif effort == "max" then return "SmeltReasonMax"
+  elseif effort == "xhigh" or effort == "max" then return "SmeltReasonMax"
+  elseif effort == "ultra" then return "SmeltReasonUltra"
   else return "Comment"
   end
 end

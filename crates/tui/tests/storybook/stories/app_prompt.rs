@@ -359,6 +359,16 @@ app_story!(prompt_working_bar_width_ladder, |ctx| {
     }
 });
 
+app_story!(prompt_extended_reasoning_colors, |ctx| {
+    ctx.set_viewport(48, 8);
+    ctx.use_test_model();
+
+    for effort in ["xhigh", "max", "ultra"] {
+        ctx.run_lua(&format!("smelt.reasoning.set({effort:?})"));
+        ctx.assert_snapshot_named(effort);
+    }
+});
+
 // ── Exec block (`!cmd` shell escape) ──────────────────────────────
 
 app_story!(exec_command_block_with_output, |ctx| {

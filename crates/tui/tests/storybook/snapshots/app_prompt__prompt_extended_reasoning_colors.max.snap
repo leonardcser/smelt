@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current …
+────────────────────────── test/test-model max ─
+
+────────────────────────────────────────────────
+ ○ normal                               1:1 100%

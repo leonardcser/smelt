@@ -71,6 +71,7 @@ local groups = {
   SmeltReasonMedium   = fg({ ansi = 214 }),
   SmeltReasonHigh     = fg({ ansi = 203 }),
   SmeltReasonMax      = fg({ ansi = 196 }),
+  SmeltReasonUltra    = fg(dl(201, 127)),
 
   -- Statusline pills: each carries a full {fg, bg} pair so plugins
   -- reference them by `style_group` alone.
