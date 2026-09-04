@@ -155,6 +155,13 @@ app_story!(web_tool_group_states, |ctx| {
     ctx.assert_snapshot_named("expanded");
 });
 
+app_story!(successful_background_process_group, |ctx| {
+    ctx.set_viewport(76, 14);
+    ctx.push_background_process_completed("4210", Some(0));
+    ctx.push_background_process_completed("4211", Some(0));
+    ctx.assert_snapshot_named("collapsed");
+});
+
 app_story!(background_process_group_states, |ctx| {
     ctx.set_viewport(76, 14);
     ctx.push_background_process_completed("4210", Some(0));

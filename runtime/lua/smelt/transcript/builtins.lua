@@ -38,10 +38,12 @@ local function aggregate_status_hl(group)
   return "SmeltSuccess"
 end
 
-local function summary_line(text, has_failure)
-  local span = { text = text }
-  if has_failure then span.hl = "ErrorMsg" end
-  return layout.runs({ { span } })
+local function process_summary_line(text, has_failure)
+  return layout.runs({ { {
+    text = text,
+    fg = has_failure and "ErrorMsg" or "SmeltProcess",
+    italic = true,
+  } } })
 end
 
 local function tool_group_header(name, count, hl, suffix, called_at_ms, ctx)
@@ -216,7 +218,7 @@ local function render_background_process_completed_group(group, ctx)
   if #failed > 0 then
     text = text .. ", " .. tostring(#failed) .. " failed" .. failed_process_summary(failed)
   end
-  return summary_line(text, #failed > 0)
+  return process_summary_line(text, #failed > 0)
 end
 
 function M.render(group, ctx)
@@ -246,7 +248,7 @@ end
 function M.register()
   smelt.transcript.groups.register({
     name = "background_process_completed",
-    cache_key = "smelt.transcript.group.background_process_completed:v1",
+    cache_key = "smelt.transcript.group.background_process_completed:v2",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
