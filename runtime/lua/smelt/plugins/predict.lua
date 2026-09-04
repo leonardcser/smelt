@@ -99,7 +99,6 @@ smelt.events.on("turn_end", function(payload)
     system = SYSTEM,
     messages = messages,
     model = smelt.model.preferred("predict"),
-    reasoning_effort = "off",
     guard = guard,
     on_response = function(response, err)
       if err then return end

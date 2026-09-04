@@ -252,6 +252,95 @@ fn add_restricted_reasoning_model(app: &mut TestApp) {
     app.set_available_models(vec![current, target]);
 }
 
+fn add_codex_gpt_5_6_sol_model(app: &mut TestApp) {
+    let current = app.core_probe().config.available_models[0].clone();
+    let mut target = current.clone();
+    target.key = "codex/gpt-5.6-sol".into();
+    target.provider_name = "codex".into();
+    target.model_name = "gpt-5.6-sol".into();
+    target.provider_type = "codex".into();
+    target.catalog.default_reasoning_effort = Some(protocol::ReasoningEffort::Low);
+    target.catalog.supported_reasoning_efforts = vec![
+        protocol::ReasoningEffort::Low,
+        protocol::ReasoningEffort::Medium,
+        protocol::ReasoningEffort::High,
+        protocol::ReasoningEffort::XHigh,
+        protocol::ReasoningEffort::Max,
+        protocol::ReasoningEffort::Ultra,
+    ];
+    app.set_available_models(vec![current, target]);
+}
+
+fn engine_ask_models_and_efforts(
+    commands: Vec<protocol::UiCommand>,
+) -> Vec<(String, protocol::ReasoningEffort)> {
+    commands
+        .into_iter()
+        .filter_map(|command| match command {
+            protocol::UiCommand::EngineAsk {
+                target,
+                reasoning_effort,
+                ..
+            } => Some((target.model, reasoning_effort)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn codex_model_accepts_all_advertised_reasoning_efforts() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_codex_gpt_5_6_sol_model(&mut app);
+    app.apply_model("codex/gpt-5.6-sol", false);
+    let _ = app.drain_engine_sends();
+    assert!(app.run_lua(
+        r#"assert(table.concat(smelt.reasoning.cycle_list(), ",") ==
+            "low,medium,high,xhigh,max,ultra")"#,
+    ));
+
+    for label in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+        assert!(app.run_lua(&format!("smelt.reasoning.set({label:?})")));
+    }
+}
+
+#[test]
+fn bundled_title_ask_uses_codex_default_when_off_is_unsupported() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_codex_gpt_5_6_sol_model(&mut app);
+    app.apply_model("codex/gpt-5.6-sol", false);
+    assert!(app.run_lua(r#"smelt.reasoning.set("ultra")"#));
+    let _ = app.drain_engine_sends();
+
+    publish_input_submit(&mut app, "Submit with ultra reasoning");
+
+    let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
+    assert_eq!(
+        requests,
+        vec![("gpt-5.6-sol".into(), protocol::ReasoningEffort::Low)]
+    );
+    assert!(!app.lua_messages_contain("reasoning effort"));
+}
+
+#[test]
+fn bundled_prediction_ask_uses_codex_default_when_off_is_unsupported() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_codex_gpt_5_6_sol_model(&mut app);
+    app.apply_model("codex/gpt-5.6-sol", false);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "How should I debug this failing test?",
+    )));
+    let _ = app.drain_engine_sends();
+
+    publish_turn_end(&mut app);
+
+    let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
+    assert_eq!(
+        requests,
+        vec![("gpt-5.6-sol".into(), protocol::ReasoningEffort::Low)]
+    );
+    assert!(!app.lua_messages_contain("reasoning effort"));
+}
+
 #[test]
 fn model_switch_updates_reasoning_levels_for_active_provider() {
     let mut app = TestApp::builder().build();
@@ -1093,18 +1182,7 @@ fn engine_asks_validate_and_reconcile_reasoning_for_selected_model() {
         })
         "#,
     ));
-    let requests = app
-        .drain_engine_sends()
-        .into_iter()
-        .filter_map(|command| match command {
-            protocol::UiCommand::EngineAsk {
-                target,
-                reasoning_effort,
-                ..
-            } => Some((target.model, reasoning_effort)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
     assert_eq!(
         requests,
         vec![

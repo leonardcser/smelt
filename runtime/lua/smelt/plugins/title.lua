@@ -121,7 +121,6 @@ local function update_title(new_text)
     system = SYSTEM,
     messages = messages,
     model = smelt.model.preferred("title"),
-    reasoning_effort = "off",
     response_format = { name = "session_title", schema = SCHEMA },
     guard = guard,
     on_response = function(response, err)
