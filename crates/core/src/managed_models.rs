@@ -508,6 +508,7 @@ mod tests {
             supports_reasoning: None,
             supports_fast_mode: None,
             input_modalities: None,
+            catalog: protocol::ModelCatalogMetadata::default(),
         }
     }
 

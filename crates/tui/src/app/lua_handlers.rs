@@ -392,7 +392,7 @@ impl TuiApp {
                     self.core
                         .engine
                         .send(protocol::UiCommand::SetReasoningEffort {
-                            effort: self.core.config.reasoning_effort,
+                            effort: self.core.config.reasoning_effort.clone(),
                         });
                     self.core.engine.send(protocol::UiCommand::SetFastMode {
                         enabled: self.core.config.settings.fast_mode,
@@ -769,7 +769,7 @@ impl TuiApp {
     ) {
         let old_settings = self.core.config.settings.clone();
         let old_mode = self.core.config.mode.clone();
-        let old_reasoning = self.core.config.reasoning_effort;
+        let old_reasoning = self.core.config.reasoning_effort.clone();
         let old_model = self.core.config.active_model().cloned();
         let changed = next != self.core.config;
         if changed {

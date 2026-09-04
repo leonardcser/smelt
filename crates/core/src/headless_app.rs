@@ -476,7 +476,7 @@ impl HeadlessApp {
                 mode: self.core.config.mode.clone(),
                 model_target,
                 request_config: self.core.config.request_runtime_config(),
-                reasoning_effort: self.core.config.reasoning_effort,
+                reasoning_effort: self.core.config.reasoning_effort.clone(),
                 fast_mode,
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.session.id.clone(),

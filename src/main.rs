@@ -60,14 +60,14 @@ pub struct Args {
     #[arg(
         long,
         value_name = "EFFORT",
-        help = "Starting reasoning effort (off/low/medium/high/max)"
+        help = "Starting reasoning effort (known: off/low/medium/high/xhigh/max/ultra; provider-defined labels accepted)"
     )]
     reasoning_effort: Option<String>,
     #[arg(
         long,
         value_delimiter = ',',
         value_name = "LEVELS",
-        help = "Reasoning effort levels for cycling (comma-separated: off,low,medium,high,max)"
+        help = "Reasoning effort levels for cycling (comma-separated known or provider-defined labels)"
     )]
     reasoning_cycle: Option<Vec<String>>,
     #[arg(long, value_name = "TEMP", help = "Sampling temperature")]

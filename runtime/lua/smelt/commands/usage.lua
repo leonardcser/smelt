@@ -50,6 +50,10 @@ end
 
 local function active_provider()
   local active = smelt.model.current()
+  local capabilities = smelt.model.capabilities and smelt.model.capabilities()
+  if capabilities then
+    return capabilities.provider_type or "", active or "", capabilities.api_base or ""
+  end
   for _, model in ipairs(smelt.model.list() or {}) do
     if model.key == active or model.name == active then
       return model.provider or "", model.key or active or "", model.api_base or ""

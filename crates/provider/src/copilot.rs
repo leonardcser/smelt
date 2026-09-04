@@ -360,13 +360,23 @@ pub struct CopilotModel {
 
 impl From<CopilotModel> for protocol::ModelMetadata {
     fn from(model: CopilotModel) -> Self {
+        let supports_reasoning = (!model.supported_reasoning_efforts.is_empty()).then_some(true);
+        let parsed_reasoning_efforts: Vec<_> = model
+            .supported_reasoning_efforts
+            .iter()
+            .filter_map(|effort| protocol::ReasoningEffort::parse(effort))
+            .collect();
         Self {
             id: model.id,
             display_name: Some(model.name),
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
-            supports_reasoning: (!model.supported_reasoning_efforts.is_empty()).then_some(true),
+            supports_reasoning,
             supports_fast_mode: None,
+            catalog: protocol::ModelCatalogMetadata {
+                supported_reasoning_efforts: parsed_reasoning_efforts,
+                ..Default::default()
+            },
             input_modalities: None,
         }
     }

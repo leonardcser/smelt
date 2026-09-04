@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelConfigOverrides, ThinkingBudgets};
+use crate::{ModelConfigOverrides, ReasoningEffort, ThinkingBudgets};
 
 /// Complete model/provider value carried across every engine request boundary.
 ///
@@ -123,6 +123,52 @@ pub struct RequestRuntimeConfig {
     pub request_audit: RequestAuditMode,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Provider-owned catalog policy kept separate from request configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogMetadata {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub show_in_picker: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
+}
+
+impl Default for ModelCatalogMetadata {
+    fn default() -> Self {
+        Self {
+            description: None,
+            show_in_picker: true,
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
+        }
+    }
+}
+
+impl ModelCatalogMetadata {
+    pub fn supports_reasoning_effort(&self, effort: &ReasoningEffort) -> bool {
+        self.supported_reasoning_efforts.is_empty()
+            || self.supported_reasoning_efforts.contains(effort)
+    }
+
+    pub fn reconcile_reasoning_effort(&self, selected: ReasoningEffort) -> ReasoningEffort {
+        if self.supports_reasoning_effort(&selected) {
+            return selected;
+        }
+        self.default_reasoning_effort
+            .clone()
+            .filter(|effort| self.supports_reasoning_effort(effort))
+            .or_else(|| self.supported_reasoning_efforts.first().cloned())
+            .unwrap_or(selected)
+    }
+}
+
 /// Model metadata fetched from managed providers and shared with config/model resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelMetadata {
@@ -134,6 +180,8 @@ pub struct ModelMetadata {
     pub supports_reasoning: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub supports_fast_mode: Option<bool>,
+    #[serde(flatten)]
+    pub catalog: ModelCatalogMetadata,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub input_modalities: Option<Vec<String>>,
 }
@@ -181,6 +229,47 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<RequestRuntimeConfig>(&runtime_json).unwrap(),
             runtime
+        );
+    }
+
+    #[test]
+    fn legacy_model_metadata_is_picker_visible() {
+        let metadata: ModelMetadata = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "display_name": null,
+            "context_window": null,
+            "supports_reasoning": null
+        }))
+        .unwrap();
+
+        assert!(metadata.catalog.show_in_picker);
+        assert_eq!(metadata.catalog.default_reasoning_effort, None);
+        assert!(metadata.catalog.supported_reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn catalog_reconciles_to_valid_default_then_first_supported_effort() {
+        let catalog = ModelCatalogMetadata {
+            default_reasoning_effort: Some(ReasoningEffort::Low),
+            supported_reasoning_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+            ..Default::default()
+        };
+        assert_eq!(
+            catalog.reconcile_reasoning_effort(ReasoningEffort::Ultra),
+            ReasoningEffort::Low
+        );
+
+        let catalog = ModelCatalogMetadata {
+            default_reasoning_effort: Some(ReasoningEffort::Ultra),
+            supported_reasoning_efforts: vec![
+                ReasoningEffort::Custom("persistent".into()),
+                ReasoningEffort::High,
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            catalog.reconcile_reasoning_effort(ReasoningEffort::Low),
+            ReasoningEffort::Custom("persistent".into())
         );
     }
 

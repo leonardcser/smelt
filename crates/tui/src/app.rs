@@ -1265,7 +1265,7 @@ impl TuiApp {
     }
 
     pub(crate) fn reasoning_effort_pending(&self) -> bool {
-        self.conversation.applied_reasoning_effort() != self.core.config.reasoning_effort
+        self.conversation.applied_reasoning_effort() != &self.core.config.reasoning_effort
     }
 
     pub(crate) fn mode_pending(&self) -> bool {
@@ -1280,7 +1280,7 @@ impl TuiApp {
 
     pub(crate) fn sync_reasoning_effort_applied(&mut self) {
         self.conversation
-            .set_applied_reasoning_effort(self.core.config.reasoning_effort);
+            .set_applied_reasoning_effort(self.core.config.reasoning_effort.clone());
     }
 
     pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
@@ -1939,7 +1939,7 @@ impl TuiApp {
         let managed_models =
             crate::app::managed_models::ManagedModelState::new(managed_models, clock.instant_now());
         let initial_agent_mode = runtime_state.mode.clone();
-        let initial_reasoning_effort = runtime_state.reasoning_effort;
+        let initial_reasoning_effort = runtime_state.reasoning_effort.clone();
         let auto_reload_enabled = runtime_state.settings.auto_reload;
         let mut session = smelt_core::session::Session::new(env.pid(), env.cwd());
         session.fast_mode = Some(runtime_state.settings.fast_mode);

@@ -448,7 +448,7 @@ impl From<&Session> for SessionWire {
             created_at_ms: s.created_at_ms,
             updated_at_ms: s.updated_at_ms,
             mode: s.mode.clone(),
-            reasoning_effort: s.reasoning_effort,
+            reasoning_effort: s.reasoning_effort.clone(),
             model: s.model.clone(),
             fast_mode: s.fast_mode,
             cwd: s.cwd.clone(),
@@ -1202,7 +1202,7 @@ impl Session {
             created_at_ms: target.created_at_ms,
             updated_at_ms: target.created_at_ms,
             mode: self.mode.clone(),
-            reasoning_effort: self.reasoning_effort,
+            reasoning_effort: self.reasoning_effort.clone(),
             model: self.model.clone(),
             fast_mode: self.fast_mode,
             cwd: self.cwd.clone(),
@@ -1650,6 +1650,7 @@ pub fn store_metadata_from_session(
         mode: session.mode.clone(),
         reasoning_effort: session
             .reasoning_effort
+            .as_ref()
             .map(|effort| effort.label().to_string()),
         model: session.model.clone(),
         fast_mode: session.fast_mode,

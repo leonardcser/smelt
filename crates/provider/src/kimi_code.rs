@@ -66,6 +66,7 @@ impl From<KimiCodeModelInfo> for protocol::ModelMetadata {
             max_output_tokens: None,
             supports_reasoning: model.supports_reasoning,
             supports_fast_mode: None,
+            catalog: protocol::ModelCatalogMetadata::default(),
             input_modalities: Some(input_modalities),
         }
     }

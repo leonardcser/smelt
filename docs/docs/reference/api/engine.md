@@ -18,7 +18,7 @@ Types: [`smelt.engine.AskSpec`](types.md#smeltengineaskspec)
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`). `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
+Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, and `spec.reasoning_effort` explicitly selects a known or provider-defined effort supported by that model. Omitted effort starts at `"off"` and reconciles to the selected model's advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
 
 ## `smelt.engine.ask_inherited`
 
@@ -30,7 +30,7 @@ Types: [`smelt.engine.InheritedAskSpec`](types.md#smeltengineinheritedaskspec)
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
+Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Explicit reasoning effort must be supported by the selected model; omitted effort starts at `"off"` and reconciles to advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
 
 ## `smelt.engine.cancel`
 

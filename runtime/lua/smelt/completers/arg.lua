@@ -37,7 +37,7 @@ local function build_placeholder(args, max_width)
     end
   end
 
-  -- Finite choice set: [off|low|medium|high|max]
+  -- Finite choice set: [off|low|medium|high|xhigh|max|ultra]
   local full = "[" .. table.concat(args, "|") .. "]"
   if #full <= max_width then return full end
   for i = #args, 1, -1 do

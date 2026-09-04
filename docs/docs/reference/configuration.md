@@ -158,18 +158,21 @@ Model resolution follows this precedence on a fresh launch:
 1. `--model` CLI flag
 2. Last explicitly chosen model (recalled from `recent.json`)
 3. `smelt.defaults.set{ model = "..." }` in `init.lua`
-4. First model in the providers list
+4. First picker-visible model in configuration or managed-provider priority order
 
-Switch models at runtime with `/model`. The choice is recorded in `recent.json`
-in the [state directory](#storage-paths) and restored on the next launch. To
+If the catalog has no picker-visible entries, its first internal model is used as
+the fallback. Switch models at runtime with `/model`. The choice is recorded in
+`recent.json` in the [state directory](#storage-paths) and restored on the next
+launch. To
 always start from `smelt.defaults` and ignore the last pick, set
 `smelt.remember.set({ model = false })` in `init.lua`.
 
 OAuth-backed Codex, Copilot, and Kimi Code catalogs load from cache for the first
 frame and refresh in the background. Fresh models and capability metadata become
-available in the running picker without a restart. Login, logout, account changes,
-and authoritative empty catalogs are reflected live without discarding the saved
-selection key.
+available in the running picker without a restart. Models that providers mark
+hidden stay out of picker and list surfaces but remain available by explicit
+`provider/model` key. Login, logout, account changes, and authoritative empty
+catalogs are reflected live without discarding the saved selection key.
 
 The TUI can run while a requested model is pending or unavailable. In that state
 `smelt.model.current()` returns `nil`, and model-backed actions fail with a clear
@@ -183,22 +186,30 @@ Starting mode and reasoning effort can be set via CLI flags or in `init.lua`.
 Both are toggleable at runtime: `Shift+Tab` cycles modes, `Ctrl+T` cycles
 reasoning.
 
-| CLI flag                     | Description                                               |
-| ---------------------------- | --------------------------------------------------------- |
-| `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`          |
-| `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)           |
-| `--reasoning-effort <LEVEL>` | Starting reasoning: `off`, `low`, `medium`, `high`, `max` |
-| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)             |
+| CLI flag                     | Description                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`                            |
+| `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)                             |
+| `--reasoning-effort <LEVEL>` | Starting reasoning: `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)                               |
 
 Reasoning effort controls how deeply the model thinks before responding.
 Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and any
 openai-compatible / anthropic-compatible provider that supports
-`reasoning_effort`. For OpenAI, `max` maps to `xhigh`. Models that don't support
-thinking ignore this setting.
+`reasoning_effort`. The built-in labels are `off`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultra`, but non-empty provider-defined labels are also
+accepted and preserved exactly on label-based provider APIs. Budget-based APIs
+cannot interpret custom labels, so they use the configured `max` thinking
+budget. Models that don't support thinking ignore this setting.
 
-`openai-compatible` providers default the reasoning cycle to
-`off,low,medium,high`; everything else adds `max`. The currently active effort
-is always included in the cycle.
+Managed models use the provider's advertised reasoning levels when available,
+including labels unknown to this smelt version. Those advertised levels are
+authoritative. Without catalog metadata, OpenAI-compatible, OpenAI, and Codex
+models conservatively cycle through `off,low,medium,high`; other providers stop
+at `max`. When switching models, smelt keeps the current effort if supported,
+otherwise uses the new model's valid provider default, then its first advertised
+level. Explicitly selecting a level that the active model does not advertise
+returns an error without changing the current effort.
 
 Set thinking block presentation at runtime with
 `/thinking [open|close|peek|toggle]`.

@@ -23,7 +23,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/stats`                                 | Show token usage statistics |
 | `/usage`, `/cost`                        | Show session cost and active-provider usage limits |
 | `/thinking [mode]`                       | Set thinking block presentation: `open`, `close`, `peek`, `toggle` |
-| `/reasoning [level]`                     | Set or show reasoning effort: `off`, `low`, `medium`, `high`, `max` |
+| `/reasoning [level]`                     | Set or show a known or provider-defined reasoning effort |
 | `/permissions`                           | Manage saved permissions |
 | `/ps`                                    | Manage background processes |
 | `/notify [once|on|off|clear|status]`      | Override turn-end terminal notifications for this session |
@@ -146,7 +146,7 @@ All fields are optional:
 | `top_k`            | Top-k sampling                                                                                            |
 | `min_p`            | Min-p sampling                                                                                            |
 | `repeat_penalty`   | Repetition penalty                                                                                        |
-| `reasoning_effort` | Thinking depth: `off`/`low`/`medium`/`high`/`max`                                                         |
+| `reasoning_effort` | Known or provider-defined reasoning label supported by the command's selected model                      |
 | `agent_skill`      | When true, expose this command as a loadable [skill](api/skills.md)                                       |
 | `tools`            | `allow`/`ask`/`deny` lists for tool permissions                                                           |
 | `bash`             | `allow`/`ask`/`deny` glob patterns for bash                                                               |

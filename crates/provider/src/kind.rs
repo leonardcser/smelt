@@ -18,18 +18,13 @@ pub enum ProviderKind {
 impl ProviderKind {
     pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
         match self {
-            Self::OpenAiCompatible => &[
+            Self::OpenAiCompatible | Self::OpenAi | Self::Codex => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,
             ],
-            Self::OpenAi
-            | Self::Codex
-            | Self::AnthropicCompatible
-            | Self::Anthropic
-            | Self::Copilot
-            | Self::KimiCode => &[
+            Self::AnthropicCompatible | Self::Anthropic | Self::Copilot | Self::KimiCode => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
@@ -293,6 +288,23 @@ mod tests {
             ProviderKind::from_config("unknown"),
             ProviderKind::OpenAiCompatible
         );
+    }
+
+    #[test]
+    fn openai_family_fallback_does_not_advertise_extended_reasoning_levels() {
+        let expected = [
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ];
+        for provider in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAi,
+            ProviderKind::Codex,
+        ] {
+            assert_eq!(provider.default_reasoning_cycle(), expected);
+        }
     }
 
     #[test]

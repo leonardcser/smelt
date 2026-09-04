@@ -36,7 +36,7 @@ fun(): table
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.
+Return picker-visible `{ key, name, display_name?, provider, api_base, provider_type }` records. Hidden catalog models remain selectable by explicit key.
 
 ## `smelt.model.preferred`
 

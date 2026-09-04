@@ -110,8 +110,8 @@ impl TurnLifecycle {
         self.applied_mode = mode;
     }
 
-    pub(crate) fn applied_reasoning_effort(&self) -> protocol::ReasoningEffort {
-        self.applied_reasoning_effort
+    pub(crate) fn applied_reasoning_effort(&self) -> &protocol::ReasoningEffort {
+        &self.applied_reasoning_effort
     }
 
     pub(crate) fn set_applied_reasoning_effort(
@@ -606,7 +606,7 @@ impl TuiApp {
                 continuation_of: Some(continuation_of),
                 model_target,
                 request_config: self.core.config.request_runtime_config(),
-                reasoning_effort: self.core.config.reasoning_effort,
+                reasoning_effort: self.core.config.reasoning_effort.clone(),
                 permission_overrides: None,
                 permissions: self.core.permissions.snapshot(),
                 rewind_history_idx: None,
@@ -644,7 +644,7 @@ impl TuiApp {
             continuation_of: None,
             model_target,
             request_config: self.core.config.request_runtime_config(),
-            reasoning_effort: self.core.config.reasoning_effort,
+            reasoning_effort: self.core.config.reasoning_effort.clone(),
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
             rewind_history_idx,
@@ -805,7 +805,7 @@ impl TuiApp {
         self.conversation.record_started_turn(
             turn_id,
             self.core.config.mode.clone(),
-            turn.reasoning_effort,
+            turn.reasoning_effort.clone(),
         );
 
         let permissions = turn.permissions.clone();
@@ -1069,7 +1069,7 @@ impl TuiApp {
             continuation_of: None,
             model_target,
             request_config,
-            reasoning_effort: self.core.config.reasoning_effort,
+            reasoning_effort: self.core.config.reasoning_effort.clone(),
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
             rewind_history_idx: None,
@@ -1122,7 +1122,7 @@ impl TuiApp {
     fn resolve_command_model_target(
         &mut self,
         overrides: &smelt_core::custom_commands::CommandOverrides,
-    ) -> Option<protocol::ModelTarget> {
+    ) -> Option<(protocol::ModelTarget, protocol::ModelCatalogMetadata)> {
         let target_model = overrides.model.as_deref();
         let target_provider = overrides.provider.as_deref();
         let resolved = match (target_model, target_provider) {
@@ -1135,7 +1135,15 @@ impl TuiApp {
                 &self.core.config.available_models,
                 provider,
             ),
-            (None, None) => return self.resolve_model_target(),
+            (None, None) => {
+                let catalog = self
+                    .core
+                    .config
+                    .active_model()
+                    .map(|model| model.catalog.clone())
+                    .unwrap_or_default();
+                return self.resolve_model_target().map(|target| (target, catalog));
+            }
         };
         let resolved = match resolved {
             Ok(model) => model.clone(),
@@ -1148,7 +1156,7 @@ impl TuiApp {
             }
         };
         let api_key = self.resolve_api_key_for_env(&resolved.api_key_env)?;
-        Some(resolved.target(api_key))
+        Some((resolved.target(api_key), resolved.catalog))
     }
 
     pub(crate) fn begin_command_request_turn(
@@ -1165,7 +1173,30 @@ impl TuiApp {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
-        let mut model_target = self.resolve_command_model_target(&overrides)?;
+        let (mut model_target, model_catalog) = self.resolve_command_model_target(&overrides)?;
+        let reasoning = if let Some(label) = overrides.reasoning_effort.as_deref() {
+            let Some(effort) = protocol::ReasoningEffort::parse(label) else {
+                self.notify_operation_error_sticky(
+                    NotificationOperation::TurnStart,
+                    "reasoning effort must not be empty".into(),
+                );
+                return None;
+            };
+            if !model_catalog.supports_reasoning_effort(&effort) {
+                self.notify_operation_error_sticky(
+                    NotificationOperation::TurnStart,
+                    format!(
+                        "reasoning effort '{}' is not supported by model '{}'",
+                        effort.label(),
+                        model_target.model
+                    ),
+                );
+                return None;
+            }
+            effort
+        } else {
+            model_catalog.reconcile_reasoning_effort(self.core.config.reasoning_effort.clone())
+        };
         let (kind, continuation_of) = match start {
             CommandTurnStart::Fresh => (smelt_store::TurnKind::Command, None),
             CommandTurnStart::ContinueFromLast => (
@@ -1210,17 +1241,6 @@ impl TuiApp {
             self.model_history_source()
         };
         self.publish_turn_input(submitted);
-
-        let reasoning = overrides
-            .reasoning_effort
-            .as_deref()
-            .map(|s| match s.to_lowercase().as_str() {
-                "low" => protocol::ReasoningEffort::Low,
-                "medium" => protocol::ReasoningEffort::Medium,
-                "high" => protocol::ReasoningEffort::High,
-                _ => protocol::ReasoningEffort::Off,
-            })
-            .unwrap_or(self.core.config.reasoning_effort);
 
         let model_config_overrides = {
             let o = &overrides;

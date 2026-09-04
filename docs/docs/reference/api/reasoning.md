@@ -11,10 +11,8 @@ Reasoning-effort selector. `smelt.reasoning.current()` reads the active effort, 
 ## `smelt.reasoning.current`
 
 ```lua
-fun(): smelt.reasoning.Effort
+fun(): string
 ```
-
-Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
@@ -35,22 +33,28 @@ cycle is empty.
 ## `smelt.reasoning.cycle_list`
 
 ```lua
-fun(): smelt.reasoning.Effort[]
+fun(): string[]
 ```
-
-Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return the configured reasoning-effort cycle.
 
+## `smelt.reasoning.known_list`
+
+```lua
+fun(): string[]
+```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return the reasoning-effort labels known by this smelt version. Models may advertise additional labels.
+
 ## `smelt.reasoning.set`
 
 ```lua
-fun(effort: smelt.reasoning.Effort): nil
+fun(effort: string): nil
 ```
-
-Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 

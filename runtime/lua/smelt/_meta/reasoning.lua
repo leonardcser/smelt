@@ -9,7 +9,7 @@
 local reasoning = {}
 
 --- Return the active reasoning effort.
----@type fun(): smelt.reasoning.Effort
+---@type fun(): string
 reasoning.current = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
@@ -21,12 +21,16 @@ reasoning.current = nil
 reasoning.cycle = nil
 
 --- Return the configured reasoning-effort cycle.
----@type fun(): smelt.reasoning.Effort[]
+---@type fun(): string[]
 reasoning.cycle_list = nil
+
+--- Return the reasoning-effort labels known by this smelt version. Models may advertise additional labels.
+---@type fun(): string[]
+reasoning.known_list = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.
----@type fun(effort: smelt.reasoning.Effort): nil
+---@type fun(effort: string): nil
 reasoning.set = nil
 
 return reasoning

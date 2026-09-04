@@ -47,7 +47,10 @@ pub use message::{
     TOOL_METADATA_MAX_KEY_BYTES, TOOL_METADATA_MAX_NODES,
 };
 pub use mode::{AgentMode, ReasoningEffort};
-pub use model::{ModelConfig, ModelMetadata, ModelTarget, RequestAuditMode, RequestRuntimeConfig};
+pub use model::{
+    ModelCatalogMetadata, ModelConfig, ModelMetadata, ModelTarget, RequestAuditMode,
+    RequestRuntimeConfig,
+};
 pub use note::{
     context_note, mode_change_note, process_status_note, CONTEXT_NOTE_PREFIX, MODE_NOTE_PREFIX,
     PROCESS_STATUS_NOTE_PREFIX,

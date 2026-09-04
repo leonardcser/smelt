@@ -623,6 +623,7 @@ impl TestApp {
                 mode: meta.mode.clone(),
                 reasoning_effort: meta
                     .reasoning_effort
+                    .as_ref()
                     .map(|effort| effort.label().to_string()),
                 model: meta.model.clone(),
                 fast_mode: meta.fast_mode,

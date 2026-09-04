@@ -703,6 +703,7 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
         api_key_env: String::new(),
         provider_type: "openai".into(),
         config: protocol::ModelConfig::default(),
+        catalog: protocol::ModelCatalogMetadata::default(),
     });
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.push_assistant_text("a1");
@@ -952,6 +953,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
         api_key_env: String::new(),
         provider_type: "openai".into(),
         config: protocol::ModelConfig::default(),
+        catalog: protocol::ModelCatalogMetadata::default(),
     });
     app.set_context_window(Some(200));
     let mut settings = app.core_probe().config.settings.clone();

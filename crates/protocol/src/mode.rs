@@ -1,6 +1,6 @@
 //! Agent modes and reasoning effort levels.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -66,43 +66,85 @@ impl std::fmt::Display for AgentMode {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub enum ReasoningEffort {
     #[default]
     Off,
     Low,
     Medium,
     High,
+    XHigh,
     Max,
+    Ultra,
+    /// A non-empty provider-defined effort label unknown to this client.
+    Custom(String),
 }
 
 impl ReasoningEffort {
-    /// Parse from a string label.
+    pub const KNOWN: &'static [Self] = &[
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::Ultra,
+    ];
+
+    /// Parse a known or provider-defined string label.
     pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
+        let label = s.trim();
+        if label.is_empty() {
+            return None;
+        }
+        match label.to_ascii_lowercase().as_str() {
             "off" => Some(Self::Off),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
-            _ => None,
+            "ultra" => Some(Self::Ultra),
+            _ => Some(Self::Custom(label.to_string())),
         }
     }
 
-    /// Parse a list of effort labels into enum values, skipping unknown ones.
+    /// Parse a list of non-empty effort labels.
     pub fn parse_list(items: &[String]) -> Vec<Self> {
         items.iter().filter_map(|s| Self::parse(s)).collect()
     }
 
-    pub fn label(self) -> &'static str {
+    /// Return the exact value sent to providers.
+    pub fn label(&self) -> &str {
         match self {
             Self::Off => "off",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
+            Self::Custom(label) => label,
         }
+    }
+}
+
+impl Serialize for ReasoningEffort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        Self::parse(&label).ok_or_else(|| D::Error::custom("reasoning effort must not be empty"))
     }
 }
 
@@ -177,7 +219,15 @@ mod tests {
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(ReasoningEffort::parse("high"), Some(ReasoningEffort::High));
+        assert_eq!(
+            ReasoningEffort::parse("xhigh"),
+            Some(ReasoningEffort::XHigh)
+        );
         assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
+        assert_eq!(
+            ReasoningEffort::parse("ultra"),
+            Some(ReasoningEffort::Ultra)
+        );
     }
 
     #[test]
@@ -190,17 +240,25 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_parse_rejects_unknown() {
-        assert_eq!(ReasoningEffort::parse("extreme"), None);
+    fn reasoning_effort_parse_preserves_custom_labels_and_rejects_empty() {
+        assert_eq!(
+            ReasoningEffort::parse("extreme"),
+            Some(ReasoningEffort::Custom("extreme".into()))
+        );
         assert_eq!(ReasoningEffort::parse(""), None);
+        assert_eq!(ReasoningEffort::parse("  "), None);
     }
 
     #[test]
-    fn reasoning_effort_parse_list_filters_unknown() {
-        let items = vec!["low".into(), "?".into(), "MAX".into()];
+    fn reasoning_effort_parse_list_preserves_custom_labels() {
+        let items = vec!["low".into(), "provider-special".into(), "MAX".into()];
         assert_eq!(
             ReasoningEffort::parse_list(&items),
-            vec![ReasoningEffort::Low, ReasoningEffort::Max]
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Custom("provider-special".into()),
+                ReasoningEffort::Max,
+            ]
         );
     }
 
@@ -211,9 +269,26 @@ mod tests {
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::XHigh,
             ReasoningEffort::Max,
+            ReasoningEffort::Ultra,
         ] {
-            assert_eq!(ReasoningEffort::parse(e.label()), Some(e));
+            assert_eq!(ReasoningEffort::parse(e.label()), Some(e.clone()));
+            assert_eq!(
+                serde_json::to_value(&e).unwrap(),
+                serde_json::json!(e.label())
+            );
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(serde_json::json!(e.label())).unwrap(),
+                e
+            );
         }
+
+        let custom = ReasoningEffort::Custom("provider-special".into());
+        assert_eq!(
+            serde_json::from_value::<ReasoningEffort>(serde_json::to_value(&custom).unwrap())
+                .unwrap(),
+            custom
+        );
     }
 }

@@ -29,10 +29,13 @@ pub struct CodexTokens {
 pub struct CodexModel {
     pub slug: String,
     pub display_name: String,
-    pub description: Option<String>,
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_fast_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning: Option<bool>,
+    #[serde(flatten)]
+    pub catalog: protocol::ModelCatalogMetadata,
 }
 
 impl From<CodexModel> for protocol::ModelMetadata {
@@ -42,8 +45,9 @@ impl From<CodexModel> for protocol::ModelMetadata {
             display_name: Some(model.display_name),
             context_window: model.context_window,
             max_output_tokens: None,
-            supports_reasoning: None,
+            supports_reasoning: model.supports_reasoning,
             supports_fast_mode: model.supports_fast_mode,
+            catalog: model.catalog,
             input_modalities: None,
         }
     }
@@ -457,6 +461,59 @@ fn model_supports_fast_mode(model: &serde_json::Value) -> bool {
             .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
 }
 
+fn model_reasoning_efforts(model: &serde_json::Value) -> Vec<protocol::ReasoningEffort> {
+    model["supported_reasoning_levels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|level| level["effort"].as_str().or_else(|| level.as_str()))
+        .filter_map(protocol::ReasoningEffort::parse)
+        .collect()
+}
+
+pub fn parse_models_response(data: &serde_json::Value) -> Result<Vec<CodexModel>, String> {
+    let models = data["models"]
+        .as_array()
+        .ok_or("missing 'models' key in response")?;
+    let mut result: Vec<(i64, CodexModel)> = models
+        .iter()
+        .filter_map(|model| {
+            let slug = model["slug"].as_str()?.to_string();
+            let display_name = model["display_name"].as_str().unwrap_or(&slug).to_string();
+            let description = model["description"].as_str().map(str::to_string);
+            let context_window = model["context_window"].as_u64().map(|v| v as u32);
+            let show_in_picker = model["visibility"].as_str() == Some("list");
+            let priority = model["priority"].as_i64().unwrap_or(999);
+            let supports_fast_mode = Some(model_supports_fast_mode(model));
+            let supports_reasoning = model["supported_reasoning_levels"]
+                .as_array()
+                .map(|levels| !levels.is_empty());
+            let default_reasoning_effort = model["default_reasoning_level"]
+                .as_str()
+                .and_then(protocol::ReasoningEffort::parse);
+            let supported_reasoning_efforts = model_reasoning_efforts(model);
+            Some((
+                priority,
+                CodexModel {
+                    slug,
+                    display_name,
+                    context_window,
+                    supports_fast_mode,
+                    supports_reasoning,
+                    catalog: protocol::ModelCatalogMetadata {
+                        description,
+                        show_in_picker,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
+                    },
+                },
+            ))
+        })
+        .collect();
+    result.sort_by_key(|(priority, _)| *priority);
+    Ok(result.into_iter().map(|(_, model)| model).collect())
+}
+
 pub async fn fetch_models(
     client: &reqwest::Client,
     access_token: &str,
@@ -488,34 +545,7 @@ pub async fn fetch_models(
         .json()
         .await
         .map_err(|e| format!("bad models response: {e}"))?;
-    let models = data["models"]
-        .as_array()
-        .ok_or("missing 'models' key in response")?;
-
-    let mut result: Vec<(i64, CodexModel)> = models
-        .iter()
-        .filter_map(|m| {
-            let slug = m["slug"].as_str()?.to_string();
-            let display_name = m["display_name"].as_str().unwrap_or(&slug).to_string();
-            let description = m["description"].as_str().map(str::to_string);
-            let context_window = m["context_window"].as_u64().map(|v| v as u32);
-            let visibility = m["visibility"].as_str().unwrap_or("none");
-            let priority = m["priority"].as_i64().unwrap_or(999);
-            let supports_fast_mode = Some(model_supports_fast_mode(m));
-            (visibility == "list").then_some((
-                priority,
-                CodexModel {
-                    slug,
-                    display_name,
-                    description,
-                    context_window,
-                    supports_fast_mode,
-                },
-            ))
-        })
-        .collect();
-    result.sort_by_key(|(priority, _)| *priority);
-    Ok(result.into_iter().map(|(_, model)| model).collect())
+    parse_models_response(&data)
 }
 
 async fn fetch_latest_release_version(client: &reqwest::Client) -> Result<String, String> {
@@ -798,6 +828,78 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_and_cache_retain_hidden_models_and_reasoning_metadata() {
+        let models = parse_models_response(&serde_json::json!({
+            "models": [
+                {
+                    "slug": "visible",
+                    "display_name": "Visible",
+                    "visibility": "list",
+                    "priority": 2,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "low"},
+                        {"effort": "high"}
+                    ]
+                },
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "visibility": "hide",
+                    "priority": 1,
+                    "context_window": 272000,
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [
+                        {"effort": "low"},
+                        {"effort": "medium"},
+                        {"effort": "high"},
+                        {"effort": "xhigh"},
+                        {"effort": "max"},
+                        {"effort": "ultra"}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-6-astra", "visible"]
+        );
+        let astra = &models[0];
+        assert!(!astra.catalog.show_in_picker);
+        assert_eq!(astra.context_window, Some(272_000));
+        assert_eq!(astra.supports_reasoning, Some(true));
+        assert_eq!(
+            astra.catalog.default_reasoning_effort,
+            Some(protocol::ReasoningEffort::Low)
+        );
+        assert_eq!(
+            astra.catalog.supported_reasoning_efforts,
+            vec![
+                protocol::ReasoningEffort::Low,
+                protocol::ReasoningEffort::Medium,
+                protocol::ReasoningEffort::High,
+                protocol::ReasoningEffort::XHigh,
+                protocol::ReasoningEffort::Max,
+                protocol::ReasoningEffort::Ultra,
+            ]
+        );
+        assert!(models[1].catalog.show_in_picker);
+
+        let cached: Vec<CodexModel> =
+            serde_json::from_value(serde_json::to_value(&models).unwrap()).unwrap();
+        assert!(!cached[0].catalog.show_in_picker);
+        assert_eq!(
+            cached[0].catalog.supported_reasoning_efforts,
+            astra.catalog.supported_reasoning_efforts
+        );
+    }
+
+    #[test]
     fn model_fast_capability_accepts_current_and_legacy_catalog_fields() {
         assert!(model_supports_fast_mode(&serde_json::json!({
             "service_tiers": [{
@@ -826,5 +928,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(model.supports_fast_mode, None);
+        assert_eq!(model.supports_reasoning, None);
+        assert_eq!(
+            model.catalog.description.as_deref(),
+            Some("Latest frontier agentic coding model.")
+        );
+        assert!(model.catalog.show_in_picker);
+        assert_eq!(model.catalog.default_reasoning_effort, None);
+        assert!(model.catalog.supported_reasoning_efforts.is_empty());
     }
 }

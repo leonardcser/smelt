@@ -500,6 +500,7 @@ impl TuiApp {
             .config
             .active_model()
             .map(|model| model.key.clone());
+        let old_reasoning = self.core.config.reasoning_effort.clone();
         self.core.config.revision = self.core.config.revision.wrapping_add(1);
         self.core.config.set_model_selection(
             smelt_core::ModelSelectionState {
@@ -534,6 +535,9 @@ impl TuiApp {
                     system_prompt: self.assemble_system_prompt(),
                 });
             }
+        }
+        if self.core.config.reasoning_effort != old_reasoning {
+            self.publish_reasoning_effort_change();
         }
         self.core.engine.send(UiCommand::SetFastMode {
             enabled: self.fast_mode_active(),
@@ -741,24 +745,8 @@ impl TuiApp {
         }
     }
 
-    /// `record=false` skips the `recent.json` write so session
-    /// resume doesn't overwrite the user's last explicit pick.
-    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort, record: bool) {
-        if self.core.config.reasoning_effort == effort {
-            return;
-        }
-        if record && self.block_read_only_mutation("change read-only session reasoning effort") {
-            return;
-        }
-        self.core.config.revision = self.core.config.revision.wrapping_add(1);
-        self.core.config.reasoning_effort = effort;
-        if record {
-            self.update_session_persist_metadata();
-        }
-        if record && self.core.config.remember.reasoning_effort {
-            let result = self.core.recent.set_reasoning_effort(effort);
-            self.warn_if_recent_write_failed("reasoning effort", result);
-        }
+    fn publish_reasoning_effort_change(&mut self) {
+        let effort = self.core.config.reasoning_effort.clone();
         self.core
             .signals
             .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));
@@ -768,6 +756,43 @@ impl TuiApp {
         self.core
             .engine
             .send(UiCommand::SetReasoningEffort { effort });
+    }
+
+    /// `record=false` skips the `recent.json` write so session
+    /// resume doesn't overwrite the user's last explicit pick.
+    pub(crate) fn set_reasoning_effort(
+        &mut self,
+        effort: ReasoningEffort,
+        record: bool,
+    ) -> Result<(), String> {
+        let effort = match self.core.config.active_model() {
+            Some(model) if record && !model.catalog.supports_reasoning_effort(&effort) => {
+                return Err(format!(
+                    "reasoning effort '{}' is not supported by model '{}'",
+                    effort.label(),
+                    model.key
+                ));
+            }
+            Some(model) if !record => model.catalog.reconcile_reasoning_effort(effort),
+            _ => effort,
+        };
+        if self.core.config.reasoning_effort == effort {
+            return Ok(());
+        }
+        if record && self.block_read_only_mutation("change read-only session reasoning effort") {
+            return Ok(());
+        }
+        self.core.config.revision = self.core.config.revision.wrapping_add(1);
+        self.core.config.reasoning_effort = effort.clone();
+        if record {
+            self.update_session_persist_metadata();
+        }
+        if record && self.core.config.remember.reasoning_effort {
+            let result = self.core.recent.set_reasoning_effort(effort.clone());
+            self.warn_if_recent_write_failed("reasoning effort", result);
+        }
+        self.publish_reasoning_effort_change();
+        Ok(())
     }
 }
 
@@ -1000,12 +1025,56 @@ mod tests {
         app.start_turn(1);
 
         app.app
-            .set_reasoning_effort(protocol::ReasoningEffort::High, false);
+            .set_reasoning_effort(protocol::ReasoningEffort::High, false)
+            .unwrap();
         assert!(app.app.reasoning_effort_pending());
 
         app.app
-            .set_reasoning_effort(protocol::ReasoningEffort::Off, false);
+            .set_reasoning_effort(protocol::ReasoningEffort::Off, false)
+            .unwrap();
         assert!(!app.app.reasoning_effort_pending());
+    }
+
+    #[test]
+    fn restored_reasoning_is_reconciled_to_the_active_model() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut active = app
+            .app
+            .core
+            .config
+            .active_model()
+            .expect("test app has an active model")
+            .clone();
+        active.catalog.default_reasoning_effort = Some(protocol::ReasoningEffort::Low);
+        active.catalog.supported_reasoning_efforts = vec![
+            protocol::ReasoningEffort::Low,
+            protocol::ReasoningEffort::High,
+        ];
+        app.replace_active_model_for_harness(active);
+        app.app.core.config.reasoning_effort = protocol::ReasoningEffort::High;
+        let _ = app.drain_engine_sends();
+
+        app.app
+            .set_reasoning_effort(protocol::ReasoningEffort::Ultra, false)
+            .unwrap();
+
+        assert_eq!(
+            app.app.core.config.reasoning_effort,
+            protocol::ReasoningEffort::Low
+        );
+        let commands = app.drain_engine_sends();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            protocol::UiCommand::SetReasoningEffort {
+                effort: protocol::ReasoningEffort::Low,
+            }
+        )));
+        assert!(commands.iter().all(|command| !matches!(
+            command,
+            protocol::UiCommand::SetReasoningEffort {
+                effort: protocol::ReasoningEffort::Ultra,
+            }
+        )));
     }
 
     #[test]
@@ -1028,6 +1097,7 @@ mod tests {
                 api_key_env: "NEW_KEY".into(),
                 provider_type: "openai".into(),
                 config: smelt_core::config::ModelConfig::default(),
+                catalog: protocol::ModelCatalogMetadata::default(),
             },
             smelt_core::config::ResolvedModel {
                 key: "old/old-model".into(),
@@ -1038,6 +1108,7 @@ mod tests {
                 api_key_env: "OLD_KEY".into(),
                 provider_type: "openai".into(),
                 config: smelt_core::config::ModelConfig::default(),
+                catalog: protocol::ModelCatalogMetadata::default(),
             },
         ];
         let old_identity = app.app.active_context_token_identity();
@@ -1082,6 +1153,7 @@ mod tests {
             api_key_env: "NEW_KEY".into(),
             provider_type: "openai".into(),
             config: smelt_core::config::ModelConfig::default(),
+            catalog: protocol::ModelCatalogMetadata::default(),
         }];
         let old_identity = app.app.active_context_token_identity();
         app.app

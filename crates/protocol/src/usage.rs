@@ -85,13 +85,19 @@ pub struct ThinkingBudgets {
 
 impl ThinkingBudgets {
     /// Budget for a specific reasoning effort level.
+    ///
+    /// Extended and provider-defined labels have no numeric equivalent, so
+    /// budget-based providers receive the configured maximum budget.
     pub fn for_effort(&self, effort: crate::ReasoningEffort) -> u32 {
         match effort {
             crate::ReasoningEffort::Off => 0,
             crate::ReasoningEffort::Low => self.low,
             crate::ReasoningEffort::Medium => self.medium,
             crate::ReasoningEffort::High => self.high,
-            crate::ReasoningEffort::Max => self.max,
+            crate::ReasoningEffort::XHigh
+            | crate::ReasoningEffort::Max
+            | crate::ReasoningEffort::Ultra
+            | crate::ReasoningEffort::Custom(_) => self.max,
         }
     }
 }
@@ -230,6 +236,27 @@ mod tests {
         assert!(u.context_tokens.is_none());
         assert!(u.prompt_tokens.is_none());
         assert!(u.completion_tokens.is_none());
+    }
+
+    // ---- ThinkingBudgets ----
+
+    #[test]
+    fn extended_and_custom_reasoning_efforts_use_the_maximum_numeric_budget() {
+        let budgets = ThinkingBudgets {
+            low: 1,
+            medium: 2,
+            high: 3,
+            max: 4,
+        };
+
+        for effort in [
+            crate::ReasoningEffort::XHigh,
+            crate::ReasoningEffort::Max,
+            crate::ReasoningEffort::Ultra,
+            crate::ReasoningEffort::Custom("persistent".into()),
+        ] {
+            assert_eq!(budgets.for_effort(effort), 4);
+        }
     }
 
     // ---- ModelConfigOverrides ----

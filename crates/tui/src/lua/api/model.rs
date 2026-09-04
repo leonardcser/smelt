@@ -57,7 +57,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let host = LuaMod::extend_supported(lua, m.tbl.clone(), "smelt.model", Tier::Host);
     host.fn_(
         "list",
-        "Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.",
+        "Return picker-visible `{ key, name, display_name?, provider, api_base, provider_type }` records. Hidden catalog models remain selectable by explicit key.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
@@ -65,7 +65,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 core.config.available_models.clone()
             })
             .unwrap_or_default();
-            for (index, model) in models.into_iter().enumerate() {
+            for (index, model) in models
+                .into_iter()
+                .filter(|model| model.catalog.show_in_picker)
+                .enumerate()
+            {
                 let entry = lua.create_table()?;
                 entry.set("key", model.key)?;
                 entry.set("name", model.model_name)?;

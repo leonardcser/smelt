@@ -47,6 +47,7 @@ fn partial_model_command_tab_then_enter_opens_model_picker() {
         api_key_env: "ANTHROPIC_API_KEY".into(),
         provider_type: "anthropic".into(),
         config: protocol::ModelConfig::default(),
+        catalog: protocol::ModelCatalogMetadata::default(),
     }]);
 
     app.type_text("/mode");
@@ -68,6 +69,68 @@ fn partial_model_command_tab_then_enter_opens_model_picker() {
         !frame.contains("[test/test-model]"),
         "the submitted command's argument placeholder remained visible:\n{frame}"
     );
+}
+
+#[test]
+fn hidden_catalog_model_stays_out_of_picker_but_can_be_selected_explicitly() {
+    let mut app = TestApp::builder().build();
+    let model =
+        |name: &str, display_name: &str, show_in_picker: bool| smelt_core::config::ResolvedModel {
+            key: format!("codex/{name}"),
+            provider_name: "codex".into(),
+            model_name: name.into(),
+            display_name: Some(display_name.into()),
+            api_base: "https://chatgpt.com/backend-api/codex/responses".into(),
+            api_key_env: String::new(),
+            provider_type: "codex".into(),
+            config: protocol::ModelConfig::default(),
+            catalog: protocol::ModelCatalogMetadata {
+                show_in_picker,
+                ..Default::default()
+            },
+        };
+    app.set_available_models(vec![
+        model("gpt-6-astra", "GPT-6-Astra", false),
+        model("visible", "Visible Model", true),
+    ]);
+
+    app.type_text("/model");
+    app.press(KeyCode::Enter);
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("Visible Model"),
+        "visible model missing:\n{frame}"
+    );
+    assert!(
+        !frame.contains("GPT-6-Astra"),
+        "hidden model leaked into picker:\n{frame}"
+    );
+
+    app.press(KeyCode::Esc);
+    app.type_text("/model codex/gpt-6-astra");
+    app.press(KeyCode::Enter);
+    assert_eq!(
+        app.core_probe()
+            .config
+            .active_model()
+            .map(|model| model.key.as_str()),
+        Some("codex/gpt-6-astra")
+    );
+}
+
+#[test]
+fn reasoning_slash_command_accepts_extended_levels() {
+    let mut app = TestApp::builder().build();
+
+    for (label, expected) in [
+        ("xhigh", protocol::ReasoningEffort::XHigh),
+        ("max", protocol::ReasoningEffort::Max),
+        ("ultra", protocol::ReasoningEffort::Ultra),
+    ] {
+        app.type_text(&format!("/reasoning {label}"));
+        app.press(KeyCode::Enter);
+        assert_eq!(app.core_probe().config.reasoning_effort, expected);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

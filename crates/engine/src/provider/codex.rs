@@ -604,17 +604,34 @@ mod tests {
         let meta: protocol::ModelMetadata = CodexModel {
             slug: "codex-mini".into(),
             display_name: "Codex Mini".into(),
-            description: Some("desc".into()),
             context_window: Some(1234),
             supports_fast_mode: Some(true),
+            supports_reasoning: Some(true),
+            catalog: protocol::ModelCatalogMetadata {
+                description: Some("desc".into()),
+                show_in_picker: false,
+                default_reasoning_effort: Some(protocol::ReasoningEffort::Low),
+                supported_reasoning_efforts: vec![
+                    protocol::ReasoningEffort::Low,
+                    protocol::ReasoningEffort::XHigh,
+                ],
+            },
         }
         .into();
 
         assert_eq!(meta.id, "codex-mini");
         assert_eq!(meta.display_name.as_deref(), Some("Codex Mini"));
         assert_eq!(meta.context_window, Some(1234));
-        assert_eq!(meta.supports_reasoning, None);
+        assert_eq!(meta.supports_reasoning, Some(true));
         assert_eq!(meta.supports_fast_mode, Some(true));
+        assert!(!meta.catalog.show_in_picker);
+        assert_eq!(
+            meta.catalog.supported_reasoning_efforts,
+            vec![
+                protocol::ReasoningEffort::Low,
+                protocol::ReasoningEffort::XHigh,
+            ]
+        );
     }
 
     #[test]

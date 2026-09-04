@@ -108,6 +108,7 @@ impl AppStoryCtx {
                 name: Some("test-model".into()),
                 ..Default::default()
             },
+            catalog: protocol::ModelCatalogMetadata::default(),
         };
         self.app.use_model(model);
     }
@@ -528,6 +529,7 @@ impl AppStoryCtx {
                             name: Some((*model).to_string()),
                             ..Default::default()
                         },
+                        catalog: protocol::ModelCatalogMetadata::default(),
                     },
                 )
                 .collect(),

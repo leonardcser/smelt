@@ -1731,15 +1731,16 @@ impl TuiApp {
                 self.set_mode(mode, false);
             }
         }
-        if self.core.startup_overrides.reasoning_effort.is_none() {
-            if let Some(effort) = loaded.reasoning_effort {
-                self.set_reasoning_effort(effort, false);
-            }
-        }
         // Only restore model/API settings if not overridden by CLI.
         if !self.core.startup_overrides.fixes_model_selection() {
             if let Some(ref model_key) = loaded.model {
                 self.restore_session_model(&loaded.id, model_key);
+            }
+        }
+        if self.core.startup_overrides.reasoning_effort.is_none() {
+            if let Some(effort) = loaded.reasoning_effort.clone() {
+                self.set_reasoning_effort(effort, false)
+                    .expect("restored reasoning reconciliation cannot fail");
             }
         }
 
@@ -1808,14 +1809,15 @@ impl TuiApp {
                 self.set_mode(mode, false);
             }
         }
-        if self.core.startup_overrides.reasoning_effort.is_none() {
-            if let Some(effort) = loaded.reasoning_effort {
-                self.set_reasoning_effort(effort, false);
-            }
-        }
         if !self.core.startup_overrides.fixes_model_selection() {
             if let Some(ref model_key) = loaded.model {
                 self.restore_session_model(&loaded.id, model_key);
+            }
+        }
+        if self.core.startup_overrides.reasoning_effort.is_none() {
+            if let Some(effort) = loaded.reasoning_effort.clone() {
+                self.set_reasoning_effort(effort, false)
+                    .expect("restored reasoning reconciliation cannot fail");
             }
         }
 
@@ -2171,7 +2173,7 @@ impl TuiApp {
         crate::app::session_document::RuntimeSessionMetadata {
             updated_at_ms: session::now_ms(),
             mode: self.core.config.mode.as_str().to_string(),
-            reasoning_effort: self.core.config.reasoning_effort,
+            reasoning_effort: self.core.config.reasoning_effort.clone(),
             model: self.current_model_key(),
             fast_mode: self.fast_mode(),
         }

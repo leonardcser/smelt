@@ -34,7 +34,7 @@
 smelt.defaults.set({
   model = nil,             -- example: "openai/gpt-5.5"
   mode = nil,              -- possible: "normal", "plan", "apply", "yolo"
-  reasoning_effort = nil,  -- possible: "off", "low", "medium", "high", "max"
+  reasoning_effort = nil,  -- possible: "off", "low", "medium", "high", "xhigh", "max", "ultra"
 })
 
 -- Remember last-used startup choices from recent.json.

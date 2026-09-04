@@ -1160,7 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn codex_http_request_normalizes_endpoint_and_emits_one_based_attempts() {
         let (body, _headers, attempts) = capture_codex_request(false, true).await;
-        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["reasoning"]["effort"], "max");
         assert_eq!(attempts, vec![1]);
     }
 

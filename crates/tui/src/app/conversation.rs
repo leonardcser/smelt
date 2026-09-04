@@ -170,12 +170,12 @@ impl ConversationRuntime {
 
     pub(crate) fn install_startup_runtime(&mut self, runtime: &smelt_core::RuntimeState) {
         self.session.mode = Some(runtime.mode.as_str().to_string());
-        self.session.reasoning_effort = Some(runtime.reasoning_effort);
+        self.session.reasoning_effort = Some(runtime.reasoning_effort.clone());
         self.session.model = runtime.active_model().map(|model| model.key.clone());
         self.session.fast_mode = Some(runtime.settings.fast_mode);
         self.turn.set_applied_mode(runtime.mode.clone());
         self.turn
-            .set_applied_reasoning_effort(runtime.reasoning_effort);
+            .set_applied_reasoning_effort(runtime.reasoning_effort.clone());
     }
 
     pub(crate) fn transcript(&self) -> &super::transcript::TranscriptDocument {
@@ -1627,7 +1627,7 @@ impl ConversationRuntime {
         self.turn.set_applied_mode(mode);
     }
 
-    pub(crate) fn applied_reasoning_effort(&self) -> protocol::ReasoningEffort {
+    pub(crate) fn applied_reasoning_effort(&self) -> &protocol::ReasoningEffort {
         self.turn.applied_reasoning_effort()
     }
 

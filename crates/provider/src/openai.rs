@@ -46,14 +46,6 @@ fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     }
 }
 
-fn effort_label(effort: ReasoningEffort) -> String {
-    if effort == ReasoningEffort::Max {
-        "xhigh".to_string()
-    } else {
-        effort.label().to_string()
-    }
-}
-
 fn reasoning_item_without_id(data: &serde_json::Value) -> serde_json::Value {
     let mut out = data.clone();
     if let Some(obj) = out.as_object_mut() {
@@ -279,7 +271,7 @@ fn build_body_with_user_shape(
     }
     if effort != ReasoningEffort::Off {
         body["reasoning"] = serde_json::json!({
-            "effort": effort_label(effort),
+            "effort": effort.label(),
             "summary": "auto",
         });
         // Ask the server to return encrypted reasoning so we can replay it
@@ -837,25 +829,6 @@ mod tests {
         assert_eq!(u.reasoning_tokens, None);
     }
 
-    // ---- effort_label ----
-
-    #[test]
-    fn effort_label_maps_max_to_xhigh() {
-        assert_eq!(effort_label(ReasoningEffort::Max), "xhigh");
-    }
-
-    #[test]
-    fn effort_label_falls_through_for_other_levels() {
-        assert_eq!(
-            effort_label(ReasoningEffort::Low),
-            ReasoningEffort::Low.label()
-        );
-        assert_eq!(
-            effort_label(ReasoningEffort::High),
-            ReasoningEffort::High.label()
-        );
-    }
-
     // ---- build_body ----
 
     #[test]
@@ -1207,6 +1180,19 @@ mod tests {
         let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::High, &cfg());
         assert_eq!(body["reasoning"]["effort"], ReasoningEffort::High.label());
         assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn build_body_preserves_extended_reasoning_effort_labels() {
+        for effort in [
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+            ReasoningEffort::Ultra,
+            ReasoningEffort::Custom("persistent".into()),
+        ] {
+            let body = build_body(&[user("hi")], &[], "m", effort.clone(), &cfg());
+            assert_eq!(body["reasoning"]["effort"], effort.label());
+        }
     }
 
     #[test]

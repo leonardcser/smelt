@@ -183,6 +183,7 @@ fn model_switch_marks_missing_credentials_unavailable() {
         api_key_env: "SMELT_TEST_INTENTIONALLY_MISSING_MODEL_KEY_7F31A9".into(),
         provider_type: "openai-compatible".into(),
         config: protocol::ModelConfig::default(),
+        catalog: protocol::ModelCatalogMetadata::default(),
     });
     app.set_available_models(models);
 
@@ -223,7 +224,32 @@ fn add_reasoning_capable_model(app: &mut TestApp) {
     capable.provider_name = "openai".into();
     capable.model_name = "reasoning-model".into();
     capable.provider_type = "openai".into();
+    capable.catalog.supported_reasoning_efforts = vec![
+        protocol::ReasoningEffort::Off,
+        protocol::ReasoningEffort::Low,
+        protocol::ReasoningEffort::Medium,
+        protocol::ReasoningEffort::High,
+        protocol::ReasoningEffort::XHigh,
+        protocol::ReasoningEffort::Max,
+        protocol::ReasoningEffort::Ultra,
+        protocol::ReasoningEffort::Custom("persistent".into()),
+    ];
     app.set_available_models(vec![default, capable]);
+}
+
+fn add_restricted_reasoning_model(app: &mut TestApp) {
+    let current = app.core_probe().config.available_models[0].clone();
+    let mut target = current.clone();
+    target.key = "codex/restricted-model".into();
+    target.provider_name = "codex".into();
+    target.model_name = "restricted-model".into();
+    target.provider_type = "codex".into();
+    target.catalog.default_reasoning_effort = Some(protocol::ReasoningEffort::Low);
+    target.catalog.supported_reasoning_efforts = vec![
+        protocol::ReasoningEffort::Low,
+        protocol::ReasoningEffort::High,
+    ];
+    app.set_available_models(vec![current, target]);
 }
 
 #[test]
@@ -238,14 +264,83 @@ fn model_switch_updates_reasoning_levels_for_active_provider() {
         assert(levels[#levels] == "high")
         smelt.model.set("openai/reasoning-model")
         levels = smelt.reasoning.cycle_list()
-        assert(#levels == 5)
-        assert(levels[#levels] == "max")
+        assert(#levels == 8)
+        assert(levels[5] == "xhigh")
+        assert(levels[6] == "max")
+        assert(levels[7] == "ultra")
+        assert(levels[8] == "persistent")
         smelt.model.set("test/test-model")
         levels = smelt.reasoning.cycle_list()
         assert(#levels == 4)
         assert(levels[#levels] == "high")
         "#,
     ));
+}
+
+#[test]
+fn model_switch_uses_provider_default_when_current_reasoning_is_unsupported() {
+    let mut app = TestApp::builder().build();
+    add_restricted_reasoning_model(&mut app);
+
+    assert!(app.run_lua(
+        r#"
+        smelt.reasoning.set("ultra")
+        smelt.model.set("codex/restricted-model")
+        assert(smelt.reasoning.current() == "low")
+        assert(smelt.signal.get("reasoning") == "low")
+        local levels = smelt.reasoning.cycle_list()
+        assert(#levels == 2)
+        assert(levels[1] == "low")
+        assert(levels[2] == "high")
+        "#,
+    ));
+    assert_eq!(
+        app.conversation_probe().applied_reasoning_effort(),
+        &protocol::ReasoningEffort::Low
+    );
+    assert_eq!(
+        app.conversation_probe().session().reasoning_effort,
+        Some(protocol::ReasoningEffort::Low)
+    );
+    assert!(app.drain_engine_sends().iter().any(|command| matches!(
+        command,
+        protocol::UiCommand::SetReasoningEffort {
+            effort: protocol::ReasoningEffort::Low,
+        }
+    )));
+}
+
+#[test]
+fn explicit_unsupported_reasoning_is_rejected_without_mutating_state() {
+    let mut app = TestApp::builder().build();
+    add_restricted_reasoning_model(&mut app);
+    app.apply_model("codex/restricted-model", false);
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Low
+    );
+    let _ = app.drain_engine_sends();
+
+    let error = app
+        .run_lua_result(r#"smelt.reasoning.set("ultra")"#)
+        .expect_err("unsupported effort must fail");
+
+    assert!(
+        error.contains(
+            "reasoning effort 'ultra' is not supported by model 'codex/restricted-model'"
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        app.core_probe().config.reasoning_effort,
+        protocol::ReasoningEffort::Low
+    );
+    assert!(app.drain_engine_sends().iter().all(|command| !matches!(
+        command,
+        protocol::UiCommand::SetReasoningEffort {
+            effort: protocol::ReasoningEffort::Ultra,
+        }
+    )));
 }
 
 #[test]
@@ -320,6 +415,7 @@ fn restored_static_credentials_recover_without_model_reselection() {
         api_key_env: KEY_ENV.into(),
         provider_type: "openai-compatible".into(),
         config: protocol::ModelConfig::default(),
+        catalog: protocol::ModelCatalogMetadata::default(),
     });
     app.set_available_models(models);
     app.apply_model("restored/credentials", true);
@@ -556,6 +652,7 @@ async fn read_file_result(
             input_modalities: Some(modalities.iter().map(|value| (*value).into()).collect()),
             ..Default::default()
         },
+        catalog: protocol::ModelCatalogMetadata::default(),
     });
     app.start_turn(1);
     app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
@@ -699,6 +796,7 @@ fn explicit_model_switch_sends_complete_context_only_for_an_active_turn() {
             tool_calling: Some(false),
             ..Default::default()
         },
+        catalog: protocol::ModelCatalogMetadata::default(),
     });
     app.set_available_models(models);
     let _ = app.drain_engine_sends();
@@ -767,6 +865,14 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
             tool_calling: Some(false),
             ..Default::default()
         },
+        catalog: protocol::ModelCatalogMetadata {
+            default_reasoning_effort: Some(protocol::ReasoningEffort::Low),
+            supported_reasoning_efforts: vec![
+                protocol::ReasoningEffort::Low,
+                protocol::ReasoningEffort::High,
+            ],
+            ..Default::default()
+        },
     }]);
     let _ = app.drain_engine_sends();
 
@@ -799,8 +905,43 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
     assert_eq!(payload.model_target.config.output_cost, Some(3.0));
     assert_eq!(payload.model_target.config.input_cost, None);
     assert_eq!(payload.model_target.config.tool_calling, Some(false));
+    assert_eq!(payload.reasoning_effort, protocol::ReasoningEffort::Low);
     assert!(payload.request_config.redact_secrets);
     assert!(payload.request_config.cache_ttl_long);
+}
+
+#[test]
+fn custom_command_rejects_unsupported_reasoning_before_staging_turn() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_restricted_reasoning_model(&mut app);
+    let history_len = app.conversation_probe().session().history.len();
+    let transcript_len = app.conversation_probe().transcript().history().order.len();
+    let _ = app.drain_engine_sends();
+
+    assert!(!app.start_command_request_turn(
+        "custom".into(),
+        "body".into(),
+        smelt_core::custom_commands::CommandOverrides {
+            model: Some("codex/restricted-model".into()),
+            reasoning_effort: Some("ultra".into()),
+            ..Default::default()
+        },
+        crate::app::CommandTurnStart::Fresh,
+    ));
+
+    assert_eq!(
+        app.conversation_probe().session().history.len(),
+        history_len
+    );
+    assert_eq!(
+        app.conversation_probe().transcript().history().order.len(),
+        transcript_len
+    );
+    assert!(!app.state().agent_running);
+    assert!(app
+        .drain_engine_sends()
+        .iter()
+        .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 }
 
 #[test]
@@ -909,6 +1050,68 @@ fn custom_command_starts_after_replaced_synthetic_history() {
         .start_custom_command_with_lua_tool(127)
         .expect("custom command should send StartTurn after replaced synthetic history");
     assert!(payload.tools.iter().any(|t| t.name == "fuzz_custom_tool_3"));
+}
+
+#[test]
+fn engine_asks_validate_and_reconcile_reasoning_for_selected_model() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_restricted_reasoning_model(&mut app);
+    let _ = app.drain_engine_sends();
+
+    for call in [
+        r#"smelt.engine.ask({
+            system = "test",
+            model = "codex/restricted-model",
+            reasoning_effort = "ultra",
+        })"#,
+        r#"smelt.engine.ask_inherited({
+            model = "codex/restricted-model",
+            reasoning_effort = "ultra",
+        })"#,
+    ] {
+        let error = app
+            .run_lua_result(call)
+            .expect_err("unsupported ask reasoning must fail");
+        assert!(
+            error.contains("reasoning effort 'ultra' is not supported by model 'restricted-model'"),
+            "unexpected error: {error}"
+        );
+    }
+    assert!(app
+        .drain_engine_sends()
+        .iter()
+        .all(|command| !matches!(command, protocol::UiCommand::EngineAsk { .. })));
+
+    assert!(app.run_lua(
+        r#"
+        smelt.engine.ask({
+            system = "test",
+            model = "codex/restricted-model",
+        })
+        smelt.engine.ask_inherited({
+            model = "codex/restricted-model",
+        })
+        "#,
+    ));
+    let requests = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter_map(|command| match command {
+            protocol::UiCommand::EngineAsk {
+                target,
+                reasoning_effort,
+                ..
+            } => Some((target.model, reasoning_effort)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests,
+        vec![
+            ("restricted-model".into(), protocol::ReasoningEffort::Low),
+            ("restricted-model".into(), protocol::ReasoningEffort::Low),
+        ]
+    );
 }
 
 #[test]
@@ -1138,6 +1341,7 @@ async fn managed_model_refresh_notifications_follow_error_and_revision_lifecycle
             supports_reasoning: None,
             supports_fast_mode: None,
             input_modalities: None,
+            catalog: protocol::ModelCatalogMetadata::default(),
         }],
     )]);
     let after_success = app
@@ -1231,6 +1435,7 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
                 supports_reasoning: Some(true),
                 supports_fast_mode: Some(true),
                 input_modalities: Some(vec!["text".into()]),
+                catalog: protocol::ModelCatalogMetadata::default(),
             }],
             cache_warning: None,
         },
@@ -1290,6 +1495,7 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
             supports_reasoning: Some(true),
             supports_fast_mode: Some(true),
             input_modalities: Some(vec!["text".into()]),
+            catalog: protocol::ModelCatalogMetadata::default(),
         }],
     )]);
     assert_eq!(
@@ -1326,6 +1532,7 @@ fn expired_kimi_auth_preserves_selected_codex_model() {
                 supports_reasoning: Some(true),
                 supports_fast_mode: Some(true),
                 input_modalities: Some(vec!["text".into()]),
+                catalog: protocol::ModelCatalogMetadata::default(),
             }],
         ),
         (
@@ -1339,6 +1546,7 @@ fn expired_kimi_auth_preserves_selected_codex_model() {
                 supports_reasoning: Some(true),
                 supports_fast_mode: None,
                 input_modalities: Some(vec!["text".into()]),
+                catalog: protocol::ModelCatalogMetadata::default(),
             }],
         ),
     ]);

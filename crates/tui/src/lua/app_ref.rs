@@ -704,6 +704,22 @@ impl AgentLuaHost<'_> {
         started
     }
 
+    fn resolve_ask_reasoning_effort(
+        catalog: &protocol::ModelCatalogMetadata,
+        requested: Option<protocol::ReasoningEffort>,
+        model: &str,
+    ) -> Result<protocol::ReasoningEffort, String> {
+        match requested {
+            Some(effort) if catalog.supports_reasoning_effort(&effort) => Ok(effort),
+            Some(effort) => Err(format!(
+                "reasoning effort '{}' is not supported by model '{}'",
+                effort.label(),
+                model
+            )),
+            None => Ok(catalog.reconcile_reasoning_effort(protocol::ReasoningEffort::Off)),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_engine_ask(
         &mut self,
@@ -713,16 +729,18 @@ impl AgentLuaHost<'_> {
         model_reference: Option<String>,
         question: Option<String>,
         response_format: Option<protocol::AskResponseFormat>,
-        reasoning_effort: protocol::ReasoningEffort,
+        reasoning_effort: Option<protocol::ReasoningEffort>,
         stream: bool,
         visible_retries: bool,
-    ) -> bool {
+    ) -> Result<(), String> {
         if let Some(question) = question {
             messages.push(protocol::Message::user(protocol::Content::text(&question)));
         }
-        let Some(target) = self.resolve_ask_target(model_reference.as_deref()) else {
-            return false;
+        let Some((target, catalog)) = self.resolve_ask_target(model_reference.as_deref()) else {
+            return Err("no usable model is available".into());
         };
+        let reasoning_effort =
+            Self::resolve_ask_reasoning_effort(&catalog, reasoning_effort, &target.model)?;
         let request_config = self.app.core.config.request_runtime_config();
         let session_id = self.app.conversation.session().id.clone();
         let persistence = self.app.conversation.persistence_scope();
@@ -741,7 +759,7 @@ impl AgentLuaHost<'_> {
             stream,
             visible_retries,
         });
-        true
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -752,10 +770,10 @@ impl AgentLuaHost<'_> {
         model_reference: Option<String>,
         question: Option<String>,
         response_format: Option<protocol::AskResponseFormat>,
-        reasoning_effort: protocol::ReasoningEffort,
+        reasoning_effort: Option<protocol::ReasoningEffort>,
         stream: bool,
         visible_retries: bool,
-    ) -> bool {
+    ) -> Result<(), String> {
         let system = self.app.assemble_system_prompt();
         if messages.is_empty() {
             messages = self.app.model_history_messages();
@@ -763,9 +781,11 @@ impl AgentLuaHost<'_> {
         if let Some(question) = question {
             messages.push(protocol::Message::user(protocol::Content::text(&question)));
         }
-        let Some(target) = self.resolve_ask_target(model_reference.as_deref()) else {
-            return false;
+        let Some((target, catalog)) = self.resolve_ask_target(model_reference.as_deref()) else {
+            return Err("no usable model is available".into());
         };
+        let reasoning_effort =
+            Self::resolve_ask_reasoning_effort(&catalog, reasoning_effort, &target.model)?;
         let request_config = self.app.core.config.request_runtime_config();
         let session_id = self.app.conversation.session().id.clone();
         let persistence = self.app.conversation.persistence_scope();
@@ -788,15 +808,25 @@ impl AgentLuaHost<'_> {
             stream,
             visible_retries,
         });
-        true
+        Ok(())
     }
 
     fn resolve_ask_target(
         &mut self,
         model_reference: Option<&str>,
-    ) -> Option<protocol::ModelTarget> {
+    ) -> Option<(protocol::ModelTarget, protocol::ModelCatalogMetadata)> {
         let Some(reference) = model_reference else {
-            return self.app.resolve_model_target();
+            let catalog = self
+                .app
+                .core
+                .config
+                .active_model()
+                .map(|model| model.catalog.clone())
+                .unwrap_or_default();
+            return self
+                .app
+                .resolve_model_target()
+                .map(|target| (target, catalog));
         };
         let resolved = match smelt_core::config::resolve_model_ref(
             &self.app.core.config.available_models,
@@ -812,7 +842,8 @@ impl AgentLuaHost<'_> {
             }
         };
         let api_key = self.app.resolve_api_key_for_env(&resolved.api_key_env)?;
-        Some(resolved.target(api_key))
+        let catalog = resolved.catalog.clone();
+        Some((resolved.target(api_key), catalog))
     }
 
     pub(crate) fn busy_registration(&mut self, label: String) -> smelt_core::lua::reg::LuaReg {
@@ -864,8 +895,11 @@ impl AgentLuaHost<'_> {
         self.app.set_mode(mode, true);
     }
 
-    pub(crate) fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
-        self.app.set_reasoning_effort(effort, true);
+    pub(crate) fn set_reasoning_effort(
+        &mut self,
+        effort: protocol::ReasoningEffort,
+    ) -> Result<(), String> {
+        self.app.set_reasoning_effort(effort, true)
     }
 
     pub(crate) fn focus_name(&self) -> &'static str {

@@ -314,7 +314,7 @@ impl EngineProvider {
                 messages,
                 tools,
                 model,
-                effort,
+                effort: effort.clone(),
                 request_opts,
                 opts,
                 config: &config,
@@ -1206,21 +1206,29 @@ mod tests {
     }
 
     #[test]
-    fn default_reasoning_cycle_openai_compatible_excludes_max() {
-        let cycle = ProviderKind::OpenAiCompatible.default_reasoning_cycle();
-        assert!(!cycle.contains(&ReasoningEffort::Max));
-        assert!(cycle.contains(&ReasoningEffort::Off));
-        assert!(cycle.contains(&ReasoningEffort::High));
+    fn default_reasoning_cycle_openai_family_is_conservative() {
+        let expected = [
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ];
+        for kind in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAi,
+            ProviderKind::Codex,
+        ] {
+            assert_eq!(kind.default_reasoning_cycle(), expected);
+        }
     }
 
     #[test]
     fn default_reasoning_cycle_other_kinds_include_max() {
         for k in [
-            ProviderKind::OpenAi,
-            ProviderKind::Codex,
             ProviderKind::Anthropic,
             ProviderKind::AnthropicCompatible,
             ProviderKind::Copilot,
+            ProviderKind::KimiCode,
         ] {
             assert!(k.default_reasoning_cycle().contains(&ReasoningEffort::Max));
         }

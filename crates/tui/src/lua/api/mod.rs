@@ -35,7 +35,6 @@ mod work;
 
 use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
-use smelt_core::lua::api::reasoning::LuaReasoningEffort;
 use smelt_core::lua::doc::{record_module_doc, ApiClassification, Tier};
 use smelt_core::lua::module::LuaMod;
 use std::path::Path;
@@ -204,9 +203,12 @@ impl LuaRuntime {
             "set",
             "Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.",
             &["effort"],
-            |_, effort: LuaReasoningEffort| -> LuaResult<()> {
-                crate::lua::with_agent_host(|host| host.set_reasoning_effort(effort.into()));
-                Ok(())
+            |_, effort: String| -> LuaResult<()> {
+                let effort = protocol::ReasoningEffort::parse(&effort).ok_or_else(|| {
+                    LuaError::RuntimeError("reasoning effort must not be empty".into())
+                })?;
+                crate::lua::with_agent_host(|host| host.set_reasoning_effort(effort))
+                    .map_err(LuaError::RuntimeError)
             },
         )?;
         let host_root = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host);

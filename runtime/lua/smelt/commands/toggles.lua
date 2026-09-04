@@ -44,15 +44,6 @@ end, { desc = "toggle accelerated inference", args = { "on", "off", "toggle" } }
 
 -- `/reasoning` - set explicitly or show current effort.
 smelt.cmd.register("reasoning", function(arg)
-  local valid = { off = true, low = true, medium = true, high = true, max = true }
-  if arg then
-    arg = arg:lower()
-    if valid[arg] then
-      smelt.reasoning.set(arg)
-    else
-      smelt.notify.error("invalid reasoning effort: " .. arg)
-      return
-    end
-  end
+  if arg then smelt.reasoning.set(arg) end
   smelt.notify.info("reasoning effort: " .. smelt.reasoning.current())
-end, { desc = "set or show reasoning effort", args = { "off", "low", "medium", "high", "max" } })
+end, { desc = "set or show reasoning effort", args = smelt.reasoning.known_list() })

@@ -95,7 +95,7 @@
 ---@class smelt.defaults.Config
 ---@field model? string Starting model reference (`"provider/model"` or bare model name).
 ---@field mode? string Starting agent mode. Must name a registered mode.
----@field reasoning_effort? string Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`.
+---@field reasoning_effort? string Starting reasoning effort. Known labels are `"off"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, and `"ultra"`; provider-defined labels are also accepted.
 
 --- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
 --- context exposing `ctx.close()` and `ctx.resolve(value)` so the
@@ -203,7 +203,7 @@
 ---@field question? string Single-shot question appended as a final user message after `messages`.
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
----@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
+---@field reasoning_effort? string Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
 ---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
 ---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
 ---@field on_delta? fun(value: string) Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message.
@@ -220,7 +220,7 @@
 ---@field top_k? integer Top-k sampling cutoff override.
 ---@field min_p? number Minimum-probability cutoff override.
 ---@field repeat_penalty? number Repeat-penalty override.
----@field reasoning_effort? string Reasoning-effort override; one of the `smelt.reasoning.Effort` strings.
+---@field reasoning_effort? string Reasoning-effort override. Known and provider-defined string labels are accepted.
 ---@field tools? smelt.engine.RuleOverride Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn.
 ---@field [string] smelt.engine.RuleOverride Per-subcommand pattern buckets keyed by tool name.
 
@@ -231,7 +231,7 @@
 ---@field question? string Single-shot question appended as a final user message after `messages`.
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
----@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
+---@field reasoning_effort? string Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
 ---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
 ---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
 ---@field on_delta? fun(value: string) Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message.
@@ -1058,10 +1058,6 @@
 --- Decision accepted by effect-level permission rules.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.permissions.Decision "allow"|"ask"|"deny"
-
---- Reasoning effort level string literal.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.reasoning.Effort "off"|"low"|"medium"|"high"|"max"
 
 --- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

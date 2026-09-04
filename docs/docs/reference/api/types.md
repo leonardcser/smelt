@@ -143,7 +143,7 @@ Spec accepted by `smelt.defaults`.
 | --- | --- | --- | --- |
 | `model` | `string` |  | Starting model reference (`"provider/model"` or bare model name). |
 | `mode` | `string` |  | Starting agent mode. Must name a registered mode. |
-| `reasoning_effort` | `string` |  | Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`. |
+| `reasoning_effort` | `string` |  | Starting reasoning effort. Known labels are `"off"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, and `"ultra"`; provider-defined labels are also accepted. |
 
 ### `smelt.dialog.Keymap`
 
@@ -301,7 +301,7 @@ Spec for `smelt.engine.ask`.
 | `question` | `string` |  | Single-shot question appended as a final user message after `messages`. |
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
-| `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
+| `reasoning_effort` | `string` |  | Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels. |
 | `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires. |
 | `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
 | `on_delta` | `fun(value: string)` |  | Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message. |
@@ -323,7 +323,7 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 | `top_k` | `integer` |  | Top-k sampling cutoff override. |
 | `min_p` | `number` |  | Minimum-probability cutoff override. |
 | `repeat_penalty` | `number` |  | Repeat-penalty override. |
-| `reasoning_effort` | `string` |  | Reasoning-effort override; one of the `smelt.reasoning.Effort` strings. |
+| `reasoning_effort` | `string` |  | Reasoning-effort override. Known and provider-defined string labels are accepted. |
 | `tools` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn. |
 | `[string]` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-subcommand pattern buckets keyed by tool name. |
 
@@ -339,7 +339,7 @@ Spec for `smelt.engine.ask_inherited`.
 | `question` | `string` |  | Single-shot question appended as a final user message after `messages`. |
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
-| `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
+| `reasoning_effort` | `string` |  | Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels. |
 | `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires. |
 | `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
 | `on_delta` | `fun(value: string)` |  | Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message. |
@@ -1585,14 +1585,6 @@ Variants: `"press"` \| `"release"` \| `"drag"`
 Decision accepted by effect-level permission rules.
 
 Variants: `"allow"` \| `"ask"` \| `"deny"`
-
-### `smelt.reasoning.Effort`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Reasoning effort level string literal.
-
-Variants: `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"max"`
 
 ### `smelt.signal.Name`
 

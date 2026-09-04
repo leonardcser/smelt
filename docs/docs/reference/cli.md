@@ -179,8 +179,8 @@ Auto-detection:
 | ---------------------------- | ------------------------------------------------------------------------------------------------ |
 | `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`                                                 |
 | `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)                                                  |
-| `--reasoning-effort <LEVEL>` | Starting reasoning: `off`, `low`, `medium`, `high`, `max`                                        |
-| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)                                                    |
+| `--reasoning-effort <LEVEL>` | Starting reasoning. Known labels: `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; provider-defined labels are accepted |
+| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated known or provider-defined labels)                    |
 | `--no-tool-calling`          | Disable tools (chat-only)                                                                        |
 | `--system-prompt <PROMPT>`   | Override the system prompt (string or file path)                                                 |
 | `--no-system-prompt`         | Disable system prompt and AGENTS.md                                                              |
@@ -188,8 +188,11 @@ Auto-detection:
 
 Reasoning effort controls how deeply the model thinks before responding.
 Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible,
-and anthropic-compatible providers that support `reasoning_effort`. For OpenAI,
-`max` maps to `xhigh`. Models that don't support thinking ignore this setting.
+and anthropic-compatible providers that support `reasoning_effort`. Label-based
+provider APIs receive known and provider-defined labels unchanged. Budget-based
+APIs map extended or custom labels to the configured maximum thinking budget.
+Models that don't support thinking ignore this setting. Managed model metadata
+can restrict the accepted levels; an unsupported explicit level is rejected.
 
 ## Sampling
 

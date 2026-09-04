@@ -2729,7 +2729,7 @@ impl<'a> Turn<'a> {
                 wire_messages.wire(),
                 tool_defs,
                 &self.model_target.model,
-                self.reasoning_effort,
+                self.reasoning_effort.clone(),
                 &request_opts,
                 &opts,
             );

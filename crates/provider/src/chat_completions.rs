@@ -630,10 +630,15 @@ mod tests {
 
     #[test]
     fn build_body_sets_reasoning_effort_when_effort_set() {
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::High, &cfg());
-        let label = ReasoningEffort::High.label();
-        assert_eq!(body["reasoning_effort"], label);
-        assert!(body.get("chat_template_kwargs").is_none());
+        for effort in [
+            ReasoningEffort::High,
+            ReasoningEffort::Custom("persistent".into()),
+        ] {
+            let label = effort.label().to_string();
+            let body = build_body(&[user("hi")], &[], "m", effort, &cfg());
+            assert_eq!(body["reasoning_effort"], label);
+            assert!(body.get("chat_template_kwargs").is_none());
+        }
     }
 
     // ---- parse_response ----

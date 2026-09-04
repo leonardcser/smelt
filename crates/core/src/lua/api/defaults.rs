@@ -22,7 +22,7 @@ pub struct LuaDefaults {
     pub model: Option<String>,
     /// Starting agent mode. Must name a registered mode.
     pub mode: Option<String>,
-    /// Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`.
+    /// Starting reasoning effort. Known labels are `"off"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, and `"ultra"`; provider-defined labels are also accepted.
     pub reasoning_effort: Option<String>,
 }
 

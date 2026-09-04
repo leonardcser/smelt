@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::config;
 use protocol::{
-    AgentMode, ModelConfig, ModelConfigOverrides, ModelTarget, ReasoningEffort, RequestAuditMode,
-    RequestRuntimeConfig,
+    AgentMode, ModelCatalogMetadata, ModelConfig, ModelConfigOverrides, ModelTarget,
+    ReasoningEffort, RequestAuditMode, RequestRuntimeConfig,
 };
 
 /// Immutable precedence values captured from CLI and environment policy at launch.
@@ -52,7 +52,7 @@ pub enum ModelSelectionSource {
     Session,
     Remembered,
     Default,
-    /// First model in stable configuration or managed-provider priority order.
+    /// First picker-visible model in stable configuration or provider priority order.
     CatalogDefault,
     Direct,
     User,
@@ -95,6 +95,7 @@ pub struct ActiveModel {
     pub api_key_env: String,
     pub provider_type: String,
     pub config: ModelConfig,
+    pub catalog: ModelCatalogMetadata,
     pub availability: ModelAvailability,
 }
 
@@ -108,6 +109,7 @@ impl ActiveModel {
             api_key_env: model.api_key_env.clone(),
             provider_type: model.provider_type.clone(),
             config: model.config.clone(),
+            catalog: model.catalog.clone(),
             availability: ModelAvailability::Available,
         }
     }
@@ -174,8 +176,10 @@ impl RuntimeState {
         selection: ModelSelectionState,
         startup: &StartupOverrides,
     ) {
+        self.reasoning_effort =
+            reconcile_reasoning_effort(self.reasoning_effort.clone(), selection.active.as_ref());
         self.reasoning_cycle =
-            resolve_reasoning_cycle(startup, self.reasoning_effort, selection.active.as_ref());
+            resolve_reasoning_cycle(startup, &self.reasoning_effort, selection.active.as_ref());
         self.model_selection = selection;
     }
 
@@ -322,7 +326,7 @@ fn resolve_mode(inputs: &RuntimeInputs<'_>, cycle: &mut Vec<AgentMode>) -> Agent
 
 fn resolve_reasoning_cycle(
     startup: &StartupOverrides,
-    selected: ReasoningEffort,
+    selected: &ReasoningEffort,
     active: Option<&ActiveModel>,
 ) -> Vec<ReasoningEffort> {
     let fixed_cycle = startup.reasoning_cycle.is_some();
@@ -330,20 +334,34 @@ fn resolve_reasoning_cycle(
         active.map_or_else(
             || vec![ReasoningEffort::Off],
             |model| {
-                smelt_provider::ProviderKind::from_config_and_url(
-                    &model.provider_type,
-                    &model.api_base,
-                )
-                .default_reasoning_cycle()
-                .to_vec()
+                if model.catalog.supported_reasoning_efforts.is_empty() {
+                    smelt_provider::ProviderKind::from_config_and_url(
+                        &model.provider_type,
+                        &model.api_base,
+                    )
+                    .default_reasoning_cycle()
+                    .to_vec()
+                } else {
+                    model.catalog.supported_reasoning_efforts.clone()
+                }
             },
         )
     });
     cycle = dedup_preserving_order(cycle);
-    if !fixed_cycle && !cycle.contains(&selected) {
-        cycle.push(selected);
+    if !fixed_cycle && !cycle.contains(selected) {
+        cycle.push(selected.clone());
     }
     cycle
+}
+
+fn reconcile_reasoning_effort(
+    selected: ReasoningEffort,
+    active: Option<&ActiveModel>,
+) -> ReasoningEffort {
+    match active {
+        Some(model) => model.catalog.reconcile_reasoning_effort(selected),
+        None => selected,
+    }
 }
 
 fn direct_model(startup: &StartupOverrides, model_name: &str) -> Result<ActiveModel, ResolveError> {
@@ -365,6 +383,7 @@ fn direct_model(startup: &StartupOverrides, model_name: &str) -> Result<ActiveMo
         api_key_env: startup.api_key_env.clone().unwrap_or_default(),
         provider_type,
         config: ModelConfig::default().with_overrides(&startup.model_config),
+        catalog: ModelCatalogMetadata::default(),
         availability: ModelAvailability::Available,
     })
 }
@@ -534,8 +553,14 @@ fn resolve_model_selection(
     }
 
     // Static catalogs retain configuration order, while managed catalogs retain
-    // provider recommendation order. Their first entry is the explicit fallback.
-    let Some(resolved) = inputs.available_models.first() else {
+    // provider recommendation order. Prefer their first picker-visible entry,
+    // falling back to the first internal entry when a catalog has no visible models.
+    let Some(resolved) = inputs
+        .available_models
+        .iter()
+        .find(|model| model.catalog.show_in_picker)
+        .or_else(|| inputs.available_models.first())
+    else {
         if inputs.startup.api_base.is_some() {
             return Err(ResolveError(
                 "--model is required when using --api-base without a configured model".into(),
@@ -607,30 +632,54 @@ pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, Resolv
     let model_selection = resolve_model_selection(&inputs)?;
     let mut mode_cycle = resolve_mode_cycle(&inputs);
     let mode = resolve_mode(&inputs, &mut mode_cycle);
+    let configured_reasoning_effort = inputs
+        .config
+        .defaults
+        .reasoning_effort
+        .as_deref()
+        .and_then(ReasoningEffort::parse);
+    let explicit_reasoning_effort = inputs
+        .startup
+        .reasoning_effort
+        .as_ref()
+        .or(configured_reasoning_effort.as_ref());
+    if let (Some(effort), Some(model)) =
+        (explicit_reasoning_effort, model_selection.active.as_ref())
+    {
+        if !model.catalog.supports_reasoning_effort(effort) {
+            return Err(ResolveError(format!(
+                "reasoning effort '{}' is not supported by model '{}'",
+                effort.label(),
+                model.key
+            )));
+        }
+    }
     let reasoning_effort = inputs
         .startup
         .reasoning_effort
-        .or_else(|| inputs.previous.map(|state| state.reasoning_effort))
+        .clone()
+        .or_else(|| inputs.previous.map(|state| state.reasoning_effort.clone()))
         .or_else(|| {
             inputs
                 .config
                 .remember
                 .reasoning_effort
-                .then_some(inputs.selections.reasoning_effort)
+                .then(|| inputs.selections.reasoning_effort.clone())
                 .flatten()
         })
+        .or(configured_reasoning_effort)
         .or_else(|| {
-            inputs
-                .config
-                .defaults
-                .reasoning_effort
-                .as_deref()
-                .and_then(ReasoningEffort::parse)
+            model_selection
+                .active
+                .as_ref()
+                .and_then(|model| model.catalog.default_reasoning_effort.clone())
         })
         .unwrap_or(ReasoningEffort::Off);
+    let reasoning_effort =
+        reconcile_reasoning_effort(reasoning_effort, model_selection.active.as_ref());
     let reasoning_cycle = resolve_reasoning_cycle(
         inputs.startup,
-        reasoning_effort,
+        &reasoning_effort,
         model_selection.active.as_ref(),
     );
     let context_window = inputs.previous.and_then(|previous| {
@@ -949,6 +998,7 @@ mod tests {
             supports_reasoning: None,
             supports_fast_mode: None,
             input_modalities: None,
+            catalog: protocol::ModelCatalogMetadata::default(),
         };
         let mut models = config.resolve_models();
         config.inject_codex_models(
@@ -975,6 +1025,86 @@ mod tests {
         assert_eq!(
             resolved.model_selection.requested_by,
             ModelSelectionSource::CatalogDefault
+        );
+    }
+
+    #[test]
+    fn catalog_default_skips_hidden_models_but_explicit_selection_accepts_them() {
+        let config = provider_config();
+        let mut models = config.resolve_models();
+        models[0].catalog.show_in_picker = false;
+        models[0].catalog.default_reasoning_effort = Some(ReasoningEffort::Ultra);
+        models[0].catalog.supported_reasoning_efforts = vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+            ReasoningEffort::Ultra,
+        ];
+        models[1].catalog.default_reasoning_effort = Some(ReasoningEffort::Low);
+
+        let default = resolve_runtime(RuntimeInputs {
+            config: &config,
+            startup: &StartupOverrides::default(),
+            available_models: &models,
+            registered_modes: &[],
+            selections: &RuntimeSelections::default(),
+            previous: None,
+            headless: false,
+        })
+        .unwrap();
+        assert_eq!(default.active_model().unwrap().key, "test/model-b");
+        assert_eq!(default.reasoning_effort, ReasoningEffort::Low);
+
+        let explicit = resolve_runtime(RuntimeInputs {
+            config: &config,
+            startup: &StartupOverrides {
+                model: Some("test/model-a".into()),
+                ..Default::default()
+            },
+            available_models: &models,
+            registered_modes: &[],
+            selections: &RuntimeSelections::default(),
+            previous: None,
+            headless: false,
+        })
+        .unwrap();
+        assert_eq!(explicit.active_model().unwrap().key, "test/model-a");
+        assert_eq!(explicit.reasoning_effort, ReasoningEffort::Ultra);
+        assert_eq!(
+            explicit.reasoning_cycle,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+                ReasoningEffort::Ultra,
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_unsupported_startup_reasoning_is_rejected() {
+        let config = provider_config();
+        let mut models = config.resolve_models();
+        models[0].catalog.supported_reasoning_efforts =
+            vec![ReasoningEffort::Low, ReasoningEffort::High];
+
+        let error = resolve_runtime(RuntimeInputs {
+            config: &config,
+            startup: &StartupOverrides {
+                reasoning_effort: Some(ReasoningEffort::Ultra),
+                ..Default::default()
+            },
+            available_models: &models,
+            registered_modes: &[],
+            selections: &RuntimeSelections::default(),
+            previous: None,
+            headless: false,
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.0,
+            "reasoning effort 'ultra' is not supported by model 'test/model-a'"
         );
     }
 

@@ -441,7 +441,7 @@ fn default_config_lua() -> String {
         "  mode = nil,              -- possible: \"normal\", \"plan\", \"apply\", \"yolo\"\n",
     );
     lua.push_str(
-        "  reasoning_effort = nil,  -- possible: \"off\", \"low\", \"medium\", \"high\", \"max\"\n",
+        "  reasoning_effort = nil,  -- possible: \"off\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\", \"ultra\"\n",
     );
     lua.push_str("})\n\n");
 

@@ -4,19 +4,7 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
-use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
-
-/// Reasoning effort level string literal.
-#[derive(Clone, Copy, Debug, LuaAlias)]
-#[lua(name = "smelt.reasoning.Effort", mirror = "protocol::ReasoningEffort")]
-pub enum LuaReasoningEffort {
-    Off,
-    Low,
-    Medium,
-    High,
-    Max,
-}
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::supported(
@@ -30,13 +18,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "cycle_list",
         "Return the configured reasoning-effort cycle.",
         &[],
-        |_, ()| -> LuaResult<Vec<LuaReasoningEffort>> {
+        |_, ()| -> LuaResult<Vec<String>> {
             Ok(crate::host::try_with_core(|core| {
                 core.config
                     .reasoning_cycle
                     .iter()
-                    .copied()
-                    .map(LuaReasoningEffort::from)
+                    .map(|effort| effort.label().to_string())
                     .collect()
             })
             .unwrap_or_default())
@@ -44,14 +31,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     m.fn_(
+        "known_list",
+        "Return the reasoning-effort labels known by this smelt version. Models may advertise additional labels.",
+        &[],
+        |_, ()| -> LuaResult<Vec<String>> {
+            Ok(protocol::ReasoningEffort::KNOWN
+                .iter()
+                .map(|effort| effort.label().to_string())
+                .collect())
+        },
+    )?;
+
+    m.fn_(
         "current",
         "Return the active reasoning effort.",
         &[],
-        |_, ()| -> LuaResult<LuaReasoningEffort> {
-            Ok(crate::host::try_with_core(|core| {
-                LuaReasoningEffort::from(core.config.reasoning_effort)
-            })
-            .unwrap_or(LuaReasoningEffort::Medium))
+        |_, ()| -> LuaResult<String> {
+            Ok(
+                crate::host::try_with_core(|core| core.config.reasoning_effort.label().to_string())
+                    .unwrap_or_else(|| "off".to_string()),
+            )
         },
     )?;
 

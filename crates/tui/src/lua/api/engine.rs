@@ -3,7 +3,6 @@
 use crate::lua::{LuaHandle, LuaShared};
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
-use smelt_core::lua::api::reasoning::LuaReasoningEffort;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
@@ -115,7 +114,7 @@ pub struct LuaCommandOverrides {
     pub min_p: Option<f64>,
     /// Repeat-penalty override.
     pub repeat_penalty: Option<f64>,
-    /// Reasoning-effort override; one of the `smelt.reasoning.Effort` strings.
+    /// Reasoning-effort override. Known and provider-defined string labels are accepted.
     pub reasoning_effort: Option<String>,
     /// Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn.
     pub tools: Option<LuaRuleOverride>,
@@ -235,8 +234,8 @@ pub struct LuaAskSpec {
     pub model: Option<String>,
     /// JSON-schema response constraint.
     pub response_format: Option<LuaAskResponseFormat>,
-    /// Reasoning effort for the request; defaults to `"off"`.
-    pub reasoning_effort: Option<LuaReasoningEffort>,
+    /// Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
+    pub reasoning_effort: Option<String>,
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
     /// the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
     pub guard: Option<mlua::Table>,
@@ -270,8 +269,8 @@ pub struct LuaInheritedAskSpec {
     pub model: Option<String>,
     /// JSON-schema response constraint.
     pub response_format: Option<LuaAskResponseFormat>,
-    /// Reasoning effort for the request; defaults to `"off"`.
-    pub reasoning_effort: Option<LuaReasoningEffort>,
+    /// Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
+    pub reasoning_effort: Option<String>,
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
     /// the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
     pub guard: Option<mlua::Table>,
@@ -286,6 +285,15 @@ pub struct LuaInheritedAskSpec {
     /// on failure `response` is `nil` and `err` is a
     /// `smelt.engine.AskError` table.
     pub on_response: Option<LuaCallback<(mlua::Value, Option<LuaAskErrorTable>), ()>>,
+}
+
+fn parse_reasoning_effort(value: Option<String>) -> LuaResult<Option<protocol::ReasoningEffort>> {
+    value
+        .map(|label| {
+            protocol::ReasoningEffort::parse(&label)
+                .ok_or_else(|| LuaError::external("reasoning effort must not be empty"))
+        })
+        .transpose()
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -434,7 +442,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.live_only_fn(
             "ask",
-            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
+            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, and `spec.reasoning_effort` explicitly selects a known or provider-defined effort supported by that model. Omitted effort starts at `\"off\"` and reconciles to the selected model's advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
                 if spec.system.is_empty() {
@@ -465,14 +473,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
                 });
-                let reasoning_effort = spec
-                    .reasoning_effort
-                    .map(Into::into)
-                    .unwrap_or(protocol::ReasoningEffort::Off);
+                let reasoning_effort = parse_reasoning_effort(spec.reasoning_effort)?;
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
-                let dispatched = crate::lua::try_with_agent_host(|host| {
+                let dispatch = crate::lua::try_with_agent_host(|host| {
                     host.dispatch_engine_ask(
                         id,
                         system,
@@ -485,14 +490,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         visible_retries,
                     )
                 })
-                .unwrap_or(false);
-                if !dispatched {
+                .unwrap_or_else(|| Err("app not initialized".into()));
+                if let Err(error) = dispatch {
                     if let Ok(mut callbacks) = s.ask_callbacks.lock() {
                         callbacks.remove(&id);
                     }
-                    return Err(LuaError::external(
-                        "smelt.engine.ask: no usable model is available",
-                    ));
+                    return Err(LuaError::external(format!("smelt.engine.ask: {error}")));
                 }
                 Ok(id)
             },
@@ -504,7 +507,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.live_only_fn(
             "ask_inherited",
-            "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
+            "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Explicit reasoning effort must be supported by the selected model; omitted effort starts at `\"off\"` and reconciles to advertised levels. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
             move |lua, spec: LuaInheritedAskSpec| -> LuaResult<u64> {
                 let messages: Vec<protocol::Message> = spec
@@ -528,14 +531,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
                 });
-                let reasoning_effort = spec
-                    .reasoning_effort
-                    .map(Into::into)
-                    .unwrap_or(protocol::ReasoningEffort::Off);
+                let reasoning_effort = parse_reasoning_effort(spec.reasoning_effort)?;
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
-                let dispatched = crate::lua::try_with_agent_host(|host| {
+                let dispatch = crate::lua::try_with_agent_host(|host| {
                     host.dispatch_inherited_engine_ask(
                         id,
                         messages,
@@ -547,14 +547,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         visible_retries,
                     )
                 })
-                .unwrap_or(false);
-                if !dispatched {
+                .unwrap_or_else(|| Err("app not initialized".into()));
+                if let Err(error) = dispatch {
                     if let Ok(mut callbacks) = s.ask_callbacks.lock() {
                         callbacks.remove(&id);
                     }
-                    return Err(LuaError::external(
-                        "smelt.engine.ask_inherited: no usable model is available",
-                    ));
+                    return Err(LuaError::external(format!(
+                        "smelt.engine.ask_inherited: {error}"
+                    )));
                 }
                 Ok(id)
             },

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub use protocol::ModelConfig;
+pub use protocol::{ModelCatalogMetadata, ModelConfig};
 
 pub fn config_dir() -> PathBuf {
     engine::config_dir()
@@ -320,7 +320,7 @@ pub struct DefaultsConfig {
     pub model: Option<String>,
     /// Starting agent mode. Must name a registered mode.
     pub mode: Option<String>,
-    /// Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`.
+    /// Starting reasoning effort. Known labels are `"off"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, and `"ultra"`; provider-defined labels are also accepted.
     pub reasoning_effort: Option<String>,
 }
 
@@ -370,6 +370,7 @@ pub struct ResolvedModel {
     /// Provider type from config: "openai-compatible" (default), "openai", "codex", "anthropic-compatible", "anthropic", or "copilot".
     pub provider_type: String,
     pub config: ModelConfig,
+    pub catalog: ModelCatalogMetadata,
 }
 
 impl ResolvedModel {
@@ -545,6 +546,7 @@ impl Config {
                     api_key_env: api_key_env.clone(),
                     provider_type: provider_type.clone(),
                     config: model.clone(),
+                    catalog: ModelCatalogMetadata::default(),
                 });
             }
         }
@@ -583,6 +585,21 @@ impl Config {
                     .config
                     .supports_fast_mode
                     .or(model.supports_fast_mode);
+                if resolved_model.catalog.description.is_none() {
+                    resolved_model.catalog.description = model.catalog.description.clone();
+                }
+                if resolved_model.catalog.default_reasoning_effort.is_none() {
+                    resolved_model.catalog.default_reasoning_effort =
+                        model.catalog.default_reasoning_effort.clone();
+                }
+                if resolved_model
+                    .catalog
+                    .supported_reasoning_efforts
+                    .is_empty()
+                {
+                    resolved_model.catalog.supported_reasoning_efforts =
+                        model.catalog.supported_reasoning_efforts.clone();
+                }
                 if resolved_model.config.input_modalities.is_none() {
                     resolved_model.config.input_modalities = model.input_modalities.clone();
                 }
@@ -615,6 +632,7 @@ impl Config {
                     input_modalities: model.input_modalities.clone(),
                     ..ModelConfig::default()
                 },
+                catalog: model.catalog.clone(),
             });
         }
     }
@@ -761,6 +779,7 @@ mod tests {
                     supports_reasoning: Some(true),
                     supports_fast_mode: Some(true),
                     input_modalities: Some(vec!["text".into()]),
+                    catalog: ModelCatalogMetadata::default(),
                 },
                 DynamicModel {
                     id: "canonical".into(),
@@ -770,6 +789,15 @@ mod tests {
                     supports_reasoning: Some(true),
                     supports_fast_mode: Some(true),
                     input_modalities: Some(vec!["text".into(), "image".into()]),
+                    catalog: ModelCatalogMetadata {
+                        description: Some("provider metadata".into()),
+                        show_in_picker: false,
+                        default_reasoning_effort: Some(protocol::ReasoningEffort::Low),
+                        supported_reasoning_efforts: vec![
+                            protocol::ReasoningEffort::Low,
+                            protocol::ReasoningEffort::High,
+                        ],
+                    },
                 },
             ],
         );
@@ -778,11 +806,85 @@ mod tests {
         assert_eq!(resolved[0].config.context_window, Some(8_192));
         assert_eq!(resolved[0].config.max_tokens, Some(8_192));
         assert_eq!(resolved[0].display_name.as_deref(), Some("friendly-alias"));
+        assert_eq!(
+            resolved[0].catalog.description.as_deref(),
+            Some("provider metadata")
+        );
+        assert_eq!(
+            resolved[0].catalog.supported_reasoning_efforts,
+            vec![
+                protocol::ReasoningEffort::Low,
+                protocol::ReasoningEffort::High,
+            ]
+        );
         assert_eq!(resolved[1].key, "copilot/z-model");
         assert_eq!(resolved[2].key, "copilot/canonical");
+        assert!(resolved[0].catalog.show_in_picker);
+        assert!(!resolved[2].catalog.show_in_picker);
         assert!(resolved[1..]
             .iter()
             .all(|model| model.api_key_env == "COPILOT_KEY"));
+    }
+
+    #[test]
+    fn hidden_dynamic_models_remain_explicitly_resolvable() {
+        let cfg = Config {
+            providers: vec![ProviderConfig {
+                name: Some("codex".into()),
+                provider_type: Some("codex".into()),
+                api_base: Some("https://chatgpt.com/backend-api/codex/responses".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut resolved = cfg.resolve_models();
+        cfg.inject_codex_models(
+            &mut resolved,
+            &[
+                DynamicModel {
+                    id: "gpt-6-astra".into(),
+                    display_name: Some("GPT-6-Astra".into()),
+                    context_window: Some(272_000),
+                    max_output_tokens: None,
+                    supports_reasoning: Some(true),
+                    supports_fast_mode: Some(false),
+                    input_modalities: None,
+                    catalog: ModelCatalogMetadata {
+                        description: None,
+                        show_in_picker: false,
+                        default_reasoning_effort: Some(protocol::ReasoningEffort::Low),
+                        supported_reasoning_efforts: vec![
+                            protocol::ReasoningEffort::Low,
+                            protocol::ReasoningEffort::XHigh,
+                            protocol::ReasoningEffort::Max,
+                            protocol::ReasoningEffort::Ultra,
+                        ],
+                    },
+                },
+                DynamicModel {
+                    id: "visible".into(),
+                    display_name: Some("Visible".into()),
+                    context_window: None,
+                    max_output_tokens: None,
+                    supports_reasoning: None,
+                    supports_fast_mode: None,
+                    input_modalities: None,
+                    catalog: ModelCatalogMetadata::default(),
+                },
+            ],
+        );
+
+        let astra = resolve_model_ref(&resolved, "codex/gpt-6-astra").unwrap();
+        assert!(!astra.catalog.show_in_picker);
+        assert_eq!(
+            astra.catalog.supported_reasoning_efforts,
+            vec![
+                protocol::ReasoningEffort::Low,
+                protocol::ReasoningEffort::XHigh,
+                protocol::ReasoningEffort::Max,
+                protocol::ReasoningEffort::Ultra,
+            ]
+        );
     }
 
     #[test]
