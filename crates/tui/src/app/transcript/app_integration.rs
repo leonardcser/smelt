@@ -172,17 +172,11 @@ impl TuiApp {
             let win = self.transcript_win();
             let state = win.document_view_state();
             let following_tail = scroll.as_ref().is_some_and(|scroll| scroll.follow);
-            let has_document_selection =
-                state.selection_anchor.is_some() || state.drag_endpoint.is_some();
             (
                 following_tail,
-                scroll.as_ref().is_some_and(|scroll| {
-                    !scroll.follow
-                        && scroll.viewport > 0
-                        && scroll.at_bottom
-                        && !win.selection_active()
-                        && !has_document_selection
-                }),
+                scroll
+                    .as_ref()
+                    .is_some_and(|scroll| scroll.is_pinned_to_tail(win)),
                 win.scroll_top(),
                 state.cursor,
                 state.selection_anchor,

@@ -22,6 +22,18 @@ pub(crate) struct WindowScrollSnapshot {
     pub(crate) needs_tail_repin: bool,
 }
 
+impl WindowScrollSnapshot {
+    pub(crate) fn is_pinned_to_tail(&self, window: &crate::smelt_edit::Window) -> bool {
+        let document_view = window.document_view_state();
+        !self.follow
+            && self.viewport > 0
+            && self.at_bottom
+            && !window.selection_active()
+            && document_view.selection_anchor.is_none()
+            && document_view.drag_endpoint.is_none()
+    }
+}
+
 impl TuiApp {
     pub(crate) fn window_scroll_snapshot(&self, window_id: WinId) -> Option<WindowScrollSnapshot> {
         let window = self.ui.win(window_id)?;

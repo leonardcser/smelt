@@ -632,6 +632,180 @@ fn stale_prompt_prediction_response_after_submit_is_ignored() {
     assert_eq!(app.placeholder_text(prompt), None);
 }
 
+fn scrollable_transcript_app() -> TestApp {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 16);
+    for i in 0..40 {
+        app.push_transcript_block(smelt_core::Block::Text {
+            content: format!("transcript row {i:02}").into(),
+        });
+    }
+    app.render_to_frame();
+    app
+}
+
+fn assert_transcript_is_pinned_to_bottom(app: &TestApp, action: &str) {
+    let window = app.transcript_window();
+    let viewport = window.viewport.expect("transcript viewport");
+    let expected_top = viewport
+        .total_rows
+        .saturating_sub(crate::smelt_edit::RowIndex::from(viewport.rect.height));
+    assert_eq!(
+        window.scroll_top(),
+        expected_top,
+        "transcript was not at the numeric bottom after {action}"
+    );
+    assert!(
+        window.is_following_tail(),
+        "transcript stopped following the tail after {action}"
+    );
+}
+
+fn pin_transcript_bottom_with_click(app: &mut TestApp) {
+    let viewport = app
+        .transcript_window()
+        .viewport
+        .expect("transcript viewport");
+    let click = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: viewport.rect.left.saturating_add(4),
+        row: viewport.rect.bottom().saturating_sub(2),
+        modifiers: KeyModifiers::empty(),
+    };
+    app.feed_one(SourceEvent::Term(Event::Mouse(click)));
+    app.feed_one(SourceEvent::Term(Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            ..click
+        },
+    )));
+
+    app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+    app.press(KeyCode::Char('p'));
+    assert_eq!(app.state().app_focus, AppFocus::Prompt);
+
+    let clicked = app.transcript_window();
+    assert!(
+        !clicked.is_following_tail(),
+        "test setup must exercise a numerically bottom-pinned viewport"
+    );
+    assert!(
+        clicked.document_view.selection_anchor.is_none()
+            && clicked.document_view.drag_endpoint.is_none(),
+        "a click without a drag must not leave a selection active"
+    );
+    let viewport = clicked.viewport.expect("clicked transcript viewport");
+    assert_eq!(
+        clicked.scroll_top(),
+        viewport
+            .total_rows
+            .saturating_sub(crate::smelt_edit::RowIndex::from(viewport.rect.height)),
+        "click setup moved the transcript away from the bottom"
+    );
+}
+
+#[test]
+fn queue_unqueue_and_stash_keep_transcript_pinned_to_bottom() {
+    let mut app = scrollable_transcript_app();
+    assert_transcript_is_pinned_to_bottom(&app, "initial render");
+
+    pin_transcript_bottom_with_click(&mut app);
+    app.start_turn(1);
+    app.type_text("queued follow-up");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    app.render_to_frame();
+    assert_transcript_is_pinned_to_bottom(&app, "queue");
+
+    pin_transcript_bottom_with_click(&mut app);
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    app.render_to_frame();
+    assert_transcript_is_pinned_to_bottom(&app, "unqueue");
+
+    pin_transcript_bottom_with_click(&mut app);
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    app.render_to_frame();
+    assert_transcript_is_pinned_to_bottom(&app, "stash");
+
+    pin_transcript_bottom_with_click(&mut app);
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    app.render_to_frame();
+    assert_transcript_is_pinned_to_bottom(&app, "unstash");
+}
+
+#[test]
+fn no_op_layout_invalidation_preserves_bottom_pinned_scroll_state() {
+    let mut app = scrollable_transcript_app();
+    pin_transcript_bottom_with_click(&mut app);
+    let before = app.transcript_window();
+    let before_viewport = before.viewport.expect("transcript viewport");
+
+    assert!(app.run_lua("smelt.ui.layout.invalidate()"));
+    app.render_to_frame();
+
+    let after = app.transcript_window();
+    assert_eq!(
+        after.viewport.expect("transcript viewport").rect,
+        before_viewport.rect,
+        "no-op layout invalidation changed transcript geometry"
+    );
+    assert_eq!(after.scroll_top(), before.scroll_top());
+    assert!(
+        !after.is_following_tail(),
+        "no-op layout invalidation changed pinned scroll intent"
+    );
+}
+
+#[test]
+fn queue_layout_reflow_preserves_retained_transcript_selection() {
+    let mut app = scrollable_transcript_app();
+    let before = app.transcript_window();
+    let before_viewport = before.viewport.expect("transcript viewport");
+    assert!(
+        before.document_view.active,
+        "scrollable transcript must use document view"
+    );
+
+    let mut selection = before.document_view_state();
+    let anchor = crate::smelt_edit::DocPosition {
+        row: before.scroll_top().saturating_add(1),
+        byte_col: 0,
+    };
+    // Retained row-selection endpoints must block tail restoration even while
+    // document view is between projections.
+    selection.active = false;
+    selection.cursor = crate::smelt_edit::DocPosition {
+        row: anchor.row.saturating_add(1),
+        byte_col: 0,
+    };
+    selection.selection_anchor = Some(anchor);
+    selection.selection_includes_cursor_cell = true;
+    app.set_transcript_document_view(selection);
+    app.pin_transcript_scroll(before.scroll_top());
+
+    app.start_turn(1);
+    app.type_text("queued while transcript selection is retained");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    app.render_to_frame();
+
+    let after = app.transcript_window();
+    assert!(
+        after
+            .viewport
+            .expect("transcript viewport after queue")
+            .rect
+            .height
+            < before_viewport.rect.height,
+        "queue must shrink the transcript viewport to exercise layout reflow"
+    );
+    assert!(
+        !after.is_following_tail(),
+        "layout reflow must not replace retained selection intent with tail-follow"
+    );
+    assert_eq!(after.scroll_top(), before.scroll_top());
+    assert_eq!(after.document_view.selection_anchor, Some(anchor));
+}
+
 #[test]
 fn queued_messages_collapse_to_keep_transcript_visible() {
     let mut app = TestApp::builder().build();

@@ -939,8 +939,23 @@ impl TuiApp {
         let tree = self
             .invoke_lua_layout_composer(term_w, term_h, input_rows)
             .unwrap_or_else(|| self.fallback_main_layout(term_w, term_h, input_rows));
+        let previous_transcript_rect = self.layout.transcript;
+        let transcript_was_pinned_to_tail = self
+            .window_scroll_snapshot(crate::app::TRANSCRIPT_WIN)
+            .is_some_and(|scroll| {
+                self.ui
+                    .win(crate::app::TRANSCRIPT_WIN)
+                    .is_some_and(|win| scroll.is_pinned_to_tail(win))
+            });
         self.ui.set_layout(tree);
-        self.layout = layout::LayoutState::from_ui(&self.ui);
+        let next_layout = layout::LayoutState::from_ui(&self.ui);
+        let transcript_viewport_resized = next_layout.transcript.width
+            != previous_transcript_rect.width
+            || next_layout.transcript.height != previous_transcript_rect.height;
+        if transcript_was_pinned_to_tail && transcript_viewport_resized {
+            self.transcript_win_mut().follow_tail();
+        }
+        self.layout = next_layout;
         self.main_layout_inputs = Some(layout_inputs);
         // Prompt-docked pickers size themselves to the headroom above the
         // prompt chrome; recompute them whenever the main layout changes.
