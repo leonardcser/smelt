@@ -245,13 +245,14 @@ impl Default for TuiAppOptions {
 
 #[derive(Clone, Debug)]
 pub(crate) enum SessionAccess {
+    Opening,
     Owned,
     ReadOnly { reason: String },
 }
 
 impl SessionAccess {
     fn is_read_only(&self) -> bool {
-        matches!(self, Self::ReadOnly { .. })
+        !matches!(self, Self::Owned)
     }
 }
 
@@ -2761,6 +2762,11 @@ impl TuiApp {
         let Some(report) = self.conversation.drain_persistence_report() else {
             return;
         };
+        if let Some(Err(cause)) = report.startup {
+            self.fail_pending_turn_submission(None, &cause);
+            self.conversation.abandon_all_canonical_operations();
+            self.notify_writer_startup_failure(&cause);
+        }
         if let Some(session_id) = report.acknowledged_session_id {
             self.dismiss_session_save_failure_notification(&session_id);
         }

@@ -70,6 +70,7 @@ impl TestApp {
         &mut self,
         command: smelt_core::custom_commands::CustomCommand,
     ) -> bool {
+        self.ensure_writer_ready();
         let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
         let Some(turn) = self.app.begin_custom_command_turn(command, sent_at_ms) else {
             return false;
@@ -85,6 +86,7 @@ impl TestApp {
         overrides: smelt_core::custom_commands::CommandOverrides,
         start: crate::app::CommandTurnStart,
     ) -> bool {
+        self.ensure_writer_ready();
         let Some(turn) = self.app.begin_command_request_turn(
             display,
             evaluated,

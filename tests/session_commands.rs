@@ -184,7 +184,9 @@ fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
         .unwrap()
         .as_millis() as u64;
     writer.rewind_to_sequence(1, updated_at).unwrap();
-    writer.switch_branch(&target_id).unwrap();
+    writer.release().unwrap();
+    let writer =
+        smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &target_id).unwrap();
     writer.refresh_catalog().unwrap();
     writer.release().unwrap();
 

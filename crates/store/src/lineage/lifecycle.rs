@@ -594,10 +594,8 @@ pub(crate) fn apply_lineage_submit_turn(
     if let Some(receipt) = recover_lineage_submit_turn(conn, lineage, branch, command)? {
         return Ok(receipt);
     }
-    let mut tx = conn
-        .transaction()
-        .map_err(StoreError::from)
-        .map_err(store_failure)?;
+    let mut tx =
+        crate::write_transaction::begin_write(conn, "commit turn").map_err(store_failure)?;
     let session =
         apply_lineage_session_commit(&mut tx, lineage, branch, &command.session, compression)?;
     let turn_id = tx
@@ -733,10 +731,8 @@ pub(crate) fn apply_lineage_turn_transition(
     if let Some(receipt) = recover_lineage_turn_transition(conn, lineage, branch, command)? {
         return Ok(receipt);
     }
-    let mut tx = conn
-        .transaction()
-        .map_err(StoreError::from)
-        .map_err(store_failure)?;
+    let mut tx =
+        crate::write_transaction::begin_write(conn, "commit turn").map_err(store_failure)?;
     let current = stored_lineage_turn(&tx, lineage, branch, command.turn_id)
         .map_err(store_failure)?
         .ok_or(SessionCommitFailure::TurnNotFound {
@@ -871,7 +867,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
     branch: &BranchId,
     at_ms: u64,
 ) -> Result<Option<StartupRecoveryReceipt>> {
-    let tx = conn.transaction()?;
+    let tx = crate::write_transaction::begin_write(conn, "recover interrupted turns")?;
     let mut statement = tx.prepare(
         "SELECT turn_id, turn_state, created_at_ms, started_at_ms
          FROM lineage_turns
@@ -1091,15 +1087,15 @@ pub(crate) struct ForkStats {
     pub(crate) sequence_rows_written: u64,
 }
 
-pub(crate) fn fork_branch(
-    conn: &mut Connection,
+pub(crate) fn fork_branch<C: LineageSavepoint>(
+    conn: &mut C,
     lineage: &LineageId,
     source: &BranchId,
     target: &BranchId,
     captured_revision: Option<&RevisionId>,
     created_at: u64,
 ) -> Result<(LineageCommitReceipt, ForkStats)> {
-    let tx = conn.transaction()?;
+    let tx = conn.lineage_savepoint()?;
     let existing_creation = tx
         .query_row(
             "SELECT fork_parent_session_id, initial_revision_id

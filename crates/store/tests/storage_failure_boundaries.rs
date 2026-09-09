@@ -185,6 +185,40 @@ fn process_crash_releases_lifetime_ownership() {
 }
 
 #[test]
+fn fork_writer_can_open_while_another_process_owns_the_parent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = create_lineage_session(dir.path());
+    let fork_id = "f".repeat(64);
+    let writer = smelt_store::OwnedLineageWriter::open_existing(dir.path(), SESSION_ID).unwrap();
+    writer.fork_current(&fork_id, 2).unwrap();
+    writer.release().unwrap();
+
+    let ready = dir.path().join("parent.ready");
+    let release = dir.path().join("parent.release");
+    let mut owner = spawn_probe("closed-owner", &db_path, &ready, &release, None, None);
+    wait_for(&ready);
+
+    let fork = smelt_store::OwnedLineageWriter::open_existing(dir.path(), &fork_id);
+    let parent_conflicts = matches!(
+        smelt_store::OwnedLineageWriter::open_existing(dir.path(), SESSION_ID),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    );
+    let fork_conflicts = matches!(
+        smelt_store::OwnedLineageWriter::open_existing(dir.path(), &fork_id),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    );
+    touch(&release);
+    assert_success(owner.wait().expect("wait for parent owner"));
+
+    let fork = fork.expect("fork must not inherit its parent's writer ownership");
+    assert_eq!(fork.database_path(), db_path);
+    assert!(parent_conflicts);
+    assert!(fork_conflicts);
+    smelt_store::OwnedLineageWriter::open_existing(dir.path(), SESSION_ID)
+        .expect("parent ownership is released independently of the fork");
+}
+
+#[test]
 fn root_lease_remains_exclusive_while_sqlite_is_closed() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = create_lineage_session(dir.path());

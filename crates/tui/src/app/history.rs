@@ -1252,6 +1252,10 @@ impl TuiApp {
     }
 
     pub(crate) fn block_read_only_mutation(&mut self, action: &str) -> bool {
+        if self.conversation.writer_is_opening() && self.session_is_read_only() {
+            self.notify("session is still opening; try again when it is ready".into());
+            return true;
+        }
         if self.session_is_read_only() {
             self.notify_error(format!("cannot {action}: {}", self.read_only_reason()));
             true
@@ -1488,111 +1492,12 @@ impl TuiApp {
             },
             |(forked, intent)| (forked, Some(intent)),
         );
-        let fork_target = smelt_core::session::SessionForkTarget {
-            id: forked.id.clone(),
-            created_at_ms: forked.created_at_ms,
-        };
-        let fork_root = self.conversation.sessions().sessions_dir();
-        let resolved_source = match self
-            .conversation
-            .sessions()
-            .resolve_session_for_read_result(&original_id)
-        {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                self.notify_session_error_sticky(format!(
-                    "failed to resolve source session store: {err}"
-                ));
-                return;
-            }
-        };
-        let mut source = match smelt_store::OwnedLineageWriter::open_existing_in_lineage(
-            &fork_root,
-            &resolved_source.lineage_id,
-            &original_id,
-        ) {
-            Ok(source) => source,
-            Err(err) => {
-                self.notify_session_error_sticky(format!(
-                    "failed to open source session store: {err}"
-                ));
-                return;
-            }
-        };
-        if preserve_unsaved {
-            match source.store_head() {
-                Ok(source_head) if source_head == acknowledged_head => {}
-                Ok(source_head) => {
-                    self.notify_session_error_sticky(format!(
-                        "failed to fork unsaved session: source head changed from {acknowledged_head:?} to {source_head:?}"
-                    ));
-                    return;
-                }
-                Err(err) => {
-                    self.notify_session_error_sticky(format!(
-                        "failed to inspect unsaved session source head: {err}"
-                    ));
-                    return;
-                }
-            }
-        }
-        let imported = match source.fork_current(&fork_target.id, fork_target.created_at_ms) {
-            Ok(receipt) => receipt,
-            Err(err) => {
-                self.notify_session_error_sticky(format!("failed to fork session store: {err}"));
-                return;
-            }
-        };
-        let published = if let Some(intent) = preserved_intent {
-            if let Err(err) = source.switch_branch(&fork_target.id) {
-                self.notify_session_error_sticky(format!(
-                    "failed to select fork destination: {err}"
-                ));
-                return;
-            }
-            let command = match intent.to_store_commit(fork_target.id.clone(), imported.current) {
-                Ok(command) => command,
-                Err(err) => {
-                    self.notify_session_error_sticky(format!(
-                        "failed to prepare unsaved fork state: {err}"
-                    ));
-                    return;
-                }
-            };
-            match source.commit_session(&command) {
-                Ok(receipt) => receipt,
-                Err(err) => {
-                    self.notify_session_error_sticky(format!(
-                        "failed to preserve unsaved fork state: {err:?}"
-                    ));
-                    return;
-                }
-            }
-        } else {
-            if let Err(err) = source.switch_branch(&fork_target.id) {
-                self.notify_session_error_sticky(format!(
-                    "failed to select fork destination: {err}"
-                ));
-                return;
-            }
-            imported
-        };
-        if let Err(err) = source.release() {
-            self.notify_session_error_sticky(format!("failed to release lineage writer: {err}"));
-            return;
-        }
-        if let Err(err) = self
-            .conversation
-            .sessions()
-            .publish_session_catalog_snapshot(&forked, &published)
-        {
-            self.notify_session_error_sticky(format!("failed to publish fork session: {err}"));
-            return;
-        }
-        if self.load_session_by_id(&fork_target.id) {
-            self.publish_history_delta(HistoryDeltaKind::Forked);
-            self.notify(format!("forked from {original_id}"));
-        }
+        self.request_session_fork(super::session_load::SessionForkRequest {
+            source_id: original_id,
+            forked,
+            expected_source: preserve_unsaved.then_some(acknowledged_head),
+            preserved_intent,
+        });
     }
 
     pub(crate) fn reset_session(&mut self) {
@@ -1650,9 +1555,31 @@ impl TuiApp {
     }
 
     fn claim_writer_access_for_current_session(&mut self) {
-        if let Err(reason) = self.conversation.claim_writer_access() {
-            self.conversation.mark_read_only(reason.clone());
-            self.notify_session_error_sticky(format!("opened session read-only: {reason}"));
+        if let Err(cause) = self.conversation.claim_writer_access() {
+            self.notify_writer_startup_failure(&cause);
+        }
+    }
+
+    pub(super) fn notify_writer_startup_failure(
+        &mut self,
+        cause: &crate::persist::PersistenceCause,
+    ) {
+        if cause.class == crate::persist::PersistenceFailureClass::Ownership {
+            let reason = "this session is already open in another window";
+            self.conversation.mark_read_only(reason.into());
+            self.record_notice_with_lifetime(
+                smelt_core::messages::MessageKind::Info,
+                "smelt".into(),
+                format!("opened session read-only: {reason}"),
+                crate::app::NotificationLifetime::Sticky,
+                crate::app::NotificationScope::Session(self.conversation.session().id.clone()),
+            );
+        } else {
+            self.conversation.mark_read_only(cause.message.clone());
+            self.notify_session_error_sticky(format!(
+                "opened session read-only: {}",
+                cause.message
+            ));
         }
     }
 
@@ -2101,7 +2028,8 @@ impl TuiApp {
         let metadata = self.runtime_session_metadata();
         match self.conversation.retry_blocked_persistence(metadata) {
             Ok(crate::app::conversation::SaveStatus::Unchanged) => false,
-            Ok(crate::app::conversation::SaveStatus::DeferredHydration) => {
+            Ok(crate::app::conversation::SaveStatus::DeferredHydration)
+            | Ok(crate::app::conversation::SaveStatus::DeferredStartup) => {
                 self.pending_session_save = true;
                 self.request_urgent_render();
                 true
@@ -2122,7 +2050,8 @@ impl TuiApp {
             Ok(crate::app::conversation::SaveStatus::Unchanged) => {
                 smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             }
-            Ok(crate::app::conversation::SaveStatus::DeferredHydration) => {
+            Ok(crate::app::conversation::SaveStatus::DeferredHydration)
+            | Ok(crate::app::conversation::SaveStatus::DeferredStartup) => {
                 self.pending_session_save = true;
                 self.request_urgent_render();
             }
@@ -2826,7 +2755,7 @@ mod checkpoint_tests {
             })
             .collect();
 
-        app.app.load_session(session);
+        app.load_session(session);
         app.app.restore_screen();
         app.app.save_session();
         app.app.flush_persist();
@@ -2853,7 +2782,7 @@ mod checkpoint_tests {
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         session.history = vec![user("loaded user"), assistant("loaded assistant")];
 
-        app.app.load_session(session);
+        app.load_session(session);
 
         let history = app.app.conversation.transcript().history();
         let visible_text = history
@@ -2875,12 +2804,12 @@ mod checkpoint_tests {
         initial.history = vec![user("initial user"), assistant("initial assistant")];
         let id = initial.id.clone();
 
-        app.app.load_session(initial.clone());
+        app.load_session(initial.clone());
         app.app.restore_screen();
         app.app.save_session_and_flush();
 
         initial.history = vec![user("replacement user"), assistant("replacement assistant")];
-        app.app.load_session(initial);
+        app.load_session(initial);
         app.app.restore_screen();
         app.app.save_session_and_flush();
 
@@ -2957,7 +2886,7 @@ mod checkpoint_tests {
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
-        app.app.load_session(session);
+        app.load_session(session);
         app.app.restore_screen();
         app.app
             .shutdown_persist()
@@ -2988,8 +2917,7 @@ mod checkpoint_tests {
             loaded_transcript,
         );
 
-        app.app
-            .load_store_backed_session(document.into_store_backed());
+        app.load_store_backed_session(document.into_store_backed());
 
         let source = app.app.commit_request_history_item(
             user("new user"),
@@ -3043,7 +2971,7 @@ mod checkpoint_tests {
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
-        app.app.load_session(session);
+        app.load_session(session);
         app.app.restore_screen();
         app.app
             .shutdown_persist()
@@ -3147,7 +3075,7 @@ mod checkpoint_tests {
         let mut app = large_saved_session_app(HISTORY_LEN);
         let id = app.app.conversation.session().id.clone();
 
-        assert!(app.app.load_session_by_id(&id));
+        assert!(app.load_session_by_id(&id));
         assert!(app.app.conversation.has_live_session());
         assert!(app.app.conversation.session().history.is_empty());
 
@@ -3173,7 +3101,7 @@ mod checkpoint_tests {
         assert_eq!(snapshot.head.transcript_record_count.get(), 0);
 
         assert!(
-            !app.app.load_session_by_id(&id),
+            !app.load_session_by_id(&id),
             "recordless sessions cannot be resumed"
         );
     }
@@ -3186,7 +3114,7 @@ mod checkpoint_tests {
         let mut app = large_saved_session_app(HISTORY_LEN);
         let session_id = app.app.conversation.session().id.clone();
 
-        assert!(app.app.load_session_by_id(&session_id));
+        assert!(app.load_session_by_id(&session_id));
         let slice = lineage_reader(&app, &session_id)
             .transcript_record_slice_with_total(
                 smelt_store::TranscriptRecordRange::from(
@@ -3281,7 +3209,7 @@ mod checkpoint_tests {
     fn rewind_turn_enumeration_reports_store_failure_without_partial_results() {
         let mut app = large_saved_session_app(1_024);
         let id = app.app.conversation.session().id.clone();
-        assert!(app.app.load_session_by_id(&id));
+        assert!(app.load_session_by_id(&id));
         let reader = lineage_reader(&app, &id);
         let database_path = reader.database_path().to_path_buf();
         drop(reader);
@@ -3340,7 +3268,7 @@ mod checkpoint_tests {
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
 
-        assert!(app.app.load_session_by_id(&id));
+        assert!(app.load_session_by_id(&id));
         assert!(app.app.conversation.session().history.is_empty());
         assert_eq!(
             app.app.rewind_to_history(INITIAL_HISTORY_INDEX),
@@ -3420,7 +3348,7 @@ mod checkpoint_tests {
             "replacement assistant"
         );
 
-        assert!(app.app.load_session_by_id(&id));
+        assert!(app.load_session_by_id(&id));
         assert_eq!(
             app.app
                 .session_history_range(TARGET_HISTORY_INDEX..TARGET_HISTORY_INDEX + 2)
@@ -3474,7 +3402,7 @@ mod checkpoint_tests {
     fn live_session_checkpoint_uses_store_history_coordinates() {
         let mut app = large_saved_session_app(32);
         let id = app.app.conversation.session().id.clone();
-        app.app.load_session_by_id(&id);
+        app.load_session_by_id(&id);
         assert!(app.app.conversation.has_live_session());
         assert!(app.app.conversation.session().history.is_empty());
 
@@ -3514,7 +3442,7 @@ mod checkpoint_tests {
         const OLD_HISTORY_LEN: usize = 504;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         let old_id = app.app.conversation.session().id.clone();
-        assert!(app.app.load_session_by_id(&old_id));
+        assert!(app.load_session_by_id(&old_id));
         assert!(app.app.conversation.has_live_session());
         assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN);
 
@@ -3582,7 +3510,7 @@ mod checkpoint_tests {
         let before = lineage_reader(&app, &id)
             .snapshot()
             .expect("read initial canonical session");
-        app.app.load_session_by_id(&id);
+        app.load_session_by_id(&id);
         assert!(app.app.conversation.has_live_session());
         assert!(app.app.conversation.session().history.is_empty());
 
@@ -3642,7 +3570,7 @@ mod checkpoint_tests {
                     "#,
         )
         .expect("render sparse session preview");
-        app.app.load_session_by_id(&id);
+        app.load_session_by_id(&id);
         smelt_perf::perf::set_enabled(false);
 
         assert_no_full_store_reads();
@@ -3745,7 +3673,7 @@ mod checkpoint_tests {
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
-        app.app.load_session(session);
+        app.load_session(session);
         app.app.restore_screen();
         app.app
             .shutdown_persist()
@@ -4240,7 +4168,7 @@ mod checkpoint_tests {
         assert_eq!(app.app.core.jobs.running_count(), 1);
 
         let loaded = smelt_core::session::Session::new(99, std::path::PathBuf::from("/tmp/loaded"));
-        app.app.load_session(loaded);
+        app.load_session(loaded);
 
         assert_eq!(app.app.core.jobs.running_count(), 0);
         assert!(app.app.core.jobs.list().is_empty());

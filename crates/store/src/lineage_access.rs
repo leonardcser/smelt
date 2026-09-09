@@ -23,8 +23,6 @@ use maintenance::*;
 mod storage;
 use storage::*;
 
-const LINEAGE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LineageSessionLocation {
     pub session_id: String,
@@ -77,14 +75,26 @@ struct LineageLease {
 
 impl LineageLease {
     fn acquire(root: &Path, lineage: &LineageId) -> Result<Self> {
-        Self::acquire_named(root, lineage.as_str())
+        Self::acquire_named(root, lineage.as_str(), false)
+    }
+
+    fn acquire_shared(root: &Path, lineage: &LineageId) -> Result<Self> {
+        Self::acquire_named(root, lineage.as_str(), true)
     }
 
     fn acquire_branch(root: &Path, branch: &BranchId) -> Result<Self> {
-        Self::acquire_named(root, branch.as_str())
+        Self::acquire_named(root, branch.as_str(), false)
     }
 
-    fn acquire_named(root: &Path, name: &str) -> Result<Self> {
+    fn try_exclusive(&self) -> Result<bool> {
+        match fs4::FileExt::try_lock(&self._file) {
+            Ok(()) => Ok(true),
+            Err(fs4::TryLockError::WouldBlock) => Ok(false),
+            Err(fs4::TryLockError::Error(error)) => Err(StoreError::Io(error)),
+        }
+    }
+
+    fn acquire_named(root: &Path, name: &str, shared: bool) -> Result<Self> {
         let layout = crate::SessionStoreLayout::from_sessions_root(root);
         ensure_private_directory_all(root)?;
         ensure_private_directory_all(&layout.locks_dir())?;
@@ -98,7 +108,12 @@ impl LineageLease {
             options.mode(0o600);
         }
         let file = options.open(path)?;
-        match fs4::FileExt::try_lock(&file) {
+        let result = if shared {
+            fs4::FileExt::try_lock_shared(&file)
+        } else {
+            fs4::FileExt::try_lock(&file)
+        };
+        match result {
             Ok(()) => Ok(Self { _file: file }),
             Err(fs4::TryLockError::WouldBlock) => Err(StoreError::OwnershipConflict {
                 owner: Some(name.to_owned()),
@@ -116,8 +131,9 @@ pub struct OwnedLineageWriter {
     startup_recovery: Option<crate::session_commit::StartupRecoveryReceipt>,
     connection_invalidated: bool,
     catalog: RefCell<Option<Catalog>>,
-    _lease: LineageLease,
-    branch_lease: Option<LineageLease>,
+    // Writers share the database, but cleanup must wait for every writer to close.
+    lineage_lease: LineageLease,
+    branch_lease: LineageLease,
 }
 
 impl std::fmt::Debug for OwnedLineageWriter {
@@ -150,9 +166,9 @@ impl OwnedLineageWriter {
         let root = root.as_ref();
         let branch = BranchId::new(session_id.into())?;
         validate_storage_root(root)?;
-        let _branch_lease = LineageLease::acquire_branch(root, &branch)?;
+        let branch_lease = LineageLease::acquire_branch(root, &branch)?;
         let lineage = LineageId::from_hex(lineage_id.into())?;
-        let lease = LineageLease::acquire(root, &lineage)?;
+        let lease = LineageLease::acquire_shared(root, &lineage)?;
         let path = lineage_database_path(root, &lineage);
         reject_symlink(&path)?;
         if !path.is_file() {
@@ -178,7 +194,7 @@ impl OwnedLineageWriter {
                 lineage.as_str()
             )));
         }
-        Self::finish_open(root, lineage, branch, conn, lease, None)
+        Self::finish_open(root, lineage, branch, conn, lease, branch_lease)
     }
 
     fn open_inner(root: &Path, session_id: String, create: bool) -> Result<Self> {
@@ -186,7 +202,6 @@ impl OwnedLineageWriter {
         validate_storage_root(root)?;
         let branch_lease = LineageLease::acquire_branch(root, &branch)?;
         let located = locate_lineage(root, &branch)?;
-        let is_new = located.is_none();
         let lineage = match (located, create) {
             (Some(lineage), _) => lineage,
             (None, true) => create_lineage_database(root)?,
@@ -197,21 +212,14 @@ impl OwnedLineageWriter {
                 )))
             }
         };
-        let lease = LineageLease::acquire(root, &lineage)?;
+        let lease = LineageLease::acquire_shared(root, &lineage)?;
         let path = lineage_database_path(root, &lineage);
         let mut conn = open_write_connection(&path, &lineage)?;
         if !lineage_exists(&conn, &lineage)? {
             lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
         }
         crate::schema::initialize_lineage_schema(&mut conn)?;
-        Self::finish_open(
-            root,
-            lineage,
-            branch,
-            conn,
-            lease,
-            is_new.then_some(branch_lease),
-        )
+        Self::finish_open(root, lineage, branch, conn, lease, branch_lease)
     }
 
     fn finish_open(
@@ -220,17 +228,21 @@ impl OwnedLineageWriter {
         branch: BranchId,
         mut conn: Connection,
         lease: LineageLease,
-        branch_lease: Option<LineageLease>,
+        branch_lease: LineageLease,
     ) -> Result<Self> {
-        let _catalog_pending = lineage::lineage_has_nonterminal_turns(&conn, &lineage, &branch)?
-            .then(|| crate::catalog::mark_catalog_session_pending(root, branch.as_str()))
-            .transpose()?;
-        let startup_recovery = lineage::recover_lineage_nonterminal_turns(
-            &mut conn,
-            &lineage,
-            &branch,
-            unix_timestamp_millis()?,
-        )?;
+        let startup_recovery = if lineage::lineage_has_nonterminal_turns(&conn, &lineage, &branch)?
+        {
+            let _catalog_pending =
+                crate::catalog::mark_catalog_session_pending(root, branch.as_str())?;
+            lineage::recover_lineage_nonterminal_turns(
+                &mut conn,
+                &lineage,
+                &branch,
+                unix_timestamp_millis()?,
+            )?
+        } else {
+            None
+        };
         Ok(Self {
             sessions_root: root.to_path_buf(),
             lineage,
@@ -239,7 +251,7 @@ impl OwnedLineageWriter {
             startup_recovery,
             connection_invalidated: false,
             catalog: RefCell::new(None),
-            _lease: lease,
+            lineage_lease: lease,
             branch_lease,
         })
     }
@@ -259,14 +271,19 @@ impl OwnedLineageWriter {
         let _catalog_pending =
             crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
                 .map_err(crate::session_command::commit_failure_from_store_error)?;
+        let mut transaction =
+            crate::write_transaction::begin_write(&mut self.conn, "commit session")
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
         let receipt = lineage::apply_lineage_session_commit(
-            &mut self.conn,
+            &mut transaction,
             &self.lineage,
             &self.branch,
             command,
             ObjectCompression::default(),
         )?;
-        self.branch_lease = None;
+        transaction.commit().map_err(|error| {
+            crate::session_command::commit_failure_from_store_error(error.into())
+        })?;
         Ok(receipt)
     }
 
@@ -311,7 +328,6 @@ impl OwnedLineageWriter {
                 "persist:submit_turn:index_rows",
                 transcript_record_rows,
             );
-            self.branch_lease = None;
         }
         result
     }
@@ -460,54 +476,99 @@ impl OwnedLineageWriter {
         lineage::lineage_transcript_range(&self.conn, &self.lineage, &self.branch, start, end)
     }
 
-    pub fn switch_branch(&mut self, session_id: impl Into<String>) -> Result<()> {
-        let branch = BranchId::new(session_id.into())?;
-        if !branch_exists(&self.conn, &self.lineage, &branch)? {
-            return Err(StoreError::Integrity(format!(
-                "branch {} is not live in lineage {}",
-                branch.as_str(),
-                self.lineage.as_str()
-            )));
-        }
-        self.branch = branch;
-        Ok(())
-    }
-
-    pub fn fork_current(
-        &mut self,
+    /// Creates and owns a destination without taking ownership of its source.
+    /// An expected source head fences unsaved suffixes against concurrent edits.
+    pub fn fork_from(
+        root: impl AsRef<Path>,
+        source_session_id: impl Into<String>,
         target_session_id: impl Into<String>,
         created_at: u64,
-    ) -> Result<SaveReceipt> {
+        expected_source: Option<StoreHead>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Self, SaveReceipt)> {
+        let root = root.as_ref();
+        validate_storage_root(root)?;
+        let source = BranchId::new(source_session_id.into())?;
         let target = BranchId::new(target_session_id.into())?;
-        if let Some(lineage) = locate_lineage(&self.sessions_root, &target)? {
+        let target_lease = LineageLease::acquire_branch(root, &target)?;
+        if let Some(lineage) = locate_lineage(root, &target)? {
             return Err(StoreError::Integrity(format!(
                 "session {} already exists in lineage {}",
                 target.as_str(),
                 lineage.as_str()
             )));
         }
-        let _catalog_pending =
-            crate::catalog::mark_catalog_session_pending(&self.sessions_root, target.as_str())?;
-        let source = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let lineage = locate_lineage(root, &source)?.ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "session {} has no canonical lineage",
+                source.as_str()
+            ))
+        })?;
+        let lease = LineageLease::acquire_shared(root, &lineage)?;
+        let path = lineage_database_path(root, &lineage);
+        reject_symlink(&path)?;
+        if !path.is_file() {
+            return Err(StoreError::Integrity(
+                "fork source database no longer exists".into(),
+            ));
+        }
+        let mut conn = open_write_connection(&path, &lineage)?;
+        crate::schema::validate_lineage_schema(&conn)?;
+        let _catalog_pending = crate::catalog::mark_catalog_session_pending(root, target.as_str())?;
+        let mut tx = crate::write_transaction::begin_write_until(
+            &mut conn,
+            "fork session",
+            std::time::Instant::now() + crate::write_transaction::WRITE_DEADLINE,
+            cancelled,
+        )?;
+        let snapshot = lineage::lineage_session_snapshot(&tx, &lineage, &source)?;
+        if let Some(expected) = expected_source {
+            if snapshot.head != expected {
+                return Err(StoreError::Integrity(format!(
+                    "source head changed from {expected:?} to {:?}",
+                    snapshot.head
+                )));
+            }
+        }
         lineage::fork_branch(
-            &mut self.conn,
-            &self.lineage,
-            &self.branch,
+            &mut tx,
+            &lineage,
+            &source,
             &target,
-            Some(&source.revision_id),
+            Some(&snapshot.revision_id),
             created_at,
         )?;
-        Ok(SaveReceipt {
+        let receipt = SaveReceipt {
             session_id: target.as_str().to_owned(),
             previous: StoreHead::default(),
             current: StoreHead {
                 revision: crate::session_commit::Revision::new(1),
-                history_len: source.head.history_len,
-                transcript_record_count: source.head.transcript_record_count,
+                history_len: snapshot.head.history_len,
+                transcript_record_count: snapshot.head.transcript_record_count,
             },
-            lineage_id: Some(self.lineage.as_str().to_owned()),
-            history_text_bytes: source.history_root.byte_count(),
-        })
+            lineage_id: Some(lineage.as_str().to_owned()),
+            history_text_bytes: snapshot.history_root.byte_count(),
+        };
+        tx.commit()?;
+        let writer = Self::finish_open(root, lineage, target, conn, lease, target_lease)?;
+        Ok((writer, receipt))
+    }
+
+    pub fn fork_current(
+        &self,
+        target_session_id: impl Into<String>,
+        created_at: u64,
+    ) -> Result<SaveReceipt> {
+        let (destination, receipt) = Self::fork_from(
+            &self.sessions_root,
+            self.session_id(),
+            target_session_id,
+            created_at,
+            None,
+            &|| false,
+        )?;
+        destination.release()?;
+        Ok(receipt)
     }
 
     pub fn rewind_to_sequence(&mut self, sequence: u64, updated_at: u64) -> Result<SaveReceipt> {
@@ -546,6 +607,11 @@ impl OwnedLineageWriter {
             self.branch.as_str(),
         )?;
         lineage::delete_branch(&self.conn, &self.lineage, &self.branch, deleted_at)?;
+        // A failed upgrade may drop the shared lock. Close immediately and leave
+        // physical reclamation to cleanup rather than racing another writer.
+        if !self.lineage_lease.try_exclusive()? {
+            return self.release();
+        }
         let live_branches: bool = self.conn.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM lineage_branches
@@ -589,6 +655,9 @@ impl OwnedLineageWriter {
         deleted_at: u64,
     ) -> Result<()> {
         let branch = BranchId::new(session_id)?;
+        let _branch_lease = (branch != self.branch)
+            .then(|| LineageLease::acquire_branch(&self.sessions_root, &branch))
+            .transpose()?;
         let _catalog_pending =
             crate::catalog::mark_catalog_session_pending(&self.sessions_root, branch.as_str())?;
         lineage::delete_branch(&self.conn, &self.lineage, &branch, deleted_at)
@@ -683,7 +752,8 @@ impl OwnedLineageWriter {
         entry: &protocol::request_log::RequestLogEntry,
         payload_mode: crate::request_audit::RequestAuditPayloadMode,
     ) -> Result<i64> {
-        let transaction = self.conn.transaction()?;
+        let transaction =
+            crate::write_transaction::begin_write(&mut self.conn, "append request audit")?;
         let attempt_id = crate::request_audit::append_request_attempt(
             &transaction,
             entry,
@@ -1770,6 +1840,212 @@ mod tests {
     }
 
     #[test]
+    fn branch_writers_are_independent_and_keep_exclusive_session_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = session_id('a');
+        let target_id = session_id('b');
+        let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+        source.commit_session(&initial_commit(&source_id)).unwrap();
+        source.fork_current(&target_id, 2).unwrap();
+        let lineage_id = source.lineage_id().to_owned();
+        let target =
+            OwnedLineageWriter::open_existing_in_lineage(root.path(), &lineage_id, &target_id)
+                .unwrap();
+        assert_eq!(source.database_path(), target.database_path());
+
+        for id in [&source_id, &target_id] {
+            assert!(matches!(
+                OwnedLineageWriter::open(root.path(), id),
+                Err(StoreError::OwnershipConflict { .. })
+            ));
+            assert!(matches!(
+                OwnedLineageWriter::open_existing(root.path(), id),
+                Err(StoreError::OwnershipConflict { .. })
+            ));
+            assert!(matches!(
+                OwnedLineageWriter::open_existing_in_lineage(root.path(), &lineage_id, id),
+                Err(StoreError::OwnershipConflict { .. })
+            ));
+        }
+        assert_eq!(source.session_id(), source_id);
+        assert!(matches!(
+            source.delete_branch_by_id(&target_id, 3),
+            Err(StoreError::OwnershipConflict { .. })
+        ));
+        assert!(matches!(
+            OwnedLineageWriter::open_existing(root.path(), &source_id),
+            Err(StoreError::OwnershipConflict { .. })
+        ));
+
+        target.delete_branch(4).unwrap();
+        assert_eq!(
+            source.history_range(0, 1).unwrap(),
+            vec![protocol::HistoryItem::system("first")]
+        );
+        let directory = source.database_path().parent().unwrap().to_owned();
+        source.delete_branch(5).unwrap();
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn fork_cannot_claim_an_unpublished_session_owned_by_another_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = session_id('a');
+        let target_id = session_id('b');
+        let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+        source.commit_session(&initial_commit(&source_id)).unwrap();
+        let target = OwnedLineageWriter::open(root.path(), &target_id).unwrap();
+        assert!(matches!(
+            source.fork_current(&target_id, 2),
+            Err(StoreError::OwnershipConflict { .. })
+        ));
+        target.release().unwrap();
+        source.fork_current(&target_id, 2).unwrap();
+    }
+
+    #[test]
+    fn fork_checks_the_source_head_before_creating_the_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = session_id('a');
+        let target_id = session_id('b');
+        let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+        let initial = source.commit_session(&initial_commit(&source_id)).unwrap();
+        let mut changed = initial_commit(&source_id);
+        changed.expected = initial.current;
+        changed.metadata.title = Some("parent advanced".into());
+        let updated = source.commit_session(&changed).unwrap();
+        assert!(matches!(
+            OwnedLineageWriter::fork_from(root.path(), &source_id, &target_id, 2, Some(initial.current), &|| false),
+            Err(StoreError::Integrity(message)) if message.contains("source head changed")
+        ));
+        assert!(
+            LineageSessionReader::try_open_existing(root.path(), &target_id)
+                .unwrap()
+                .is_none()
+        );
+        let (destination, receipt) = OwnedLineageWriter::fork_from(
+            root.path(),
+            &source_id,
+            &target_id,
+            2,
+            Some(updated.current),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(destination.session_id(), target_id);
+        assert_eq!(destination.store_head().unwrap(), receipt.current);
+        assert_eq!(source.store_head().unwrap(), updated.current);
+        assert!(matches!(
+            OwnedLineageWriter::open_existing(root.path(), &target_id),
+            Err(StoreError::OwnershipConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn cancelling_a_contended_fork_releases_destination_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = session_id('a');
+        let target_id = session_id('b');
+        let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+        source.commit_session(&initial_commit(&source_id)).unwrap();
+        let transaction = source.conn.transaction().unwrap();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let (waiting, ready) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let task = scope.spawn(|| {
+                OwnedLineageWriter::fork_from(root.path(), &source_id, &target_id, 2, None, &|| {
+                    let _ = waiting.send(());
+                    cancelled.load(std::sync::atomic::Ordering::Acquire)
+                })
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+            assert!(matches!(task.join().unwrap(), Err(StoreError::Cancelled)));
+        });
+        transaction.commit().unwrap();
+        assert!(
+            LineageSessionReader::try_open_existing(root.path(), &target_id)
+                .unwrap()
+                .is_none()
+        );
+        OwnedLineageWriter::open(root.path(), &target_id)
+            .unwrap()
+            .release()
+            .unwrap();
+    }
+
+    #[test]
+    fn opening_a_clean_fork_does_not_wait_for_its_parents_write_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = session_id('a');
+        let target_id = session_id('b');
+        let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+        source.commit_session(&initial_commit(&source_id)).unwrap();
+        source.fork_current(&target_id, 2).unwrap();
+        let transaction = source.conn.transaction().unwrap();
+        let target = OwnedLineageWriter::open_existing(root.path(), &target_id).unwrap();
+        assert!(target.startup_recovery().is_none());
+        assert_eq!(
+            target.history_range(0, 1).unwrap(),
+            vec![protocol::HistoryItem::system("first")]
+        );
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn concurrent_branch_commits_preserve_independent_histories() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = session_id('a');
+        let target_id = session_id('b');
+        let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+        source.commit_session(&initial_commit(&source_id)).unwrap();
+        source.fork_current(&target_id, 2).unwrap();
+        let target = OwnedLineageWriter::open_existing(root.path(), &target_id).unwrap();
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for mut writer in [source, target] {
+                let start = &start;
+                scope.spawn(move || {
+                    let mut snapshot = writer.snapshot().unwrap();
+                    start.wait();
+                    for index in 1..=20 {
+                        let command = SessionCommit {
+                            session_id: writer.session_id().to_owned(),
+                            expected: snapshot.head,
+                            identity: snapshot.identity.clone(),
+                            metadata: metadata(index + 2, writer.session_id()),
+                            history: HistorySuffix {
+                                start: HistoryIndex::new(index as u64),
+                                final_len: HistoryLen::new(index as u64 + 1),
+                                items: vec![protocol::HistoryItem::system(format!(
+                                    "{}:{index}",
+                                    writer.session_id()
+                                ))],
+                            },
+                            side_tables: SideTableSuffixes::default(),
+                            transcript_records: None,
+                        };
+                        writer.commit_session(&command).unwrap();
+                        snapshot = writer.snapshot().unwrap();
+                    }
+                    writer.release().unwrap();
+                });
+            }
+        });
+        for id in [&source_id, &target_id] {
+            let reader = LineageSessionReader::open_existing(root.path(), id).unwrap();
+            let expected: Vec<_> = std::iter::once(protocol::HistoryItem::system("first"))
+                .chain((1..=20).map(|index| protocol::HistoryItem::system(format!("{id}:{index}"))))
+                .collect();
+            assert_eq!(reader.history_range(0, 21).unwrap(), expected);
+            let report = reader.doctor_report().unwrap();
+            assert!(report.healthy, "{:?}", report.issues);
+        }
+    }
+
+    #[test]
     fn lineage_writer_owns_one_database_and_common_fork_writes_only_metadata() {
         let root = tempfile::tempdir().unwrap();
         let source_id = session_id('a');
@@ -2796,7 +3072,8 @@ mod tests {
         assert_eq!(target_status.ready_segments, 1);
         assert_eq!(segment_count(), 1);
 
-        writer.switch_branch(&target_id).unwrap();
+        writer.release().unwrap();
+        let mut writer = OwnedLineageWriter::open_existing(root.path(), &target_id).unwrap();
         let state = writer.snapshot().unwrap();
         let mut metadata = state.metadata.clone();
         metadata.updated_at = 3;
@@ -3121,7 +3398,8 @@ mod tests {
         let source_attempt = writer
             .append_request_attempt(&request_entry(1), RequestAuditPayloadMode::Full)
             .unwrap();
-        writer.switch_branch(&target_id).unwrap();
+        writer.release().unwrap();
+        let mut writer = OwnedLineageWriter::open_existing(root.path(), &target_id).unwrap();
         let target_attempt = writer
             .append_request_attempt(&request_entry(2), RequestAuditPayloadMode::Full)
             .unwrap();

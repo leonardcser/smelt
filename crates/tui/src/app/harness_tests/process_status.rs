@@ -218,6 +218,7 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
 
     let outcome = app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+    app.wait_for_session_lifecycle();
 
     assert_eq!(
         outcome,

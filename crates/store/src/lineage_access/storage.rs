@@ -147,18 +147,23 @@ pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<
     if let Some(parent) = path.parent() {
         ensure_private_directory_all(parent)?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
+    // Branch writers share a WAL database. Reserve the write transaction before
+    // reading so another branch cannot invalidate a deferred write snapshot.
+    conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    conn.busy_timeout(LINEAGE_BUSY_TIMEOUT)?;
+    conn.busy_timeout(std::time::Duration::ZERO)?;
     if new_database {
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    if new_database {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+    }
     conn.pragma_update(None, "synchronous", "FULL")?;
     let actual: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if !actual.eq_ignore_ascii_case("wal") {

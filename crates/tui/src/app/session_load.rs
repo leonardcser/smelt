@@ -30,17 +30,26 @@ impl PreparedSessionLoad {
     }
 }
 
+pub(super) struct SessionForkRequest {
+    pub(super) source_id: String,
+    pub(super) forked: smelt_core::session::Session,
+    pub(super) expected_source: Option<smelt_store::StoreHead>,
+    pub(super) preserved_intent: Option<crate::app::session_document::PreparedSessionBatch>,
+}
+
 struct SessionLoadRequest {
     sessions: smelt_core::session::SessionStorage,
     id: String,
     width: u16,
     target_rows: u16,
+    fork: Option<SessionForkRequest>,
 }
 
 pub struct SessionLoadWorkerResult {
     generation: u64,
     id: String,
     outcome: Result<PreparedSessionLoad, String>,
+    forked_from: Option<String>,
 }
 
 impl std::fmt::Debug for SessionLoadWorkerResult {
@@ -56,6 +65,7 @@ impl std::fmt::Debug for SessionLoadWorkerResult {
 
 pub(super) struct SessionLoadRuntime {
     latest_generation: Arc<AtomicU64>,
+    pending: std::cell::Cell<bool>,
     #[cfg(test)]
     delay: std::time::Duration,
 }
@@ -64,6 +74,7 @@ impl Default for SessionLoadRuntime {
     fn default() -> Self {
         Self {
             latest_generation: Arc::new(AtomicU64::new(0)),
+            pending: std::cell::Cell::new(false),
             #[cfg(test)]
             delay: std::time::Duration::ZERO,
         }
@@ -89,13 +100,21 @@ impl SessionLoadRuntime {
                 if cancelled() {
                     return;
                 }
-                let outcome = prepare_session_load(
-                    &request.sessions,
-                    &request.id,
-                    request.width,
-                    request.target_rows,
-                    &cancelled,
-                );
+                let forked_from = request.fork.as_ref().map(|fork| fork.source_id.clone());
+                let outcome = request
+                    .fork
+                    .map_or(Ok(()), |fork| {
+                        create_session_fork(&request.sessions, fork, &cancelled)
+                    })
+                    .and_then(|()| {
+                        prepare_session_load(
+                            &request.sessions,
+                            &request.id,
+                            request.width,
+                            request.target_rows,
+                            &cancelled,
+                        )
+                    });
                 if cancelled() {
                     return;
                 }
@@ -104,15 +123,22 @@ impl SessionLoadRuntime {
                         generation,
                         id: request.id,
                         outcome,
+                        forked_from,
                     },
                 )));
             })
-            .map(|_| ())
+            .map(|_| self.pending.set(true))
             .map_err(|error| format!("failed to start session load: {error}"))
     }
 
     fn cancel(&self) {
         self.latest_generation.fetch_add(1, Ordering::AcqRel);
+        self.pending.set(false);
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(super) fn is_pending(&self) -> bool {
+        self.pending.get()
     }
 
     fn is_current(&self, result: &SessionLoadWorkerResult) -> bool {
@@ -129,6 +155,53 @@ impl Drop for SessionLoadRuntime {
     fn drop(&mut self) {
         self.cancel();
     }
+}
+
+fn create_session_fork(
+    sessions: &smelt_core::session::SessionStorage,
+    request: SessionForkRequest,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    if cancelled() {
+        return Err("session fork cancelled".into());
+    }
+    let (mut destination, imported) = smelt_store::OwnedLineageWriter::fork_from(
+        sessions.sessions_dir(),
+        &request.source_id,
+        &request.forked.id,
+        request.forked.created_at_ms,
+        request.expected_source,
+        cancelled,
+    )
+    .map_err(|error| format!("failed to fork session store: {error}"))?;
+    let published = if let Some(intent) = request.preserved_intent {
+        let outcome = intent
+            .to_store_commit(request.forked.id.clone(), imported.current)
+            .map_err(|error| error.to_string())
+            .and_then(|command| {
+                destination
+                    .commit_session(&command)
+                    .map_err(|error| format!("{error:?}"))
+            });
+        match outcome {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let cleanup = destination.delete_branch(smelt_core::session::now_ms());
+                return Err(match cleanup {
+                    Ok(()) => format!("failed to preserve unsaved fork state: {error}"),
+                    Err(cleanup) => format!("failed to preserve unsaved fork state: {error}; failed to remove incomplete fork: {cleanup}"),
+                });
+            }
+        }
+    } else {
+        imported
+    };
+    sessions
+        .publish_session_catalog_snapshot(&request.forked, &published)
+        .map_err(|error| format!("failed to publish fork session: {error}"))?;
+    destination
+        .release()
+        .map_err(|error| format!("failed to release fork writer: {error}"))
 }
 
 pub(super) fn prepare_session_load(
@@ -180,6 +253,7 @@ impl super::TuiApp {
             id: id.to_string(),
             width: self.last_width,
             target_rows,
+            fork: None,
         };
         match self
             .session_load
@@ -189,6 +263,23 @@ impl super::TuiApp {
             Err(error) => {
                 self.notify_operation_error_sticky(super::NotificationOperation::SessionLoad, error)
             }
+        }
+    }
+
+    pub(super) fn request_session_fork(&mut self, fork: SessionForkRequest) {
+        let request = SessionLoadRequest {
+            sessions: self.core.sessions.clone(),
+            id: fork.forked.id.clone(),
+            width: self.last_width,
+            target_rows: super::transcript::record_tail_target_rows(self.last_height),
+            fork: Some(fork),
+        };
+        match self
+            .session_load
+            .request(self.platform.app_event_sender(), request)
+        {
+            Ok(()) => self.notify("forking session...".into()),
+            Err(error) => self.notify_session_error_sticky(error),
         }
     }
 
@@ -216,9 +307,15 @@ impl super::TuiApp {
         if !self.session_load.is_current(&result) {
             return;
         }
+        self.session_load.pending.set(false);
         match result.outcome {
             Ok(prepared) => {
-                self.install_prepared_session_load(prepared);
+                if self.install_prepared_session_load(prepared) {
+                    if let Some(source_id) = result.forked_from {
+                        self.publish_history_delta(super::history::HistoryDeltaKind::Forked);
+                        self.notify(format!("forked from {source_id}"));
+                    }
+                }
             }
             Err(error) => {
                 self.notify_operation_error_sticky(

@@ -148,6 +148,7 @@ impl TestApp {
         self.app.pump_lua();
         self.app.try_perform_scheduled_runtime_reconcile();
         self.app.drain_deferred_layout();
+        self.wait_for_writer_startup();
         result
     }
 

@@ -10,6 +10,7 @@ pub(crate) struct PersistenceReport {
     pub(crate) canonical_completions: Vec<crate::persist::CanonicalCommandCompletion>,
     pub(crate) failure: Option<PersistenceFailureReport>,
     pub(crate) audit_warning: Option<String>,
+    pub(crate) startup: Option<Result<(), crate::persist::PersistenceCause>>,
 }
 
 pub(crate) struct PersistenceFailureReport {
@@ -94,6 +95,7 @@ pub(crate) enum SaveStatus {
     SkippedReadOnly,
     Blocked,
     DeferredHydration,
+    DeferredStartup,
     Unchanged,
     DurableEphemeral,
     Submitted,
@@ -2130,10 +2132,17 @@ impl ConversationRuntime {
 
     pub(crate) fn is_read_only(&self) -> bool {
         self.access.is_read_only()
+            && !(self.writer_is_opening()
+                && self.document.acknowledged_head() == smelt_store::StoreHead::default())
+    }
+
+    pub(crate) fn writer_is_opening(&self) -> bool {
+        matches!(self.access, SessionAccess::Opening)
     }
 
     pub(crate) fn read_only_reason(&self) -> String {
         match &self.access {
+            SessionAccess::Opening => "session writer is opening".into(),
             SessionAccess::ReadOnly { reason } => reason.clone(),
             SessionAccess::Owned => "session is read-only".to_string(),
         }
@@ -2265,7 +2274,7 @@ impl ConversationRuntime {
         self.session.cwd.clone()
     }
 
-    pub(crate) fn claim_writer_access(&mut self) -> Result<(), String> {
+    pub(crate) fn claim_writer_access(&mut self) -> Result<(), crate::persist::PersistenceCause> {
         debug_assert!(self.persistence.is_none());
         if self.is_ephemeral() {
             self.access = SessionAccess::Owned;
@@ -2276,22 +2285,31 @@ impl ConversationRuntime {
             .persistence_epoch
             .checked_next()
             .expect("session persistence epoch overflow");
-        let session_id = smelt_core::session_id::SessionId::parse(&self.session.id)
-            .map_err(|error| format!("invalid session id: {error}"))?;
-        let (persistence, startup) = crate::persist::SessionPersistence::spawn(
+        let session_id =
+            smelt_core::session_id::SessionId::parse(&self.session.id).map_err(|error| {
+                crate::persist::PersistenceCause::invariant(format!("invalid session id: {error}"))
+            })?;
+        let persistence = crate::persist::SessionPersistence::spawn(
             self.sessions.clone(),
             session_id,
             epoch,
             self.document.durable_generation(),
             self.document.acknowledged_head(),
-        )
-        .map_err(|cause| cause.message)?;
+        )?;
         self.persistence_epoch = epoch;
         self.observed_persistence_status = None;
         self.document.bind_persistence(epoch);
         self.persistence = Some(persistence);
-        self.access = SessionAccess::Owned;
+        self.access = SessionAccess::Opening;
         self.document.enable_change_tracking();
+        Ok(())
+    }
+
+    fn finish_writer_startup(
+        &mut self,
+        startup: crate::persist::SessionPersistenceStartup,
+    ) -> Result<(), crate::persist::PersistenceCause> {
+        let epoch = self.persistence_epoch;
         self.turn.set_last_terminal_turn_id(
             startup
                 .latest_terminal_turn_id
@@ -2318,23 +2336,36 @@ impl ConversationRuntime {
                 let reason =
                     "startup turn recovery receipt did not match the session document".to_string();
                 self.mark_read_only(reason.clone());
-                return Err(reason);
+                return Err(crate::persist::PersistenceCause::invariant(reason));
             }
         }
+        self.access = SessionAccess::Owned;
         Ok(())
     }
 
     pub(crate) fn drain_persistence_report(&mut self) -> Option<PersistenceReport> {
+        let startup = if self.writer_is_opening() {
+            let startup = self.persistence.as_mut()?.take_startup()?;
+            let result = startup.and_then(|startup| self.finish_writer_startup(startup));
+            if let Err(cause) = &result {
+                self.mark_read_only(cause.message.clone());
+            }
+            Some(result)
+        } else {
+            None
+        };
         let persistence = self.persistence.as_ref()?;
         let status_woke = persistence.drain_status_wake();
-        if !status_woke
+        if startup.is_none()
+            && !status_woke
             && !persistence.is_finished()
             && persistence.status().canonical_completions.is_empty()
         {
             return None;
         }
         let status = persistence.take_status();
-        if self.observed_persistence_status.as_ref() == Some(&status)
+        if startup.is_none()
+            && self.observed_persistence_status.as_ref() == Some(&status)
             && status.canonical_completions.is_empty()
         {
             return None;
@@ -2419,8 +2450,13 @@ impl ConversationRuntime {
         Some(PersistenceReport {
             acknowledged_session_id,
             canonical_completions,
-            failure,
+            failure: if startup.as_ref().is_some_and(Result::is_err) {
+                None
+            } else {
+                failure
+            },
             audit_warning: status.latest_audit_warning.map(|warning| warning.message),
+            startup,
         })
     }
 
@@ -2428,6 +2464,9 @@ impl ConversationRuntime {
         &mut self,
         metadata: super::session_document::RuntimeSessionMetadata,
     ) -> Result<SaveStatus, String> {
+        if self.writer_is_opening() && self.is_read_only() {
+            return Ok(SaveStatus::DeferredStartup);
+        }
         if self.is_read_only() {
             return Ok(SaveStatus::SkippedReadOnly);
         }
@@ -2476,9 +2515,9 @@ impl ConversationRuntime {
             }
         };
         if self.persistence.is_none() {
-            if let Err(reason) = self.claim_writer_access() {
-                self.mark_read_only(reason.clone());
-                return Err(reason);
+            if let Err(cause) = self.claim_writer_access() {
+                self.mark_read_only(cause.message.clone());
+                return Err(cause.message);
             }
         }
         self.publish_shared_state();
@@ -2533,9 +2572,9 @@ impl ConversationRuntime {
             };
             if let Some(intent) = intent {
                 if self.persistence.is_none() {
-                    if let Err(reason) = self.claim_writer_access() {
-                        self.mark_read_only(reason.clone());
-                        return Err(reason);
+                    if let Err(cause) = self.claim_writer_access() {
+                        self.mark_read_only(cause.message.clone());
+                        return Err(cause.message);
                     }
                 }
                 self.publish_shared_state();
@@ -2678,12 +2717,12 @@ impl ConversationRuntime {
         turn: smelt_store::NewTurn,
     ) -> Result<CanonicalTurnSubmitOutcome, crate::persist::PersistenceCause> {
         if self.persistence.is_none() {
-            if let Err(reason) = self.claim_writer_access() {
-                self.mark_read_only(reason.clone());
-                return Err(crate::persist::PersistenceCause::unavailable(reason));
+            if let Err(cause) = self.claim_writer_access() {
+                self.mark_read_only(cause.message.clone());
+                return Err(cause);
             }
         }
-        if self.access.is_read_only() {
+        if matches!(self.access, SessionAccess::ReadOnly { .. }) {
             return Err(crate::persist::PersistenceCause::unavailable(
                 "session is read-only",
             ));
@@ -2890,6 +2929,9 @@ impl ConversationRuntime {
     fn process_front_canonical_operation(
         &mut self,
     ) -> Result<CanonicalOperationProgress, crate::persist::PersistenceCause> {
+        if self.writer_is_opening() {
+            return Ok(CanonicalOperationProgress::DeferredPreparation);
+        }
         let operation = self
             .canonical_operations
             .front()

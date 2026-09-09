@@ -16,6 +16,7 @@ mod session_command;
 mod session_commit;
 mod session_writer;
 mod snapshot;
+mod write_transaction;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionStoreLayout {

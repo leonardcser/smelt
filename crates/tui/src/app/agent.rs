@@ -2816,7 +2816,7 @@ mod tests {
                 }
             })
             .collect();
-        app.app.load_session(session);
+        app.load_session(session);
         app.app.restore_screen();
         app.app.ensure_current_context_note();
         app.app.apply_pending_history_appends_for_request();
@@ -2832,6 +2832,7 @@ mod tests {
             .notify_turn_error_sticky("rate limit exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("try again", Content::text("try again"), 0)
@@ -2849,6 +2850,7 @@ mod tests {
             "missing credentials".to_string(),
         );
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("try again", Content::text("try again"), 0)
@@ -2865,6 +2867,7 @@ mod tests {
         app.app
             .notify_session_error_sticky("session failure".to_string());
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("try again", Content::text("try again"), 0)
@@ -2886,6 +2889,7 @@ mod tests {
         app.app
             .notify_application_error_sticky("application failure".to_string());
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("try again", Content::text("try again"), 0)
@@ -2903,6 +2907,7 @@ mod tests {
     #[test]
     fn starting_command_continuation_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.ensure_writer_ready();
         let previous = app
             .app
             .begin_agent_turn("previous", Content::text("previous"), 0)
@@ -2913,6 +2918,7 @@ mod tests {
             .notify_turn_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_command_request_turn(
@@ -2932,6 +2938,7 @@ mod tests {
     fn user_turn_commits_request_before_dispatch_without_duplicate_history() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("first request", Content::text("first request"), 0)
@@ -2975,6 +2982,7 @@ mod tests {
     #[test]
     fn terminal_turn_commits_final_history_and_completed_state_together() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("finish me", Content::text("finish me"), 0)
@@ -3228,7 +3236,7 @@ mod tests {
         });
         app.app.save_session_and_flush();
         let source_id = app.app.conversation.session().id.clone();
-        app.app.fork_session();
+        app.fork_session();
         assert_ne!(app.app.conversation.session().id, source_id);
         app.set_lua_string_global("SOURCE_SESSION_ID", source_id.clone())
             .expect("install source session id");
@@ -3536,6 +3544,7 @@ mod tests {
             .execute_batch("ROLLBACK")
             .expect("release catalog lock");
 
+        app.wait_for_session_lifecycle();
         let fork_id = app.app.conversation.session().id.clone();
         assert_ne!(fork_id, original_id, "fork becomes the active session");
         assert!(
@@ -3570,7 +3579,15 @@ mod tests {
         let elapsed = started.elapsed();
         drop(catalog_lock);
 
-        assert!(turn.is_some(), "canonical submission remains independent");
+        assert!(
+            turn.is_some() || app.app.turn_submission_is_pending(),
+            "canonical submission remains independent"
+        );
+        if let Some(turn) = turn {
+            app.app.conversation.set_active(Some(turn));
+        }
+        app.wait_for_session_lifecycle();
+        assert!(app.agent_running());
         assert!(
             elapsed < std::time::Duration::from_secs(1),
             "canonical submit waited {elapsed:?} for an unrelated catalog marker"
@@ -3660,6 +3677,7 @@ mod tests {
     #[test]
     fn terminal_transition_failure_keeps_queued_turn_from_starting() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("first", Content::text("first"), 0)
@@ -4032,6 +4050,7 @@ mod tests {
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 
         assert!(app.app.retry_blocked_persistence());
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_command_request_turn(
@@ -4152,6 +4171,7 @@ mod tests {
     fn engine_rejection_records_failed_after_durable_submit() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.disconnect_engine_commands();
+        app.ensure_writer_ready();
 
         assert!(app
             .app
@@ -4254,6 +4274,7 @@ mod tests {
             let mut app = crate::app::test_harness::TestApp::builder()
                 .with_runtime_home(runtime.path())
                 .build();
+            app.ensure_writer_ready();
             let turn = app
                 .app
                 .begin_agent_turn("before restart", Content::text("before restart"), 0)
@@ -4273,7 +4294,7 @@ mod tests {
             .with_runtime_home(runtime.path())
             .build();
         resumed.clear_actions();
-        resumed.app.load_session_by_id(&session_id);
+        resumed.load_session_by_id(&session_id);
 
         assert_eq!(
             resumed.app.conversation.session().id,
@@ -4316,6 +4337,7 @@ mod tests {
 
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("new request", Content::text("new request"), 0)
@@ -4388,7 +4410,7 @@ mod tests {
                 ))
             }
         }));
-        app.app.load_session(session);
+        app.load_session(session);
         app.app.restore_screen();
         app.app.ensure_current_context_note();
         app.app.apply_pending_history_appends_for_request();
@@ -4398,6 +4420,7 @@ mod tests {
         app.app.set_context_note("goal".into(), None);
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_agent_turn("new request", Content::text("new request"), 0)
@@ -4435,6 +4458,7 @@ mod tests {
     fn command_turn_metadata_snapshot_matches_committed_request() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
+        app.ensure_writer_ready();
         let turn = app
             .app
             .begin_command_request_turn(
@@ -4544,6 +4568,7 @@ mod tests {
                 termination: protocol::JobTermination::Exited,
             });
 
+        app.wait_for_session_lifecycle();
         assert!(app.app.agent_is_running());
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
@@ -4563,6 +4588,7 @@ mod tests {
                 termination: protocol::JobTermination::OutOfMemory,
             });
 
+        app.wait_for_session_lifecycle();
         assert!(app.app.agent_is_running());
         assert_eq!(
             process_status_blocks(&app),
@@ -4659,6 +4685,7 @@ mod tests {
             "test app has a usable model"
         );
 
+        app.wait_for_session_lifecycle();
         assert!(app.app.agent_is_running());
         assert_eq!(process_status_blocks(&app), vec![text]);
         assert!(user_blocks(&app).is_empty());
@@ -4674,6 +4701,7 @@ mod tests {
                 exit_code: Some(1),
                 termination: protocol::JobTermination::Exited,
             });
+        app.wait_for_session_lifecycle();
         let turn_id = app
             .app
             .active_agent_turn_id()

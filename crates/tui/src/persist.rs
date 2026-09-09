@@ -562,6 +562,7 @@ pub(crate) struct SessionPersistence {
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
     thread: Option<thread::JoinHandle<()>>,
+    startup: Option<Mutex<Receiver<Result<SessionPersistenceStartup, PersistenceCause>>>>,
 }
 
 impl SessionPersistence {
@@ -571,7 +572,7 @@ impl SessionPersistence {
         epoch: SessionEpoch,
         generation: PersistenceGeneration,
         acknowledged_head: smelt_store::StoreHead,
-    ) -> Result<(Self, SessionPersistenceStartup), PersistenceCause> {
+    ) -> Result<Self, PersistenceCause> {
         let latest = Arc::new(Mutex::new(PendingBatchState {
             accepting: true,
             wake_pending: false,
@@ -644,32 +645,37 @@ impl SessionPersistence {
             .map_err(|error| {
                 PersistenceCause::unavailable(format!("spawn persistence actor: {error}"))
             })?;
-        match started_rx.recv() {
-            Ok(Ok(startup_recovery)) => Ok((
-                Self {
-                    session_id,
-                    epoch,
-                    latest,
-                    control: Some(control),
-                    status,
-                    status_wake: Mutex::new(status_wake),
-                    pending_audits,
-                    pending_full_audit_bytes,
-                    thread: Some(thread),
-                },
-                startup_recovery,
+        Ok(Self {
+            session_id,
+            epoch,
+            latest,
+            control: Some(control),
+            status,
+            status_wake: Mutex::new(status_wake),
+            pending_audits,
+            pending_full_audit_bytes,
+            thread: Some(thread),
+            startup: Some(Mutex::new(started_rx)),
+        })
+    }
+
+    pub(crate) fn take_startup(
+        &mut self,
+    ) -> Option<Result<SessionPersistenceStartup, PersistenceCause>> {
+        let receiver = self
+            .startup
+            .as_mut()?
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(PersistenceCause::unavailable(
+                "persistence actor stopped during startup",
             )),
-            Ok(Err(cause)) => {
-                let _ = thread.join();
-                Err(cause)
-            }
-            Err(_) => {
-                let _ = thread.join();
-                Err(PersistenceCause::unavailable(
-                    "persistence actor stopped during startup",
-                ))
-            }
-        }
+        };
+        self.startup = None;
+        Some(result)
     }
 
     pub(crate) fn epoch(&self) -> SessionEpoch {
@@ -1878,6 +1884,7 @@ fn persistence_actor(
         recovery: startup_recovery,
         latest_terminal_turn_id,
     }));
+    let _ = actor.publisher.wake.try_send(());
     actor.run(controls);
 }
 
@@ -3238,15 +3245,23 @@ mod tests {
     }
 
     fn actor() -> SessionPersistence {
-        SessionPersistence::spawn(
+        let mut actor = SessionPersistence::spawn(
             smelt_core::session::SessionStorage::new(smelt_core::config::state_dir()),
             smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap(),
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
             smelt_store::StoreHead::default(),
         )
-        .unwrap()
-        .0
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(result) = actor.take_startup() {
+                result.unwrap();
+                return actor;
+            }
+            assert!(Instant::now() < deadline, "persistence startup timed out");
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn intent(generation: u64, history: &[&str]) -> PreparedSessionBatch {

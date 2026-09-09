@@ -46,6 +46,7 @@ impl TestApp {
     }
 
     pub fn start_submitted_turn(&mut self, text: &str) {
+        self.ensure_writer_ready();
         let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
         let turn = self
             .app
@@ -539,7 +540,47 @@ impl TestApp {
 
     /// Resume a canonical session through the app's normal storage path.
     pub fn resume_session(&mut self, id: &str) -> bool {
-        self.app.load_session_by_id(id)
+        let loaded = self.app.load_session_by_id(id);
+        self.wait_for_session_lifecycle();
+        loaded
+    }
+
+    pub(crate) fn ensure_writer_ready(&mut self) {
+        if !self.app.conversation.has_persistence() {
+            self.app
+                .conversation
+                .claim_writer_access()
+                .expect("start fixture writer");
+        }
+        self.wait_for_writer_startup();
+    }
+
+    pub(super) fn wait_for_writer_startup(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.app.conversation.writer_is_opening() {
+            self.app.drain_persist_reports();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer startup timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    pub(crate) fn wait_for_session_lifecycle(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.app.session_load.is_pending() || self.app.conversation.writer_is_opening() {
+            self.app.drain_persist_reports();
+            if let Some(event) = self.app.platform.try_recv_app_event() {
+                self.app.handle_app_event(event);
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "session lifecycle timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
     }
 
     pub fn publish_session_catalog_commit(
@@ -802,6 +843,7 @@ impl TestApp {
 
     pub(crate) fn load_session(&mut self, session: smelt_core::session::Session) {
         self.app.load_session(session);
+        self.wait_for_session_lifecycle();
     }
 
     pub(crate) fn load_store_backed_session(
@@ -809,6 +851,7 @@ impl TestApp {
         document: crate::app::session_document::StoreBackedSessionDocument,
     ) {
         self.app.load_store_backed_session(document);
+        self.wait_for_session_lifecycle();
     }
 
     pub(crate) fn load_session_by_id(&mut self, id: &str) -> bool {
@@ -817,6 +860,7 @@ impl TestApp {
 
     pub(crate) fn fork_session(&mut self) {
         self.app.fork_session();
+        self.wait_for_session_lifecycle();
     }
 
     pub(crate) fn reset_session(&mut self) {
@@ -873,6 +917,7 @@ impl TestApp {
                 exit_code,
                 termination,
             });
+        self.wait_for_writer_startup();
     }
 
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {

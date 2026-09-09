@@ -3230,7 +3230,7 @@ mod tests {
         assert_eq!(suffix.records.len(), 20);
 
         let generation = intent.generation;
-        let (mut persistence, _) = crate::persist::SessionPersistence::spawn(
+        let mut persistence = crate::persist::SessionPersistence::spawn(
             smelt_core::session::SessionStorage::new(target_root.path().to_path_buf()),
             smelt_core::session_id::SessionId::parse(TEST_LINEAGE_SESSION_ID).expect("session id"),
             SessionEpoch::new(1),

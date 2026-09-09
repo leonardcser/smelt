@@ -79,6 +79,7 @@ fn wait_for_session_load(app: &mut TestApp, id: &str) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
+    app.wait_for_session_lifecycle();
 }
 
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
@@ -1010,6 +1011,39 @@ fn failed_canonical_submit_dispatches_once_after_explicit_retry() {
 }
 
 #[test]
+fn writer_startup_failure_does_not_dispatch_a_queued_turn() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.session_snapshot().id.clone();
+    let layout =
+        smelt_store::SessionStoreLayout::from_sessions_root(smelt_core::session::sessions_dir());
+    std::fs::create_dir_all(layout.lineage_lock_path(&session_id)).unwrap();
+
+    let turn = app.app.begin_agent_turn(
+        "do not dispatch",
+        Content::text("do not dispatch"),
+        smelt_core::session::now_ms(),
+    );
+    assert!(turn.is_none());
+    assert!(app.app.conversation.writer_is_opening());
+    assert!(app.app.turn_submission_is_pending());
+
+    app.wait_for_session_lifecycle();
+    assert!(app.session_is_read_only());
+    assert!(!app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    app.app.drain_persist_reports();
+    assert!(app
+        .drain_engine_sends()
+        .iter()
+        .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+    assert_eq!(
+        app.overlays_probe().notification().unwrap().kind,
+        smelt_core::messages::MessageKind::Error
+    );
+}
+
+#[test]
 fn lua_delete_returns_actionable_error_for_malicious_id() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -1391,7 +1425,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
 
     let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
     let fork_started = std::time::Instant::now();
-    app.fork_session();
+    app.app.fork_session();
     let fork_elapsed = fork_started.elapsed();
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
@@ -1407,6 +1441,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
         allocated_bytes <= 4 * 1024 * 1024,
         "current compacted fork allocated {allocated_bytes} bytes on the UI thread"
     );
+    app.wait_for_session_lifecycle();
     let fork_id = app.session_snapshot().id.clone();
     assert_ne!(fork_id, source_id);
     assert!(
@@ -1492,7 +1527,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
 
     let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
     let fork_started = std::time::Instant::now();
-    resumed.fork_session();
+    resumed.app.fork_session();
     let fork_elapsed = fork_started.elapsed();
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
@@ -1510,6 +1545,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
         allocated_bytes <= 4 * 1024 * 1024,
         "large visible fork allocated {allocated_bytes} bytes on the UI thread"
     );
+    resumed.wait_for_session_lifecycle();
     let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
     let fork = lineage_reader(&fork_id);
@@ -2282,6 +2318,209 @@ fn resume_waits_for_pending_catalog_publication() {
     assert_eq!(resumed.session_message_count(), 1);
 }
 
+fn wait_for_fork(app: &mut TestApp, source_id: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while app.session_snapshot().id == source_id {
+        if let Some(event) = app.try_recv_app_event() {
+            app.handle_app_event(event);
+        } else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fork did not complete: {:?}",
+                app.overlays_probe()
+                    .notification()
+                    .map(|notice| &notice.summary)
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    app.wait_for_session_lifecycle();
+    app.session_snapshot().id.clone()
+}
+
+#[test]
+fn read_only_session_can_fork_while_its_owner_keeps_writing() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_record_backed_session(&mut owner);
+    let source_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&source_id));
+    assert!(reader.session_is_read_only());
+    assert!(reader.run_lua("smelt.session.fork()"));
+    let fork_id = wait_for_fork(&mut reader, &source_id);
+    assert!(!reader.session_is_read_only());
+    assert!(!owner.session_is_read_only());
+    assert_eq!(
+        lineage_reader(&fork_id).history_range(0, 1).unwrap(),
+        vec![HistoryItem::user(Content::text("shared history"))]
+    );
+    owner.session_append_history(HistoryItem::user(Content::text("parent continues")));
+    owner.save_session_and_flush();
+    reader.session_append_history(HistoryItem::user(Content::text("fork continues")));
+    reader.save_session_and_flush();
+    assert_eq!(
+        lineage_reader(&source_id).history_range(1, 2).unwrap(),
+        vec![HistoryItem::user(Content::text("parent continues"))]
+    );
+    assert_eq!(
+        lineage_reader(&fork_id).history_range(1, 2).unwrap(),
+        vec![HistoryItem::user(Content::text("fork continues"))]
+    );
+}
+
+#[test]
+fn resume_recovery_contention_does_not_block_the_ui() {
+    let guard = test_home_guard();
+    let (source_id, turn_id, path) = {
+        let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+        owner.start_submitted_turn("interrupted request");
+        owner.save_session_and_flush();
+        let source_id = owner.session_snapshot().id.clone();
+        let turn_id = owner.current_turn_id().unwrap();
+        let address = owner
+            .core_probe()
+            .sessions
+            .resolve_session_for_read_result(&source_id)
+            .unwrap();
+        let path = smelt_store::SessionStoreLayout::from_sessions_root(address.sessions_root)
+            .lineage_database_path(&address.lineage_id);
+        (source_id, turn_id, path)
+    };
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    let blocker = rusqlite::Connection::open(path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let elapsed = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+        let started = std::time::Instant::now();
+        assert!(resumed.app.load_session_by_id(&source_id));
+        let elapsed = started.elapsed();
+        assert!(resumed.app.conversation.writer_is_opening());
+        assert!(resumed.app.session_is_read_only());
+        elapsed
+    });
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "resume blocked the UI for {elapsed:?}"
+    );
+    resumed.wait_for_session_lifecycle();
+    assert!(!resumed.session_is_read_only());
+    assert_eq!(
+        resumed.app.conversation.last_terminal_turn_id(),
+        Some(turn_id)
+    );
+}
+
+#[test]
+fn fork_storage_contention_does_not_block_the_ui() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    app.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_record_backed_session(&mut app);
+    let source_id = app.session_snapshot().id.clone();
+    let address = app
+        .core_probe()
+        .sessions
+        .resolve_session_for_read_result(&source_id)
+        .unwrap();
+    let path = smelt_store::SessionStoreLayout::from_sessions_root(address.sessions_root)
+        .lineage_database_path(&address.lineage_id);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let elapsed = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            conn.execute_batch("ROLLBACK").unwrap();
+        });
+        let start = std::time::Instant::now();
+        assert!(app.run_lua("smelt.session.fork()"));
+        start.elapsed()
+    });
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "fork blocked the UI for {elapsed:?}"
+    );
+    wait_for_fork(&mut app, &source_id);
+    assert!(!app.session_is_read_only());
+}
+
+#[test]
+fn resuming_fork_while_parent_has_active_writer_is_writable() {
+    let guard = test_home_guard();
+    let mut parent = TestApp::builder().build_with_test_home_guard(&guard);
+    parent.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_record_backed_session(&mut parent);
+    let parent_id = parent.session_snapshot().id.clone();
+
+    assert!(parent.run_lua("smelt.session.fork()"));
+    let fork_id = wait_for_fork(&mut parent, &parent_id);
+    assert_ne!(fork_id, parent_id);
+    assert!(parent.load_session_by_id(&parent_id));
+    assert!(!parent.session_is_read_only());
+
+    let mut fork = TestApp::builder().build_without_test_home_reset(&guard);
+    fork.set_lua_string_global("__fork_id", fork_id.clone())
+        .unwrap();
+    assert!(fork.run_lua("smelt.session.load(_G.__fork_id)"));
+    wait_for_session_load(&mut fork, &fork_id);
+    assert!(
+        !fork.session_is_read_only(),
+        "fork opened read-only while only its parent is owned: {:?}",
+        fork.overlays_probe()
+            .notification()
+            .map(|notice| &notice.summary)
+    );
+
+    for (app, text) in [(&mut parent, "parent suffix"), (&mut fork, "fork suffix")] {
+        app.commit_request_history_item(
+            HistoryItem::user(Content::text(text)),
+            Some(Block::User {
+                text: text.into(),
+                image_labels: Vec::new(),
+                command: false,
+                sent_at_ms: None,
+            }),
+        );
+        app.save_session_and_flush();
+        assert!(!app.session_is_read_only());
+        assert!(!app.session_document_has_unflushed_work());
+    }
+    assert_eq!(
+        lineage_reader(&parent_id).history_range(0, 2).unwrap(),
+        vec![
+            HistoryItem::user(Content::text("shared history")),
+            HistoryItem::user(Content::text("parent suffix")),
+        ]
+    );
+    assert_eq!(
+        lineage_reader(&fork_id).history_range(0, 2).unwrap(),
+        vec![
+            HistoryItem::user(Content::text("shared history")),
+            HistoryItem::user(Content::text("fork suffix")),
+        ]
+    );
+
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(
+        reader.load_session_by_id(&fork_id),
+        "{:?}",
+        reader
+            .overlays_probe()
+            .notification()
+            .map(|notice| &notice.summary)
+    );
+    assert!(reader.session_is_read_only());
+    assert_eq!(
+        reader.overlays_probe().notification().unwrap().kind,
+        smelt_core::messages::MessageKind::Info,
+        "a second window on the same fork must remain read-only"
+    );
+}
+
 #[test]
 fn resuming_session_with_active_writer_is_read_only() {
     let guard = test_home_guard();
@@ -2297,6 +2536,15 @@ fn resuming_session_with_active_writer_is_read_only() {
     assert_eq!(reader.session_snapshot().id, session_id);
     assert!(reader.session_is_read_only());
     assert_eq!(reader.session_message_count(), 1);
+    assert_eq!(
+        reader.overlays_probe().notification().unwrap().kind,
+        smelt_core::messages::MessageKind::Info,
+        "opening a busy session read-only is informational"
+    );
+    assert_eq!(
+        reader.overlays_probe().notification().unwrap().summary,
+        "opened session read-only: this session is already open in another window"
+    );
     assert!(reader
         .overlays_probe()
         .notification()
@@ -2329,6 +2577,28 @@ fn resuming_session_with_active_writer_is_read_only() {
             .len(),
         1
     );
+}
+
+#[test]
+fn resuming_session_with_writer_io_failure_still_reports_an_error() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let layout =
+        smelt_store::SessionStoreLayout::from_sessions_root(smelt_core::session::sessions_dir());
+    let lock_path = layout.lineage_lock_path(&session_id);
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&session_id));
+    assert!(reader.session_is_read_only());
+    assert_eq!(reader.session_message_count(), 1);
+    let overlays = reader.overlays_probe();
+    let notice = overlays.notification().unwrap();
+    assert_eq!(notice.kind, smelt_core::messages::MessageKind::Error);
+    assert!(notice
+        .summary
+        .starts_with("opened session read-only: open session writer:"));
 }
 
 #[test]

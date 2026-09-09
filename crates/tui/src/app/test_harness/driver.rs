@@ -325,6 +325,7 @@ impl TestApp {
 
     /// Drain `UiCommand`s buffered on the engine channel into the action log.
     pub(super) fn drain_cmd(&mut self) {
+        self.wait_for_writer_startup();
         let Some(cmd_rx) = self.cmd_rx.as_mut() else {
             return;
         };
@@ -337,6 +338,7 @@ impl TestApp {
     /// Useful for host-hook tests that need to inspect background
     /// `EngineAsk` requests directly without going through `feed_one`.
     pub fn drain_engine_sends(&mut self) -> Vec<UiCommand> {
+        self.wait_for_writer_startup();
         let Some(cmd_rx) = self.cmd_rx.as_mut() else {
             return Vec::new();
         };
