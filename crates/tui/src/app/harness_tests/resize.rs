@@ -67,6 +67,62 @@ fn open(app: &mut TestApp, placement: &str) {
 }
 
 #[test]
+fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(60, 20);
+    app.type_text("first line\nsecond line\nthird line");
+    paint(&mut app);
+    let top = rect(&app, "smelt.prompt_bar.top");
+    mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        top.top,
+        1,
+    );
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 0, 1);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 0, 1);
+    let before = app.render_to_frame().text();
+    assert!(before.contains("test-model"), "{before}");
+    let expanded_top = rect(&app, "smelt.prompt_bar.top").top;
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let frame = app.render_to_frame().text();
+    assert_eq!(app.state().prompt_text, "");
+    assert!(frame.contains("Stashed"), "{frame}");
+    assert!(
+        frame.contains("test-model"),
+        "top bar disappeared:\n{frame}"
+    );
+    assert_eq!(rect(&app, "smelt.prompt_bar.top").height, 2);
+
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    paint(&mut app);
+    assert_eq!(rect(&app, "smelt.prompt_bar.top").top, expanded_top);
+    assert_eq!(
+        app.state().prompt_text,
+        "first line\nsecond line\nthird line"
+    );
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    paint(&mut app);
+
+    let top = rect(&app, "smelt.prompt_bar.top");
+    let row = top.top + top.height - 1;
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), row, 1);
+    mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        row + 1,
+        1,
+    );
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), row + 1, 1);
+    assert_eq!(
+        rect(&app, "smelt.prompt_bar.top").top,
+        top.top + 1,
+        "the first drag step must resize from the visible prompt height"
+    );
+}
+
+#[test]
 fn split_layout_resolution_storage_scales_linearly() {
     smelt_perf::alloc::enable();
     use smelt_term::{Axis, LayoutTree, NoopSizer, PaintId, Split, SplitOptions};

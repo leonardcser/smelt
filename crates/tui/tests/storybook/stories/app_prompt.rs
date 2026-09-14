@@ -124,6 +124,14 @@ app_story!(prompt_stash_row, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_multiline_with_stash_short_terminal, |ctx| {
+    ctx.set_viewport(50, 12);
+    ctx.type_prompt("first line\nsecond line\nthird line");
+    ctx.stash_prompt();
+    ctx.type_prompt("one\ntwo\nthree\nfour\nfive\nsix\nseven");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_queued_messages, |ctx| {
     // While a turn is active, Enter-on-prompt queues the message for the
     // next turn. Empty Enter promotes the oldest item into the next-request

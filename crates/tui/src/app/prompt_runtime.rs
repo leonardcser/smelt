@@ -334,8 +334,8 @@ impl PromptRuntime {
         self.height.register_click(row, column, now)
     }
 
-    pub(crate) fn start_resize_drag(&mut self, chrome: &'static str, row: u16) {
-        self.height.start_drag(chrome, row);
+    pub(crate) fn start_resize_drag(&mut self, chrome: &'static str, row: u16, visible_rows: u16) {
+        self.height.start_drag(chrome, row, visible_rows);
     }
 
     #[cfg(test)]

@@ -605,7 +605,8 @@ impl TuiApp {
     }
 
     fn start_prompt_resize_drag(&mut self, me: MouseEvent) {
-        self.prompt.start_resize_drag("top", me.row);
+        self.prompt
+            .start_resize_drag("top", me.row, self.layout.prompt.height);
         self.publish_prompt_resize_state();
         self.app_focus = AppFocus::Prompt;
         self.ui.set_focus(crate::app::PROMPT_WIN);

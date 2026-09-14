@@ -1017,6 +1017,30 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
 }
 
 #[test]
+fn prompt_bar_keeps_indicator_in_single_row_with_stash() {
+    let lua = prompt_bar_lua_fixture();
+    lua.load(
+        r#"
+        smelt.prompt.has_stash = function() return true end
+        smelt.prompt.queued_rows = function() return {{ text = "queued" }} end
+        local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+        for height = 1, 3 do
+          top.rect = function() return { height = height } end
+          top:renderer()
+          local lines = top:buf()._lines
+          assert(#lines == height)
+          assert(lines[height]:find("model", 1, true), lines[height])
+          if height > 1 then
+            assert(lines[height - 1]:find("Stashed", 1, true))
+          end
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
 fn prompt_bar_renders_fast_mode_marker_before_model() {
     let lua = prompt_bar_lua_fixture();
 

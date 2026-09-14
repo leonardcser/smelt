@@ -435,11 +435,11 @@ impl PromptHeightState {
         self.drag.map(|drag| drag.chrome).unwrap_or_default()
     }
 
-    pub(crate) fn start_drag(&mut self, chrome: &'static str, row: u16) {
+    pub(crate) fn start_drag(&mut self, chrome: &'static str, row: u16, visible_rows: u16) {
         self.drag = Some(PromptResizeDrag {
             chrome,
             start_row: row,
-            start_input_rows: self.rows.max(1),
+            start_input_rows: visible_rows.max(1),
             dragged: false,
         });
     }

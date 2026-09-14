@@ -35,12 +35,13 @@ smelt.ui.layout.set(function(state)
     content = state.dialog
   else
     local aux_rows = 1
-    -- Reserve the prompt bottom bar and the root statusline while deciding how
-    -- many queued/stashed rows the top bar may claim.
-    local chrome_except_top = input_rows + 2
-    local max_top_rows = math.max(
-      1,
-      term_h - header_rows - MIN_TRANSCRIPT_ROWS - aux_rows - chrome_except_top)
+    -- Keep the indicator and stash rows visible before allocating prompt input
+    -- space. Queued messages use the remaining headroom above the prompt.
+    local min_top_rows = prompt_bar.min_top_rows()
+    local composer_budget = term_h - header_rows - MIN_TRANSCRIPT_ROWS - aux_rows
+    -- Reserve the prompt bottom bar and the root statusline as well.
+    input_rows = math.min(input_rows, math.max(1, composer_budget - min_top_rows - 2))
+    local max_top_rows = math.max(min_top_rows, composer_budget - input_rows - 2)
     local top_rows = prompt_bar.top_rows(max_top_rows)
     local composer_height = top_rows + input_rows + 1
 

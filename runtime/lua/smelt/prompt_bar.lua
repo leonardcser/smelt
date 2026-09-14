@@ -434,10 +434,11 @@ local function render_top(win)
   local win_height = (win:rect() or {}).height
   -- During the very first frame a renderer can run before the window has
   -- a resolved rect; in that case use the natural row count as a fallback.
-  local natural_rows = M.top_rows()
-  local reserved = 1 -- indicator bar row
-  if smelt.prompt.has_stash() then reserved = reserved + 1 end
-  local queue_slots = math.max(0, (win_height or natural_rows) - reserved)
+  local available_rows = win_height or M.top_rows()
+  -- Custom layouts may provide only one row; the indicator takes priority.
+  local reserved = math.min(M.min_top_rows(), available_rows)
+  local show_stash = reserved > 1
+  local queue_slots = math.max(0, available_rows - reserved)
   local visible_queued = math.min(#queued, queue_slots)
   local hidden = #queued - visible_queued
   local show_more = hidden > 0 and queue_slots > 0
@@ -455,7 +456,7 @@ local function render_top(win)
   if show_more then
     rows[#rows + 1] = more_row(hidden, width)
   end
-  if smelt.prompt.has_stash() then
+  if show_stash then
     rows[#rows + 1] = stash_row(width)
   end
   local bar_opts = resize_bar_opts("top")
@@ -542,6 +543,11 @@ invalidate_on(M.bottom_win, {
   "prompt_resize_chrome",
 })
 
+-- Mandatory chrome, excluding queued messages that may be collapsed.
+function M.min_top_rows()
+  return smelt.prompt.has_stash() and 2 or 1
+end
+
 -- Expose helper for the layout composer so it can compute the top bar's
 -- row count from current state (queued messages, stash row, bar row).
 -- `max_top_rows` is an optional cap; when omitted the natural row count is
@@ -549,8 +555,7 @@ invalidate_on(M.bottom_win, {
 -- least two transcript rows.
 function M.top_rows(max_top_rows)
   local queued = smelt.prompt.queued()
-  local rows = 1 + #queued
-  if smelt.prompt.has_stash() then rows = rows + 1 end
+  local rows = M.min_top_rows() + #queued
   if type(max_top_rows) == "number" then
     return math.min(rows, math.max(1, max_top_rows))
   end

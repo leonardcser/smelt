@@ -1190,6 +1190,39 @@ fn generic_prompt_buf_lines_setter_uses_prompt_install_path() {
 }
 
 #[test]
+fn multiline_stash_keeps_prompt_top_bar_visible() {
+    for height in [8, 10, 12, 24] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.set_terminal_size(50, height);
+        app.render_to_frame();
+        let draft = "first line\nsecond line\nthird line";
+        app.type_text(draft);
+        let before = app.render_to_frame().text();
+        assert!(before.contains("test-model"), "{before}");
+
+        for _ in 0..2 {
+            app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+            assert_eq!(app.state().prompt_text, "");
+            for text in ["", "another line\n".repeat(15).as_str()] {
+                app.feed_one(SourceEvent::Term(Event::Paste(text.to_string())));
+                let frame = app.render_to_frame().text();
+                assert!(frame.contains("Stashed"), "height {height}:\n{frame}");
+                assert!(
+                    frame.contains("test-model"),
+                    "top bar disappeared at height {height}:\n{frame}"
+                );
+                assert!(app.transcript_window().viewport.unwrap().rect.height >= 2);
+            }
+            app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+            assert_eq!(app.state().prompt_text, draft);
+            let frame = app.render_to_frame().text();
+            assert!(!frame.contains("Stashed"), "{frame}");
+            assert!(frame.contains("test-model"), "{frame}");
+        }
+    }
+}
+
+#[test]
 fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
