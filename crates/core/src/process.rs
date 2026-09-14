@@ -360,7 +360,9 @@ fn spawn_shell_job(
         ])
         .arg("--property=OOMPolicy=kill");
         if let Some(max_bytes) = options.memory_max_bytes {
-            cmd.arg(format!("--property=MemoryMax={max_bytes}"));
+            // Keep the memory cap independent of the host's available swap.
+            cmd.arg(format!("--property=MemoryMax={max_bytes}"))
+                .arg("--property=MemorySwapMax=0");
         }
         cmd.arg("--")
             .arg(&shell.program)
