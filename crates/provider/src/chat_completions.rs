@@ -256,13 +256,9 @@ fn apply_sse_event(
         return;
     };
 
-    if let Some(text) = delta["content"].as_str() {
-        if !text.is_empty() {
-            state.content.push_str(text);
-            on_delta(ProviderStreamEvent::TextDelta(text));
-        }
-    }
-
+    // A single delta can contain the reasoning tail and the answer prefix.
+    // Emit reasoning first so downstream consumers see the channel transition
+    // in semantic order, independent of how the provider batches tokens.
     if let Some(text) = delta
         .get("reasoning_content")
         .or_else(|| delta.get("reasoning"))
@@ -278,6 +274,13 @@ fn apply_sse_event(
                     delta: text,
                 },
             ));
+        }
+    }
+
+    if let Some(text) = delta["content"].as_str() {
+        if !text.is_empty() {
+            state.content.push_str(text);
+            on_delta(ProviderStreamEvent::TextDelta(text));
         }
     }
 
@@ -791,6 +794,48 @@ mod tests {
         );
         assert_eq!(state.content, "hi");
         assert_eq!(got, vec!["hi"]);
+    }
+
+    #[test]
+    fn sse_coalesced_reasoning_precedes_text_and_tool_calls() {
+        for reasoning_field in ["reasoning_content", "reasoning"] {
+            let mut state = StreamState::default();
+            let mut got = Vec::new();
+            apply_sse_event(
+                &mut state,
+                &json!({"choices": [{"delta": {
+                    "content": "The",
+                    reasoning_field: " lighthouse story.",
+                    "tool_calls": [{
+                        "index": 0, "id": "c1",
+                        "function": {"name": "read_file", "arguments": "{}"}
+                    }]
+                }}]}),
+                &mut |event| match event {
+                    ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta {
+                        delta, ..
+                    }) => {
+                        got.push(("thinking", delta.to_string()));
+                    }
+                    ProviderStreamEvent::TextDelta(text) => got.push(("text", text.to_string())),
+                    ProviderStreamEvent::ToolCall(ToolCallStreamEvent::Started { .. }) => {
+                        got.push(("tool", String::new()));
+                    }
+                    _ => {}
+                },
+            );
+            assert_eq!(
+                got,
+                vec![
+                    ("thinking", " lighthouse story.".into()),
+                    ("text", "The".into()),
+                    ("tool", String::new()),
+                ],
+                "{reasoning_field}"
+            );
+            assert_eq!(state.reasoning, " lighthouse story.");
+            assert_eq!(state.content, "The");
+        }
     }
 
     #[test]

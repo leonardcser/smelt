@@ -268,6 +268,99 @@ fn empty_engine_output_is_a_transcript_noop() {
 }
 
 #[test]
+fn fast_streaming_keeps_thinking_before_answer() {
+    for paint_after_event in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(120, 24);
+        app.start_turn(42);
+        app.render_to_frame();
+
+        let thinking = "The user is asking for a longer story. Let me write a longer, more developed version of that lighthouse story.";
+        for event in [
+            EngineEvent::ReasoningPartStarted {
+                id: "raw:0".into(),
+                kind: protocol::ReasoningKind::Raw,
+            },
+            EngineEvent::ReasoningPartDelta {
+                id: "raw:0".into(),
+                kind: protocol::ReasoningKind::Raw,
+                title: None,
+                delta: thinking.strip_suffix(" lighthouse story.").unwrap().into(),
+            },
+            EngineEvent::ReasoningPartDelta {
+                id: "raw:0".into(),
+                kind: protocol::ReasoningKind::Raw,
+                title: None,
+                delta: " lighthouse story.".into(),
+            },
+            EngineEvent::TextDelta {
+                delta: "The".into(),
+            },
+            EngineEvent::TextDelta {
+                delta: " lighthouse stood on the cliff.".into(),
+            },
+            EngineEvent::ReasoningPartFinished {
+                id: "raw:0".into(),
+                kind: protocol::ReasoningKind::Raw,
+                title: None,
+                content: thinking.into(),
+            },
+        ] {
+            app.inject_engine(event).unwrap();
+        }
+        let mut frames = Vec::new();
+        while let Ok(output) = app.try_receive_engine_output() {
+            app.dispatch_engine_output_in_render_loop_to(output, &mut std::io::sink(), |frame| {
+                frames.push(frame.text());
+            });
+            if paint_after_event {
+                frames.push(app.render_to_frame().text());
+            }
+        }
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("The lighthouse stood on the cliff.")),
+            "no frame painted the answer while draining the stream"
+        );
+        frames.push(app.render_to_frame().text());
+        assert!(frames
+            .last()
+            .unwrap()
+            .contains("The lighthouse stood on the cliff."));
+        if paint_after_event {
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.lines().any(|line| line.trim() == "The")),
+                "no frame painted the answer prefix"
+            );
+        }
+        for frame in frames {
+            let Some(answer_row) = frame.lines().position(|line| {
+                let text = line.trim().trim_start_matches('│').trim_start();
+                text == "The" || text.starts_with("The lighthouse")
+            }) else {
+                continue;
+            };
+            let thinking_row = frame
+                .lines()
+                .position(|line| line.contains(thinking))
+                .expect(&frame);
+            assert!(thinking_row < answer_row, "stream reordered: {frame}");
+            assert!(
+                frame.lines().nth(thinking_row).unwrap().contains("│ "),
+                "thinking gutter missing: {frame}"
+            );
+            assert!(
+                !frame.lines().nth(answer_row).unwrap().contains('│'),
+                "answer has thinking gutter: {frame}"
+            );
+        }
+    }
+}
+
+#[test]
 fn main_transcript_paints_a_selected_delta_before_a_coalesced_turn_completion() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(70, 22);

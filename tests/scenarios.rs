@@ -205,6 +205,73 @@ async fn streaming_concat_across_deltas() {
     });
 }
 
+/// A fast provider can put the reasoning tail and answer prefix in one delta.
+/// Preserve their semantic order before the frontend sees either channel.
+#[tokio::test]
+async fn openai_compatible_coalesced_reasoning_precedes_text() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    for reasoning_field in ["reasoning_content", "reasoning"] {
+        let h = Harness::new().await;
+        h.write_config("openai-compatible", "story-test");
+        let events = [
+            json!({"choices": [{"delta": {
+                reasoning_field: "Let me write a longer version of that"
+            }}]}),
+            json!({"choices": [{"delta": {
+                "content": "The",
+                reasoning_field: " lighthouse story."
+            }}]}),
+            json!({"choices": [{"delta": {
+                "content": " lighthouse stood on the cliff."
+            }}]}),
+            json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        ];
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&h.mock)
+            .await;
+
+        let out = h.run("Write a longer lighthouse story", "test/story-test");
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        let deltas: Vec<_> = out
+            .events
+            .iter()
+            .filter_map(|event| {
+                if let Some(reasoning) = event.get("ReasoningPartDelta") {
+                    Some(("thinking", reasoning["delta"].as_str().unwrap()))
+                } else {
+                    event
+                        .get("TextDelta")
+                        .map(|text| ("text", text["delta"].as_str().unwrap()))
+                }
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                ("thinking", "Let me write a longer version of that"),
+                ("thinking", " lighthouse story."),
+                ("text", "The"),
+                ("text", " lighthouse stood on the cliff."),
+            ],
+            "{reasoning_field}"
+        );
+    }
+}
+
 /// Provider returns 401 Unauthorized. The engine emits `TurnError`, and the
 /// headless process reports a dispatch failure.
 #[tokio::test]
