@@ -3161,3 +3161,130 @@ impl ConversationRuntime {
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use crate::persist::PersistenceFlushOutcome;
+
+    #[test]
+    fn first_message_rewind_after_a_late_persistence_confirmation_can_resubmit() {
+        for vim in [false, true] {
+            let mut app = crate::app::test_harness::TestApp::builder()
+                .with_vim(vim)
+                .build();
+            app.ensure_writer_ready();
+            app.app.stage_request_history_item_with_first_user(
+                protocol::HistoryItem::user(protocol::Content::text("first request")),
+                Some(smelt_core::transcript_model::Block::User {
+                    text: "first request".into(),
+                    image_labels: Vec::new(),
+                    command: false,
+                    sent_at_ms: None,
+                }),
+                Some("first request".into()),
+            );
+            let super::CanonicalTurnSubmitOutcome::Durable(submitted) = app
+                .app
+                .submit_canonical_turn(smelt_store::NewTurn {
+                    kind: smelt_store::TurnKind::User,
+                    submitted_history_idx: smelt_store::HistoryIndex::new(0),
+                    continuation_of: None,
+                    created_at_ms: smelt_core::session::now_ms(),
+                })
+                .unwrap()
+            else {
+                panic!("first turn submission was not durable");
+            };
+
+            // Engine dispatch can be active while Ready -> Running is still queued.
+            app.start_turn(submitted.receipt.turn_id.get());
+            let mut turn = app.app.conversation.clear_active().unwrap();
+            turn.canonical = true;
+            turn.rewind_history_idx = Some(0);
+            app.app.conversation.set_active(Some(turn));
+            let conversation = &mut app.app.conversation;
+            conversation.set_title("First request".into(), "first-request".into(), 1);
+            let metadata = crate::app::session_document::RuntimeSessionMetadata {
+                updated_at_ms: conversation.session.updated_at_ms,
+                mode: app.app.core.config.mode.as_str().to_string(),
+                reasoning_effort: app.app.core.config.reasoning_effort.clone(),
+                model: conversation.session.model.clone(),
+                fast_mode: conversation.session.fast_mode.unwrap_or(false),
+            };
+            assert_eq!(
+                conversation.save(metadata.clone()).unwrap(),
+                super::SaveStatus::Submitted
+            );
+            let generation = conversation.persistence_generation();
+            let actor = conversation.persistence.as_ref().unwrap();
+            assert!(matches!(
+                actor.flush(generation, Instant::now() + Duration::from_secs(5)),
+                PersistenceFlushOutcome::Durable { .. }
+            ));
+            let saved = actor.status().acknowledgement.unwrap();
+            let resume = actor.pause();
+            conversation
+                .enqueue_canonical_turn_transition(
+                    metadata,
+                    submitted.receipt.turn_id,
+                    smelt_store::TurnState::Running,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(conversation.persistence_generation(), generation);
+            conversation
+                .persistence
+                .as_ref()
+                .unwrap()
+                .resume_before_next_confirmation(resume);
+
+            // Only the worker advances between applying the save and confirming it.
+            // Both writes are queued before the UI takes its status snapshot.
+            app.app.drain_persist_reports();
+            let conversation = &app.app.conversation;
+            assert_eq!(conversation.persistence_generation(), generation);
+            assert_eq!(conversation.acknowledged_head(), saved.receipt.current);
+            let status = conversation.persistence.as_ref().unwrap().status();
+            let running = status.acknowledgement.as_ref().unwrap();
+            assert_eq!(running.generation, saved.generation);
+            assert_eq!(running.receipt.previous, saved.receipt.current);
+            // A turn-state-only commit keeps the saved session revision unchanged.
+            assert_eq!(running.receipt.current, saved.receipt.current);
+            assert_ne!(running.receipt, saved.receipt);
+            assert_eq!(status.canonical_completions.len(), 1);
+            assert!(matches!(
+                status.canonical_completions.front(),
+                Some(crate::persist::CanonicalCommandCompletion::Transition(completion))
+                    if completion.receipt.state == smelt_store::TurnState::Running
+            ));
+
+            app.press(crossterm::event::KeyCode::Esc);
+            app.press(crossterm::event::KeyCode::Esc);
+            assert_eq!(app.state().prompt_text, "first request");
+            app.press(crossterm::event::KeyCode::Enter);
+            assert_eq!(app.state().queued_inputs, vec!["first request"]);
+            let generation = app.app.conversation.persistence_generation();
+            let actor = app.app.conversation.persistence.as_ref().unwrap();
+            assert!(matches!(
+                actor.flush(generation, Instant::now() + Duration::from_secs(5)),
+                PersistenceFlushOutcome::Durable { .. }
+            ));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app.agent_running() && Instant::now() < deadline {
+                app.app.drain_persist_reports();
+                app.app.save_deferred_session_batch_if_ready();
+                app.app.start_next_queued_input_if_idle();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                app.agent_running(),
+                "rewound first message stayed queued (vim={vim}): head={:?}, persistence={:?}",
+                app.app.conversation.acknowledged_head(),
+                app.app.conversation.persistence.as_ref().unwrap().status(),
+            );
+            assert!(app.app.prompt.queue_is_empty());
+        }
+    }
+}

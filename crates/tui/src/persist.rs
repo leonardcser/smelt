@@ -563,6 +563,8 @@ pub(crate) struct SessionPersistence {
     pending_full_audit_bytes: Arc<AtomicUsize>,
     thread: Option<thread::JoinHandle<()>>,
     startup: Option<Mutex<Receiver<Result<SessionPersistenceStartup, PersistenceCause>>>>,
+    #[cfg(test)]
+    confirmation_resume: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl SessionPersistence {
@@ -656,6 +658,8 @@ impl SessionPersistence {
             pending_full_audit_bytes,
             thread: Some(thread),
             startup: Some(Mutex::new(started_rx)),
+            #[cfg(test)]
+            confirmation_resume: Mutex::new(None),
         })
     }
 
@@ -1104,16 +1108,46 @@ impl SessionPersistence {
     }
 
     pub(crate) fn confirm_acknowledgement(&self, acknowledgement: &PersistenceAcknowledgement) {
+        #[cfg(test)]
+        {
+            let resume = self.confirmation_resume.lock().unwrap().take();
+            if let Some(resume) = resume {
+                resume
+                    .send(())
+                    .expect("resume persistence before confirmation");
+                assert!(matches!(
+                    self.flush(
+                        acknowledgement.generation,
+                        Instant::now() + DEFAULT_PERSISTENCE_DEADLINE
+                    ),
+                    PersistenceFlushOutcome::Durable { .. }
+                ));
+            }
+        }
         let confirmed = {
             let mut status = self
                 .status
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if status.acknowledgement.as_ref() != Some(acknowledgement) {
-                false
-            } else {
-                status.acknowledgement = None;
-                true
+            match status.acknowledgement.as_mut() {
+                Some(current) if current == acknowledgement => {
+                    status.acknowledgement = None;
+                    true
+                }
+                Some(current)
+                    if current.epoch == acknowledgement.epoch
+                        && current.receipt.session_id == acknowledgement.receipt.session_id
+                        && current.previous == acknowledgement.previous
+                        && current.generation >= acknowledgement.generation
+                        && current.receipt.previous.revision
+                            >= acknowledgement.receipt.current.revision =>
+                {
+                    // A newer receipt may arrive while the UI applies its snapshot. Keep
+                    // the unconfirmed suffix anchored at the head the UI just accepted.
+                    current.previous = acknowledgement.receipt.current;
+                    true
+                }
+                _ => false,
             }
         };
         if !confirmed {
@@ -1429,6 +1463,16 @@ impl SessionPersistence {
             .expect("persistence actor accepts submit receipt failure injection");
         done.recv()
             .expect("persistence actor acknowledges submit receipt failure injection");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_before_next_confirmation(&self, resume: mpsc::Sender<()>) {
+        assert!(self
+            .confirmation_resume
+            .lock()
+            .unwrap()
+            .replace(resume)
+            .is_none());
     }
 
     #[cfg(test)]
@@ -4365,6 +4409,109 @@ mod tests {
             deadline(),
             ClosePolicy::RequireDurable,
         );
+    }
+
+    #[test]
+    fn confirming_a_snapshot_advances_a_newer_coalesced_acknowledgement() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let actor = actor();
+        actor.submit(intent(1, &["first request"])).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { .. }
+        ));
+        let snapshot = actor.take_status().acknowledgement.unwrap();
+
+        for generation in 2..=3 {
+            actor.submit(intent(generation, &[])).unwrap();
+            assert!(matches!(
+                actor.flush(PersistenceGeneration::new(generation), deadline()),
+                PersistenceFlushOutcome::Durable { .. }
+            ));
+        }
+        let unconfirmed = actor.status().acknowledgement.unwrap();
+        let mut wrong_epoch = snapshot.clone();
+        wrong_epoch.epoch = SessionEpoch::new(2);
+        let mut wrong_session = snapshot.clone();
+        wrong_session.receipt.session_id = "another-session".into();
+        let mut future_generation = snapshot.clone();
+        future_generation.generation = PersistenceGeneration::new(4);
+        let mut future_head = snapshot.clone();
+        future_head.receipt.current = unconfirmed.receipt.current;
+        for invalid in [wrong_epoch, wrong_session, future_generation, future_head] {
+            actor.confirm_acknowledgement(&invalid);
+            assert_eq!(actor.status().acknowledgement.as_ref(), Some(&unconfirmed));
+        }
+
+        actor.confirm_acknowledgement(&snapshot);
+        let newer = actor.take_status().acknowledgement.unwrap();
+        assert_eq!(newer.previous, snapshot.receipt.current);
+        assert_eq!(newer.generation, unconfirmed.generation);
+        assert_eq!(newer.receipt, unconfirmed.receipt);
+        assert_eq!(
+            actor
+                .latest
+                .lock()
+                .unwrap()
+                .desired
+                .as_ref()
+                .unwrap()
+                .generation,
+            unconfirmed.generation
+        );
+        actor.confirm_acknowledgement(&snapshot);
+        assert_eq!(actor.status().acknowledgement.as_ref(), Some(&newer));
+        actor.confirm_acknowledgement(&newer);
+        assert!(actor.status().acknowledgement.is_none());
+        assert!(actor.latest.lock().unwrap().desired.is_none());
+    }
+
+    #[test]
+    fn confirming_a_snapshot_preserves_a_same_generation_turn_transition() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let actor = actor();
+        let submitted = durable_submit(
+            actor
+                .submit_turn(submit_intent(1, &["first request"]), deadline())
+                .unwrap(),
+        );
+        actor.confirm_acknowledgement(&submitted.persistence);
+        actor.submit(intent(2, &["first request"])).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable { .. }
+        ));
+        let snapshot = actor.take_status().acknowledgement.unwrap();
+
+        actor
+            .enqueue_turn_transition(transition_intent(
+                2,
+                &["first request"],
+                submitted.receipt.turn_id,
+                smelt_store::TurnState::Running,
+            ))
+            .unwrap();
+        assert!(matches!(
+            actor.flush(snapshot.generation, deadline()),
+            PersistenceFlushOutcome::Durable { .. }
+        ));
+        let unconfirmed = actor.take_status();
+        let transition = unconfirmed.acknowledgement.as_ref().unwrap();
+        assert_eq!(transition.generation, snapshot.generation);
+        assert_eq!(transition.receipt.previous, snapshot.receipt.current);
+        assert_eq!(unconfirmed.canonical_completions.len(), 1);
+
+        actor.confirm_acknowledgement(&snapshot);
+        let newer = actor.take_status();
+        let acknowledgement = newer.acknowledgement.as_ref().unwrap();
+        assert_eq!(acknowledgement.previous, snapshot.receipt.current);
+        assert_eq!(acknowledgement.receipt, transition.receipt);
+        assert_eq!(
+            newer.canonical_completions,
+            unconfirmed.canonical_completions
+        );
+        actor.confirm_acknowledgement(acknowledgement);
+        assert!(actor.status().acknowledgement.is_none());
     }
 
     #[test]

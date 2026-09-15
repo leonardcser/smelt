@@ -1,8 +1,8 @@
 #![cfg(unix)]
 
 use std::fs::File;
-use std::io::{ErrorKind, Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -88,6 +88,31 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+fn consume_http_request(stream: &mut TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set request read timeout");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let mut content_length = None;
+    loop {
+        line.clear();
+        assert_ne!(reader.read_line(&mut line).expect("read request header"), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(value.trim().parse::<u64>().expect("request content length"));
+            }
+        }
+    }
+    let content_length = content_length.expect("POST request has content length");
+    let consumed = std::io::copy(&mut reader.take(content_length), &mut std::io::sink())
+        .expect("consume request body");
+    assert_eq!(consumed, content_length, "truncated request body");
 }
 
 fn drain_provider_requests(listener: &TcpListener) -> bool {
@@ -203,21 +228,42 @@ smelt.mcp.register("stalled", {{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_first_message_rewind_can_resubmit() {
-    interactive_first_message_rewind(false).await;
+    interactive_first_message_recovery(FirstMessageRecovery::Rewind).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_first_response_cancel_can_resubmit() {
+    interactive_first_message_recovery(FirstMessageRecovery::CancelStreaming).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_rewind_preserves_paused_queue_until_submission() {
-    interactive_first_message_rewind(true).await;
+    interactive_first_message_recovery(FirstMessageRecovery::RewindPausedQueue).await;
 }
 
-async fn interactive_first_message_rewind(paused_queue: bool) {
+enum FirstMessageRecovery {
+    Rewind,
+    CancelStreaming,
+    RewindPausedQueue,
+}
+
+async fn interactive_first_message_recovery(recovery: FirstMessageRecovery) {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    let paused_queue = matches!(recovery, FirstMessageRecovery::RewindPausedQueue);
+    let streaming = matches!(recovery, FirstMessageRecovery::CancelStreaming);
     let home = tempfile::tempdir().expect("temporary home");
     let provider = MockServer::start().await;
-    let response = if paused_queue {
+    let stream_provider = TcpListener::bind("127.0.0.1:0").unwrap();
+    stream_provider.set_nonblocking(true).unwrap();
+    let mut streams = Vec::new();
+    let response = if streaming {
+        ResponseTemplate::new(307).insert_header(
+            "location",
+            format!("http://{}/", stream_provider.local_addr().unwrap()),
+        )
+    } else if paused_queue {
         ResponseTemplate::new(429)
             .insert_header("retry-after", "3600")
             .set_body_json(serde_json::json!({"error": {"code": "insufficient_quota"}}))
@@ -246,7 +292,17 @@ smelt.prompt.win():on("text_changed", function()
     file:close()
   end
 end)
+smelt.events.on("stream_delta", function()
+  local file = assert(io.open("output-started", "w"))
+  file:write("ready")
+  file:close()
+end)
 smelt.events.on("turn_end", function(ev)
+  if ev.cancelled then
+    local file = assert(io.open("turn-interrupted", "w"))
+    file:write("ready")
+    file:close()
+  end
   if ev.error_kind == "quota" then
     local file = assert(io.open("quota-paused", "w"))
     file:write("ready")
@@ -288,6 +344,14 @@ smelt.provider.register("local", {{
     loop {
         drain_pty(&mut master, &mut captured);
         assert!(process.child.try_wait().unwrap().is_none(), "smelt exited");
+        while let Ok((mut stream, _)) = stream_provider.accept() {
+            consume_http_request(&mut stream);
+            let chunk =
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Starting\"}}]}\n\n";
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{chunk}\r\n", chunk.len()).unwrap();
+            // Leave the response open so Escape interrupts a live stream.
+            streams.push(stream);
+        }
         if !submitted && contains(&captured, b"local/test-model") {
             master.write_all(b"first request\r").unwrap();
             submitted = true;
@@ -304,12 +368,18 @@ smelt.provider.register("local", {{
             .collect();
         assert!(
             resubmitted || bodies.len() <= 1,
-            "rewind submitted a queued message without Enter"
+            "unexpected request before resubmission (rewind_sent={rewind_sent}, output_started={}, interrupted={}, requests={}): {}",
+            home.path().join("output-started").exists(),
+            home.path().join("turn-interrupted").exists(),
+            bodies.len(),
+            String::from_utf8_lossy(&captured[captured.len().saturating_sub(5000)..])
         );
         if bodies.len() == 1 && !rewind_sent {
             if !paused_queue {
-                master.write_all(b"\x1b\x1b").unwrap();
-                rewind_sent = true;
+                if !streaming || home.path().join("output-started").exists() {
+                    master.write_all(b"\x1b\x1b").unwrap();
+                    rewind_sent = true;
+                }
             } else if !queued {
                 master.write_all(b"queued follow-up\r").unwrap();
                 queued = true;
@@ -318,10 +388,23 @@ smelt.provider.register("local", {{
                 rewind_sent = true;
             }
         }
-        if !resubmitted && rewind_sent && home.path().join("prompt-restored").exists() {
+        if !resubmitted
+            && rewind_sent
+            && home
+                .path()
+                .join(if streaming {
+                    "turn-interrupted"
+                } else {
+                    "prompt-restored"
+                })
+                .exists()
+        {
             let restored = restored_at.get_or_insert_with(Instant::now);
             // Observe an idle interval to catch unsolicited dispatch before explicitly submitting.
             if !paused_queue || restored.elapsed() >= Duration::from_secs(1) {
+                if streaming {
+                    master.write_all(b"first request").unwrap();
+                }
                 master.write_all(b"\r").unwrap();
                 resubmitted = true;
             }
@@ -335,7 +418,7 @@ smelt.provider.register("local", {{
                     .to_string()
                     .matches("first request")
                     .count(),
-                1
+                if streaming { 2 } else { 1 }
             );
             return;
         }
