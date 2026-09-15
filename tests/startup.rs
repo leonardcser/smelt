@@ -202,6 +202,154 @@ smelt.mcp.register("stalled", {{
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_first_message_rewind_can_resubmit() {
+    interactive_first_message_rewind(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_rewind_preserves_paused_queue_until_submission() {
+    interactive_first_message_rewind(true).await;
+}
+
+async fn interactive_first_message_rewind(paused_queue: bool) {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let home = tempfile::tempdir().expect("temporary home");
+    let provider = MockServer::start().await;
+    let response = if paused_queue {
+        ResponseTemplate::new(429)
+            .insert_header("retry-after", "3600")
+            .set_body_json(serde_json::json!({"error": {"code": "insufficient_quota"}}))
+            .set_delay(Duration::from_secs(1))
+    } else {
+        ResponseTemplate::new(200).set_delay(Duration::from_secs(30))
+    };
+    Mock::given(method("POST"))
+        .respond_with(response)
+        .mount(&provider)
+        .await;
+    let config = home.path().join("init.lua");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+local submitted, cleared = false, false
+smelt.events.on("input_submit", function() submitted = true end)
+smelt.prompt.win():on("text_changed", function()
+  if submitted and smelt.prompt.text() == "" then cleared = true end
+  if cleared and not smelt.engine.is_running() and smelt.prompt.text() == "first request" then
+    local file = assert(io.open("prompt-restored", "w"))
+    file:write("ready")
+    file:close()
+  end
+end)
+smelt.events.on("turn_end", function(ev)
+  if ev.error_kind == "quota" then
+    local file = assert(io.open("quota-paused", "w"))
+    file:write("ready")
+    file:close()
+  end
+end)
+smelt.cmd.register("rewind-first", function()
+  smelt.session.rewind_to(smelt.session.turns()[1].history_idx)
+end)
+smelt.provider.register("local", {{
+  type = "openai-compatible",
+  api_base = "{}",
+  models = {{ "test-model" }},
+}})
+"#,
+            provider.uri()
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .args(["--config", config.to_str().unwrap()])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env("XDG_CACHE_HOME", home.path().join("cache"))
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1");
+    let (mut master, mut process) = spawn_in_pty(command);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut captured = Vec::new();
+    let mut submitted = false;
+    let mut queued = false;
+    let mut rewind_sent = false;
+    let mut restored_at = None;
+    let mut resubmitted = false;
+    loop {
+        drain_pty(&mut master, &mut captured);
+        assert!(process.child.try_wait().unwrap().is_none(), "smelt exited");
+        if !submitted && contains(&captured, b"local/test-model") {
+            master.write_all(b"first request\r").unwrap();
+            submitted = true;
+        }
+        let requests = provider.received_requests().await.unwrap();
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .filter_map(|request| request.body_json().ok())
+            .filter(|body: &serde_json::Value| {
+                body["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty())
+            })
+            .collect();
+        assert!(
+            resubmitted || bodies.len() <= 1,
+            "rewind submitted a queued message without Enter"
+        );
+        if bodies.len() == 1 && !rewind_sent {
+            if !paused_queue {
+                master.write_all(b"\x1b\x1b").unwrap();
+                rewind_sent = true;
+            } else if !queued {
+                master.write_all(b"queued follow-up\r").unwrap();
+                queued = true;
+            } else if home.path().join("quota-paused").exists() {
+                master.write_all(b"/rewind-first\r").unwrap();
+                rewind_sent = true;
+            }
+        }
+        if !resubmitted && rewind_sent && home.path().join("prompt-restored").exists() {
+            let restored = restored_at.get_or_insert_with(Instant::now);
+            // Observe an idle interval to catch unsolicited dispatch before explicitly submitting.
+            if !paused_queue || restored.elapsed() >= Duration::from_secs(1) {
+                master.write_all(b"\r").unwrap();
+                resubmitted = true;
+            }
+        }
+        if bodies.len() == 2 {
+            assert!(!bodies[1]["messages"]
+                .to_string()
+                .contains("queued follow-up"));
+            assert_eq!(
+                bodies[1]["messages"]
+                    .to_string()
+                    .matches("first request")
+                    .count(),
+                1
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "first message could not be resubmitted after rewind (requests: {}): {}",
+            bodies.len(),
+            String::from_utf8_lossy(&captured[captured.len().saturating_sub(5000)..])
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_quota_error_does_not_dispatch_queued_input() {
     interactive_quota_pause(false, QuotaRecovery::Wait).await;
 }

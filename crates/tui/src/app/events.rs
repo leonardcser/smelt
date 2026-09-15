@@ -249,6 +249,7 @@ impl TuiApp {
                         if content.is_empty() {
                             false
                         } else {
+                            self.clear_cancelled_pause();
                             self.commit_prompt_submission(edit.take().expect("submit edit"));
                             self.prompt.try_queue_turn(QueuedInput::request(
                                 display.clone(),
@@ -826,6 +827,7 @@ impl TuiApp {
             );
             return EventOutcome::Noop;
         }
+        self.clear_cancelled_pause();
         self.commit_prompt_submission(edit);
         let queued = QueuedInput::request(display, content, sent_at_ms);
         match target {
@@ -840,6 +842,9 @@ impl TuiApp {
     }
 
     fn handle_empty_submit(&mut self) -> EventOutcome {
+        if !self.prompt.queue_is_empty() {
+            self.clear_cancelled_pause();
+        }
         match self.prompt_work_state() {
             PromptWorkState::TurnActive => {
                 self.clear_prompt_prediction();
@@ -871,6 +876,17 @@ impl TuiApp {
             EventOutcome::ContinueTurn
         } else {
             EventOutcome::Noop
+        }
+    }
+
+    /// Explicit submission authorizes queued work after cancellation, but not error recovery.
+    fn clear_cancelled_pause(&mut self) {
+        if self
+            .conversation
+            .turn_pause()
+            .is_some_and(|pause| pause.kind == Some(protocol::EngineAskErrorKind::Cancelled))
+        {
+            self.conversation.set_turn_pause(None);
         }
     }
 

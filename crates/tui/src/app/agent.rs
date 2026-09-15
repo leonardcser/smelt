@@ -3091,6 +3091,62 @@ mod tests {
     }
 
     #[test]
+    fn first_message_rewind_releases_pending_cancellation() {
+        for vim in [false, true] {
+            for to_start in [false, true] {
+                let mut app = crate::app::test_harness::TestApp::builder()
+                    .with_vim(vim)
+                    .build();
+                app.start_submitted_turn("first request");
+                app.app.flush_persist();
+                let turn_id = app.app.conversation.active_id().unwrap();
+                let release = app.app.conversation.pause_persistence();
+
+                if to_start {
+                    app.app.rewind_to_history_index(None, vim);
+                    app.type_text("first request");
+                } else {
+                    app.press(crossterm::event::KeyCode::Esc);
+                    app.press(crossterm::event::KeyCode::Esc);
+                }
+                assert!(!app.agent_running());
+                assert_eq!(app.state().prompt_text, "first request");
+                assert!(app.app.conversation.turn_pause().is_none());
+                assert!(app
+                    .app
+                    .model_history()
+                    .iter()
+                    .all(|item| !matches!(item, HistoryItem::User { .. })));
+
+                // Resubmission must wait for cancellation to become durable, then run.
+                app.press(crossterm::event::KeyCode::Enter);
+                assert!(!app.agent_running());
+                assert_eq!(app.state().queued_inputs, vec!["first request"]);
+                release.send(()).unwrap();
+                let flush = app.app.flush_persist();
+                assert!(
+                    matches!(
+                        flush,
+                        crate::persist::PersistenceFlushOutcome::Durable { .. }
+                    ),
+                    "{flush:?}"
+                );
+                assert!(app.agent_running());
+                assert!(app.app.prompt.queue_is_empty());
+                assert_eq!(
+                    app.app.model_history().iter().filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "first request")).count(),
+                    1
+                );
+                assert_ne!(app.app.conversation.active_id(), Some(turn_id));
+                assert_eq!(
+                    lineage_turn(&lineage_reader(&app), turn_id).state,
+                    smelt_store::TurnState::Cancelled
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rewind_during_active_turn_is_not_blocked_by_persistence() {
         let mut app = large_saved_session_app(4);
         let rewind_history_idx = app.app.rewind_turns().unwrap()[0].history_idx;

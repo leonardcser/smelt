@@ -922,10 +922,7 @@ impl TuiApp {
             };
             while self.core.engine.try_recv().is_ok() {}
             if rewound {
-                self.save_session();
-                if restore_vim_insert {
-                    self.restore_vim_insert_after_rewind();
-                }
+                self.finish_rewind(restore_vim_insert);
             }
         } else {
             if self.conversation.is_active() {
@@ -935,10 +932,23 @@ impl TuiApp {
             self.clear_prompt_prediction();
             self.rewind_to_start();
             while self.core.engine.try_recv().is_ok() {}
-            self.save_session();
-            if restore_vim_insert {
-                self.restore_vim_insert_after_rewind();
-            }
+            self.finish_rewind(restore_vim_insert);
+        }
+    }
+
+    fn finish_rewind(&mut self, restore_vim_insert: bool) {
+        self.conversation.invalidate_turn_callbacks();
+        // Existing queued work needs explicit submission against the rewound history.
+        self.conversation
+            .set_turn_pause((!self.prompt.queue_is_empty()).then_some(
+                crate::app::agent::TurnPause {
+                    kind: Some(protocol::EngineAskErrorKind::Cancelled),
+                    retry_at_ms: None,
+                },
+            ));
+        self.save_session();
+        if restore_vim_insert {
+            self.restore_vim_insert_after_rewind();
         }
     }
 

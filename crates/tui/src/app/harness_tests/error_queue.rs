@@ -317,6 +317,52 @@ fn quota_pause_blocks_idle_dispatch_and_keeps_both_queue_stages_visible() {
 }
 
 #[test]
+fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
+    for to_start in [false, true] {
+        for pending_persistence in [false, true] {
+            let mut app = isolated_app();
+            assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
+            app.start_submitted_turn("initial request");
+            app.app.flush_persist();
+            let history_idx = app.app.conversation.active().unwrap().rewind_history_idx;
+            app.steer("queued steering");
+            app.push_queued_message("queued follow-up".into());
+            let queued = app.state().queued_inputs;
+            let release = pending_persistence.then(|| app.app.conversation.pause_persistence());
+            quota_error(&mut app, Some(123_000));
+            let retry_token = app.app.conversation.continuation_token().unwrap();
+
+            app.rewind_to_history_index(if to_start { None } else { history_idx }, false);
+
+            assert_eq!(app.state().queued_inputs, queued);
+            assert_eq!(
+                app.state().prompt_text,
+                if to_start { "" } else { "initial request" }
+            );
+            assert!(app.app.conversation.continuation_token().is_none());
+            assert!(!app.app.resume_paused_turn(Some(retry_token)));
+            assert!(!app.start_next_queued_input_if_idle());
+            app.clear_actions();
+            assert!(!has_started_turn(&run_due_timers(&mut app, 124_000)));
+            assert_eq!(app.state().queued_inputs, queued);
+            assert!(!app.agent_running());
+
+            app.press(crossterm::event::KeyCode::Enter);
+            if let Some(release) = release {
+                assert!(!app.agent_running(), "submission must wait for persistence");
+                release.send(()).unwrap();
+            }
+            app.app.flush_persist();
+            assert!(
+                app.agent_running(),
+                "explicit Enter must not leave the queue locked"
+            );
+            assert!(app.app.conversation.turn_pause().is_none());
+        }
+    }
+}
+
+#[test]
 fn quota_retry_resumes_original_work_without_consuming_the_turn_queue() {
     let mut app = isolated_app();
     create_auto_goal(&mut app, "finish original work");
