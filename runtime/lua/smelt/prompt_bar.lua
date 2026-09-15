@@ -58,7 +58,10 @@ local function queued_message_row(row, width)
   local kind = row.kind or "turn"
   local marker = kind == "request" and "»" or "›"
   local prefix = "  " .. marker .. " "
-  local text, body_end = bar.truncate_right_padded(prefix .. (row.text or ""), width)
+  -- Each queued message owns one row. Normalize preview whitespace before
+  -- measuring cells so line breaks and tabs cannot displace the prompt chrome.
+  local preview = (row.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+  local text, body_end = bar.truncate_right_padded(prefix .. preview, width)
   local prefix_end = math.min(#prefix, body_end)
   return {
     text = text,

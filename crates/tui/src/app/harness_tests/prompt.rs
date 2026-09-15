@@ -922,6 +922,43 @@ fn queue_layout_reflow_preserves_retained_transcript_selection() {
 }
 
 #[test]
+fn multiline_queued_preview_keeps_prompt_chrome_visible() {
+    for height in [8, 12, 24] {
+        for (modifiers, marker) in [(KeyModifiers::NONE, '›'), (KeyModifiers::CONTROL, '»')] {
+            let mut app = TestApp::builder().with_vim(false).build();
+            app.set_terminal_size(50, height);
+            app.start_turn(1);
+            app.render_to_frame();
+            let draft = "first line\nsecond line\nthird line";
+            app.feed_one(SourceEvent::Term(Event::Paste(draft.to_string())));
+            assert!(app.agent_running(), "turn must be active before queueing");
+            app.press_mod(KeyCode::Enter, modifiers);
+            assert_eq!(app.state().queued_inputs, vec![draft]);
+            assert_eq!(app.state().prompt_text, "");
+
+            for _ in 0..2 {
+                let frame = app.render_to_frame().text();
+                assert!(
+                    frame.contains("test-model"),
+                    "top bar disappeared:\n{frame}"
+                );
+                assert!(
+                    frame.contains(&format!("{marker} first line second line third line")),
+                    "{frame}"
+                );
+                assert!(app.transcript_window().viewport.unwrap().rect.height >= 2);
+            }
+
+            app.press(KeyCode::Esc);
+            app.press(KeyCode::Esc);
+            assert_eq!(app.state().prompt_text, draft);
+            assert!(app.state().queued_inputs.is_empty());
+            assert!(app.agent_running());
+        }
+    }
+}
+
+#[test]
 fn queued_messages_collapse_to_keep_transcript_visible() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 10);

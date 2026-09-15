@@ -1017,6 +1017,46 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
 }
 
 #[test]
+fn prompt_bar_queued_previews_are_single_line_before_truncation() {
+    let lua = prompt_bar_lua_fixture();
+    lua.load(
+        r#"
+        local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+        top.rect = function() return { height = 2 } end
+        for _, case in ipairs({
+          { "first\nsecond\nthird", "first second third" },
+          { "first\r\n\tsecond\n\n  third", "first second third" },
+          { "first\rsecond\tthird", "first second third" },
+          { "  café\n日本語  ", "café 日本語" },
+          { "\n\r\t ", "" },
+        }) do
+          for _, kind in ipairs({ "turn", "request" }) do
+            local row = { text = case[1], kind = kind }
+            smelt.prompt.queued_rows = function() return { row } end
+            for width = 1, 60 do
+              top.content_width = function() return width end
+              top:renderer()
+              local lines = top:buf()._lines
+              assert(#lines == 2)
+              local prefix = kind == "request" and "  » " or "  › "
+              local expected = require("smelt._bar").truncate_right_padded(prefix .. case[2], width)
+              assert(lines[1] == expected, lines[1])
+              assert(not lines[1]:find("[\r\n\t]"))
+              assert(smelt.text.width(lines[1]) <= width)
+              for _, mark in ipairs(top:buf()._marks) do
+                assert(mark.start_col >= 0 and mark.end_col <= #lines[mark.row])
+              end
+              assert(row.text == case[1])
+            end
+          end
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
 fn prompt_bar_keeps_indicator_in_single_row_with_stash() {
     let lua = prompt_bar_lua_fixture();
     lua.load(

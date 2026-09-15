@@ -143,6 +143,19 @@ app_story!(prompt_queued_messages, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_queued_multiline_messages, |ctx| {
+    ctx.set_viewport(50, 12);
+    ctx.type_prompt("stashed draft");
+    ctx.stash_prompt();
+    ctx.push_queued_message("first line\nsecond line\nthird line");
+    ctx.promote_next_queued_message();
+    ctx.push_queued_message(
+        "check:\r\n\t日本語 and café\n\nthen run the tests and report the results",
+    );
+    ctx.type_prompt("next draft\nsecond draft line");
+    ctx.assert_snapshot();
+});
+
 app_story!(
     prompt_queued_messages_collapse_when_tall_queue_short_terminal,
     |ctx| {
